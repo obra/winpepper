@@ -42,12 +42,39 @@ On the real Windows machine:
 
 Acceptance bar for Plan 1: all four state transitions log, transcript is non-empty for clear speech, text appears in the focused window.
 
-## Headless VM smoke (limited, what CI actually runs)
+## Audio-passthrough VM smoke (end-to-end)
 
-On the dockur VM you can still verify:
+We replaced dockur's bundled QEMU (no pulse) with raw QEMU + PulseAudio on the host so synthetic speech can be piped into the Windows guest's microphone.
+
+**One-time host setup:**
+```sh
+./scripts/setup-audio-host.sh    # installs PA, piper, QEMU; loads null-sink; grants /dev/kvm
+```
+
+**Boot the VM** (with the existing `/home/jesse/windows-vm/storage` disk):
+```sh
+./scripts/launch-qemu.sh         # backgrounds itself; SSH on 2222, RDP on 3389
+```
+
+**Speak into the VM's mic:**
+```sh
+./scripts/say.sh "hello world testing one two three"
+```
+
+**Verify end-to-end** (WasapiCapture → resample → Parakeet) — start the audio-loopback test on the VM in one shell, run `say.sh` from another within the 6-second window:
+```sh
+./scripts/winrun "cd C:\winpepper\scripts\audio-loopback-test && dotnet run -c Release -- asr"
+# (in another shell, after about 2-3 seconds)
+./scripts/say.sh "hello world testing one two three"
+```
+Expected transcript: `Hello world testing 123` (the NeMo model itn-converts spoken digits).
+
+## Headless VM smoke (without audio)
+
+Build + non-audio tests still run cleanly:
 
 - Build: `./scripts/winrun "dotnet build"`.
 - Tests excluding Windows-only integration: `./scripts/winrun "dotnet test --filter 'Platform!=Windows'"`.
-- Parakeet load + decode against a synthetic tone: `./scripts/winrun "dotnet test --filter 'FullyQualifiedName~ParakeetSessionIntegrationTests'"`. This proves the ONNX model loads, the encoder runs, and the TDT decode loop completes without throwing. The transcript text itself will be empty/garbage for a pure tone, which is fine.
+- Parakeet load + decode against a synthetic tone: `./scripts/winrun "dotnet test --filter 'FullyQualifiedName~ParakeetSessionIntegrationTests'"`. Proves the ONNX model loads and the TDT decode loop completes.
 - Avoid `./scripts/winrun "dotnet test"` without a filter — `Hook_Installs_And_DisposesCleanly` hangs in headless environments.
 

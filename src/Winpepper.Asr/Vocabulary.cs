@@ -10,9 +10,28 @@ public sealed class Vocabulary
 
     public static Vocabulary FromFile(string path)
     {
-        var lines = File.ReadAllLines(path).Select(l => l.TrimEnd('\r')).ToList();
-        while (lines.Count > 0 && lines[^1].Length == 0) lines.RemoveAt(lines.Count - 1);
-        return new Vocabulary(lines, lines.Count - 1);
+        var raw = File.ReadAllLines(path).Select(l => l.TrimEnd('\r')).ToList();
+        while (raw.Count > 0 && raw[^1].Length == 0) raw.RemoveAt(raw.Count - 1);
+
+        // Two formats supported:
+        //   1. One token per line (simple form, used in tests):     "▁hello"
+        //   2. "<text> <id>" per line (HuggingFace exports, real):  "▁hello 7"
+        // Detect format by checking whether every non-empty line ends with " <decimal>".
+        var withIds = raw.Count > 0 && raw.All(l =>
+        {
+            var i = l.LastIndexOf(' ');
+            if (i < 0 || i == l.Length - 1) return false;
+            for (var k = i + 1; k < l.Length; k++)
+                if (l[k] < '0' || l[k] > '9') return false;
+            return true;
+        });
+
+        var tokens = withIds
+            ? raw.Select(l => l[..l.LastIndexOf(' ')]).ToList()
+            : raw;
+
+        // Last token is the blank by convention.
+        return new Vocabulary(tokens, tokens.Count - 1);
     }
 
     public string Decode(IEnumerable<int> tokenIds)

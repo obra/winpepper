@@ -1,8 +1,11 @@
 using Microsoft.Extensions.Logging;
 using Winpepper.Core.Logging;
 #if WINDOWS
+using Winpepper.Cleanup;
+using Winpepper.Corrections;
 using Winpepper.Core.Settings;
 using Winpepper.Platform.Hotkeys;
+using Winpepper.Platform.WindowContext;
 #endif
 
 namespace Winpepper.Cli;
@@ -27,11 +30,34 @@ internal static class Program
             return 2;
         }
 
+        var cleanupModelPath = Path.Combine(localAppData, "winpepper", "models", "cleanup",
+            "qwen2.5-0.5b-instruct", "Qwen2.5-0.5B-Instruct-Q4_K_M.gguf");
+        if (!File.Exists(cleanupModelPath))
+        {
+            log.LogError("Cleanup model not found at {Path}. Run scripts/download-cleanup-model.ps1 first.", cleanupModelPath);
+            return 3;
+        }
+
+        var correctionsPath = Path.Combine(localAppData, "winpepper", "corrections.json");
+        var corrections = new CorrectionStore(correctionsPath);
+
+        using var cleanupBackend = new LlamaCleanupBackend(cleanupModelPath, logFactory.CreateLogger<LlamaCleanupBackend>());
+        await cleanupBackend.WarmAsync(CancellationToken.None);
+        var cleanupRunner = new CleanupRunner(cleanupBackend, logFactory.CreateLogger<CleanupRunner>());
+
+        var uiaReader = new UiaTreeReader(logFactory.CreateLogger<UiaTreeReader>());
+        var ocrFallback = new OcrFallback(logFactory.CreateLogger<OcrFallback>());
+        var windowContextPrefetch = WindowContextPrefetch.CreateWindows(
+            uiaReader, ocrFallback, logFactory.CreateLogger<WindowContextPrefetch>());
+
         using var pipeline = new Pipeline(
             logFactory.CreateLogger<Pipeline>(), logFactory, modelDir,
             HotkeyChord.Parse(settings.HoldHotkey),
             HotkeyChord.Parse(settings.ToggleHotkey),
-            HotkeyChord.Parse("Esc"));
+            HotkeyChord.Parse("Esc"),
+            cleanupRunner,
+            corrections,
+            windowContextPrefetch);
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };

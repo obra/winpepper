@@ -13,8 +13,13 @@
     <ProjectReference Include="..\Winpepper.Audio\Winpepper.Audio.csproj" />
     <ProjectReference Include="..\Winpepper.Asr\Winpepper.Asr.csproj" />
     <ProjectReference Include="..\Winpepper.Platform\Winpepper.Platform.csproj" />
+    <ProjectReference Include="..\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
+    <ProjectReference Include="..\Winpepper.Corrections\Winpepper.Corrections.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Extensions.Logging" />
   </ItemGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">
+    <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
+  </PropertyGroup>
 </Project>

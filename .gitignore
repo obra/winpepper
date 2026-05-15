@@ -1,0 +1,13 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+out/
+artifacts/
+TestResults/
+.idea/
+.vscode/
+node_modules/
+*.log
+%LOCALAPPDATA%

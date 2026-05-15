@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Winpepper.Core</RootNamespace>
+    <AssemblyName>Winpepper.Core</AssemblyName>
+  </PropertyGroup>
+</Project>

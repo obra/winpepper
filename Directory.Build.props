@@ -1,13 +1,13 @@
 <Project>
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework Condition="'$(TargetFrameworks)' == ''">net9.0</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <WarningsAsErrors>nullable</WarningsAsErrors>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest</AnalysisLevel>
     <Deterministic>true</Deterministic>

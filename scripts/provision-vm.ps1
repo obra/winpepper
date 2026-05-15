@@ -49,6 +49,21 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     Start-Process -Wait -FilePath $git -ArgumentList "/VERYSILENT /NORESTART /NOCANCEL /SP- /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS"
 }
 
+# Windows App SDK runtime (WinAppSDK 1.6) ---------------------------------
+# Required by Winpepper.App (WinUI 3 packaged). The bootstrapper installs
+# both the framework MSIX and the singleton service.
+$winAppSdkInstalled = Get-AppxPackage -AllUsers -Name "Microsoft.WindowsAppRuntime.1.6" -ErrorAction SilentlyContinue
+if (-not $winAppSdkInstalled) {
+    Write-Host "Installing Windows App SDK 1.6 runtime..."
+    $installerUrl = "https://aka.ms/windowsappsdk/1.6/latest/windowsappruntimeinstall-x64.exe"
+    $installer = "$env:TEMP\windowsappruntimeinstall-x64.exe"
+    Invoke-WebRequest -UseBasicParsing -Uri $installerUrl -OutFile $installer
+    Start-Process -Wait -FilePath $installer -ArgumentList "--quiet"
+    Remove-Item $installer -Force
+} else {
+    Write-Host "Windows App SDK runtime already installed: $($winAppSdkInstalled.Version)"
+}
+
 $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 $env:Path = "$machinePath;$userPath"

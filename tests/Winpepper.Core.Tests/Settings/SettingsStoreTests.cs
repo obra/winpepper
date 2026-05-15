@@ -53,6 +53,35 @@ public class SettingsStoreTests : IDisposable
             .Pipe(d => Directory.GetFiles(d, $"{Path.GetFileName(_path)}.tmp-*"))
             .Length.ShouldBe(0);
     }
+
+    [Fact]
+    public void Defaults_Include_NewPlan3Fields()
+    {
+        var s = new SettingsStore(_path).Load();
+        s.AutostartEnabled.ShouldBeFalse();
+        s.OnboardingCompleted.ShouldBeFalse();
+        s.SpeakerFilterEnabled.ShouldBeFalse();
+        s.LastVersionSeen.ShouldBe("");
+    }
+
+    [Fact]
+    public void Save_RoundTrips_NewFields()
+    {
+        var store = new SettingsStore(_path);
+        var s = store.Load() with
+        {
+            AutostartEnabled = true,
+            OnboardingCompleted = true,
+            SpeakerFilterEnabled = true,
+            LastVersionSeen = "0.3.0",
+        };
+        store.Save(s);
+        var loaded = new SettingsStore(_path).Load();
+        loaded.AutostartEnabled.ShouldBeTrue();
+        loaded.OnboardingCompleted.ShouldBeTrue();
+        loaded.SpeakerFilterEnabled.ShouldBeTrue();
+        loaded.LastVersionSeen.ShouldBe("0.3.0");
+    }
 }
 
 internal static class PipeExtensions

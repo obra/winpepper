@@ -12,5 +12,7 @@
     <AnalysisLevel>latest</AnalysisLevel>
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
 </Project>

@@ -2,8 +2,8 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
-    <TargetFramework></TargetFramework>
     <TargetFrameworks>net9.0;net9.0-windows10.0.19041.0</TargetFrameworks>
+    <TargetFramework></TargetFramework>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="xunit.v3" />
@@ -13,9 +13,7 @@
     <PackageReference Include="coverlet.collector" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\src\Winpepper.Platform\Winpepper.Platform.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Corrections\Winpepper.Corrections.csproj" />
   </ItemGroup>
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">
-    <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
-  </PropertyGroup>
 </Project>

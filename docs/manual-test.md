@@ -78,3 +78,40 @@ Build + non-audio tests still run cleanly:
 - Parakeet load + decode against a synthetic tone: `./scripts/winrun "dotnet test --filter 'FullyQualifiedName~ParakeetSessionIntegrationTests'"`. Proves the ONNX model loads and the TDT decode loop completes.
 - Avoid `./scripts/winrun "dotnet test"` without a filter — `Hook_Installs_And_DisposesCleanly` hangs in headless environments.
 
+## Plan 2 cleanup-pipeline smoke (Windows VM)
+
+1. Sync: `./scripts/sync-to-vm.sh`
+2. Make sure both models exist:
+   ```bash
+   ./scripts/winssh < scripts/download-parakeet.ps1
+   ./scripts/winssh < scripts/download-cleanup-model.ps1
+   ```
+3. Build the CLI: `./scripts/winrun "dotnet build src/Winpepper.Cli/Winpepper.Cli.csproj -c Release"`
+4. Pre-create a correction file so we can confirm the deterministic post-pass runs:
+   ```bash
+   ./scripts/winssh 'powershell -Command "$dst = \"$env:LOCALAPPDATA\\winpepper\\corrections.json\"; New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null; Set-Content -Path $dst -Value (@{schema=1; preferred=@(\"ChatGPT\"); replacements=@{\"chat gbt\"=\"ChatGPT\"}} | ConvertTo-Json -Depth 5)"'
+   ```
+5. Run the CLI in a foreground PowerShell session on the VM:
+   ```powershell
+   cd C:\winpepper
+   dotnet run --project src/Winpepper.Cli -c Release
+   ```
+6. The console log should show:
+   - "Loading cleanup model: ...Qwen2.5-0.5B-Instruct-Q4_K_M.gguf"
+   - "Cleanup model loaded."
+   - "Cleanup LLM pre-warm complete."
+   - "Winpepper ready. Hold the trigger to dictate."
+7. From the host, hold `RightCtrl+RightShift` for ~2 seconds, then release.
+8. The log should show:
+   - "State Idle -> Recording"
+   - "Captured NNNNN samples (X.XXs)"
+   - "Raw transcript: '...'" (likely empty on a silent VM)
+   - "Cleanup path=FallbackEmpty, NNms, text='...'"
+   - "State Transcribing -> Injecting" then "-> Idle"
+9. Acceptance bar for Plan 2 on the VM: no crash, model loaded, pre-warm completed, cleanup runner invoked, correction post-pass available. Real cleaned-text output requires real audio.
+
+For a real demo, run on a physical Windows 11 host with a mic. Say
+"so um like we tested chat gbt today" → release. Expected injected text:
+`We tested ChatGPT today.` (filler removed by the LLM, then case-aware
+correction post-pass maps any surviving "chat gbt" to "ChatGPT").
+

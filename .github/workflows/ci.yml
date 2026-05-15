@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  linux-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: dotnet restore
+      - run: dotnet build --configuration Release --no-restore
+      # Filter out Windows-tagged tests (hotkey hook, real WASAPI, real Parakeet model).
+      # Those run nightly on the Windows VM, not in CI.
+      - run: dotnet test --configuration Release --no-build --filter "Platform!=Windows"
+
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+      - run: dotnet restore
+      - run: dotnet build --configuration Release --no-restore
+      # Skip the WindowsModel trait — those tests need the 600 MB Parakeet model,
+      # which isn't downloaded in CI. Hook integration test also skipped because
+      # GitHub-hosted Windows runners may not deliver low-level keyboard events.
+      - run: dotnet test --configuration Release --no-build --filter "FullyQualifiedName!~HotkeyHookIntegrationTests&FullyQualifiedName!~ParakeetSessionIntegrationTests"

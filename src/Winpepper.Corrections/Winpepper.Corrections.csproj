@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Winpepper.Corrections</RootNamespace>
+    <AssemblyName>Winpepper.Corrections</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Winpepper.Core\Winpepper.Core.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Winpepper.Corrections.Tests" />
+  </ItemGroup>
+</Project>

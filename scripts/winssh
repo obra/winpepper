@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Usage: ./scripts/winssh "powershell command here"
+# Or:    ./scripts/winssh < script.ps1
+set -euo pipefail
+if [ "$#" -gt 0 ]; then
+    sshpass -p 'password' ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -p 2222 user@localhost "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$*\""
+else
+    sshpass -p 'password' ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -p 2222 user@localhost "powershell -NoProfile -ExecutionPolicy Bypass -Command -"
+fi

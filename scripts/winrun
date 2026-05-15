@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Usage: ./scripts/winrun "dotnet test" [-- extra args]
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+"$HERE/scripts/sync-to-vm.sh"
+CMD="$*"
+sshpass -p 'password' ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -p 2222 user@localhost "cd C:\\winpepper; $CMD"

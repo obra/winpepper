@@ -3,12 +3,23 @@
     <RootNamespace>Winpepper.Platform</RootNamespace>
     <AssemblyName>Winpepper.Platform</AssemblyName>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TargetFramework></TargetFramework>
+    <TargetFrameworks>net9.0;net9.0-windows10.0.19041.0</TargetFrameworks>
+    <UseWindowsForms>false</UseWindowsForms>
+    <UseWPF>false</UseWPF>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Winpepper.Core\Winpepper.Core.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="System.Threading.Channels" />
   </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App" />
+    <PackageReference Include="System.Drawing.Common" />
+  </ItemGroup>
+  <PropertyGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">
+    <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>
+  </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Winpepper.Platform.Tests" />
   </ItemGroup>

@@ -9,4 +9,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="System.Threading.Channels" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Winpepper.Platform.Tests" />
+  </ItemGroup>
 </Project>

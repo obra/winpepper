@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Winpepper.App.Views.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid>
+        <NavigationView x:Name="Nav" PaneDisplayMode="Left" IsSettingsVisible="False">
+            <NavigationView.MenuItems>
+                <NavigationViewItem Tag="recording"   Content="Recording" />
+                <NavigationViewItem Tag="cleanup"     Content="Cleanup" />
+                <NavigationViewItem Tag="corrections" Content="Corrections" />
+                <NavigationViewItemSeparator />
+                <NavigationViewItem Tag="history"     Content="History" IsEnabled="False" ToolTipService.ToolTip="Available in Plan 4" />
+                <NavigationViewItem Tag="lab"         Content="Lab" IsEnabled="False" ToolTipService.ToolTip="Available in Plan 4" />
+                <NavigationViewItem Tag="models"      Content="Models" IsEnabled="False" ToolTipService.ToolTip="Available in Plan 4" />
+                <NavigationViewItem Tag="diagnostics" Content="Diagnostics" IsEnabled="False" ToolTipService.ToolTip="Available in Plan 5" />
+            </NavigationView.MenuItems>
+            <Frame x:Name="ContentFrame" />
+        </NavigationView>
+    </Grid>
+</Window>

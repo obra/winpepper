@@ -15,4 +15,8 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Winpepper.App' AND '$(OS)' != 'Windows_NT' AND '$(EnableWindowsTargeting)' != 'true'">
+    <BuildProjectReferences>false</BuildProjectReferences>
+    <DefineConstants>$(DefineConstants);SKIP_WINUI_LINUX</DefineConstants>
+  </PropertyGroup>
 </Project>

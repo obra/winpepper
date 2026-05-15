@@ -59,11 +59,81 @@ public sealed class AppShell : IDisposable
         var autostart = new AutostartRegistry();
         var sounds = new WinUiSoundEffectPlayer(AppPaths.AssetsDir) { Enabled = settings.PlaySounds };
 
+        // PLAN2-TYPE — Plan 2 owns these types; constructing them here so Plan 3's
+        // pipeline can invoke real cleanup + window context. Each one is optional —
+        // if the model or registry isn't present yet, we fall back to raw transcript.
+        Winpepper.Cleanup.CleanupRunner? cleanup = null;
+        Winpepper.Corrections.CorrectionStore? correctionStore = null;
+        Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null;
+
+        try
+        {
+            correctionStore = new Winpepper.Corrections.CorrectionStore(AppPaths.CorrectionsJson);
+        }
+        catch (Exception ex)
+        {
+            factory.CreateLogger("Winpepper.App").LogWarning(ex,
+                "CorrectionStore unavailable; cleanup will run with empty corrections.");
+        }
+
+        try
+        {
+            // Plan 2's LlamaCleanupBackend (line 2141) is constructed with the path to
+            // the .gguf file (not the directory). The cleanup model lives at
+            // <Root>/models/cleanup/<name>.gguf. We pick the first .gguf in that dir.
+            var cleanupModelDir = Path.Combine(AppPaths.Root, "models", "cleanup");
+            var modelFile = Directory.Exists(cleanupModelDir)
+                ? Directory.EnumerateFiles(cleanupModelDir, "*.gguf", SearchOption.AllDirectories).FirstOrDefault()
+                : null;
+            if (modelFile is not null)
+            {
+                var backend = new Winpepper.Cleanup.LlamaCleanupBackend(modelFile,
+                    factory.CreateLogger<Winpepper.Cleanup.LlamaCleanupBackend>());
+                cleanup = new Winpepper.Cleanup.CleanupRunner(backend,
+                    factory.CreateLogger<Winpepper.Cleanup.CleanupRunner>());
+            }
+        }
+        catch (Exception ex)
+        {
+            factory.CreateLogger("Winpepper.App").LogWarning(ex,
+                "Cleanup runner unavailable; falling back to raw transcripts.");
+        }
+
+        try
+        {
+            // CreateWindows is Plan 2's production factory (line 3480 of plan 2);
+            // UiaTreeReader and OcrFallback both take a logger.
+            windowContext = Winpepper.Platform.WindowContext.WindowContextPrefetch.CreateWindows(
+                new Winpepper.Platform.WindowContext.UiaTreeReader(
+                    factory.CreateLogger<Winpepper.Platform.WindowContext.UiaTreeReader>()),
+                new Winpepper.Platform.WindowContext.OcrFallback(
+                    factory.CreateLogger<Winpepper.Platform.WindowContext.OcrFallback>()),
+                factory.CreateLogger<Winpepper.Platform.WindowContext.WindowContextPrefetch>());
+        }
+        catch (Exception ex)
+        {
+            factory.CreateLogger("Winpepper.App").LogWarning(ex,
+                "WindowContextPrefetch unavailable; cleanup will run without window context.");
+        }
+
+        // Build CleanupOptions from current cleanup settings (Plan 3 keeps these in
+        // the CleanupSettingsViewModel; here we read once at boot and re-read in
+        // Plan 4's settings-reactive wiring).
+        var cleanupOptions = new Winpepper.Cleanup.CleanupOptions
+        {
+            Profile = ParseProfile(cleanupContract.Profile),
+            CustomBasePrompt = cleanupContract.CustomPrompt,
+            Timeout = TimeSpan.FromMilliseconds(cleanupContract.TimeoutMs),
+            WindowContextEnabled = cleanupContract.WindowContextEnabled,
+            MaxNewTokensCap = cleanupContract.MaxNewTokens,
+        };
+
         var hold   = HotkeyChord.Parse(settings.HoldHotkey);
         var toggle = HotkeyChord.Parse(settings.ToggleHotkey);
         var cancel = HotkeyChord.Parse("Esc");
         var pipeline = new PipelineHost(factory, engine, sessionVm, sounds,
-                                         hold, toggle, cancel, AppPaths.ParakeetModelDir);
+                                         hold, toggle, cancel, AppPaths.ParakeetModelDir,
+                                         cleanup, correctionStore, windowContext, cleanupOptions);
 
         var shell = new AppShell(factory, store, settings, writer, engine, sessionVm,
                                   recordingVm, cleanupVm, correctionsVm,
@@ -111,6 +181,14 @@ public sealed class AppShell : IDisposable
         Dispose();
         Application.Current.Exit();
     }
+
+    private static Winpepper.Cleanup.CleanupProfile ParseProfile(string s) => s switch
+    {
+        "Ordinary" => Winpepper.Cleanup.CleanupProfile.Ordinary,
+        "Literal"  => Winpepper.Cleanup.CleanupProfile.Literal,
+        "Custom"   => Winpepper.Cleanup.CleanupProfile.Custom,
+        _          => Winpepper.Cleanup.CleanupProfile.Ordinary,
+    };
 
     public void Dispose()
     {

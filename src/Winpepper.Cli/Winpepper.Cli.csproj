@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Winpepper.Cli</RootNamespace>
+    <AssemblyName>winpepper</AssemblyName>
+    <TargetFrameworks>net9.0;net9.0-windows10.0.19041.0</TargetFrameworks>
+    <TargetFramework></TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <UseWindowsForms>false</UseWindowsForms>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Winpepper.Core\Winpepper.Core.csproj" />
+    <ProjectReference Include="..\Winpepper.Audio\Winpepper.Audio.csproj" />
+    <ProjectReference Include="..\Winpepper.Asr\Winpepper.Asr.csproj" />
+    <ProjectReference Include="..\Winpepper.Platform\Winpepper.Platform.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+  </ItemGroup>
+</Project>

@@ -55,4 +55,16 @@
       <Properties>Configuration=$(Configuration);RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=true;PublishDir=$(MSBuildThisFileDirectory)probes\bin\$(Configuration)\publish\</Properties>
     </ProjectReference>
   </ItemGroup>
+  <Target Name="SignArtifacts" AfterTargets="Build"
+          Condition="'$(OS)' == 'Windows_NT' AND ('$(WinpepperSigningThumbprint)' != '' OR '$(WinpepperSigningPfx)' != '')">
+    <PropertyGroup>
+      <SignScript>$(MSBuildThisFileDirectory)sign.ps1</SignScript>
+      <SignedExe>$(AppPublishDir)\Winpepper.exe</SignedExe>
+      <SignedMsi>$(OutputPath)$(OutputName).msi</SignedMsi>
+    </PropertyGroup>
+    <Exec Condition="'$(WinpepperSigningThumbprint)' != ''"
+          Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(SignScript)&quot; -Thumbprint $(WinpepperSigningThumbprint) -InputFiles &quot;$(SignedExe)&quot; &quot;$(SignedMsi)&quot;" />
+    <Exec Condition="'$(WinpepperSigningThumbprint)' == '' AND '$(WinpepperSigningPfx)' != ''"
+          Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(SignScript)&quot; -PfxPath &quot;$(WinpepperSigningPfx)&quot; -PfxPassword $(WinpepperSigningPfxPassword) -InputFiles &quot;$(SignedExe)&quot; &quot;$(SignedMsi)&quot;" />
+  </Target>
 </Project>

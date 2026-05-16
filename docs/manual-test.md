@@ -302,3 +302,59 @@ Tray autostart variant: after onboarding completes, restart the app with `dotnet
 **Acceptance bar for Plan 6 on the VM:** steps 2–4 build green; step 5 installs
 with exit code 0; step 6 prints `WINPEPPER_SELFTEST_OK`; step 7 finds the Run
 key; step 8 uninstalls cleanly; step 9 leaves `%LOCALAPPDATA%\winpepper` intact.
+
+## Plan 6 MSI upgrade smoke (Windows VM)
+
+> **Status (as of Plan 6 execution, 2026-05-16):** blocked on `Winpepper.App`
+> build (same WinAppSDK XAML markup compiler block as the install smoke above).
+> When that unblocks, exercise the procedure below to confirm a major-upgrade
+> install of a newer MSI over an older one preserves all per-user state and
+> respects the user's autostart preference.
+
+Goal: confirm settings, corrections, history, models, and the autostart Run key
+all survive a major-upgrade install (MajorUpgrade is
+`AllowDowngrades="no" Schedule="afterInstallInitialize"`; the autostart Run key
+component carries `Condition="NOT WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE"`
+so the upgrade installer must not overwrite a user-chosen Run value).
+
+1. Build MSI **A** from the current `HEAD`. Note the version string in the
+   filename (`artifacts\winpepper-<verA>-x64.msi`).
+2. Install MSI A silently:
+   ```bash
+   ./scripts/winrun "cd C:\\winpepper; msiexec /i artifacts\\winpepper-<verA>-x64.msi /qn /l*v artifacts\\install-A.log"
+   ```
+3. Launch the app, complete onboarding (or skip), then exercise per-user state:
+   - Toggle off "Capture window context" (or any other non-default setting).
+   - Add a custom correction pair `("kubernetes", "Kubernetes")` on the
+     Corrections tab.
+   - Hold the hotkey for a short dictation so a history row + WAV are written.
+   - Open Settings, disable autostart (the Run key should be removed), then
+     re-enable it so a fresh user-owned Run value is written.
+4. Quit the app.
+5. Bump the minor version (edit `version.json`), commit, and build MSI **B**
+   from that fresh HEAD. Note the new filename
+   (`artifacts\winpepper-<verB>-x64.msi`).
+6. Install MSI B silently — this exercises the MajorUpgrade path:
+   ```bash
+   ./scripts/winrun "cd C:\\winpepper; msiexec /i artifacts\\winpepper-<verB>-x64.msi /qn /l*v artifacts\\install-B.log"
+   ```
+   Expected: exit code `0`. `install-B.log` should reference
+   `WIX_UPGRADE_DETECTED` and remove the older product before installing B.
+7. Verify on the VM (every check must pass):
+   - `%LOCALAPPDATA%\winpepper\settings.json` is intact (window-context toggle
+     still off; no schema rewrite).
+   - `%LOCALAPPDATA%\winpepper\corrections.json` still contains the
+     `kubernetes` → `Kubernetes` pair you added under A.
+   - `%LOCALAPPDATA%\winpepper\history\<date>\<uuid>.wav` and the matching row
+     in `%LOCALAPPDATA%\winpepper\history\entries.json` survive untouched.
+   - `%LOCALAPPDATA%\winpepper\models\` contents are intact (no re-download
+     required — encoder.onnx, decoder/joint, the GGUF, manifests).
+   - `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Winpepper` still
+     holds the exact value you set in step 3 (B did **not** overwrite it; the
+     `WIX_UPGRADE_DETECTED` condition excluded the Run-key component on the
+     upgrade install).
+   - Launch the upgraded app and confirm `--selftest` still prints
+     `WINPEPPER_SELFTEST_OK` and a dictation round-trip still works.
+
+**Acceptance bar:** all six verification checks pass and the install log shows
+the MajorUpgrade ran (`WIX_UPGRADE_DETECTED` true, prior product removed).

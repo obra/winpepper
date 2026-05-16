@@ -29,8 +29,8 @@
     <PackageVersion Include="DiffPlex" Version="1.7.2" />
 
     <!-- Plan 3: WinUI 3 + MVVM -->
-    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="1.6.241114003" />
-    <PackageVersion Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.22621.3233" />
+    <PackageVersion Include="Microsoft.WindowsAppSDK" Version="1.8.260508005" />
+    <PackageVersion Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4654" />
     <PackageVersion Include="H.NotifyIcon.WinUI" Version="2.1.4" />
     <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageVersion Include="Microsoft.Win32.Registry" Version="5.0.0" />

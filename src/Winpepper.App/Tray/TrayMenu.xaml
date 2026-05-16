@@ -4,7 +4,8 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <MenuFlyoutItem x:Name="StatusItem" Text="Ready" IsEnabled="False" />
-    <ProgressBar x:Name="StatusProgress" Visibility="Collapsed" IsIndeterminate="True" Margin="12,4" Width="160" Height="3" />
+    <!-- Status pill (in the main UI) shows real-time progress; tray menu carries
+         the text label only. MenuFlyout's collection only accepts MenuFlyoutItemBase. -->
     <MenuFlyoutSeparator />
     <MenuFlyoutItem x:Name="OpenSettings" Text="Settings..." />
     <MenuFlyoutItem x:Name="OpenDiagnostics" Text="Diagnostics (Plan 5)" IsEnabled="False" />

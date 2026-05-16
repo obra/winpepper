@@ -65,9 +65,8 @@ public sealed class TrayIconHost : IDisposable
             _icon.IconSource = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(iconPath));
         _menu.StatusItemControl.Text = _paused ? "Paused" : _session.StatusText;
         _icon.ToolTipText = state.Tooltip;
-        _menu.StatusProgressBar.Visibility =
-            !_paused && _session.Stage is SessionStage.Recording or SessionStage.Transcribing or SessionStage.CleaningUp
-                ? Visibility.Visible : Visibility.Collapsed;
+        // Tray progress indicator dropped — MenuFlyout doesn't accept ProgressBar
+        // children. Live progress is shown by the status pill instead.
     }
 
     public void Dispose()

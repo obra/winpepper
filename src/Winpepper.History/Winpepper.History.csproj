@@ -6,10 +6,12 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Winpepper.Core\Winpepper.Core.csproj" />
+    <ProjectReference Include="..\Winpepper.Corrections\Winpepper.Corrections.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="DiffPlex" />
   </ItemGroup>
   <ItemGroup Condition="$(TargetFramework.Contains('windows'))">
     <ProjectReference Include="..\Winpepper.Asr\Winpepper.Asr.csproj" />
+    <ProjectReference Include="..\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
   </ItemGroup>
 </Project>

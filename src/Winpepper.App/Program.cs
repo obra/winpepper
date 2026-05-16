@@ -22,7 +22,7 @@ public static class Program
             return 0;
         }
 
-        ComWrappersSupport.InitializeComWrappers();
+        WinRT.ComWrappersSupport.InitializeComWrappers();
         Application.Start((p) =>
         {
             var ctx = new DispatcherQueueSynchronizationContext(DispatcherQueue.GetForCurrentThread());

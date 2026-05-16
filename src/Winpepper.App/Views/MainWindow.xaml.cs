@@ -30,6 +30,9 @@ public sealed partial class MainWindow : Window
             "recording"   => typeof(RecordingPage),
             "cleanup"     => typeof(CleanupPage),
             "corrections" => typeof(CorrectionsPage),
+            "history"     => typeof(HistoryPage),
+            "lab"         => typeof(HistoryDetailPage),
+            "models"      => typeof(ModelsPage),
             _ => null,
         };
         if (pageType is not null)

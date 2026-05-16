@@ -10,9 +10,9 @@
                 <NavigationViewItem Tag="cleanup"     Content="Cleanup" />
                 <NavigationViewItem Tag="corrections" Content="Corrections" />
                 <NavigationViewItemSeparator />
-                <NavigationViewItem Tag="history"     Content="History" IsEnabled="False" ToolTipService.ToolTip="Available in Plan 4" />
-                <NavigationViewItem Tag="lab"         Content="Lab" IsEnabled="False" ToolTipService.ToolTip="Available in Plan 4" />
-                <NavigationViewItem Tag="models"      Content="Models" IsEnabled="False" ToolTipService.ToolTip="Available in Plan 4" />
+                <NavigationViewItem Tag="history"     Content="History" />
+                <NavigationViewItem Tag="lab"         Content="Lab" />
+                <NavigationViewItem Tag="models"      Content="Models" />
                 <NavigationViewItem Tag="diagnostics" Content="Diagnostics" IsEnabled="False" ToolTipService.ToolTip="Available in Plan 5" />
             </NavigationView.MenuItems>
             <Frame x:Name="ContentFrame" />

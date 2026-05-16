@@ -164,7 +164,10 @@ public sealed class AppShell : IDisposable
     {
         Pipeline.Start();
         await Task.CompletedTask;
+        var startHidden = Environment.GetEnvironmentVariable("WINPEPPER_START_HIDDEN") == "1";
         if (!Settings.OnboardingCompleted) ShowMain(navigateToOnboarding: true);
+        else if (!startHidden) ShowMain(navigateToOnboarding: false);
+        // else: stay tray-only (autostart with --tray).
     }
 
     public void ShowMain() => ShowMain(navigateToOnboarding: false);

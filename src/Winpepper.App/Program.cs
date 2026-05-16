@@ -11,6 +11,10 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        // Autostart hand-off: --tray means start hidden to the tray.
+        var startHidden = args.Any(a => a.Equals("--tray", StringComparison.OrdinalIgnoreCase));
+        Environment.SetEnvironmentVariable("WINPEPPER_START_HIDDEN", startHidden ? "1" : "0");
+
         // Single-instance handshake. If a sibling is already running, redirect
         // activation and exit.
         var key = "Winpepper-singleton";

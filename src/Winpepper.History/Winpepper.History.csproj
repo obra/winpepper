@@ -2,10 +2,14 @@
   <PropertyGroup>
     <RootNamespace>Winpepper.History</RootNamespace>
     <AssemblyName>Winpepper.History</AssemblyName>
+    <TargetFrameworks>net9.0;net9.0-windows10.0.19041.0</TargetFrameworks>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Winpepper.Core\Winpepper.Core.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="DiffPlex" />
+  </ItemGroup>
+  <ItemGroup Condition="$(TargetFramework.Contains('windows'))">
+    <ProjectReference Include="..\Winpepper.Asr\Winpepper.Asr.csproj" />
   </ItemGroup>
 </Project>

@@ -34,6 +34,8 @@ public sealed class AppShell : IDisposable
     public Winpepper.App.Services.HistoryServices HistoryServices { get; }
     public Winpepper.App.Services.ModelsServices ModelsServices { get; }
     public Winpepper.Core.Errors.ErrorBus ErrorBus { get; }
+    public Winpepper.Core.Notifications.IToastService Toasts { get; }
+    public Winpepper.Platform.Injection.ClipboardFallback ClipboardFallback { get; }
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
@@ -140,14 +142,19 @@ public sealed class AppShell : IDisposable
         var hold   = HotkeyChord.Parse(settings.HoldHotkey);
         var toggle = HotkeyChord.Parse(settings.ToggleHotkey);
         var cancel = HotkeyChord.Parse("Esc");
+        var clipboard = new Winpepper.App.Hosting.WindowsClipboard();
+        var clipboardFallback = new Winpepper.Platform.Injection.ClipboardFallback(clipboard);
+        var toasts = new Winpepper.App.Notifications.AppNotificationToastService();
         var pipeline = new PipelineHost(factory, errorBus, engine, sessionVm, sounds,
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
                                          historyServices.Archiver, settings.AsrModelName, cleanupModelName,
+                                         clipboardFallback, toasts,
                                          cleanup, correctionStore, windowContext, cleanupOptions);
 
         var shell = new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
                                   recordingVm, cleanupVm, correctionsVm,
-                                  autostart, pipeline, sounds, historyServices, modelsServices);
+                                  autostart, pipeline, sounds, historyServices, modelsServices,
+                                  toasts, clipboardFallback);
         await shell.StartAsync();
         return shell;
     }
@@ -160,7 +167,9 @@ public sealed class AppShell : IDisposable
                      CorrectionsViewModel corrVm, IAutostartRegistry autostart,
                      PipelineHost pipeline, WinUiSoundEffectPlayer sounds,
                      Winpepper.App.Services.HistoryServices historyServices,
-                     Winpepper.App.Services.ModelsServices modelsServices)
+                     Winpepper.App.Services.ModelsServices modelsServices,
+                     Winpepper.Core.Notifications.IToastService toasts,
+                     Winpepper.Platform.Injection.ClipboardFallback clipboardFallback)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;
@@ -168,6 +177,7 @@ public sealed class AppShell : IDisposable
         Pipeline = pipeline; _sounds = sounds;
         ErrorBus = errorBus;
         HistoryServices = historyServices; ModelsServices = modelsServices;
+        Toasts = toasts; ClipboardFallback = clipboardFallback;
 
         Pill = new StatusPillWindow(sessionVm);
         Tray = new TrayIconHost(sessionVm, AppPaths.AssetsDir, "0.3.0",
@@ -216,6 +226,7 @@ public sealed class AppShell : IDisposable
         SettingsWriter.Dispose();
         _sounds.Dispose();
         ModelsServices.Dispose();
+        (Toasts as IDisposable)?.Dispose();
         WinpepperLogging.Flush();
     }
 }

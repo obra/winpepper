@@ -42,6 +42,8 @@ public sealed class PipelineHost : IDisposable
 
     private readonly Winpepper.Core.Errors.ErrorBus _errorBus;
     private Guid _currentSessionId = Guid.Empty;
+    private readonly Winpepper.Platform.Injection.ClipboardFallback _clipboardFallback;
+    private readonly Winpepper.Core.Notifications.IToastService _toasts;
 
     public PipelineHost(
         ILoggerFactory factory,
@@ -54,6 +56,8 @@ public sealed class PipelineHost : IDisposable
         Winpepper.History.HistoryArchiver archiver,
         string asrModelName,
         string cleanupModelName,
+        Winpepper.Platform.Injection.ClipboardFallback clipboardFallback,
+        Winpepper.Core.Notifications.IToastService toasts,
         Winpepper.Cleanup.CleanupRunner? cleanup = null,                       // PLAN2-TYPE
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
@@ -74,6 +78,8 @@ public sealed class PipelineHost : IDisposable
         _corrections = corrections;
         _windowContext = windowContext;
         _cleanupOptions = cleanupOptions ?? new Winpepper.Cleanup.CleanupOptions();
+        _clipboardFallback = clipboardFallback;
+        _toasts = toasts;
     }
 
     public void Start()
@@ -197,7 +203,12 @@ public sealed class PipelineHost : IDisposable
                             Winpepper.Core.Errors.ErrorStage.Injection,
                             new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
                             _currentSessionId);
-                        // Plan 5 Task 16 fills in the clipboard-fallback path.
+                        _clipboardFallback.Copy(final);
+                        _ = _toasts.ShowAsync(
+                            "Winpepper",
+                            "Couldn't type into the active window. The cleaned text is on your clipboard.",
+                            Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                            TimeSpan.FromSeconds(6));
                     }
                 }
                 injectSw.Stop();
@@ -326,7 +337,12 @@ public sealed class PipelineHost : IDisposable
                                 Winpepper.Core.Errors.ErrorStage.Injection,
                                 new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
                                 _currentSessionId);
-                            // Plan 5 Task 16 fills in the clipboard-fallback path.
+                            _clipboardFallback.Copy(final2);
+                            _ = _toasts.ShowAsync(
+                                "Winpepper",
+                                "Couldn't type into the active window. The cleaned text is on your clipboard.",
+                                Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                TimeSpan.FromSeconds(6));
                         }
                     }
                     injectSw2.Stop();

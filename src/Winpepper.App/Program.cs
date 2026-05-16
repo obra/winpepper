@@ -3,6 +3,7 @@ using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.AppLifecycle;
 using Winpepper.App;
+using Winpepper.Core;
 
 namespace Winpepper.App;
 
@@ -11,6 +12,13 @@ public static class Program
     [STAThread]
     public static int Main(string[] args)
     {
+        // Install smoke probe: must run BEFORE WinRT/WinUI init or any global
+        // exception hookups so it's fast, minimal, and safe on bare VMs.
+        if (args.Any(a => a.Equals("--selftest", StringComparison.OrdinalIgnoreCase)))
+        {
+            return SelftestProbe.Run(Console.WriteLine);
+        }
+
         // Autostart hand-off: --tray means start hidden to the tray.
         var startHidden = args.Any(a => a.Equals("--tray", StringComparison.OrdinalIgnoreCase));
         Environment.SetEnvironmentVariable("WINPEPPER_START_HIDDEN", startHidden ? "1" : "0");

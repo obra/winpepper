@@ -151,3 +151,32 @@ correction post-pass maps any surviving "chat gbt" to "ChatGPT").
 **Acceptance bar:** every step lands without exceptions in `%LOCALAPPDATA%\winpepper\logs\winpepper-<date>.log`. Tray icon and status pill appear. Onboarding finishes and `settings.json` shows `"onboardingCompleted": true`.
 
 Tray autostart variant: after onboarding completes, restart the app with `dotnet run --project src/Winpepper.App -c Debug -- --tray` — the main window should NOT appear, only the tray icon. Click the tray icon to show the window.
+
+## Plan 4 smoke (Windows VM)
+
+> **Status (as of Plan 4 execution):** Cannot execute end-to-end on the VM until the
+> WinUI markup compiler blocker (Plan 3 milestone commit 4bdb988) is resolved. The
+> procedure below is the canonical Plan 4 smoke and runs once Winpepper.App builds.
+
+1. `./scripts/sync-to-vm.sh`
+2. `./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj -c Release"`
+3. Launch the packaged app on the VM (per Plan 3's onboarding instructions).
+4. Models tab:
+   - The ASR and Cleanup cards each show a "Download Missing Models" button.
+   - Click it. Watch the progress list populate. Confirm WAV / GGUF files land under
+     `%LOCALAPPDATA%\winpepper\models\` and the "Installed" label flips to "yes".
+   - Verify SHA-256 by deleting one file and re-running — it should re-download.
+   - Verify resume by killing the app mid-download, restarting, and clicking again — the file should resume from byte X (check log for `Range: bytes=X-`).
+5. Trigger a dictation session (hold + release).
+6. History tab:
+   - Newest entry appears at the top with the correct timestamp and preview.
+   - Click it → detail page opens.
+   - Click "Run" on the transcription rerun → diff renders (likely all-equal if the same model).
+   - Pick a different model, rerun, observe diff.
+   - Click "Run" on the cleanup rerun → cleaned text appears.
+   - Click "Show cleanup transcript" → modal shows assembled prompt + raw output.
+   - Click "Use as default cleanup" → return to Models tab, confirm the cleanup combo
+     reflects the new selection. Settings file `%LOCALAPPDATA%\winpepper\settings.json`
+     should also show the new `cleanupModelName` value.
+7. Generate >50 sessions (or seed the index manually) and confirm only 50 remain
+   and the oldest WAV files are deleted from disk.

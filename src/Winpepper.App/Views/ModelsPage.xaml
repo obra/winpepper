@@ -1,0 +1,77 @@
+<Page x:Class="Winpepper.App.Views.ModelsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:models="using:Winpepper.Models">
+    <Grid Padding="24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Models" Style="{StaticResource TitleTextBlockStyle}" />
+
+        <Grid Grid.Row="1" ColumnSpacing="16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!-- ASR card -->
+            <StackPanel Grid.Column="0" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6" Spacing="8">
+                <TextBlock Text="ASR" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <ComboBox x:Name="AsrCombo"
+                          ItemsSource="{x:Bind ViewModel.AsrCard.Available, Mode=OneWay}"
+                          DisplayMemberPath="DisplayName"
+                          SelectionChanged="OnAsrChanged" />
+                <TextBlock Text="Installed:" />
+                <TextBlock x:Name="AsrInstalledText" />
+                <ListView ItemsSource="{x:Bind ViewModel.AsrCard.ProgressByFile, Mode=OneWay}">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:DownloadProgress">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="80" />
+                                    <ColumnDefinition Width="100" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{x:Bind FileRelativePath}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind PercentComplete}" />
+                                <TextBlock Grid.Column="2" Text="{x:Bind Phase}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </StackPanel>
+
+            <!-- Cleanup card -->
+            <StackPanel Grid.Column="1" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6" Spacing="8">
+                <TextBlock Text="Cleanup" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <ComboBox x:Name="CleanupCombo"
+                          ItemsSource="{x:Bind ViewModel.CleanupCard.Available, Mode=OneWay}"
+                          DisplayMemberPath="DisplayName"
+                          SelectionChanged="OnCleanupChanged" />
+                <TextBlock Text="Installed:" />
+                <TextBlock x:Name="CleanupInstalledText" />
+                <ListView ItemsSource="{x:Bind ViewModel.CleanupCard.ProgressByFile, Mode=OneWay}">
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="models:DownloadProgress">
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="80" />
+                                    <ColumnDefinition Width="100" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="{x:Bind FileRelativePath}" TextTrimming="CharacterEllipsis" />
+                                <TextBlock Grid.Column="1" Text="{x:Bind PercentComplete}" />
+                                <TextBlock Grid.Column="2" Text="{x:Bind Phase}" />
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </StackPanel>
+        </Grid>
+
+        <Button Grid.Row="2" Content="Download Missing Models" Click="OnDownloadMissing" HorizontalAlignment="Right" />
+    </Grid>
+</Page>

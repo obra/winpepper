@@ -1,0 +1,66 @@
+namespace Winpepper.History;
+
+/// <summary>
+/// Bundle of session-finalize information handed to <see cref="HistoryArchiver.Archive"/>.
+/// </summary>
+public sealed class HistoryArchiveInput
+{
+    public required float[] Samples16k { get; init; }
+    public string RawTranscript { get; init; } = "";
+    public string CleanedText { get; init; } = "";
+    public string AsrModelName { get; init; } = "";
+    public string CleanupModelName { get; init; } = "";
+    public bool WindowContextUsed { get; init; }
+    public string WindowTitleAtStart { get; init; } = "";
+    public string WindowTitleAtInject { get; init; } = "";
+    public HistoryTimings Timings { get; init; } = new();
+}
+
+/// <summary>
+/// Session-finalize sink. Writes the WAV under <c>history-root/YYYY-MM-DD/uuid.wav</c>
+/// (UTC date), builds a <see cref="HistoryEntry"/>, and appends it to the store.
+/// Pruning to 50 happens inside <see cref="HistoryStore.Append"/>.
+/// </summary>
+public sealed class HistoryArchiver
+{
+    private const int SampleRate = 16000;
+
+    private readonly HistoryStore _store;
+    private readonly Func<DateTime> _nowUtc;
+
+    public HistoryArchiver(HistoryStore store, Func<DateTime>? nowUtc = null)
+    {
+        _store = store;
+        _nowUtc = nowUtc ?? (() => DateTime.UtcNow);
+    }
+
+    public HistoryEntry Archive(HistoryArchiveInput input)
+    {
+        var now = _nowUtc();
+        var id = Guid.NewGuid().ToString("N");
+        var day = now.ToString("yyyy-MM-dd");
+        var relative = $"{day}/{id}.wav";
+        var absolute = Path.Combine(_store.Root, relative);
+
+        WavWriter.WriteMono16kInt16(absolute, input.Samples16k);
+
+        var entry = new HistoryEntry
+        {
+            Id = id,
+            CreatedAtUtc = now,
+            RawTranscript = input.RawTranscript,
+            CleanedText = input.CleanedText,
+            WavRelativePath = relative,
+            DurationMs = (int)((long)input.Samples16k.Length * 1000 / SampleRate),
+            AsrModelName = input.AsrModelName,
+            CleanupModelName = input.CleanupModelName,
+            WindowContextUsed = input.WindowContextUsed,
+            WindowTitleAtStart = input.WindowTitleAtStart,
+            WindowTitleAtInject = input.WindowTitleAtInject,
+            Timings = input.Timings,
+        };
+
+        _store.Append(entry);
+        return entry;
+    }
+}

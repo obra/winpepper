@@ -14,6 +14,7 @@ namespace Winpepper.App.Hosting;
 /// Plan-3 pipeline host. Wires audio capture → ASR → cleanup (Plan 2) → injection.
 /// Cleanup, corrections, and window-context are optional — if absent the raw
 /// transcript is injected unchanged (Plan-1 behaviour).
+/// Plan-4: each phase is timed and the result is archived via HistoryArchiver.
 /// </summary>
 public sealed class PipelineHost : IDisposable
 {
@@ -34,6 +35,11 @@ public sealed class PipelineHost : IDisposable
     private readonly Winpepper.Platform.WindowContext.WindowContextPrefetch? _windowContext; // PLAN2-TYPE
     private Task<Winpepper.Platform.WindowContext.WindowContextResult>? _ctxPrefetchTask;    // PLAN2-TYPE
 
+    private readonly Winpepper.History.HistoryArchiver _archiver;
+    private readonly string _asrModelName;
+    private readonly string _cleanupModelName;
+    private System.Diagnostics.Stopwatch? _recordStopwatch;
+
     public PipelineHost(
         ILoggerFactory factory,
         SessionEngine engine,
@@ -41,6 +47,9 @@ public sealed class PipelineHost : IDisposable
         ISoundEffectPlayer sounds,
         HotkeyChord hold, HotkeyChord toggle, HotkeyChord cancel,
         string modelDir,
+        Winpepper.History.HistoryArchiver archiver,
+        string asrModelName,
+        string cleanupModelName,
         Winpepper.Cleanup.CleanupRunner? cleanup = null,                       // PLAN2-TYPE
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
@@ -53,6 +62,9 @@ public sealed class PipelineHost : IDisposable
         _hook = new HotkeyHook(hold, toggle, cancel, factory.CreateLogger<HotkeyHook>());
         _injector = new TextInjector(factory.CreateLogger<TextInjector>());
         _asr = new ParakeetSession(modelDir);
+        _archiver = archiver;
+        _asrModelName = asrModelName;
+        _cleanupModelName = cleanupModelName;
         _cleanup = cleanup;
         _corrections = corrections;
         _windowContext = windowContext;
@@ -89,6 +101,7 @@ public sealed class PipelineHost : IDisposable
                 _sounds.PlayStart();
                 _recorder = new WasapiRecorder();
                 _recorder.Start();
+                _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
                 _ctxPrefetchTask = null;
@@ -101,13 +114,22 @@ public sealed class PipelineHost : IDisposable
             case HotkeyEventKind.HoldUp:
                 if (_engine.State != SessionState.Recording) return;
                 _engine.Apply(SessionEvent.StopRequested);
+                _recordStopwatch?.Stop();
+
                 var samples = _recorder!.Stop();
                 _recorder.Dispose(); _recorder = null;
                 _sounds.PlayStop();
+
+                var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
                 var transcript = await Task.Run(() => _asr.Transcribe(samples), ct);
+                transcribeSw.Stop();
                 _engine.Apply(SessionEvent.TranscriptReady);
 
                 string final = transcript.Text;
+                var cleanupSw = new System.Diagnostics.Stopwatch();
+                var cleanupUsedModel = "";
+                var windowContextUsed = false;
+
                 if (!string.IsNullOrWhiteSpace(final) && _cleanup is not null)
                 {
                     _vm.MarkCleaningUp();
@@ -126,29 +148,63 @@ public sealed class PipelineHost : IDisposable
                             TaskScheduler.Default);
                     }
 
-                    var corrections = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
+                    var correctionsData = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
 
+                    cleanupSw.Start();
                     try
                     {
                         var result = await _cleanup.RunAsync(
                             rawTranscript: final,
-                            corrections: corrections,
+                            corrections: correctionsData,
                             windowContextTask: ctxTextTask,
                             options: _cleanupOptions,
                             ct: ct);
+                        cleanupSw.Stop();
                         _log.LogInformation("Cleanup path={Path}, {ElapsedMs}ms",
                             result.Path, (int)result.Elapsed.TotalMilliseconds);
                         final = result.CleanedText;
+                        cleanupUsedModel = _cleanupModelName;
+                        windowContextUsed = ctxTextTask is not null
+                                            && result.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
                     }
                     catch (Exception ex)
                     {
+                        cleanupSw.Stop();
                         _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
                     }
                 }
 
+                var injectSw = System.Diagnostics.Stopwatch.StartNew();
                 if (!string.IsNullOrWhiteSpace(final)) _injector.TryInject(final);
+                injectSw.Stop();
                 _engine.Apply(SessionEvent.InjectionCompleted);
+
+                var totalMs = (int)((_recordStopwatch?.ElapsedMilliseconds ?? 0)
+                                     + transcribeSw.ElapsedMilliseconds
+                                     + cleanupSw.ElapsedMilliseconds
+                                     + injectSw.ElapsedMilliseconds);
+                _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                {
+                    Samples16k = samples,
+                    RawTranscript = transcript.Text,
+                    CleanedText = final,
+                    AsrModelName = _asrModelName,
+                    CleanupModelName = cleanupUsedModel,
+                    WindowContextUsed = windowContextUsed,
+                    WindowTitleAtStart = "",
+                    WindowTitleAtInject = "",
+                    Timings = new Winpepper.History.HistoryTimings
+                    {
+                        RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                        TranscribeMs = (int)transcribeSw.ElapsedMilliseconds,
+                        CleanupMs = (int)cleanupSw.ElapsedMilliseconds,
+                        InjectMs = (int)injectSw.ElapsedMilliseconds,
+                        TotalMs = totalMs,
+                    },
+                });
+
                 _ctxPrefetchTask = null;
+                _recordStopwatch = null;
                 break;
             case HotkeyEventKind.Cancel:
                 _engine.Apply(SessionEvent.CancelRequested);
@@ -161,6 +217,7 @@ public sealed class PipelineHost : IDisposable
                     _sounds.PlayStart();
                     _recorder = new WasapiRecorder();
                     _recorder.Start();
+                    _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                     // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
                     _ctxPrefetchTask = null;
@@ -173,13 +230,22 @@ public sealed class PipelineHost : IDisposable
                 else if (_engine.State == SessionState.Recording)
                 {
                     _engine.Apply(SessionEvent.StopRequested);
+                    _recordStopwatch?.Stop();
+
                     var samples2 = _recorder!.Stop();
                     _recorder.Dispose(); _recorder = null;
                     _sounds.PlayStop();
+
+                    var transcribeSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var transcript2 = await Task.Run(() => _asr.Transcribe(samples2), ct);
+                    transcribeSw2.Stop();
                     _engine.Apply(SessionEvent.TranscriptReady);
 
                     string final2 = transcript2.Text;
+                    var cleanupSw2 = new System.Diagnostics.Stopwatch();
+                    var cleanupUsedModel2 = "";
+                    var windowContextUsed2 = false;
+
                     if (!string.IsNullOrWhiteSpace(final2) && _cleanup is not null)
                     {
                         _vm.MarkCleaningUp();
@@ -198,29 +264,63 @@ public sealed class PipelineHost : IDisposable
                                 TaskScheduler.Default);
                         }
 
-                        var corrections2 = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
+                        var correctionsData2 = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
 
+                        cleanupSw2.Start();
                         try
                         {
                             var result2 = await _cleanup.RunAsync(
                                 rawTranscript: final2,
-                                corrections: corrections2,
+                                corrections: correctionsData2,
                                 windowContextTask: ctxTextTask2,
                                 options: _cleanupOptions,
                                 ct: ct);
+                            cleanupSw2.Stop();
                             _log.LogInformation("Cleanup path={Path}, {ElapsedMs}ms",
                                 result2.Path, (int)result2.Elapsed.TotalMilliseconds);
                             final2 = result2.CleanedText;
+                            cleanupUsedModel2 = _cleanupModelName;
+                            windowContextUsed2 = ctxTextTask2 is not null
+                                                && result2.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
                         }
                         catch (Exception ex)
                         {
+                            cleanupSw2.Stop();
                             _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
                         }
                     }
 
+                    var injectSw2 = System.Diagnostics.Stopwatch.StartNew();
                     if (!string.IsNullOrWhiteSpace(final2)) _injector.TryInject(final2);
+                    injectSw2.Stop();
                     _engine.Apply(SessionEvent.InjectionCompleted);
+
+                    var totalMs2 = (int)((_recordStopwatch?.ElapsedMilliseconds ?? 0)
+                                         + transcribeSw2.ElapsedMilliseconds
+                                         + cleanupSw2.ElapsedMilliseconds
+                                         + injectSw2.ElapsedMilliseconds);
+                    _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                    {
+                        Samples16k = samples2,
+                        RawTranscript = transcript2.Text,
+                        CleanedText = final2,
+                        AsrModelName = _asrModelName,
+                        CleanupModelName = cleanupUsedModel2,
+                        WindowContextUsed = windowContextUsed2,
+                        WindowTitleAtStart = "",
+                        WindowTitleAtInject = "",
+                        Timings = new Winpepper.History.HistoryTimings
+                        {
+                            RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                            TranscribeMs = (int)transcribeSw2.ElapsedMilliseconds,
+                            CleanupMs = (int)cleanupSw2.ElapsedMilliseconds,
+                            InjectMs = (int)injectSw2.ElapsedMilliseconds,
+                            TotalMs = totalMs2,
+                        },
+                    });
+
                     _ctxPrefetchTask = null;
+                    _recordStopwatch = null;
                 }
                 break;
         }

@@ -1,0 +1,59 @@
+<Page x:Class="Winpepper.App.Views.HistoryDetailPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:local="using:Winpepper.App.Views"
+      xmlns:models="using:Winpepper.Models">
+    <ScrollViewer Padding="24">
+        <StackPanel Spacing="16">
+
+            <TextBlock Text="History detail" Style="{StaticResource TitleTextBlockStyle}" />
+
+            <!-- Original side-by-side -->
+            <Grid ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock Text="Original transcript" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="OriginalTranscriptText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                </StackPanel>
+                <StackPanel Grid.Column="1">
+                    <TextBlock Text="Original cleaned text" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="OriginalCleanedText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                </StackPanel>
+            </Grid>
+
+            <!-- WAV playback -->
+            <MediaPlayerElement x:Name="WavPlayer" AreTransportControlsEnabled="True" Height="60" />
+
+            <!-- Rerun transcription panel -->
+            <StackPanel Spacing="8" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">
+                <TextBlock Text="Rerun transcription" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <ComboBox x:Name="AsrModelPicker"
+                          ItemsSource="{x:Bind AvailableAsrModels, Mode=OneWay}"
+                          DisplayMemberPath="DisplayName"
+                          SelectionChanged="OnAsrSelectionChanged" />
+                <Button Content="Run" Click="OnRunTranscriptionRerun" />
+                <local:DiffSegmentsControl x:Name="TranscriptionDiff" />
+                <Button Content="Use as default ASR" Click="OnPromoteAsr" />
+            </StackPanel>
+
+            <!-- Rerun cleanup panel -->
+            <StackPanel Spacing="8" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">
+                <TextBlock Text="Rerun cleanup" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <ComboBox x:Name="CleanupModelPicker"
+                          ItemsSource="{x:Bind AvailableCleanupModels, Mode=OneWay}"
+                          DisplayMemberPath="DisplayName"
+                          SelectionChanged="OnCleanupSelectionChanged" />
+                <TextBox x:Name="CustomPromptBox" PlaceholderText="Optional custom base prompt..."
+                         AcceptsReturn="True" TextWrapping="Wrap" Height="120" />
+                <ToggleSwitch x:Name="WindowContextToggle" Header="Include window context" />
+                <Button Content="Run" Click="OnRunCleanupRerun" />
+                <local:DiffSegmentsControl x:Name="CleanupDiff" />
+                <Button Content="Show cleanup transcript" Click="OnShowCleanupTranscript" />
+                <Button Content="Use as default cleanup" Click="OnPromoteCleanup" />
+            </StackPanel>
+        </StackPanel>
+    </ScrollViewer>
+</Page>

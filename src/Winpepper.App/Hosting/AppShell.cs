@@ -33,6 +33,7 @@ public sealed class AppShell : IDisposable
     public MainWindow Main { get; private set; }
     public Winpepper.App.Services.HistoryServices HistoryServices { get; }
     public Winpepper.App.Services.ModelsServices ModelsServices { get; }
+    public Winpepper.Core.Errors.ErrorBus ErrorBus { get; }
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
@@ -47,6 +48,8 @@ public sealed class AppShell : IDisposable
         var uiThread = new DispatcherQueueUiThread(DispatcherQueue.GetForCurrentThread());
         var engine = new SessionEngine();
         var sessionVm = new SessionViewModel(engine, uiThread);
+        var errorBus = new Winpepper.Core.Errors.ErrorBus();
+        sessionVm.AttachErrorBus(errorBus);
         var hotkeyValidator = new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator();
         var recordingVm = new RecordingSettingsViewModel(settings, writer, hotkeyValidator);
         var cleanupContract = CleanupSettingsContract.Defaults();
@@ -137,12 +140,12 @@ public sealed class AppShell : IDisposable
         var hold   = HotkeyChord.Parse(settings.HoldHotkey);
         var toggle = HotkeyChord.Parse(settings.ToggleHotkey);
         var cancel = HotkeyChord.Parse("Esc");
-        var pipeline = new PipelineHost(factory, engine, sessionVm, sounds,
+        var pipeline = new PipelineHost(factory, errorBus, engine, sessionVm, sounds,
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
                                          historyServices.Archiver, settings.AsrModelName, cleanupModelName,
                                          cleanup, correctionStore, windowContext, cleanupOptions);
 
-        var shell = new AppShell(factory, store, settings, writer, engine, sessionVm,
+        var shell = new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
                                   recordingVm, cleanupVm, correctionsVm,
                                   autostart, pipeline, sounds, historyServices, modelsServices);
         await shell.StartAsync();
@@ -152,6 +155,7 @@ public sealed class AppShell : IDisposable
     private AppShell(ILoggerFactory factory, SettingsStore store, AppSettings settings,
                      DebouncedSettingsWriter writer, SessionEngine engine,
                      SessionViewModel sessionVm,
+                     Winpepper.Core.Errors.ErrorBus errorBus,
                      RecordingSettingsViewModel recVm, CleanupSettingsViewModel cleanupVm,
                      CorrectionsViewModel corrVm, IAutostartRegistry autostart,
                      PipelineHost pipeline, WinUiSoundEffectPlayer sounds,
@@ -162,6 +166,7 @@ public sealed class AppShell : IDisposable
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;
         CleanupVm = cleanupVm; CorrectionsVm = corrVm; Autostart = autostart;
         Pipeline = pipeline; _sounds = sounds;
+        ErrorBus = errorBus;
         HistoryServices = historyServices; ModelsServices = modelsServices;
 
         Pill = new StatusPillWindow(sessionVm);

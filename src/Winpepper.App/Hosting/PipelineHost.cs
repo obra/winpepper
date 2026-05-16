@@ -40,8 +40,12 @@ public sealed class PipelineHost : IDisposable
     private readonly string _cleanupModelName;
     private System.Diagnostics.Stopwatch? _recordStopwatch;
 
+    private readonly Winpepper.Core.Errors.ErrorBus _errorBus;
+    private Guid _currentSessionId = Guid.Empty;
+
     public PipelineHost(
         ILoggerFactory factory,
+        Winpepper.Core.Errors.ErrorBus errorBus,
         SessionEngine engine,
         SessionViewModel vm,
         ISoundEffectPlayer sounds,
@@ -56,6 +60,7 @@ public sealed class PipelineHost : IDisposable
         Winpepper.Cleanup.CleanupOptions? cleanupOptions = null)               // PLAN2-TYPE
     {
         _log = factory.CreateLogger<PipelineHost>();
+        _errorBus = errorBus;
         _engine = engine;
         _vm = vm;
         _sounds = sounds;
@@ -85,7 +90,13 @@ public sealed class PipelineHost : IDisposable
             await foreach (var evt in _hook.Events.ReadAllAsync(ct))
             {
                 try { await HandleHotkey(evt, ct); }
-                catch (Exception ex) { _log.LogError(ex, "pipeline error"); _engine.Apply(SessionEvent.Failed); _vm.NotifyError(ex.Message); }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "pipeline error");
+                    _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Unknown, ex, _currentSessionId);
+                    _engine.Apply(SessionEvent.Failed);
+                    _vm.NotifyError(ex.Message);
+                }
             }
         }
         catch (OperationCanceledException) { }
@@ -98,6 +109,7 @@ public sealed class PipelineHost : IDisposable
             case HotkeyEventKind.HoldDown:
                 if (_engine.State != SessionState.Idle) return;
                 _engine.Apply(SessionEvent.StartRequested);
+                _currentSessionId = Guid.NewGuid();
                 _sounds.PlayStart();
                 _recorder = new WasapiRecorder();
                 _recorder.Start();
@@ -171,11 +183,23 @@ public sealed class PipelineHost : IDisposable
                     {
                         cleanupSw.Stop();
                         _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
+                        _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Cleanup, ex, _currentSessionId);
                     }
                 }
 
                 var injectSw = System.Diagnostics.Stopwatch.StartNew();
-                if (!string.IsNullOrWhiteSpace(final)) _injector.TryInject(final);
+                if (!string.IsNullOrWhiteSpace(final))
+                {
+                    var injected = _injector.TryInject(final);
+                    if (!injected)
+                    {
+                        _errorBus.Report(
+                            Winpepper.Core.Errors.ErrorStage.Injection,
+                            new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
+                            _currentSessionId);
+                        // Plan 5 Task 16 fills in the clipboard-fallback path.
+                    }
+                }
                 injectSw.Stop();
                 _engine.Apply(SessionEvent.InjectionCompleted);
 
@@ -214,6 +238,7 @@ public sealed class PipelineHost : IDisposable
                 if (_engine.State == SessionState.Idle)
                 {
                     _engine.Apply(SessionEvent.StartRequested);
+                    _currentSessionId = Guid.NewGuid();
                     _sounds.PlayStart();
                     _recorder = new WasapiRecorder();
                     _recorder.Start();
@@ -287,11 +312,23 @@ public sealed class PipelineHost : IDisposable
                         {
                             cleanupSw2.Stop();
                             _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
+                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Cleanup, ex, _currentSessionId);
                         }
                     }
 
                     var injectSw2 = System.Diagnostics.Stopwatch.StartNew();
-                    if (!string.IsNullOrWhiteSpace(final2)) _injector.TryInject(final2);
+                    if (!string.IsNullOrWhiteSpace(final2))
+                    {
+                        var injected2 = _injector.TryInject(final2);
+                        if (!injected2)
+                        {
+                            _errorBus.Report(
+                                Winpepper.Core.Errors.ErrorStage.Injection,
+                                new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
+                                _currentSessionId);
+                            // Plan 5 Task 16 fills in the clipboard-fallback path.
+                        }
+                    }
                     injectSw2.Stop();
                     _engine.Apply(SessionEvent.InjectionCompleted);
 

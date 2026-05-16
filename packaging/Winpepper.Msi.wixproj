@@ -7,7 +7,13 @@
     <OutputPath>$(MSBuildThisFileDirectory)..\artifacts\</OutputPath>
     <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(Configuration)\</IntermediateOutputPath>
     <AppPublishDir Condition=" '$(AppPublishDir)' == '' ">$(MSBuildThisFileDirectory)..\src\Winpepper.App\bin\$(Configuration)\net9.0-windows10.0.19041.0\win-x64\publish</AppPublishDir>
-    <DefineConstants>AppPublishDir=$(AppPublishDir)</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup>
+    <D3D12ProbeExe>$(MSBuildThisFileDirectory)probes\bin\$(Configuration)\publish\Winpepper.D3D12Probe.exe</D3D12ProbeExe>
+    <WinAppSdkBootstrapper Condition="'$(WinAppSdkBootstrapper)' == ''">$(MSBuildThisFileDirectory)bootstrapper\WindowsAppRuntimeInstall-x64.exe</WinAppSdkBootstrapper>
+  </PropertyGroup>
+  <PropertyGroup>
+    <DefineConstants>AppPublishDir=$(AppPublishDir);D3D12ProbeExe=$(D3D12ProbeExe);WinAppSdkBootstrapper=$(WinAppSdkBootstrapper)</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="WixToolset.UI.wixext" />
@@ -39,6 +45,14 @@
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
       <Targets>Publish</Targets>
       <Properties>Configuration=$(Configuration);RuntimeIdentifier=win-x64;SelfContained=true;PublishDir=$(AppPublishDir)\</Properties>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="probes\Winpepper.D3D12Probe.csproj">
+      <Private>false</Private>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Targets>Publish</Targets>
+      <Properties>Configuration=$(Configuration);RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=true;PublishDir=$(MSBuildThisFileDirectory)probes\bin\$(Configuration)\publish\</Properties>
     </ProjectReference>
   </ItemGroup>
 </Project>

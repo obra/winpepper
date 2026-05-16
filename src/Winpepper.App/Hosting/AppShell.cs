@@ -43,7 +43,7 @@ public sealed class AppShell : IDisposable
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
-    public static async Task<AppShell> BootstrapAsync(Application _)
+    public static async Task<AppShell> BootstrapAsync(Application app)
     {
         Directory.CreateDirectory(AppPaths.Root);
         var logTail = new Winpepper.Core.Logging.LogRingBuffer(capacity: 2000);

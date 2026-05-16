@@ -39,7 +39,7 @@ public sealed class TrayIconHost : IDisposable
             UpdateFromSession();
         };
         _menu.QuitMenuItem.Click += (_, _) => quit();
-        _menu.CrashTestItem.Click += (_, _) =>
+        _menu.CrashTestMenuItem.Click += (_, _) =>
             throw new InvalidOperationException("synthetic crash from tray menu");
         _menu.VersionLabel.Text = $"Winpepper v{versionString}";
         _session.PropertyChanged += OnSessionChanged;

@@ -18,4 +18,5 @@ public sealed partial class TrayMenu : MenuFlyout
     public ToggleMenuFlyoutItem PauseToggle => PauseItem;
     public MenuFlyoutItem QuitMenuItem => QuitItem;
     public MenuFlyoutItem VersionLabel => VersionItem;
+    public MenuFlyoutItem CrashTestMenuItem => CrashTestItem;
 }

@@ -47,7 +47,7 @@ public static class Program
         return 0;
     }
 
-    private static void OnAppDomainUnhandled(object sender, UnhandledExceptionEventArgs e)
+    private static void OnAppDomainUnhandled(object sender, System.UnhandledExceptionEventArgs e)
     {
         if (e.ExceptionObject is not Exception ex) return;
         var keepAlive = App.CrashHandler?.HandleUnhandled(ex, fromTaskScheduler: false) ?? false;

@@ -15,6 +15,10 @@
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
+  <PropertyGroup>
+    <WinpepperSigned Condition="'$(WINPEPPER_SIGNED)' == '1'">true</WinpepperSigned>
+    <DefineConstants Condition="'$(WinpepperSigned)' == 'true'">$(DefineConstants);WINPEPPER_SIGNED</DefineConstants>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(MSBuildProjectName)' == 'Winpepper.App' AND '$(OS)' != 'Windows_NT' AND '$(EnableWindowsTargeting)' != 'true'">
     <BuildProjectReferences>false</BuildProjectReferences>
     <DefineConstants>$(DefineConstants);SKIP_WINUI_LINUX</DefineConstants>

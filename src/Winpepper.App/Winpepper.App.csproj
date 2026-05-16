@@ -32,7 +32,13 @@
     <ProjectReference Include="..\Winpepper.Platform\Winpepper.Platform.csproj" />
     <ProjectReference Include="..\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
     <ProjectReference Include="..\Winpepper.Corrections\Winpepper.Corrections.csproj" />
-    <ProjectReference Include="..\Winpepper.History\Winpepper.History.csproj" />
+    <!-- Force the Windows-TFM build of History so the #if WINDOWS Lab services
+         (ParakeetTranscriptionRerunService, LlamaCleanupRerunService) are visible
+         to HistoryServices.cs. Without the explicit SetTargetFramework hint,
+         MSBuild's nearest-TFM picker silently selects net9.0 and the Lab types
+         resolve as CS0246. -->
+    <ProjectReference Include="..\Winpepper.History\Winpepper.History.csproj"
+                      SetTargetFramework="TargetFramework=net9.0-windows10.0.19041.0" />
     <ProjectReference Include="..\Winpepper.Models\Winpepper.Models.csproj" />
   </ItemGroup>
   <ItemGroup>

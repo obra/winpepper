@@ -34,5 +34,12 @@
     <PackageVersion Include="H.NotifyIcon.WinUI" Version="2.1.4" />
     <PackageVersion Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageVersion Include="Microsoft.Win32.Registry" Version="5.0.0" />
+
+    <!-- Plan 6: versioning + packaging -->
+    <PackageVersion Include="Nerdbank.GitVersioning" Version="3.6.146" />
+    <PackageVersion Include="WixToolset.Sdk" Version="5.0.2" />
+    <PackageVersion Include="WixToolset.UI.wixext" Version="5.0.2" />
+    <PackageVersion Include="WixToolset.Util.wixext" Version="5.0.2" />
+    <PackageVersion Include="WixToolset.Heat" Version="5.0.2" />
   </ItemGroup>
 </Project>

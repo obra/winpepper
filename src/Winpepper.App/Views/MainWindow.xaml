@@ -15,6 +15,9 @@
                 <NavigationViewItem Tag="models"      Content="Models" />
                 <NavigationViewItem Tag="diagnostics" Content="Diagnostics" />
             </NavigationView.MenuItems>
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem Tag="about" Content="About Winpepper" SelectsOnInvoked="False" Tapped="OnAboutClick" />
+            </NavigationView.FooterMenuItems>
             <Frame x:Name="ContentFrame" />
         </NavigationView>
     </Grid>

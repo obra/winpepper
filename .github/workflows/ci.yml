@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
@@ -24,6 +26,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
@@ -33,3 +37,53 @@ jobs:
       # which isn't downloaded in CI. Hook integration test also skipped because
       # GitHub-hosted Windows runners may not deliver low-level keyboard events.
       - run: dotnet test --configuration Release --no-build --filter "FullyQualifiedName!~HotkeyHookIntegrationTests&FullyQualifiedName!~ParakeetSessionIntegrationTests"
+
+      # WiX v5 wix.exe is Windows-only, so the wxs lint lives in this windows-build
+      # job rather than linux-build (despite the plan's original wording). The lint
+      # uses a synthetic publish-stub dir + stub bootstrapper so the wxs structure
+      # is validated without depending on Winpepper.App actually publishing (which
+      # is gated on the WinAppSDK 1.6 / .NET 9 XAML markup-compiler block).
+      #
+      # The stub exe must be a real PE with a version resource because the wxs uses
+      # bind.FileVersion.WinpepperExe — an empty text file would fail the bind step.
+      # We synthesize a minimal console app with AssemblyVersion/FileVersion stamped
+      # to satisfy the bind without pulling in WinAppSDK.
+      - name: Build minimal stub exe (for wxs bind.FileVersion)
+        shell: pwsh
+        run: |
+          $stubDir = "$env:TEMP\winpepper-publish-stub"
+          $stubProj = "$env:TEMP\stub-app"
+          New-Item -ItemType Directory -Path $stubProj -Force | Out-Null
+          Push-Location $stubProj
+          dotnet new console --name Winpepper --output . --force | Out-Null
+          # Stamp a real assembly version so bind.FileVersion succeeds.
+          (Get-Content Winpepper.csproj) -replace '</Project>', "  <PropertyGroup><AssemblyVersion>0.6.0.0</AssemblyVersion><FileVersion>0.6.0.0</FileVersion></PropertyGroup></Project>" | Set-Content Winpepper.csproj
+          dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false -o $stubDir | Out-Null
+          Pop-Location
+          Copy-Item -Recurse -Force "$PWD\src\Winpepper.App\Assets" $stubDir\
+          New-Item -ItemType Directory -Path packaging\bootstrapper -Force | Out-Null
+          'stub' | Out-File -Encoding ASCII packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe
+          # The D3D12 probe is shipped via the MSI Binary table; <Binary> doesn't
+          # require a PE-valid file at link, so a text stub satisfies the wxs.
+          'stub' | Out-File -Encoding ASCII $env:TEMP\Winpepper.D3D12Probe.exe
+          Get-ChildItem $stubDir | ForEach-Object { Write-Host "  stub: $($_.Name) $($_.Length)" }
+
+      - name: Lint wxs (build MSI from stub publish dir)
+        shell: pwsh
+        run: |
+          dotnet build packaging\Winpepper.Msi.wixproj -c Release `
+            -p:AppPublishDir=$env:TEMP\winpepper-publish-stub `
+            -p:_SkipUpstreamProjectReferences=true `
+            -p:BuildProjectReferences=false `
+            -p:WinAppSdkBootstrapper=$PWD\packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe `
+            -p:D3D12ProbeExe=$env:TEMP\Winpepper.D3D12Probe.exe
+
+      - name: Verify MSI produced
+        shell: pwsh
+        run: |
+          $msi = Get-ChildItem -Path artifacts -Filter "winpepper-*-x64.msi" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $msi) {
+            Write-Error "No MSI produced from stub publish dir"
+            exit 1
+          }
+          Write-Host "MSI produced: $($msi.FullName) ($([math]::Round($msi.Length / 1MB, 2)) MB)"

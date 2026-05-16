@@ -12,4 +12,5 @@ public static class AppPaths
     public static string CleanupSettingsJson => Path.Combine(Root, "cleanup-settings.json");
 
     public static string AssetsDir => Path.Combine(AppContext.BaseDirectory, "Assets");
+    public static string HistoryRoot => Path.Combine(Root, "history");
 }

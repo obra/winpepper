@@ -128,11 +128,16 @@ public sealed class AppShell : IDisposable
             MaxNewTokensCap = cleanupContract.MaxNewTokens,
         };
 
+        var historyStore = new Winpepper.History.HistoryStore(AppPaths.HistoryRoot);
+        var archiver = new Winpepper.History.HistoryArchiver(historyStore);
+        var cleanupModelName = ""; // PLAN4-TASK16: replaced with settings.CleanupModelName
+
         var hold   = HotkeyChord.Parse(settings.HoldHotkey);
         var toggle = HotkeyChord.Parse(settings.ToggleHotkey);
         var cancel = HotkeyChord.Parse("Esc");
         var pipeline = new PipelineHost(factory, engine, sessionVm, sounds,
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
+                                         archiver, settings.AsrModelName, cleanupModelName,
                                          cleanup, correctionStore, windowContext, cleanupOptions);
 
         var shell = new AppShell(factory, store, settings, writer, engine, sessionVm,

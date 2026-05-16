@@ -1,0 +1,40 @@
+<Page x:Class="Winpepper.App.Views.DiagnosticsPage"
+      xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      xmlns:logging="using:Winpepper.Core.Logging">
+    <Grid Padding="24" RowSpacing="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" Text="Diagnostics" Style="{StaticResource TitleTextBlockStyle}" />
+
+        <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
+            <Button x:Name="OpenLogFolderBtn" Content="Open log folder" Click="OnOpenLogFolder" />
+            <Button x:Name="CopyBundleBtn" Content="Copy diagnostics bundle" Click="OnCopyBundle" />
+            <TextBlock x:Name="LastBundleLabel" VerticalAlignment="Center" />
+        </StackPanel>
+
+        <ListView Grid.Row="2"
+                  x:Name="TailList"
+                  ItemsSource="{x:Bind ViewModel.Tail, Mode=OneWay}"
+                  SelectionMode="None">
+            <ListView.ItemTemplate>
+                <DataTemplate x:DataType="logging:LogTailEntry">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <TextBlock Text="{x:Bind TimestampUtc}" Foreground="Gray" />
+                        <TextBlock Text="{x:Bind Level}" />
+                        <TextBlock Text="{x:Bind Message}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </DataTemplate>
+            </ListView.ItemTemplate>
+        </ListView>
+
+        <TextBlock Grid.Row="3"
+                   Text="Tail keeps the most recent 2000 log lines. Audio is never included in the diagnostics bundle."
+                   Foreground="Gray"
+                   FontSize="12" />
+    </Grid>
+</Page>

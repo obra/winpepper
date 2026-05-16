@@ -22,6 +22,18 @@ public sealed partial class MainWindow : Window
         ContentFrame.Navigate(typeof(OnboardingPage), _shell);
     }
 
+    public void NavigateToTag(string tag)
+    {
+        foreach (var item in Nav.MenuItems)
+        {
+            if (item is NavigationViewItem navItem && (string?)navItem.Tag == tag)
+            {
+                Nav.SelectedItem = navItem;
+                return;
+            }
+        }
+    }
+
     private void OnNavSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
     {
         if (args.SelectedItem is not NavigationViewItem item) return;
@@ -33,6 +45,7 @@ public sealed partial class MainWindow : Window
             "history"     => typeof(HistoryPage),
             "lab"         => typeof(HistoryDetailPage),
             "models"      => typeof(ModelsPage),
+            "diagnostics" => typeof(DiagnosticsPage),
             _ => null,
         };
         if (pageType is not null)

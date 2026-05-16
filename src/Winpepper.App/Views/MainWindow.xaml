@@ -13,7 +13,7 @@
                 <NavigationViewItem Tag="history"     Content="History" />
                 <NavigationViewItem Tag="lab"         Content="Lab" />
                 <NavigationViewItem Tag="models"      Content="Models" />
-                <NavigationViewItem Tag="diagnostics" Content="Diagnostics" IsEnabled="False" ToolTipService.ToolTip="Available in Plan 5" />
+                <NavigationViewItem Tag="diagnostics" Content="Diagnostics" />
             </NavigationView.MenuItems>
             <Frame x:Name="ContentFrame" />
         </NavigationView>

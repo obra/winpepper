@@ -37,13 +37,20 @@ public sealed class AppShell : IDisposable
     public Winpepper.Core.Notifications.IToastService Toasts { get; }
     public Winpepper.Platform.Injection.ClipboardFallback ClipboardFallback { get; }
     public Winpepper.Core.Crash.CrashHandler CrashHandler { get; }
+    public Winpepper.Core.Logging.LogRingBuffer LogTail { get; }
+    public Winpepper.Core.Threading.IUiThread Ui { get; }
+    public Winpepper.App.Hosting.DiagnosticsHost DiagnosticsHost { get; }
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
     public static async Task<AppShell> BootstrapAsync(Application _)
     {
         Directory.CreateDirectory(AppPaths.Root);
-        var factory = WinpepperLogging.Create(AppPaths.LogsDir, debugConsole: false, minimumLevel: LogLevel.Information);
+        var logTail = new Winpepper.Core.Logging.LogRingBuffer(capacity: 2000);
+        var factory = Winpepper.Core.Logging.WinpepperLogging.CreateWithBuffer(
+            AppPaths.LogsDir, debugConsole: false,
+            minimumLevel: LogLevel.Information,
+            buffer: logTail);
         var store = new SettingsStore(AppPaths.SettingsJson);
         var settings = store.Load();
         var writer = new DebouncedSettingsWriter(store);
@@ -53,6 +60,32 @@ public sealed class AppShell : IDisposable
         var sessionVm = new SessionViewModel(engine, uiThread);
         var errorBus = new Winpepper.Core.Errors.ErrorBus();
         sessionVm.AttachErrorBus(errorBus);
+
+        var toasts = new Winpepper.App.Notifications.AppNotificationToastService();
+        var diagHost = new Winpepper.App.Hosting.DiagnosticsHost(
+            mainWindow: () => Winpepper.App.App.Shell?.Main,
+            logsDir: AppPaths.LogsDir,
+            historyRoot: AppPaths.HistoryRoot,
+            settingsPath: AppPaths.SettingsJson,
+            appVersion: "0.5.0");
+
+        errorBus.Subscribe(rec =>
+        {
+            var tag = Winpepper.Core.Errors.ErrorDeepLink.NavigationTagFor(rec.Stage);
+            var label = Winpepper.Core.Errors.ErrorDeepLink.ActionLabelFor(rec.Stage);
+            _ = toasts.ShowAsync(
+                "Winpepper error",
+                $"{rec.Stage}: {rec.Message}",
+                new[] { new Winpepper.Core.Notifications.ToastButton(tag, label) },
+                TimeSpan.FromSeconds(10)).ContinueWith(t =>
+                {
+                    if (t.IsCompletedSuccessfully && !string.IsNullOrEmpty(t.Result))
+                    {
+                        uiThread.Post(() => (Winpepper.App.App.Shell?.Main as Winpepper.App.Views.MainWindow)?.NavigateToTag(t.Result));
+                        uiThread.Post(() => Winpepper.App.App.Shell?.ShowMain());
+                    }
+                });
+        });
         var hotkeyValidator = new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator();
         var recordingVm = new RecordingSettingsViewModel(settings, writer, hotkeyValidator);
         var cleanupContract = CleanupSettingsContract.Defaults();
@@ -145,7 +178,6 @@ public sealed class AppShell : IDisposable
         var cancel = HotkeyChord.Parse("Esc");
         var clipboard = new Winpepper.App.Hosting.WindowsClipboard();
         var clipboardFallback = new Winpepper.Platform.Injection.ClipboardFallback(clipboard);
-        var toasts = new Winpepper.App.Notifications.AppNotificationToastService();
 
         Winpepper.Core.Learning.PostPasteWatcher? postPaste = null;
         Winpepper.Platform.Learning.FocusedElementCapturer? focusedCapturer = null;
@@ -186,7 +218,8 @@ public sealed class AppShell : IDisposable
         var shell = new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
                                   recordingVm, cleanupVm, correctionsVm,
                                   autostart, pipeline, sounds, historyServices, modelsServices,
-                                  toasts, clipboardFallback, crashHandler);
+                                  toasts, clipboardFallback, crashHandler,
+                                  logTail, uiThread, diagHost);
         await shell.StartAsync();
         return shell;
     }
@@ -202,7 +235,10 @@ public sealed class AppShell : IDisposable
                      Winpepper.App.Services.ModelsServices modelsServices,
                      Winpepper.Core.Notifications.IToastService toasts,
                      Winpepper.Platform.Injection.ClipboardFallback clipboardFallback,
-                     Winpepper.Core.Crash.CrashHandler crashHandler)
+                     Winpepper.Core.Crash.CrashHandler crashHandler,
+                     Winpepper.Core.Logging.LogRingBuffer logTail,
+                     Winpepper.Core.Threading.IUiThread ui,
+                     Winpepper.App.Hosting.DiagnosticsHost diagnosticsHost)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;
@@ -212,6 +248,7 @@ public sealed class AppShell : IDisposable
         HistoryServices = historyServices; ModelsServices = modelsServices;
         Toasts = toasts; ClipboardFallback = clipboardFallback;
         CrashHandler = crashHandler;
+        LogTail = logTail; Ui = ui; DiagnosticsHost = diagnosticsHost;
 
         Pill = new StatusPillWindow(sessionVm);
         Tray = new TrayIconHost(sessionVm, AppPaths.AssetsDir, "0.3.0",

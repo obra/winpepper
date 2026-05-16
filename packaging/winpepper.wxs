@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <!-- Real content lands in Task 6. Empty stub so the wixproj can lint. -->
+  <Package Name="Winpepper" Manufacturer="Winpepper" Version="0.0.0.1" UpgradeCode="6c0b2a36-9d4f-44cf-9a3e-a3a4f0c1ed01">
+    <SummaryInformation Description="Winpepper installer stub" />
+    <MediaTemplate EmbedCab="yes" />
+    <Feature Id="Main" Title="Winpepper" Level="1">
+      <Component Id="StubComponent" Directory="INSTALLFOLDER" Guid="6c0b2a36-9d4f-44cf-9a3e-a3a4f0c1ed02">
+        <RegistryValue Root="HKLM" Key="Software\Winpepper" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Winpepper" />
+    </StandardDirectory>
+  </Package>
+</Wix>

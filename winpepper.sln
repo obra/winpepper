@@ -43,6 +43,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Winpepper.Models.Tests", "t
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Winpepper.IntegrationTests", "tests\Winpepper.IntegrationTests\Winpepper.IntegrationTests.csproj", "{54555121-BC84-43C6-A1F6-6EE8C02322D2}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "packaging", "packaging", "{E927F87B-A585-A586-52B2-1371051E189F}"
+EndProject
+Project("{930C7802-8A8C-48F9-8165-68863BCCD9DD}") = "Winpepper.Msi", "packaging\Winpepper.Msi.wixproj", "{0BD9A7FC-22CA-4D10-A84E-CE9A72313562}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -269,6 +273,12 @@ Global
 		{54555121-BC84-43C6-A1F6-6EE8C02322D2}.Release|x64.Build.0 = Release|Any CPU
 		{54555121-BC84-43C6-A1F6-6EE8C02322D2}.Release|x86.ActiveCfg = Release|Any CPU
 		{54555121-BC84-43C6-A1F6-6EE8C02322D2}.Release|x86.Build.0 = Release|Any CPU
+		{0BD9A7FC-22CA-4D10-A84E-CE9A72313562}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0BD9A7FC-22CA-4D10-A84E-CE9A72313562}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{0BD9A7FC-22CA-4D10-A84E-CE9A72313562}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{0BD9A7FC-22CA-4D10-A84E-CE9A72313562}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0BD9A7FC-22CA-4D10-A84E-CE9A72313562}.Release|x64.ActiveCfg = Release|Any CPU
+		{0BD9A7FC-22CA-4D10-A84E-CE9A72313562}.Release|x86.ActiveCfg = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -292,5 +302,6 @@ Global
 		{AC0801F0-6CB3-4F6E-BF16-5EFF0D474DD1} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{9E0FC666-C32E-4126-B907-A6BC2572805B} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{54555121-BC84-43C6-A1F6-6EE8C02322D2} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{0BD9A7FC-22CA-4D10-A84E-CE9A72313562} = {E927F87B-A585-A586-52B2-1371051E189F}
 	EndGlobalSection
 EndGlobal

@@ -1,0 +1,22 @@
+<Project Sdk="WixToolset.Sdk">
+  <PropertyGroup>
+    <OutputName>winpepper-$(Version)-x64</OutputName>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <SuppressIces>ICE60</SuppressIces>
+    <DefineConstants>AppPublishDir=$(MSBuildThisFileDirectory)..\src\Winpepper.App\bin\$(Configuration)\net9.0-windows10.0.19041.0\win-x64\publish</DefineConstants>
+    <OutputPath>$(MSBuildThisFileDirectory)..\artifacts\</OutputPath>
+    <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(Configuration)\</IntermediateOutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" />
+    <PackageReference Include="WixToolset.Util.wixext" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\src\Winpepper.App\Winpepper.App.csproj">
+      <DoNotHarvest>true</DoNotHarvest>
+      <Private>false</Private>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
+  </ItemGroup>
+</Project>

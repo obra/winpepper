@@ -13,4 +13,5 @@ public static class AppPaths
 
     public static string AssetsDir => Path.Combine(AppContext.BaseDirectory, "Assets");
     public static string HistoryRoot => Path.Combine(Root, "history");
+    public static string CrashesDir => Path.Combine(Root, "crashes");
 }

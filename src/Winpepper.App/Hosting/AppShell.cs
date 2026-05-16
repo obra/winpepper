@@ -36,6 +36,7 @@ public sealed class AppShell : IDisposable
     public Winpepper.Core.Errors.ErrorBus ErrorBus { get; }
     public Winpepper.Core.Notifications.IToastService Toasts { get; }
     public Winpepper.Platform.Injection.ClipboardFallback ClipboardFallback { get; }
+    public Winpepper.Core.Crash.CrashHandler CrashHandler { get; }
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
@@ -168,6 +169,13 @@ public sealed class AppShell : IDisposable
                 "PostPasteWatcher unavailable; post-paste learning will be disabled.");
         }
 
+        Directory.CreateDirectory(AppPaths.CrashesDir);
+        var miniDump = new Winpepper.Platform.Crash.MiniDumpWriter(AppPaths.CrashesDir,
+            factory.CreateLogger<Winpepper.Platform.Crash.MiniDumpWriter>());
+        var crashHandler = new Winpepper.Core.Crash.CrashHandler(miniDump, errorBus, engine,
+            factory.CreateLogger<Winpepper.Core.Crash.CrashHandler>());
+        App.CrashHandler = crashHandler;
+
         var pipeline = new PipelineHost(factory, errorBus, engine, sessionVm, sounds,
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
                                          historyServices.Archiver, settings.AsrModelName, cleanupModelName,
@@ -178,7 +186,7 @@ public sealed class AppShell : IDisposable
         var shell = new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
                                   recordingVm, cleanupVm, correctionsVm,
                                   autostart, pipeline, sounds, historyServices, modelsServices,
-                                  toasts, clipboardFallback);
+                                  toasts, clipboardFallback, crashHandler);
         await shell.StartAsync();
         return shell;
     }
@@ -193,7 +201,8 @@ public sealed class AppShell : IDisposable
                      Winpepper.App.Services.HistoryServices historyServices,
                      Winpepper.App.Services.ModelsServices modelsServices,
                      Winpepper.Core.Notifications.IToastService toasts,
-                     Winpepper.Platform.Injection.ClipboardFallback clipboardFallback)
+                     Winpepper.Platform.Injection.ClipboardFallback clipboardFallback,
+                     Winpepper.Core.Crash.CrashHandler crashHandler)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;
@@ -202,6 +211,7 @@ public sealed class AppShell : IDisposable
         ErrorBus = errorBus;
         HistoryServices = historyServices; ModelsServices = modelsServices;
         Toasts = toasts; ClipboardFallback = clipboardFallback;
+        CrashHandler = crashHandler;
 
         Pill = new StatusPillWindow(sessionVm);
         Tray = new TrayIconHost(sessionVm, AppPaths.AssetsDir, "0.3.0",

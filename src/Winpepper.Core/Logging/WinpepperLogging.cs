@@ -7,6 +7,23 @@ namespace Winpepper.Core.Logging;
 public static class WinpepperLogging
 {
     public static ILoggerFactory Create(string logDirectory, bool debugConsole, LogLevel minimumLevel)
+        => CreateInternal(logDirectory, debugConsole, minimumLevel, buffer: null);
+
+    public static ILoggerFactory CreateWithBuffer(
+        string logDirectory,
+        bool debugConsole,
+        LogLevel minimumLevel,
+        LogRingBuffer buffer)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        return CreateInternal(logDirectory, debugConsole, minimumLevel, buffer);
+    }
+
+    private static ILoggerFactory CreateInternal(
+        string logDirectory,
+        bool debugConsole,
+        LogLevel minimumLevel,
+        LogRingBuffer? buffer)
     {
         Directory.CreateDirectory(logDirectory);
 
@@ -36,6 +53,11 @@ public static class WinpepperLogging
         if (debugConsole)
         {
             config = config.WriteTo.Console(outputTemplate: template);
+        }
+
+        if (buffer is not null)
+        {
+            config = config.WriteTo.Sink(new RingBufferSink(buffer));
         }
 
         Log.Logger = config.CreateLogger();

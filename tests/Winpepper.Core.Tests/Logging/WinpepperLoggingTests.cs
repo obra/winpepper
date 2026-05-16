@@ -5,6 +5,7 @@ using Xunit;
 
 namespace Winpepper.Core.Tests.Logging;
 
+[Collection("Winpepper.Core.Logging")]
 public class WinpepperLoggingTests : IDisposable
 {
     private readonly string _dir;

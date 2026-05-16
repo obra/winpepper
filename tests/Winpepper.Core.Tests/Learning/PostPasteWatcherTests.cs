@@ -66,16 +66,20 @@ public class PostPasteWatcherTests : IDisposable
         var watcher = new FakeFocusedElementTextWatcher();
         var store = new CorrectionStore(_storePath);
         var prompt = new FakeToastPrompt(PostPasteDecision.No);
-        using var ppw = new PostPasteWatcher(watcher, new StoreWriter(store), prompt, TimeSpan.FromSeconds(30));
+        using var ppw = new PostPasteWatcher(watcher, new StoreWriter(store), prompt, TimeSpan.FromMilliseconds(200));
 
-        await ppw.BeginAsync(Ctx("Send chat gbt the link")).ContinueWith(_ => { });
+        // Watch #1: emit during the window so it triggers the prompt and records suppression.
+        var w1 = ppw.BeginAsync(Ctx("Send chat gbt the link"));
         await watcher.EmitAsync("el-1", "Send ChatGPT the link");
-
-        var done2 = ppw.BeginAsync(Ctx("Send chat gbt please"));
-        await watcher.EmitAsync("el-1", "Send ChatGPT please");
-        await done2;
-
+        await w1;
         prompt.Calls.Count.ShouldBe(1);
+
+        // Watch #2: same emit pair — must NOT prompt again.
+        var w2 = ppw.BeginAsync(Ctx("Send chat gbt please"));
+        await watcher.EmitAsync("el-1", "Send ChatGPT please");
+        await w2; // completes by watch-window timeout since the candidate is suppressed
+
+        prompt.Calls.Count.ShouldBe(1); // still 1 — second emit was suppressed
         store.Load().Replacements.Keys.ShouldNotContain("chat gbt");
     }
 
@@ -99,12 +103,11 @@ public class PostPasteWatcherTests : IDisposable
         var watcher = new FakeFocusedElementTextWatcher();
         var store = new CorrectionStore(_storePath);
         var prompt = new FakeToastPrompt(PostPasteDecision.Yes);
-        using var ppw = new PostPasteWatcher(watcher, new StoreWriter(store), prompt, TimeSpan.FromSeconds(30));
+        using var ppw = new PostPasteWatcher(watcher, new StoreWriter(store), prompt, TimeSpan.FromMilliseconds(200));
 
         var done = ppw.BeginAsync(Ctx("the quick brown fox"));
         await watcher.EmitAsync("el-1", "a slow brown fox");
-        await Task.Delay(50);
-        await done.ContinueWith(_ => { });
+        await done; // completes by watch-window timeout since no candidate was produced
 
         prompt.Calls.Count.ShouldBe(0);
     }

@@ -33,6 +33,7 @@
     <ProjectReference Include="..\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
     <ProjectReference Include="..\Winpepper.Corrections\Winpepper.Corrections.csproj" />
     <ProjectReference Include="..\Winpepper.History\Winpepper.History.csproj" />
+    <ProjectReference Include="..\Winpepper.Models\Winpepper.Models.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="Assets\start.wav" CopyToOutputDirectory="PreserveNewest" />

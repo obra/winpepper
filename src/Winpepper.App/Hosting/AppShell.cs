@@ -31,6 +31,8 @@ public sealed class AppShell : IDisposable
     public TrayIconHost Tray { get; }
     public StatusPillWindow Pill { get; }
     public MainWindow Main { get; private set; }
+    public Winpepper.App.Services.HistoryServices HistoryServices { get; }
+    public Winpepper.App.Services.ModelsServices ModelsServices { get; }
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
@@ -128,8 +130,8 @@ public sealed class AppShell : IDisposable
             MaxNewTokensCap = cleanupContract.MaxNewTokens,
         };
 
-        var historyStore = new Winpepper.History.HistoryStore(AppPaths.HistoryRoot);
-        var archiver = new Winpepper.History.HistoryArchiver(historyStore);
+        var historyServices = new Winpepper.App.Services.HistoryServices(AppPaths.HistoryRoot);
+        var modelsServices = new Winpepper.App.Services.ModelsServices(Path.Combine(AppPaths.Root, "models"));
         var cleanupModelName = settings.CleanupModelName;
 
         var hold   = HotkeyChord.Parse(settings.HoldHotkey);
@@ -137,12 +139,12 @@ public sealed class AppShell : IDisposable
         var cancel = HotkeyChord.Parse("Esc");
         var pipeline = new PipelineHost(factory, engine, sessionVm, sounds,
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
-                                         archiver, settings.AsrModelName, cleanupModelName,
+                                         historyServices.Archiver, settings.AsrModelName, cleanupModelName,
                                          cleanup, correctionStore, windowContext, cleanupOptions);
 
         var shell = new AppShell(factory, store, settings, writer, engine, sessionVm,
                                   recordingVm, cleanupVm, correctionsVm,
-                                  autostart, pipeline, sounds);
+                                  autostart, pipeline, sounds, historyServices, modelsServices);
         await shell.StartAsync();
         return shell;
     }
@@ -152,12 +154,15 @@ public sealed class AppShell : IDisposable
                      SessionViewModel sessionVm,
                      RecordingSettingsViewModel recVm, CleanupSettingsViewModel cleanupVm,
                      CorrectionsViewModel corrVm, IAutostartRegistry autostart,
-                     PipelineHost pipeline, WinUiSoundEffectPlayer sounds)
+                     PipelineHost pipeline, WinUiSoundEffectPlayer sounds,
+                     Winpepper.App.Services.HistoryServices historyServices,
+                     Winpepper.App.Services.ModelsServices modelsServices)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;
         CleanupVm = cleanupVm; CorrectionsVm = corrVm; Autostart = autostart;
         Pipeline = pipeline; _sounds = sounds;
+        HistoryServices = historyServices; ModelsServices = modelsServices;
 
         Pill = new StatusPillWindow(sessionVm);
         Tray = new TrayIconHost(sessionVm, AppPaths.AssetsDir, "0.3.0",
@@ -205,6 +210,7 @@ public sealed class AppShell : IDisposable
         Pill.Close();
         SettingsWriter.Dispose();
         _sounds.Dispose();
+        ModelsServices.Dispose();
         WinpepperLogging.Flush();
     }
 }

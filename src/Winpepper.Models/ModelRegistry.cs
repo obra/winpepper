@@ -28,25 +28,22 @@ public sealed class ModelRegistry
                     {
                         RelativePath = "encoder-model.int8.onnx",
                         Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.int8.onnx",
-                        // TODO(verify-at-exec): replace with SHA-256 from scripts/verify-model-hashes.ps1
-                        Sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
-                        SizeBytes = 410_000_000,
+                        Sha256 = "6139d2fa7e1b086097b277c7149725edbab89cc7c7ae64b23c741be4055aff09",
+                        SizeBytes = 652_183_999,
                     },
                     new ModelFile
                     {
                         RelativePath = "decoder_joint-model.int8.onnx",
                         Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.int8.onnx",
-                        // TODO(verify-at-exec): replace with SHA-256 from scripts/verify-model-hashes.ps1
-                        Sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
-                        SizeBytes = 18_000_000,
+                        Sha256 = "eea7483ee3d1a30375daedc8ed83e3960c91b098812127a0d99d1c8977667a70",
+                        SizeBytes = 18_202_004,
                     },
                     new ModelFile
                     {
                         RelativePath = "vocab.txt",
                         Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt",
-                        // TODO(verify-at-exec): replace with SHA-256 from scripts/verify-model-hashes.ps1
-                        Sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
-                        SizeBytes = 50_000,
+                        Sha256 = "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
+                        SizeBytes = 93_939,
                     },
                 },
             },
@@ -62,9 +59,8 @@ public sealed class ModelRegistry
                     {
                         RelativePath = "qwen2.5-0.5b-instruct-q4_k_m.gguf",
                         Url = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf",
-                        // TODO(verify-at-exec): replace with SHA-256 from scripts/verify-model-hashes.ps1
-                        Sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
-                        SizeBytes = 398_000_000,
+                        Sha256 = "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+                        SizeBytes = 491_400_032,
                     },
                 },
             },

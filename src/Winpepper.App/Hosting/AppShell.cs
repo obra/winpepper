@@ -130,7 +130,7 @@ public sealed class AppShell : IDisposable
 
         var historyStore = new Winpepper.History.HistoryStore(AppPaths.HistoryRoot);
         var archiver = new Winpepper.History.HistoryArchiver(historyStore);
-        var cleanupModelName = ""; // PLAN4-TASK16: replaced with settings.CleanupModelName
+        var cleanupModelName = settings.CleanupModelName;
 
         var hold   = HotkeyChord.Parse(settings.HoldHotkey);
         var toggle = HotkeyChord.Parse(settings.ToggleHotkey);

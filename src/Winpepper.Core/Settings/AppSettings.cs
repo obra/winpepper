@@ -14,6 +14,9 @@ public record AppSettings
     // ASR
     public string AsrModelName { get; init; } = "parakeet-tdt-0.6b-v3";
 
+    // Cleanup model selection. Bound to Winpepper.Models.ModelRegistry.DefaultCleanupName.
+    public string CleanupModelName { get; init; } = "qwen2.5-0.5b-instruct-q4_k_m";
+
     // Hotkeys (Plan 1 defaults; persisted as raw VK codes + modifier flags
     // — full chord recording UI comes in Plan 3)
     public string HoldHotkey { get; init; } = "RightCtrl+RightShift";

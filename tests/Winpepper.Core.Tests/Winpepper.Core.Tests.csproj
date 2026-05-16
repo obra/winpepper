@@ -12,5 +12,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Winpepper.Core\Winpepper.Core.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Corrections\Winpepper.Corrections.csproj" />
   </ItemGroup>
 </Project>

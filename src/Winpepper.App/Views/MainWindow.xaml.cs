@@ -1,6 +1,7 @@
 #if WINDOWS
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Winpepper.App.Hosting;
 
 namespace Winpepper.App.Views;
@@ -50,6 +51,18 @@ public sealed partial class MainWindow : Window
         };
         if (pageType is not null)
             ContentFrame.Navigate(pageType, _shell);
+    }
+
+    private async void OnAboutClick(object sender, TappedRoutedEventArgs e)
+    {
+        var dialog = new ContentDialog
+        {
+            Title = Winpepper.Core.AboutText.Title,
+            Content = Winpepper.Core.AboutText.Body(),
+            CloseButtonText = "Close",
+            XamlRoot = this.Content.XamlRoot
+        };
+        await dialog.ShowAsync();
     }
 }
 #endif

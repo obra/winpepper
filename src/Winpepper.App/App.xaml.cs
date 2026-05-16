@@ -6,6 +6,7 @@ namespace Winpepper.App;
 public partial class App : Application
 {
     public static AppShell? Shell { get; private set; }
+    public static Winpepper.Core.Crash.CrashHandler? CrashHandler { get; set; }
 
     public App() { InitializeComponent(); }
 

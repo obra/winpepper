@@ -180,3 +180,52 @@ Tray autostart variant: after onboarding completes, restart the app with `dotnet
      should also show the new `cleanupModelName` value.
 7. Generate >50 sessions (or seed the index manually) and confirm only 50 remain
    and the oldest WAV files are deleted from disk.
+
+## Plan 5 — Post-paste learning, Diagnostics, error bus, crash dumps
+
+### Setup
+1. Build + deploy as in earlier plans. Confirm `dotnet test` (Linux filter) is fully green.
+2. Run `./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj"`. WinUI compiler PNSE is expected (carry-forward); proceed with the previously-built binary or, once the WinUI block is resolved, with the fresh build.
+3. Launch the app on the VM.
+
+### Post-paste learning
+1. Open Notepad. Focus the document.
+2. Press the hold-to-record hotkey, say "send chat gbt the link", release.
+3. Observe injected text "send chat gbt the link" (or similar — depending on cleanup).
+4. Within 30 s, edit `chat gbt` to `ChatGPT` in Notepad.
+5. A non-modal toast should appear: "Learn correction: `chat gbt` -> `ChatGPT`? [Yes / Preferred / No]".
+6. Click "Yes". Open `%LOCALAPPDATA%\winpepper\corrections.json` and confirm `"chat gbt": "ChatGPT"` under `replacements`.
+7. Repeat with "Preferred" — confirm `"ChatGPT"` shows up under `preferred` and `replacements` is unchanged.
+8. Repeat with "No" — confirm both lists are unchanged and a second identical edit in the same session does **not** re-prompt.
+9. Wait 30 s with no edits. The watch window should silently close (no error).
+
+### Toast button compatibility
+- Microsoft Edge address bar — confirm Edge's autocomplete-style edits do NOT trigger the toast.
+- Word — confirm Word's autocapitalize ("anthropic" → "Anthropic") does NOT trigger the toast.
+
+### Diagnostics tab
+1. Open the main window, click "Diagnostics" in the nav.
+2. Confirm the tail shows the recent log lines (at least the boot lines).
+3. Trigger a session; confirm new lines appear at the bottom.
+4. Click "Open log folder" — Explorer opens at `%LOCALAPPDATA%\winpepper\logs\`.
+5. Click "Copy diagnostics bundle" — pick a destination, watch the zip get created.
+6. Unzip the bundle; confirm: `logs/winpepper-*.log`, `history-index.json`, `settings.json`, `sysinfo.json`.
+7. Confirm there are **no** `*.wav` files in the zip.
+
+### Error bus + tray
+1. Rename the parakeet model directory under `%LOCALAPPDATA%\winpepper\models\` so ASR fails.
+2. Trigger a session. Confirm the tray icon flips to the yellow Error glyph, the tooltip carries "Error (Asr): ...", and a toast appears with an "Open Models tab" button.
+3. Click the toast button — main window opens and selects Models. Restore the model directory.
+
+### Clipboard fallback
+1. Open Windows Security → focus a search box. (Or any UAC-protected window.)
+2. Trigger a session. Confirm a toast says "Couldn't type into the active window. The cleaned text is on your clipboard."
+3. Paste with Ctrl+V — the cleaned text appears.
+
+### Crash safety
+1. Open Diagnostics tab.
+2. Trigger an artificial crash using the developer hotkey (Ctrl+Shift+F12 — Task 23 wires this as a debug-build-only menu item; if not built into the current binary, throw from `PipelineHost` by editing in a temporary `throw new InvalidOperationException("synthetic crash")` and rebuilding).
+3. Confirm `%LOCALAPPDATA%\winpepper\crashes\winpepper-YYYYMMDD-HHMMSS-PID.dmp` exists.
+4. Confirm the sidecar `.txt` carries the exception type and stack.
+5. Confirm the app stayed alive: tray still present, "Ready" status.
+6. Re-trigger a dictation session and confirm the full pipeline still works.

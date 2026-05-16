@@ -4,7 +4,13 @@ namespace Winpepper.App.Tray;
 
 public sealed partial class TrayMenu : MenuFlyout
 {
-    public TrayMenu() { InitializeComponent(); }
+    public TrayMenu()
+    {
+        InitializeComponent();
+#if DEBUG
+        CrashTestItem.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+#endif
+    }
 
     public MenuFlyoutItem StatusItemControl => StatusItem;
     public ProgressBar StatusProgressBar => StatusProgress;

@@ -15,6 +15,9 @@ public static class Program
         var startHidden = args.Any(a => a.Equals("--tray", StringComparison.OrdinalIgnoreCase));
         Environment.SetEnvironmentVariable("WINPEPPER_START_HIDDEN", startHidden ? "1" : "0");
 
+        AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandled;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTask;
+
         // Single-instance handshake. If a sibling is already running, redirect
         // activation and exit.
         var key = "Winpepper-singleton";
@@ -34,5 +37,19 @@ public static class Program
             _ = new App();
         });
         return 0;
+    }
+
+    private static void OnAppDomainUnhandled(object sender, UnhandledExceptionEventArgs e)
+    {
+        if (e.ExceptionObject is not Exception ex) return;
+        var keepAlive = App.CrashHandler?.HandleUnhandled(ex, fromTaskScheduler: false) ?? false;
+        if (!keepAlive) Environment.Exit(1);
+    }
+
+    private static void OnUnobservedTask(object? sender, UnobservedTaskExceptionEventArgs e)
+    {
+        var keepAlive = App.CrashHandler?.HandleUnhandled(e.Exception, fromTaskScheduler: true) ?? false;
+        e.SetObserved();
+        if (!keepAlive) Environment.Exit(1);
     }
 }

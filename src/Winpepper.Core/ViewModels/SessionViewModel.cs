@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using Winpepper.Core.Errors;
 using Winpepper.Core.Sessions;
 using Winpepper.Core.Threading;
 
@@ -13,6 +14,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private SessionStage _stage = SessionStage.Idle;
     private string _statusText = "Ready";
     private long _elapsedMs;
+    private ErrorStage? _lastErrorStage;
+    private string _lastErrorMessage = "";
+    private IDisposable? _busSub;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -40,6 +44,33 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         get => _elapsedMs;
         private set { if (_elapsedMs == value) return; _elapsedMs = value; Raise(nameof(ElapsedMs)); }
     }
+
+    public ErrorStage? LastErrorStage
+    {
+        get => _lastErrorStage;
+        private set { if (_lastErrorStage == value) return; _lastErrorStage = value; Raise(nameof(LastErrorStage)); }
+    }
+
+    public string LastErrorMessage
+    {
+        get => _lastErrorMessage;
+        private set { if (_lastErrorMessage == value) return; _lastErrorMessage = value; Raise(nameof(LastErrorMessage)); }
+    }
+
+    public void AttachErrorBus(ErrorBus bus)
+    {
+        ArgumentNullException.ThrowIfNull(bus);
+        _busSub?.Dispose();
+        _busSub = bus.Subscribe(OnBusReport);
+    }
+
+    private void OnBusReport(ErrorRecord rec) => _ui.Post(() =>
+    {
+        LastErrorStage = rec.Stage;
+        LastErrorMessage = rec.Message;
+        Stage = SessionStage.Error;
+        StatusText = $"Error ({rec.Stage}): {rec.Message}";
+    });
 
     /// <summary>Called by pipeline glue when the cleanup worker starts.</summary>
     public void MarkCleaningUp() => _ui.Post(() =>
@@ -89,5 +120,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     private void Raise(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
-    public void Dispose() => _engine.StateChanged -= OnEngineStateChanged;
+    public void Dispose()
+    {
+        _busSub?.Dispose();
+        _engine.StateChanged -= OnEngineStateChanged;
+    }
 }

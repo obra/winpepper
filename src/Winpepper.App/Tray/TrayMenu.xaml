@@ -13,4 +13,5 @@
     <MenuFlyoutItem x:Name="QuitItem" Text="Quit" />
     <MenuFlyoutSeparator />
     <MenuFlyoutItem x:Name="VersionItem" Text="Winpepper v0.0.0" IsEnabled="False" />
+    <MenuFlyoutItem x:Name="CrashTestItem" Text="Throw synthetic crash" Visibility="Collapsed" />
 </MenuFlyout>

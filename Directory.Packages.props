@@ -40,5 +40,6 @@
     <PackageVersion Include="WixToolset.Sdk" Version="5.0.2" />
     <PackageVersion Include="WixToolset.UI.wixext" Version="5.0.2" />
     <PackageVersion Include="WixToolset.Util.wixext" Version="5.0.2" />
+    <PackageVersion Include="WixToolset.Heat" Version="5.0.2" />
   </ItemGroup>
 </Project>

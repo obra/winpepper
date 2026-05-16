@@ -43,6 +43,7 @@
 
     <Feature Id="MainFeature" Title="$(ProductName)" Level="1" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentGroupRef Id="HarvestedFiles" />
+      <ComponentGroupRef Id="WinpepperExeAliasGroup" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="AutostartRunKey" />
       <ComponentRef Id="HKLMVersionStamp" />
@@ -117,4 +118,19 @@
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
 
   </Package>
+
+  <!-- Override harvested file id for the main exe so wxs can bind to it
+       via [#WinpepperExe] (Shortcut Target) and !(bind.FileVersion.WinpepperExe). -->
+  <Fragment>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="WinpepperExeAlias" Guid="6c0b2a36-9d4f-44cf-9a3e-a3a4f0c1ed06" Bitness="always64">
+        <File Id="WinpepperExe"
+              Source="$(var.AppPublishDir)\Winpepper.exe"
+              KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <ComponentGroup Id="WinpepperExeAliasGroup">
+      <ComponentRef Id="WinpepperExeAlias" />
+    </ComponentGroup>
+  </Fragment>
 </Wix>

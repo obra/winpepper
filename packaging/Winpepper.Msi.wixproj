@@ -4,19 +4,41 @@
     <OutputType>Package</OutputType>
     <InstallerPlatform>x64</InstallerPlatform>
     <SuppressIces>ICE60</SuppressIces>
-    <DefineConstants>AppPublishDir=$(MSBuildThisFileDirectory)..\src\Winpepper.App\bin\$(Configuration)\net9.0-windows10.0.19041.0\win-x64\publish</DefineConstants>
     <OutputPath>$(MSBuildThisFileDirectory)..\artifacts\</OutputPath>
     <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(Configuration)\</IntermediateOutputPath>
+    <AppPublishDir Condition=" '$(AppPublishDir)' == '' ">$(MSBuildThisFileDirectory)..\src\Winpepper.App\bin\$(Configuration)\net9.0-windows10.0.19041.0\win-x64\publish</AppPublishDir>
+    <DefineConstants>AppPublishDir=$(AppPublishDir)</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="WixToolset.UI.wixext" />
     <PackageReference Include="WixToolset.Util.wixext" />
+    <!-- WixToolset.Heat provides the HarvestDirectory MSBuild item / Heat target.
+         In WiX v5 the SDK no longer bundles Heat, so it must be referenced explicitly
+         for the HarvestDirectory item below to generate the ComponentGroup. -->
+    <PackageReference Include="WixToolset.Heat" />
+  </ItemGroup>
+  <ItemGroup>
+    <HarvestDirectory Include="$(AppPublishDir)">
+      <ComponentGroupName>HarvestedFiles</ComponentGroupName>
+      <DirectoryRefId>INSTALLFOLDER</DirectoryRefId>
+      <SuppressRootDirectory>true</SuppressRootDirectory>
+      <PreprocessorVariable>var.AppPublishDir</PreprocessorVariable>
+      <!-- Heat's MSBuild item has no ExcludeFiles metadata; we strip Winpepper.exe
+           from the harvested ComponentGroup with an XSL transform so it does not
+           collide with the hand-authored WinpepperExeAlias in winpepper.wxs. -->
+      <Transforms>$(MSBuildThisFileDirectory)exclude-winpepper-exe.xsl</Transforms>
+    </HarvestDirectory>
+  </ItemGroup>
+  <ItemGroup>
+    <BindPath Include="$(AppPublishDir)" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\src\Winpepper.App\Winpepper.App.csproj">
       <DoNotHarvest>true</DoNotHarvest>
       <Private>false</Private>
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <Targets>Publish</Targets>
+      <Properties>Configuration=$(Configuration);RuntimeIdentifier=win-x64;SelfContained=true;PublishDir=$(AppPublishDir)\</Properties>
     </ProjectReference>
   </ItemGroup>
 </Project>

@@ -48,15 +48,21 @@ public sealed class TrayIconHost : IDisposable
 
     private void OnSessionChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(SessionViewModel.Stage) or nameof(SessionViewModel.StatusText))
+        if (e.PropertyName is nameof(SessionViewModel.Stage)
+                           or nameof(SessionViewModel.StatusText)
+                           or nameof(SessionViewModel.LastErrorMessage))
             UpdateFromSession();
     }
 
     private void UpdateFromSession()
     {
-        var label = _paused ? "Paused" : _session.StatusText;
-        _menu.StatusItemControl.Text = label;
-        _icon.ToolTipText = $"Winpepper - {label}";
+        var state = Winpepper.Core.Tray.TrayIconStateMapper.Map(
+            _session.Stage, _session.LastErrorMessage, _paused);
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", state.IconName);
+        if (File.Exists(iconPath))
+            _icon.IconSource = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(iconPath));
+        _menu.StatusItemControl.Text = _paused ? "Paused" : _session.StatusText;
+        _icon.ToolTipText = state.Tooltip;
         _menu.StatusProgressBar.Visibility =
             !_paused && _session.Stage is SessionStage.Recording or SessionStage.Transcribing or SessionStage.CleaningUp
                 ? Visibility.Visible : Visibility.Collapsed;

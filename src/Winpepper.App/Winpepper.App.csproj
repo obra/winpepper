@@ -39,5 +39,8 @@
     <Content Include="Assets\start.wav" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\stop.wav" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\AppIcon-Recording.ico" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Assets\AppIcon-Recording.ico')" />
+    <Content Include="Assets\AppIcon-Loading.ico"   CopyToOutputDirectory="PreserveNewest" Condition="Exists('Assets\AppIcon-Loading.ico')" />
+    <Content Include="Assets\AppIcon-Error.ico"     CopyToOutputDirectory="PreserveNewest" Condition="Exists('Assets\AppIcon-Error.ico')" />
   </ItemGroup>
 </Project>

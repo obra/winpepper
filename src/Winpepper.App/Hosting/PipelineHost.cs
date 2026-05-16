@@ -44,6 +44,8 @@ public sealed class PipelineHost : IDisposable
     private Guid _currentSessionId = Guid.Empty;
     private readonly Winpepper.Platform.Injection.ClipboardFallback _clipboardFallback;
     private readonly Winpepper.Core.Notifications.IToastService _toasts;
+    private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
+    private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
 
     public PipelineHost(
         ILoggerFactory factory,
@@ -61,7 +63,9 @@ public sealed class PipelineHost : IDisposable
         Winpepper.Cleanup.CleanupRunner? cleanup = null,                       // PLAN2-TYPE
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
-        Winpepper.Cleanup.CleanupOptions? cleanupOptions = null)               // PLAN2-TYPE
+        Winpepper.Cleanup.CleanupOptions? cleanupOptions = null,               // PLAN2-TYPE
+        Winpepper.Core.Learning.PostPasteWatcher? postPaste = null,
+        Winpepper.Platform.Learning.FocusedElementCapturer? focusedCapturer = null)
     {
         _log = factory.CreateLogger<PipelineHost>();
         _errorBus = errorBus;
@@ -80,6 +84,8 @@ public sealed class PipelineHost : IDisposable
         _cleanupOptions = cleanupOptions ?? new Winpepper.Cleanup.CleanupOptions();
         _clipboardFallback = clipboardFallback;
         _toasts = toasts;
+        _postPaste = postPaste;
+        _focusedCapturer = focusedCapturer;
     }
 
     public void Start()
@@ -194,9 +200,10 @@ public sealed class PipelineHost : IDisposable
                 }
 
                 var injectSw = System.Diagnostics.Stopwatch.StartNew();
+                var injected = false;
                 if (!string.IsNullOrWhiteSpace(final))
                 {
-                    var injected = _injector.TryInject(final);
+                    injected = _injector.TryInject(final);
                     if (!injected)
                     {
                         _errorBus.Report(
@@ -212,6 +219,27 @@ public sealed class PipelineHost : IDisposable
                     }
                 }
                 injectSw.Stop();
+                if (injected && _postPaste is not null && _focusedCapturer is not null && !string.IsNullOrWhiteSpace(final))
+                {
+                    var snap = _focusedCapturer.Capture();
+                    if (snap.IsValid)
+                    {
+                        var watchTask = _postPaste.BeginAsync(new Winpepper.Core.Learning.PostPasteContext
+                        {
+                            ElementId = snap.ElementId,
+                            InjectedText = final,
+                            SessionId = _currentSessionId,
+                            InjectionEndUtc = DateTime.UtcNow,
+                        });
+                        var sid = _currentSessionId;
+                        _ = watchTask.ContinueWith(t =>
+                        {
+                            if (t.Exception is not null)
+                                _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Learning,
+                                                  t.Exception.GetBaseException(), sid);
+                        }, TaskContinuationOptions.OnlyOnFaulted);
+                    }
+                }
                 _engine.Apply(SessionEvent.InjectionCompleted);
 
                 var totalMs = (int)((_recordStopwatch?.ElapsedMilliseconds ?? 0)
@@ -328,9 +356,10 @@ public sealed class PipelineHost : IDisposable
                     }
 
                     var injectSw2 = System.Diagnostics.Stopwatch.StartNew();
+                    var injected2 = false;
                     if (!string.IsNullOrWhiteSpace(final2))
                     {
-                        var injected2 = _injector.TryInject(final2);
+                        injected2 = _injector.TryInject(final2);
                         if (!injected2)
                         {
                             _errorBus.Report(
@@ -346,6 +375,27 @@ public sealed class PipelineHost : IDisposable
                         }
                     }
                     injectSw2.Stop();
+                    if (injected2 && _postPaste is not null && _focusedCapturer is not null && !string.IsNullOrWhiteSpace(final2))
+                    {
+                        var snap = _focusedCapturer.Capture();
+                        if (snap.IsValid)
+                        {
+                            var watchTask = _postPaste.BeginAsync(new Winpepper.Core.Learning.PostPasteContext
+                            {
+                                ElementId = snap.ElementId,
+                                InjectedText = final2,
+                                SessionId = _currentSessionId,
+                                InjectionEndUtc = DateTime.UtcNow,
+                            });
+                            var sid = _currentSessionId;
+                            _ = watchTask.ContinueWith(t =>
+                            {
+                                if (t.Exception is not null)
+                                    _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Learning,
+                                                      t.Exception.GetBaseException(), sid);
+                            }, TaskContinuationOptions.OnlyOnFaulted);
+                        }
+                    }
                     _engine.Apply(SessionEvent.InjectionCompleted);
 
                     var totalMs2 = (int)((_recordStopwatch?.ElapsedMilliseconds ?? 0)

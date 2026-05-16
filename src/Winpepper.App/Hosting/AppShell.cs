@@ -145,11 +145,35 @@ public sealed class AppShell : IDisposable
         var clipboard = new Winpepper.App.Hosting.WindowsClipboard();
         var clipboardFallback = new Winpepper.Platform.Injection.ClipboardFallback(clipboard);
         var toasts = new Winpepper.App.Notifications.AppNotificationToastService();
+
+        Winpepper.Core.Learning.PostPasteWatcher? postPaste = null;
+        Winpepper.Platform.Learning.FocusedElementCapturer? focusedCapturer = null;
+        try
+        {
+            var uiaWatcher = new Winpepper.Platform.Learning.UiaFocusedElementTextWatcher(
+                factory.CreateLogger<Winpepper.Platform.Learning.UiaFocusedElementTextWatcher>());
+            focusedCapturer = new Winpepper.Platform.Learning.FocusedElementCapturer(
+                uiaWatcher,
+                factory.CreateLogger<Winpepper.Platform.Learning.FocusedElementCapturer>());
+            if (correctionStore is not null)
+            {
+                var corrWriter = new Winpepper.Corrections.CorrectionStoreWriter(correctionStore);
+                var prompt = new Winpepper.Core.Learning.ToastPostPasteToastPrompt(toasts);
+                postPaste = new Winpepper.Core.Learning.PostPasteWatcher(uiaWatcher, corrWriter, prompt);
+            }
+        }
+        catch (Exception ex)
+        {
+            factory.CreateLogger("Winpepper.App").LogWarning(ex,
+                "PostPasteWatcher unavailable; post-paste learning will be disabled.");
+        }
+
         var pipeline = new PipelineHost(factory, errorBus, engine, sessionVm, sounds,
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
                                          historyServices.Archiver, settings.AsrModelName, cleanupModelName,
                                          clipboardFallback, toasts,
-                                         cleanup, correctionStore, windowContext, cleanupOptions);
+                                         cleanup, correctionStore, windowContext, cleanupOptions,
+                                         postPaste: postPaste, focusedCapturer: focusedCapturer);
 
         var shell = new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
                                   recordingVm, cleanupVm, correctionsVm,

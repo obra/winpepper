@@ -358,3 +358,54 @@ so the upgrade installer must not overwrite a user-chosen Run value).
 
 **Acceptance bar:** all six verification checks pass and the install log shows
 the MajorUpgrade ran (`WIX_UPGRADE_DETECTED` true, prior product removed).
+
+## Verified working launch procedure (2026-05-16)
+
+The dockur VM has an active console session (`quser` shows `user  console  Active`) but SSH sessions inherit a different (non-interactive) window station, which prevents WinUI 3 apps from creating their main window — they crash with `Microsoft.UI.Xaml.dll exception 0xc000027b`. Launch via the Task Scheduler with `LogonType Interactive` so the app runs inside the console session.
+
+**Build (Windows VM):**
+```sh
+./scripts/sync-to-vm.sh
+./scripts/winrun 'dotnet build src/Winpepper.App/Winpepper.App.csproj -c Debug -p:UseXamlCompilerExecutable=true'
+```
+
+`UseXamlCompilerExecutable=true` matters on `dotnet build`. After upgrading to WinAppSDK 1.8.260508005 the exe path actually works (it didn't on 1.6); the in-process task is still broken on .NET 9.
+
+**One-time per WinAppSDK upgrade:** drop `System.Security.Permissions` 6.0.0 next to the markup compiler so the in-process task variant can load if anything reaches for it (Visual Studio still does):
+
+```powershell
+$nupkg = Invoke-WebRequest -Uri "https://www.nuget.org/api/v2/package/System.Security.Permissions/6.0.0" -OutFile "$env:TEMP\ssp.zip" -UseBasicParsing
+Expand-Archive "$env:TEMP\ssp.zip" -DestinationPath "$env:TEMP\ssp" -Force
+Copy-Item "$env:TEMP\ssp\lib\net6.0\System.Security.Permissions.dll" `
+          "$env:USERPROFILE\.nuget\packages\microsoft.windowsappsdk.winui\1.8.260505002\tools\net6.0\System.Security.Permissions.dll" -Force
+```
+
+**Launch (Windows VM, in interactive console session):**
+```powershell
+$exe = "C:\winpepper\src\Winpepper.App\bin\Debug\net9.0-windows10.0.19041.0\win-x64\Winpepper.exe"
+$action = New-ScheduledTaskAction -Execute $exe -Argument "--tray"
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(2)
+$principal = New-ScheduledTaskPrincipal -UserId "user" -LogonType Interactive
+Register-ScheduledTask -TaskName "WinpepperLaunch" -Action $action -Trigger $trigger -Principal $principal
+```
+
+After ~3 seconds:
+```powershell
+Get-Process -Name "Winpepper"       # expect 1 process
+Get-Content "$env:LOCALAPPDATA\winpepper\logs\winpepper-*.log" -Tail 5
+```
+Latest log line should include `Hotkey hook installed on thread <N>` — pipeline is up.
+
+**`--selftest` headless probe** (works from SSH; no UI needed):
+```powershell
+& "C:\winpepper\src\Winpepper.App\bin\Debug\net9.0-windows10.0.19041.0\win-x64\Winpepper.exe" --selftest
+# Expected:
+#   winpepper selftest
+#   build: <version> (unsigned build)
+#   signed: False
+#   localappdata: C:\Users\user\AppData\Local\winpepper
+#   WINPEPPER_SELFTEST_OK
+```
+
+**End-to-end dictation smoke** requires RDP into `localhost:3389` so you can see the tray icon, focus a text box, hold the hotkey, and let `./scripts/say.sh` from the Linux host pipe audio into the VM's virtual mic via PulseAudio passthrough (see [[winpepper-vm]] memory). The headless SSH path can build, launch, and verify pipeline init — but not exercise the full hold-record-release-inject round trip.
+

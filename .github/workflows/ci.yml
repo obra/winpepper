@@ -63,6 +63,9 @@ jobs:
           Copy-Item -Recurse -Force "$PWD\src\Winpepper.App\Assets" $stubDir\
           New-Item -ItemType Directory -Path packaging\bootstrapper -Force | Out-Null
           'stub' | Out-File -Encoding ASCII packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe
+          # The D3D12 probe is shipped via the MSI Binary table; <Binary> doesn't
+          # require a PE-valid file at link, so a text stub satisfies the wxs.
+          'stub' | Out-File -Encoding ASCII $env:TEMP\Winpepper.D3D12Probe.exe
           Get-ChildItem $stubDir | ForEach-Object { Write-Host "  stub: $($_.Name) $($_.Length)" }
 
       - name: Lint wxs (build MSI from stub publish dir)
@@ -72,7 +75,8 @@ jobs:
             -p:AppPublishDir=$env:TEMP\winpepper-publish-stub `
             -p:_SkipUpstreamProjectReferences=true `
             -p:BuildProjectReferences=false `
-            -p:WinAppSdkBootstrapper=$PWD\packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe
+            -p:WinAppSdkBootstrapper=$PWD\packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe `
+            -p:D3D12ProbeExe=$env:TEMP\Winpepper.D3D12Probe.exe
 
       - name: Verify MSI produced
         shell: pwsh

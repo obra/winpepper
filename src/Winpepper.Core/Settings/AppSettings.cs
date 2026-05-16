@@ -21,4 +21,10 @@ public record AppSettings
 
     // Sound effects
     public bool PlaySounds { get; init; } = true;
+
+    // Plan 3 additions
+    public bool AutostartEnabled { get; init; } = false;
+    public bool OnboardingCompleted { get; init; } = false;
+    public bool SpeakerFilterEnabled { get; init; } = false;
+    public string LastVersionSeen { get; init; } = "";
 }

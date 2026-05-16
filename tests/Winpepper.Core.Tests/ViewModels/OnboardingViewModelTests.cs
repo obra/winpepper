@@ -1,0 +1,128 @@
+using Shouldly;
+using Winpepper.Core.Settings;
+using Winpepper.Core.ViewModels;
+using Xunit;
+
+namespace Winpepper.Core.Tests.ViewModels;
+
+[Trait("Layer", "ViewModel")]
+public class OnboardingViewModelTests
+{
+    private sealed class FakeWriter : ISettingsWriter
+    {
+        public AppSettings Current = new();
+        public void Queue(Func<AppSettings, AppSettings> m) => Current = m(Current);
+        public Task FlushAsync() => Task.CompletedTask;
+    }
+
+    private sealed class PermissiveValidator : IHotkeyValidator
+    {
+        public string? Validate(string chord) => null;
+        public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
+    }
+
+    private sealed class FakeValidator : IHotkeyValidator
+    {
+        private readonly HashSet<string> _conflicting;
+        public FakeValidator(params string[] conflicting) =>
+            _conflicting = new HashSet<string>(conflicting, StringComparer.Ordinal);
+        public string? Validate(string chord) =>
+            _conflicting.Contains(chord) ? $"{chord} conflicts with a system shortcut" : null;
+        public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Initial_Step_Is_PickMic()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask, new PermissiveValidator());
+        vm.Step.ShouldBe(OnboardingStep.PickMic);
+    }
+
+    [Fact]
+    public void Cannot_Advance_From_PickMic_Until_Mic_Selected()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask, new PermissiveValidator());
+        vm.CanAdvance.ShouldBeFalse();
+        vm.SelectedMicDeviceId = "{abc-123}";
+        vm.CanAdvance.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Advance_From_PickMic_Goes_To_PickHotkeys()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask, new PermissiveValidator());
+        vm.SelectedMicDeviceId = "{abc-123}";
+        await vm.AdvanceAsync();
+        vm.Step.ShouldBe(OnboardingStep.PickHotkeys);
+    }
+
+    [Fact]
+    public async Task Cannot_Advance_From_PickHotkeys_If_Conflict()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask, new FakeValidator("Ctrl+C"));
+        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync();
+        vm.HoldHotkey = "Ctrl+C";
+        vm.CanAdvance.ShouldBeFalse();
+        vm.HoldHotkey = "RightCtrl+RightShift";
+        vm.ToggleHotkey = "Ctrl+Shift+Space";
+        vm.CanAdvance.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Cannot_Advance_When_Default_Toggle_Chord_Is_Flagged_By_Validator()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask,
+            new FakeValidator("Ctrl+Shift+Space"));
+        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync();
+        vm.Step.ShouldBe(OnboardingStep.PickHotkeys);
+
+        vm.ToggleHotkey.ShouldBe("Ctrl+Shift+Space");
+        vm.ToggleHotkeyError.ShouldNotBeNull();
+        vm.CanAdvance.ShouldBeFalse();
+
+        vm.ToggleHotkey = "RightAlt+RightShift";
+        vm.ToggleHotkeyError.ShouldBeNull();
+        vm.CanAdvance.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task DownloadModels_Step_Awaits_Stub_And_Advances()
+    {
+        var downloaded = false;
+        var vm = new OnboardingViewModel(new FakeWriter(),
+            () => { downloaded = true; return Task.CompletedTask; },
+            new PermissiveValidator());
+        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync();
+        await vm.AdvanceAsync();
+        await vm.AdvanceAsync();
+        downloaded.ShouldBeTrue();
+        vm.Step.ShouldBe(OnboardingStep.TestDictation);
+    }
+
+    [Fact]
+    public async Task Skip_From_DownloadModels_Advances_Without_Running_Stub()
+    {
+        var downloaded = false;
+        var vm = new OnboardingViewModel(new FakeWriter(),
+            () => { downloaded = true; return Task.CompletedTask; },
+            new PermissiveValidator());
+        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync();
+        await vm.AdvanceAsync();
+        vm.Skip();
+        downloaded.ShouldBeFalse();
+        vm.Step.ShouldBe(OnboardingStep.TestDictation);
+    }
+
+    [Fact]
+    public async Task Finish_Sets_OnboardingCompleted()
+    {
+        var w = new FakeWriter();
+        var vm = new OnboardingViewModel(w, () => Task.CompletedTask, new PermissiveValidator());
+        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync();
+        await vm.AdvanceAsync(); vm.Skip();
+        vm.TestDictationDone = true;
+        await vm.AdvanceAsync();
+        vm.Step.ShouldBe(OnboardingStep.Done);
+        w.Current.OnboardingCompleted.ShouldBeTrue();
+    }
+}

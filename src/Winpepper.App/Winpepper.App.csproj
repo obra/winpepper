@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <RootNamespace>Winpepper.App</RootNamespace>
+    <AssemblyName>Winpepper</AssemblyName>
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Platforms>x64</Platforms>
+    <UseWinUI>true</UseWinUI>
+    <EnableMsixTooling>true</EnableMsixTooling>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <DefineConstants>$(DefineConstants);WINDOWS;DISABLE_XAML_GENERATED_MAIN</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />
+    <PackageReference Include="H.NotifyIcon.WinUI" />
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+    <PackageReference Include="Microsoft.Extensions.Logging" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Winpepper.Core\Winpepper.Core.csproj" />
+    <ProjectReference Include="..\Winpepper.Audio\Winpepper.Audio.csproj" />
+    <ProjectReference Include="..\Winpepper.Asr\Winpepper.Asr.csproj" />
+    <ProjectReference Include="..\Winpepper.Platform\Winpepper.Platform.csproj" />
+    <ProjectReference Include="..\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
+    <ProjectReference Include="..\Winpepper.Corrections\Winpepper.Corrections.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\start.wav" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\stop.wav" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

@@ -11,6 +11,7 @@
   <ItemGroup>
     <ProjectReference Include="..\Winpepper.Core\Winpepper.Core.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Win32.Registry" />
     <PackageReference Include="System.Threading.Channels" />
   </ItemGroup>
   <ItemGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">

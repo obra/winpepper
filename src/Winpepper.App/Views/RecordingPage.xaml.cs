@@ -1,0 +1,91 @@
+#if WINDOWS
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Navigation;
+using Winpepper.App.Hosting;
+using Winpepper.Audio;
+
+namespace Winpepper.App.Views;
+
+public sealed partial class RecordingPage : Page
+{
+    private AppShell? _shell;
+    private WasapiRecorder? _levelRecorder;
+
+    public RecordingPage() { InitializeComponent(); }
+
+    protected override void OnNavigatedTo(NavigationEventArgs e)
+    {
+        _shell = (AppShell)e.Parameter;
+        var vm = _shell.RecordingVm;
+
+        HoldBox.SetChord(vm.HoldHotkey, vm.HoldHotkeyConflict);
+        ToggleBox.SetChord(vm.ToggleHotkey, vm.ToggleHotkeyConflict);
+
+        HoldBox.ChordRecorded   += chord => vm.HoldHotkey = chord;
+        ToggleBox.ChordRecorded += chord => vm.ToggleHotkey = chord;
+        vm.PropertyChanged += (_, _) =>
+        {
+            HoldBox.SetChord(vm.HoldHotkey, vm.HoldHotkeyConflict);
+            ToggleBox.SetChord(vm.ToggleHotkey, vm.ToggleHotkeyConflict);
+        };
+
+        var devices = DeviceEnumerator.List();
+        MicCombo.ItemsSource = devices;
+        MicCombo.DisplayMemberPath = nameof(CaptureDevice.FriendlyName);
+        MicCombo.SelectedItem = devices.FirstOrDefault(d => d.Id == vm.MicDeviceId)
+                                 ?? devices.FirstOrDefault(d => d.IsDefault);
+        MicCombo.SelectionChanged += (_, _) =>
+        {
+            if (MicCombo.SelectedItem is CaptureDevice d) vm.MicDeviceId = d.Id;
+            RestartLevelMeter(vm.MicDeviceId);
+        };
+
+        SoundsToggle.IsOn = vm.PlaySounds;
+        SoundsToggle.Toggled += (_, _) => vm.PlaySounds = SoundsToggle.IsOn;
+        SpeakerFilterToggle.IsOn = vm.SpeakerFilterEnabled;
+        SpeakerFilterToggle.Toggled += (_, _) => vm.SpeakerFilterEnabled = SpeakerFilterToggle.IsOn;
+
+        AutostartToggle.IsOn = _shell.Autostart.IsEnabled();
+        AutostartToggle.Toggled += (_, _) =>
+        {
+            if (AutostartToggle.IsOn)
+            {
+                // Spec §7.7 mandates the literal value
+                //   "C:\Program Files\Winpepper\winpepper.exe" --tray
+                // because the MSI installs to Program Files. AppContext.BaseDirectory
+                // is correct only when running from the install location; in dev / on
+                // the VM you can override via the WINPEPPER_AUTOSTART_EXE env var.
+                var exe = Environment.GetEnvironmentVariable("WINPEPPER_AUTOSTART_EXE");
+                if (string.IsNullOrEmpty(exe))
+                    exe = @"C:\Program Files\Winpepper\winpepper.exe";
+                _shell.Autostart.Enable(exe, "--tray");
+            }
+            else _shell.Autostart.Disable();
+            _shell.SettingsWriter.Queue(s => s with { AutostartEnabled = AutostartToggle.IsOn });
+        };
+
+        RestartLevelMeter(vm.MicDeviceId);
+    }
+
+    private void RestartLevelMeter(string deviceId)
+    {
+        _levelRecorder?.Dispose();
+        _levelRecorder = new WasapiRecorder(string.IsNullOrEmpty(deviceId) ? null : deviceId);
+        _levelRecorder.FramesAvailable += frames =>
+        {
+            float peak = 0;
+            for (var i = 0; i < frames.Length; i++) { var v = Math.Abs(frames.Span[i]); if (v > peak) peak = v; }
+            DispatcherQueue.TryEnqueue(() => LevelMeter.Value = Math.Min(1.0, peak));
+        };
+        try { _levelRecorder.Start(); } catch { /* device unavailable; meter stays at zero */ }
+    }
+
+    private void OnFocusTestBox(object sender, RoutedEventArgs e) => TestBox.Focus(FocusState.Programmatic);
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        _levelRecorder?.Dispose();
+    }
+}
+#endif

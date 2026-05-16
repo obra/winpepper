@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<MenuFlyout
+    x:Class="Winpepper.App.Tray.TrayMenu"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <MenuFlyoutItem x:Name="StatusItem" Text="Ready" IsEnabled="False" />
+    <ProgressBar x:Name="StatusProgress" Visibility="Collapsed" IsIndeterminate="True" Margin="12,4" Width="160" Height="3" />
+    <MenuFlyoutSeparator />
+    <MenuFlyoutItem x:Name="OpenSettings" Text="Settings..." />
+    <MenuFlyoutItem x:Name="OpenDiagnostics" Text="Diagnostics (Plan 5)" IsEnabled="False" />
+    <ToggleMenuFlyoutItem x:Name="PauseItem" Text="Pause dictation" />
+    <MenuFlyoutSeparator />
+    <MenuFlyoutItem x:Name="QuitItem" Text="Quit" />
+    <MenuFlyoutSeparator />
+    <MenuFlyoutItem x:Name="VersionItem" Text="Winpepper v0.0.0" IsEnabled="False" />
+</MenuFlyout>

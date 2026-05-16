@@ -19,7 +19,11 @@ If working on a fresh machine:
 3. Verify: `./scripts/winrun "dotnet --version"` returns `9.0.x`.
 4. Download the Parakeet model: `./scripts/winssh < scripts/download-parakeet.ps1`.
 
-## Plan 1 walking-skeleton smoke (real Windows machine)
+## Plan 1 (retired): see Plan 3 smoke below.
+
+The walking-skeleton CLI was always temporary scaffolding. As of Plan 3, `Winpepper.App` is the only entry point — see the "Plan 3 — WinUI 3 shell smoke" section below for the current smoke procedure.
+
+Historical Plan 1 walking-skeleton smoke (kept for reference):
 
 The dockur VM has neither a real microphone nor a real desktop session — `WasapiCapture` returns silence and `SetWindowsHookEx` may not deliver hotkey events. For an honest "hold and dictate" demo, run on a physical Windows 11 host with a working mic.
 
@@ -115,3 +119,35 @@ For a real demo, run on a physical Windows 11 host with a mic. Say
 `We tested ChatGPT today.` (filler removed by the LLM, then case-aware
 correction post-pass maps any surviving "chat gbt" to "ChatGPT").
 
+
+## Plan 3 — WinUI 3 shell smoke (audio-passthrough VM)
+
+> **Known issue (2026-05-16):** the `Winpepper.App` build currently fails on the VM with `Microsoft.WindowsAppSDK 1.6/1.7 + .NET 9` due to a `RuntimeEnvironment.GetRuntimeInterfaceAsObject` PNSE in the XAML markup compiler chain. See the milestone commit at the tip of `plan-3/ui-shell` for the full diagnosis. Until the toolchain blocker is resolved (likely by installing VS Build Tools so .NET Framework MSBuild can host the markup compiler, or by waiting for a WinAppSDK update), this smoke procedure is **deferred**. All non-XAML projects build green on Linux and on the VM.
+
+1. Sync: `./scripts/sync-to-vm.sh`
+2. Build: `./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj -c Debug"`
+3. Confirm models are present: `./scripts/winrun "Test-Path C:\Users\user\AppData\Local\winpepper\models\parakeet-tdt-0.6b-v3\encoder.onnx"` should be `True`.
+4. Launch the app on the VM in a foreground RDP session (`rdesktop localhost:3389` or VS remote-debug):
+   ```powershell
+   cd C:\winpepper
+   dotnet run --project src/Winpepper.App -c Debug
+   ```
+5. The tray icon should appear; right-click → menu shows "Ready", Settings, Diagnostics (greyed), Pause, Quit, Winpepper v0.3.0.
+6. On first launch, the main window opens to **Onboarding**. Click through:
+   - Pick a mic — confirm the level meter twitches when you run `./scripts/say.sh "hello"` from the Linux host.
+   - Record hotkeys — hold a chord while focused on `HoldBox`. Recording `Ctrl+C` should trigger the warning row.
+   - Download models — click Skip. Step advances.
+   - Test dictation — tick "That worked." Click Finish.
+7. Window navigates to Recording tab. Toggle "Play start/stop sounds"; kill and relaunch — the toggle remembers.
+8. Cleanup tab: pick Custom profile, edit the prompt, change the Max-tokens slider. Restart — values persist.
+9. Corrections tab: add a preferred ("ChatGPT"), then a duplicate (see error). Add a replacement ("chat gbt" → "ChatGPT"). Reload — entries persist.
+10. Hold dictation hotkey while focused on `TestBox`, run `./scripts/say.sh "hello world"`. Release. Expected:
+    - Status pill appears bottom-center, red dot, "Recording..."
+    - Pill transitions to "Transcribing...", "Inserting..."
+    - `TestBox` contains text.
+    - Pill auto-hides 600 ms after `SessionStage.Idle`.
+11. Quit from the tray — process exits cleanly.
+
+**Acceptance bar:** every step lands without exceptions in `%LOCALAPPDATA%\winpepper\logs\winpepper-<date>.log`. Tray icon and status pill appear. Onboarding finishes and `settings.json` shows `"onboardingCompleted": true`.
+
+Tray autostart variant: after onboarding completes, restart the app with `dotnet run --project src/Winpepper.App -c Debug -- --tray` — the main window should NOT appear, only the tray icon. Click the tray icon to show the window.

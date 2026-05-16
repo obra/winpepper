@@ -55,7 +55,7 @@ internal static partial class KeyboardHookNative
     [LibraryImport("user32.dll")]
     public static partial IntPtr DispatchMessageW(in MSG lpMsg);
 
-    [LibraryImport("user32.dll")]
+    [LibraryImport("kernel32.dll")]
     public static partial uint GetCurrentThreadId();
 
     [LibraryImport("user32.dll")]

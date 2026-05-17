@@ -5,6 +5,8 @@ obj/
 *.suo
 out/
 artifacts/
+dist/
+packaging/bootstrapper/
 TestResults/
 .idea/
 .vscode/

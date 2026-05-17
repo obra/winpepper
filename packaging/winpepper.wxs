@@ -38,7 +38,11 @@
          only as long as CurrentBuildNumber is always a same-width number string — which it
          is on Windows 10/11 (5 digits). WindowsBuild is NOT a stock MSI/WiX property and
          must not be used here. -->
-    <Launch Condition='Installed OR (VersionNT64 &gt;= 1000 AND MSI_WIN_BUILD &gt;= "22621")'
+    <!-- Drop VersionNT/VersionNT64 — Windows reports them as 603 (Win 8.1 compat
+         shim) on Win 10/11+ regardless of actual version. MSI_WIN_BUILD from our
+         capability probe reads CurrentBuildNumber from the registry and is the
+         only reliable signal. -->
+    <Launch Condition="Installed OR MSI_WIN_BUILD &gt;= 22621"
             Message="[ProductName] requires Windows 11 22H2 (build 22621) or newer." />
 
     <Feature Id="MainFeature" Title="$(ProductName)" Level="1" ConfigurableDirectory="INSTALLFOLDER">
@@ -175,9 +179,14 @@
       <Custom Action="WarnNoDx12"
               After="LaunchConditions"
               Condition="WINPEPPER_DX12_PRESENT = &quot;0&quot; AND UILevel &gt;= 4 AND NOT REMOVE" />
+      <!-- InstallWinAppSdk CA gated FALSE: Winpepper.App is published with
+           self-contained true, so the WinAppSDK runtime DLLs ship inside
+           the install folder. Re-enable by changing the condition to
+           WINPEPPER_WINAPPSDK_PRESENT = "0" AND NOT REMOVE once a real
+           WindowsAppRuntimeInstall-x64.exe is in packaging/bootstrapper/. -->
       <Custom Action="InstallWinAppSdk"
               Before="InstallFinalize"
-              Condition="WINPEPPER_WINAPPSDK_PRESENT = &quot;0&quot; AND NOT REMOVE" />
+              Condition="0=1" />
     </InstallExecuteSequence>
 
     <ui:WixUI Id="WixUI_InstallDir" />

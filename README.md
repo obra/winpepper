@@ -1,5 +1,23 @@
 # Winpepper
 
+> ## ⚠️ Read this first
+>
+> **Winpepper was written entirely by an AI agent. No human has ever
+> tested it.**
+>
+> Every line of code, every test, every commit message, every doc — including this
+> README — was produced by Claude Opus 4.7 across one ~16-hour autonomous session.
+> The human in the loop approved scope (six plans, build an MSI) and arbitrated
+> when the WinAppSDK toolchain bug initially blocked Plan 3. No human has installed
+> the MSI, run the app interactively, or spoken a sentence into it.
+>
+> The app *builds*, *installs*, *uninstalls*, *boots*, and reports a healthy idle
+> state in the log. Whether dictation actually works on real hardware, with a real
+> microphone, in a real interactive desktop session — **nobody knows yet.** If you
+> install this, you are the first human in the loop.
+>
+> Treat it accordingly. Don't pin production work to it. Send bug reports.
+
 **Hold a hotkey. Speak. Release. Cleaned-up words appear in the focused Windows app.**
 
 Winpepper is a Windows-native local dictation tool. Hold Right Ctrl + Right Shift,
@@ -12,25 +30,30 @@ rewrite for Windows.
 
 [parakeet]: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 
-## Status: 0.6.0-alpha — works on my VM, needs your microphone
+## Status: 0.6.0-alpha — agent-built, human-untested
 
 The full surface is **code-complete**: all six plans (foundation, cleanup pipeline,
 WinUI 3 shell, history + lab + models tab, post-paste learning + diagnostics + crash
-safety, WiX MSI packaging) are merged. ~365 cross-platform tests pass on Linux.
+safety, WiX MSI packaging) are merged. ~365 cross-platform unit tests pass on Linux.
 
 The packaged app boots cleanly on a Windows 11 24H2 VM through the entire pipeline
 (`SelftestProbe` exits 0; the tray host registers; `Hotkey hook installed on thread N`
-lands in the log). What it has **not** yet been end-to-end verified against:
+lands in the log). The MSI installs and uninstalls cleanly via `msiexec /qn`.
+
+What has **not** been verified by anyone — agent or human:
 
 - a real microphone (the test VM has none)
-- an interactive desktop session you can actually click into (the test VM is headless
-  over SSH)
-- a real human pressing Right Ctrl + Right Shift while speaking
+- an interactive desktop session you can actually click into (the test VM was
+  driven entirely over SSH)
+- pressing Right Ctrl + Right Shift while speaking
+- whether the XAML pages render correctly
+- whether post-paste learning toasts appear and behave
+- whether the Lab rerun panels work
+- whether the model downloader UI works (the downloader *logic* has unit tests)
 
-If you're testing the MSI, **you are the first human to round-trip speech through
-this thing.** Expect rough edges. The Diagnostics tab's "Copy diagnostics bundle"
-button zips logs + system info (no audio, no transcripts) into a file that's safe
-to send back.
+If you install the MSI, **you are the first human to do any of this.** Expect rough
+edges. The Diagnostics tab's "Copy diagnostics bundle" button zips logs + system
+info (never audio, never transcripts) into a file that's safe to send back.
 
 ## Install (MSI)
 
@@ -186,12 +209,26 @@ focus a text box, hold the hotkey, and use the audio-passthrough setup (raw QEMU
 
 ## Origin
 
-Winpepper was built entirely by Claude Opus 4.7 across one ~16-hour session,
-following a spec → 6-plan → subagent-driven-development → MSI workflow. Every
-commit in the history was authored by the model; humans approved scope and
-arbitrated when the WinAppSDK toolchain bug initially blocked Plan 3.
-The full session transcript is what produced the code, the tests, the docs, and
-this README.
+Winpepper was built entirely by Claude Opus 4.7 across one ~16-hour autonomous
+session, following a spec → 6-plan → subagent-driven-development → MSI workflow.
+
+The human in the loop:
+- Picked the goal: a Windows-native rewrite of [`pepper-x`](https://github.com/obra/pepper-x).
+- Answered ~10 multiple-choice scope questions early on (C# + WinUI 3, DirectML,
+  WiX MSI, etc.).
+- Said "ship it" / "go" / "do it" / "finish it successfully" at sensible decision
+  points.
+- Arbitrated once when the WinAppSDK + .NET 9 toolchain block stopped Plan 3
+  mid-execution (picked "investigate yourself" over "stop and escalate").
+
+Everything else — the design spec, the six implementation plans, every commit,
+the test fixtures, the MSI packaging, the README you're reading — came out of
+the model. The repo's git history is the literal output of the session.
+
+No code in this repo has been read for review by a human before being committed.
+No `Winpepper.exe` instance has been clicked by a human before being shipped as
+the MSI release. The agent told the human it works; the human took the agent's
+word for it and pushed the result public.
 
 ## License
 

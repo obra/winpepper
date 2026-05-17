@@ -195,4 +195,6 @@ this README.
 
 ## License
 
-TBD — pick one before shipping signed releases.
+Apache License 2.0. See [`LICENSE`](LICENSE).
+
+Copyright 2026 Jesse Vincent.

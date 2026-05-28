@@ -24,15 +24,39 @@
                 </StackPanel>
             </Grid>
 
-            <!-- WAV playback -->
-            <MediaPlayerElement x:Name="WavPlayer" AreTransportControlsEnabled="True" Height="60">
-                <MediaPlayerElement.TransportControls>
-                    <!-- Cast/full-window aren't WinUI 3 properties on MediaTransportControls;
-                         template parts are hidden in code-behind via OnTransportControlsLoaded. -->
-                    <MediaTransportControls Loaded="OnTransportControlsLoaded"
-                                            IsZoomButtonVisible="False" />
-                </MediaPlayerElement.TransportControls>
-            </MediaPlayerElement>
+            <!-- WAV playback. We don't use MediaPlayerElement because its default
+                 MediaTransportControls template includes Cast-to-Device, Aspect
+                 Ratio, and Full-Window buttons that make no sense for a few-
+                 second dictation clip, and WinUI 3 exposes no public API to hide
+                 the Cast and Full-Window buttons. A minimal Play/Seek/Time row
+                 driven by a bare MediaPlayer is enough here. -->
+            <Grid x:Name="WavPlayerRow" ColumnSpacing="8" Height="40">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Button x:Name="PlayPauseBtn" Grid.Column="0" Click="OnPlayPauseClicked"
+                        IsEnabled="False" Width="40" Height="32" Padding="0">
+                    <FontIcon x:Name="PlayPauseIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
+                              Glyph="&#xE768;" FontSize="14" />
+                </Button>
+                <Button x:Name="MuteBtn" Grid.Column="1" Click="OnMuteClicked"
+                        IsEnabled="False" Width="40" Height="32" Padding="0">
+                    <FontIcon x:Name="MuteIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
+                              Glyph="&#xE767;" FontSize="14" />
+                </Button>
+                <TextBlock x:Name="PositionText" Grid.Column="2" Text="0:00"
+                           VerticalAlignment="Center" FontFamily="Cascadia Mono,Consolas,monospace" />
+                <Slider x:Name="SeekSlider" Grid.Column="3" Minimum="0" Maximum="1"
+                        StepFrequency="0.001" IsEnabled="False"
+                        VerticalAlignment="Center"
+                        ValueChanged="OnSeekChanged" />
+                <TextBlock x:Name="DurationText" Grid.Column="4" Text="0:00"
+                           VerticalAlignment="Center" FontFamily="Cascadia Mono,Consolas,monospace" />
+            </Grid>
 
             <!-- Rerun transcription panel -->
             <StackPanel Spacing="8" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">

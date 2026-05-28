@@ -35,17 +35,32 @@ jobs:
             --self-contained true `
             -p:WindowsPackageType=None
 
-      - name: Locate WinAppSDK bootstrapper
+      - name: Locate or stub WinAppSDK bootstrapper
         id: bootstrap
         run: |
-          $pkg = Get-ChildItem -Path "$env:USERPROFILE\.nuget\packages\microsoft.windowsappsdk" -Recurse -Filter 'WindowsAppRuntimeInstall-x64.exe' | Select-Object -First 1
-          if (-not $pkg) {
-            Write-Error "WindowsAppRuntimeInstall-x64.exe not found under the WindowsAppSDK NuGet package."
-            exit 1
-          }
+          # WindowsAppRuntimeInstall-x64.exe used to ship inside the
+          # microsoft.windowsappsdk NuGet package. WindowsAppSDK 1.8 split into
+          # sub-packages and the exe is no longer reliably present at any known
+          # path. The MSI's <Binary> reference to the bootstrapper is consumed
+          # by an InstallWinAppSdk custom action that is gated FALSE (see
+          # README "Known issues"): self-contained publish bundles the runtime
+          # in the install folder, so the bootstrapper is never executed at
+          # install time. A stub file satisfies the wxs bind without affecting
+          # behavior — matching what the CI wxs-lint job already does.
+          #
+          # Search broadly so future restructuring that moves the exe back into
+          # a sub-package gets picked up automatically.
+          $pkg = Get-ChildItem -Path "$env:USERPROFILE\.nuget\packages" -Recurse -Filter 'WindowsAppRuntimeInstall-x64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
           New-Item -ItemType Directory -Path "packaging\bootstrapper" -Force | Out-Null
-          Copy-Item $pkg.FullName -Destination "packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe" -Force
-          "bootstrapper=$($pkg.FullName)" >> $env:GITHUB_OUTPUT
+          if ($pkg) {
+            Copy-Item $pkg.FullName -Destination "packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe" -Force
+            Write-Host "Using real WindowsAppRuntimeInstall-x64.exe from $($pkg.FullName)"
+            "bootstrapper=$($pkg.FullName)" >> $env:GITHUB_OUTPUT
+          } else {
+            'stub' | Out-File -Encoding ASCII 'packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe'
+            Write-Host "::warning::Real WindowsAppRuntimeInstall-x64.exe not found in NuGet cache; placed text stub. This is fine while the InstallWinAppSdk MSI custom action remains gated FALSE."
+            "bootstrapper=stub" >> $env:GITHUB_OUTPUT
+          }
 
       - name: Build MSI
         run: dotnet build packaging\Winpepper.Msi.wixproj -c Release

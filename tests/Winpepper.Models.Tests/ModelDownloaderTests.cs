@@ -13,6 +13,18 @@ public class ModelDownloaderTests : IDisposable
     }
     public void Dispose() { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }
 
+    // Progress<T> marshals callbacks via the captured SynchronizationContext.
+    // In xUnit there's no SyncContext, so callbacks fire on the ThreadPool
+    // independently of the awaiter — the test can read the report list before
+    // every callback has run. Use a direct, synchronous IProgress<T> in tests
+    // so the report sequence is fully observable at await-return time.
+    private sealed class SyncProgress<T> : IProgress<T>
+    {
+        private readonly Action<T> _action;
+        public SyncProgress(Action<T> action) => _action = action;
+        public void Report(T value) => _action(value);
+    }
+
     private static ModelDescriptor TwoFileDescriptor(string aSha, string bSha) => new()
     {
         Name = "test",
@@ -38,7 +50,7 @@ public class ModelDownloaderTests : IDisposable
             "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589");
 
         var reports = new List<DownloadProgress>();
-        var progress = new Progress<DownloadProgress>(p => reports.Add(p));
+        var progress = new SyncProgress<DownloadProgress>(p => reports.Add(p));
         var dl = new ModelDownloader(fake);
 
         await dl.DownloadAsync(d, _root, progress, CancellationToken.None);

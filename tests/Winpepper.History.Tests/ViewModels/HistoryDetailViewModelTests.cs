@@ -136,6 +136,11 @@ public class HistoryDetailViewModelTests : IDisposable
             promoteAsrDefault: _ => { }, promoteCleanupDefault: _ => { });
         vm.OriginalTranscript.ShouldBe("hello world");
         vm.OriginalCleanedText.ShouldBe("Hello, world.");
-        vm.WavAbsolutePath.ShouldBe(Path.Combine(_root, "2026-05-15", "x.wav"));
+        // WavRelativePath is stored with '/' for cross-platform persistence;
+        // Path.Combine on Windows produces a mixed-separator string. Compare
+        // resolved paths via FileInfo.FullName so the assertion doesn't care
+        // about the in-string separator — only about the file identity.
+        new FileInfo(vm.WavAbsolutePath).FullName
+            .ShouldBe(new FileInfo(Path.Combine(_root, "2026-05-15", "x.wav")).FullName);
     }
 }

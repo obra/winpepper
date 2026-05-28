@@ -63,7 +63,12 @@ jobs:
           }
 
       - name: Build MSI
-        run: dotnet build packaging\Winpepper.Msi.wixproj -c Release
+        # -r win-x64 is required: without it, the wixproj's transitive
+        # dependency on Winpepper.History (net9.0-windows10.0.19041.0)
+        # can't find a runtime-targeted asset entry, and the build fails
+        # with NETSDK1047 "Assets file ... doesn't have a target for
+        # 'net9.0-windows10.0.19041.0/win-x64'".
+        run: dotnet build packaging\Winpepper.Msi.wixproj -c Release -r win-x64
 
       - name: Compute version
         id: version

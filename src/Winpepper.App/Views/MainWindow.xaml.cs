@@ -1,7 +1,6 @@
 #if WINDOWS
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
 using Winpepper.App.Hosting;
 
 namespace Winpepper.App.Views;
@@ -53,14 +52,21 @@ public sealed partial class MainWindow : Window
             ContentFrame.Navigate(pageType, _shell);
     }
 
-    private async void OnAboutClick(object sender, TappedRoutedEventArgs e)
+    // Footer items like About have SelectsOnInvoked=False, so they never reach
+    // OnNavSelectionChanged. ItemInvoked fires for any activation method —
+    // mouse, touch, keyboard Enter, and UIA InvokePattern — so it's the right
+    // place to handle them.
+    private async void OnNavItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
     {
+        if (args.InvokedItemContainer is not NavigationViewItem item) return;
+        if ((string?)item.Tag != "about") return;
+
         var dialog = new ContentDialog
         {
             Title = Winpepper.Core.AboutText.Title,
             Content = Winpepper.Core.AboutText.Body(),
             CloseButtonText = "Close",
-            XamlRoot = this.Content.XamlRoot
+            XamlRoot = this.Content.XamlRoot,
         };
         await dialog.ShowAsync();
     }

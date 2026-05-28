@@ -1,6 +1,7 @@
 #if WINDOWS
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Media.Core;
 using Windows.Storage;
@@ -143,5 +144,34 @@ public sealed partial class HistoryDetailPage : Page
 
     private void OnPromoteAsr(object sender, RoutedEventArgs e) => ViewModel?.PromoteTranscriptionRerunAsDefault();
     private void OnPromoteCleanup(object sender, RoutedEventArgs e) => ViewModel?.PromoteCleanupRerunAsDefault();
+
+    // Hide MediaTransportControls template parts that have no property toggle in
+    // WinUI 3 and make no sense for dictation audio playback (casting to TVs,
+    // popping out to a full-screen video window). Loaded can fire more than once
+    // (e.g. on re-templating); detach unconditionally after first run since
+    // setting Visibility on later re-templated parts is also fine and the cost
+    // of walking the tree more than once is the thing we want to avoid.
+    private void OnTransportControlsLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not MediaTransportControls mtc) return;
+        mtc.Loaded -= OnTransportControlsLoaded;
+        foreach (var partName in new[] { "CastButton", "FullWindowButton" })
+        {
+            if (FindDescendantByName(mtc, partName) is FrameworkElement fe)
+                fe.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private static DependencyObject? FindDescendantByName(DependencyObject root, string name)
+    {
+        if (root is FrameworkElement fe && fe.Name == name) return root;
+        var count = VisualTreeHelper.GetChildrenCount(root);
+        for (var i = 0; i < count; i++)
+        {
+            var hit = FindDescendantByName(VisualTreeHelper.GetChild(root, i), name);
+            if (hit is not null) return hit;
+        }
+        return null;
+    }
 }
 #endif

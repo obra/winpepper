@@ -147,15 +147,20 @@ public sealed partial class HistoryDetailPage : Page
 
     // Hide MediaTransportControls template parts that have no property toggle in
     // WinUI 3 and make no sense for dictation audio playback (casting to TVs,
-    // popping out to a full-screen video window).
+    // popping out to a full-screen video window). Loaded can fire more than once
+    // (e.g. on re-templating), so detach once both parts are hidden.
     private void OnTransportControlsLoaded(object sender, RoutedEventArgs e)
     {
         if (sender is not MediaTransportControls mtc) return;
+        var allFound = true;
         foreach (var partName in new[] { "CastButton", "FullWindowButton" })
         {
             if (FindDescendantByName(mtc, partName) is FrameworkElement fe)
                 fe.Visibility = Visibility.Collapsed;
+            else
+                allFound = false;
         }
+        if (allFound) mtc.Loaded -= OnTransportControlsLoaded;
     }
 
     private static DependencyObject? FindDescendantByName(DependencyObject root, string name)

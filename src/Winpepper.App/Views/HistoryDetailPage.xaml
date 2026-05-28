@@ -28,7 +28,7 @@
             <MediaPlayerElement x:Name="WavPlayer" AreTransportControlsEnabled="True" Height="60">
                 <MediaPlayerElement.TransportControls>
                     <!-- Cast/full-window aren't WinUI 3 properties on MediaTransportControls;
-                         template parts are hidden in code-behind via OnWavPlayerLoaded. -->
+                         template parts are hidden in code-behind via OnTransportControlsLoaded. -->
                     <MediaTransportControls Loaded="OnTransportControlsLoaded"
                                             IsZoomButtonVisible="False" />
                 </MediaPlayerElement.TransportControls>

@@ -18,7 +18,12 @@
             </StackPanel>
             <StackPanel Spacing="4">
                 <TextBlock Text="Custom prompt" />
-                <RichEditBox x:Name="CustomPromptBox" Height="220" FontFamily="Cascadia Mono,Consolas,monospace" />
+                <TextBox x:Name="CustomPromptBox"
+                         Height="220"
+                         AcceptsReturn="True"
+                         TextWrapping="Wrap"
+                         FontFamily="Cascadia Mono,Consolas,monospace"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto" />
             </StackPanel>
             <StackPanel Spacing="4">
                 <TextBlock x:Name="MaxTokLabel" Text="Max new tokens: 512" />

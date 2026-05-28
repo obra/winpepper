@@ -1,5 +1,4 @@
 #if WINDOWS
-using Microsoft.UI.Text;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
 using Winpepper.App.Hosting;
@@ -28,12 +27,8 @@ public sealed partial class CleanupPage : Page
             CustomPromptBox.IsReadOnly = !vm.CustomPromptEditable;
         };
         CustomPromptBox.IsReadOnly = !vm.CustomPromptEditable;
-        CustomPromptBox.Document.SetText(TextSetOptions.None, vm.CustomPrompt);
-        CustomPromptBox.TextChanged += (_, _) =>
-        {
-            CustomPromptBox.Document.GetText(TextGetOptions.None, out var text);
-            vm.CustomPrompt = text;
-        };
+        CustomPromptBox.Text = vm.CustomPrompt;
+        CustomPromptBox.TextChanged += (_, _) => vm.CustomPrompt = CustomPromptBox.Text;
 
         MaxTokSlider.Value = vm.MaxNewTokens;
         MaxTokLabel.Text = $"Max new tokens: {vm.MaxNewTokens}";

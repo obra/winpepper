@@ -20,9 +20,22 @@ public class DebouncedSettingsWriterTests : IDisposable
         using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromMilliseconds(50));
         for (var i = 0; i < 20; i++)
             writer.Queue(s => s with { MicDeviceId = $"dev{i}" });
-        await Task.Delay(200);
-        var loaded = new SettingsStore(_path).Load();
-        loaded.MicDeviceId.ShouldBe("dev19");
+
+        // Poll for the debounced write to land. 50 ms debounce + the file
+        // write itself usually settles in ~100 ms, but a contended CI runner
+        // can need longer. Cap at 5 s; legitimate failures still trip.
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        string? latest = null;
+        while (DateTime.UtcNow < deadline)
+        {
+            if (File.Exists(_path))
+            {
+                latest = new SettingsStore(_path).Load().MicDeviceId;
+                if (latest == "dev19") break;
+            }
+            await Task.Delay(20);
+        }
+        latest.ShouldBe("dev19");
     }
 
     [Fact]

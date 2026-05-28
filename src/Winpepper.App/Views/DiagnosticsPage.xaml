@@ -24,7 +24,7 @@
             <ListView.ItemTemplate>
                 <DataTemplate x:DataType="logging:LogTailEntry">
                     <StackPanel Orientation="Horizontal" Spacing="8">
-                        <TextBlock Text="{x:Bind TimestampUtc}" Foreground="Gray" />
+                        <TextBlock Text="{x:Bind TimestampLocal}" Foreground="Gray" />
                         <TextBlock Text="{x:Bind Level}" />
                         <TextBlock Text="{x:Bind Message}" TextWrapping="Wrap" />
                     </StackPanel>

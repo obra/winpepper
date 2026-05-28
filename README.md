@@ -81,6 +81,31 @@ After install:
 To uninstall: standard Add/Remove Programs entry. User data is preserved; delete
 `%LOCALAPPDATA%\winpepper\` yourself if you want a fully clean slate.
 
+## Performance: what to expect
+
+End-to-end latency from hotkey-release to text-in-the-focused-window is dominated
+by the **cleanup LLM** step, not by ASR. Parakeet runs streaming during your
+recording (only a ~560 ms final-window flush happens on release), so wait time
+scales with how heavy the cleanup model is for your GPU.
+
+A first real-hardware data point (single observation, single utterance):
+
+| Component | Hardware | Observed |
+|-----------|----------|----------|
+| Intel Iris Xe (integrated) | Qwen 2.5 0.5B Q4_K_M via LlamaSharp Vulkan | `Cleanup path="Llm", 6823ms` |
+
+That's ~6.8 s of cleanup on integrated graphics for one short dictation. The
+cleanup token budget is `ceil(transcript_chars * 2.0)` capped at 2048, so longer
+utterances cost proportionally more time. A discrete NVIDIA/AMD GPU will be much
+faster — the design targets sub-second cleanup there, but no reproducible
+hardware-tier benchmark has been published yet.
+
+If the cleanup latency feels too slow on your setup, the **Cleanup** tab has an
+**Enable cleanup LLM** toggle. Turning it off returns the raw Parakeet transcript
+without LLM polish, which is near-instant. The transcript is generally already
+quite clean for short utterances; the LLM adds value mainly for punctuation,
+capitalization, and disfluency removal.
+
 ## Architecture
 
 Single .NET 9 / WinUI 3 packaged process. Threads:

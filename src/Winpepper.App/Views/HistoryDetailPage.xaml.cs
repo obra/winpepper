@@ -1,9 +1,11 @@
 #if WINDOWS
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Navigation;
 using Windows.Media.Core;
+using Windows.Media.Playback;
 using Windows.Storage;
 using Winpepper.History;
 using Winpepper.History.ViewModels;
@@ -16,6 +18,19 @@ public sealed partial class HistoryDetailPage : Page
     public HistoryDetailViewModel? ViewModel { get; private set; }
     public IReadOnlyList<ModelDescriptor> AvailableAsrModels { get; private set; } = Array.Empty<ModelDescriptor>();
     public IReadOnlyList<ModelDescriptor> AvailableCleanupModels { get; private set; } = Array.Empty<ModelDescriptor>();
+
+    // Custom audio player state. MediaPlayer is the headless engine behind
+    // MediaPlayerElement; using it directly lets us draw our own minimal
+    // transport (Play/Seek/Time) instead of the default chrome that includes
+    // Cast-to-Device, Aspect Ratio, and Full-Window — none of which make
+    // sense for a few-second dictation clip.
+    private MediaPlayer? _player;
+    private DispatcherQueueTimer? _positionTimer;
+    private bool _suppressSeek;
+    private const string GlyphPlay = "";
+    private const string GlyphPause = "";
+    private const string GlyphVolume = "";
+    private const string GlyphMute = "";
 
     public HistoryDetailPage()
     {
@@ -58,11 +73,11 @@ public sealed partial class HistoryDetailPage : Page
         {
             var wavPath = ViewModel.WavAbsolutePath;
             var file = await StorageFile.GetFileFromPathAsync(wavPath);
-            WavPlayer.Source = MediaSource.CreateFromStorageFile(file);
+            InitializeAudioPlayer(MediaSource.CreateFromStorageFile(file));
         }
         catch (Exception)
         {
-            WavPlayer.Source = null;
+            // No audio — leave the player row disabled.
         }
 
         // Bind diffs.
@@ -145,33 +160,82 @@ public sealed partial class HistoryDetailPage : Page
     private void OnPromoteAsr(object sender, RoutedEventArgs e) => ViewModel?.PromoteTranscriptionRerunAsDefault();
     private void OnPromoteCleanup(object sender, RoutedEventArgs e) => ViewModel?.PromoteCleanupRerunAsDefault();
 
-    // Hide MediaTransportControls template parts that have no property toggle in
-    // WinUI 3 and make no sense for dictation audio playback (casting to TVs,
-    // popping out to a full-screen video window). Loaded can fire more than once
-    // (e.g. on re-templating); detach unconditionally after first run since
-    // setting Visibility on later re-templated parts is also fine and the cost
-    // of walking the tree more than once is the thing we want to avoid.
-    private void OnTransportControlsLoaded(object sender, RoutedEventArgs e)
+    private void InitializeAudioPlayer(MediaSource source)
     {
-        if (sender is not MediaTransportControls mtc) return;
-        mtc.Loaded -= OnTransportControlsLoaded;
-        foreach (var partName in new[] { "CastButton", "FullWindowButton" })
+        _player = new MediaPlayer { Source = source, AutoPlay = false };
+        var dispatcher = DispatcherQueue.GetForCurrentThread();
+
+        _player.MediaOpened += (_, _) => dispatcher.TryEnqueue(() =>
         {
-            if (FindDescendantByName(mtc, partName) is FrameworkElement fe)
-                fe.Visibility = Visibility.Collapsed;
-        }
+            var d = _player?.PlaybackSession.NaturalDuration ?? TimeSpan.Zero;
+            DurationText.Text = FormatTime(d);
+            PlayPauseBtn.IsEnabled = d > TimeSpan.Zero;
+            SeekSlider.IsEnabled = d > TimeSpan.Zero;
+            MuteBtn.IsEnabled = d > TimeSpan.Zero;
+        });
+        _player.MediaEnded += (_, _) => dispatcher.TryEnqueue(() =>
+        {
+            PlayPauseIcon.Glyph = GlyphPlay;
+            _suppressSeek = true;
+            try { SeekSlider.Value = 0; } finally { _suppressSeek = false; }
+            PositionText.Text = FormatTime(TimeSpan.Zero);
+        });
+        _player.PlaybackSession.PlaybackStateChanged += (s, _) => dispatcher.TryEnqueue(() =>
+            PlayPauseIcon.Glyph = s.PlaybackState == MediaPlaybackState.Playing ? GlyphPause : GlyphPlay);
+
+        // Poll position 10x/sec while playing; cheaper than wiring PositionChanged
+        // which fires every frame and forces dispatcher hops.
+        _positionTimer = dispatcher.CreateTimer();
+        _positionTimer.Interval = TimeSpan.FromMilliseconds(100);
+        _positionTimer.Tick += (_, _) =>
+        {
+            if (_player is null) return;
+            var pos = _player.PlaybackSession.Position;
+            var dur = _player.PlaybackSession.NaturalDuration;
+            PositionText.Text = FormatTime(pos);
+            if (dur > TimeSpan.Zero)
+            {
+                _suppressSeek = true;
+                try { SeekSlider.Value = pos.TotalSeconds / dur.TotalSeconds; } finally { _suppressSeek = false; }
+            }
+        };
+        _positionTimer.Start();
     }
 
-    private static DependencyObject? FindDescendantByName(DependencyObject root, string name)
+    private void OnPlayPauseClicked(object sender, RoutedEventArgs e)
     {
-        if (root is FrameworkElement fe && fe.Name == name) return root;
-        var count = VisualTreeHelper.GetChildrenCount(root);
-        for (var i = 0; i < count; i++)
-        {
-            var hit = FindDescendantByName(VisualTreeHelper.GetChild(root, i), name);
-            if (hit is not null) return hit;
-        }
-        return null;
+        if (_player is null) return;
+        if (_player.PlaybackSession.PlaybackState == MediaPlaybackState.Playing) _player.Pause();
+        else _player.Play();
+    }
+
+    private void OnMuteClicked(object sender, RoutedEventArgs e)
+    {
+        if (_player is null) return;
+        _player.IsMuted = !_player.IsMuted;
+        MuteIcon.Glyph = _player.IsMuted ? GlyphMute : GlyphVolume;
+    }
+
+    private void OnSeekChanged(object sender, RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressSeek || _player is null) return;
+        var dur = _player.PlaybackSession.NaturalDuration;
+        if (dur <= TimeSpan.Zero) return;
+        _player.PlaybackSession.Position = TimeSpan.FromSeconds(e.NewValue * dur.TotalSeconds);
+    }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        _positionTimer?.Stop();
+        _positionTimer = null;
+        _player?.Dispose();
+        _player = null;
+    }
+
+    private static string FormatTime(TimeSpan t)
+    {
+        if (t < TimeSpan.Zero) t = TimeSpan.Zero;
+        return $"{(int)t.TotalMinutes}:{t.Seconds:D2}";
     }
 }
 #endif

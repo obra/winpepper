@@ -4,7 +4,10 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Grid>
-        <NavigationView x:Name="Nav" PaneDisplayMode="Left" IsSettingsVisible="False">
+        <NavigationView x:Name="Nav"
+                        PaneDisplayMode="Left"
+                        IsSettingsVisible="False"
+                        ItemInvoked="OnNavItemInvoked">
             <NavigationView.MenuItems>
                 <NavigationViewItem Tag="recording"   Content="Recording" />
                 <NavigationViewItem Tag="cleanup"     Content="Cleanup" />
@@ -16,7 +19,7 @@
                 <NavigationViewItem Tag="diagnostics" Content="Diagnostics" />
             </NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>
-                <NavigationViewItem Tag="about" Content="About Winpepper" SelectsOnInvoked="False" Tapped="OnAboutClick" />
+                <NavigationViewItem Tag="about" Content="About Winpepper" SelectsOnInvoked="False" />
             </NavigationView.FooterMenuItems>
             <Frame x:Name="ContentFrame" />
         </NavigationView>

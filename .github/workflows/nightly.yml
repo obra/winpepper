@@ -80,11 +80,14 @@ jobs:
 
       - name: Install MSI (silent)
         run: |
+          # Start-Process -Wait is a PowerShell cmdlet, not a native command,
+          # so it does NOT update $LASTEXITCODE. Capture the process with
+          # -PassThru and read its ExitCode property explicitly.
           $msi = "${{ steps.version.outputs.msi }}"
-          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /l*v artifacts\install.log" -Wait
-          if ($LASTEXITCODE -ne 0) {
+          $proc = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /l*v artifacts\install.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
             Get-Content artifacts\install.log -Tail 200
-            Write-Error "msiexec install failed"
+            Write-Error "msiexec install failed (exit code $($proc.ExitCode))"
             exit 1
           }
 
@@ -110,11 +113,12 @@ jobs:
 
       - name: Uninstall MSI (silent)
         run: |
+          # Start-Process -Wait doesn't update $LASTEXITCODE; use -PassThru.
           $msi = "${{ steps.version.outputs.msi }}"
-          Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn /l*v artifacts\uninstall.log" -Wait
-          if ($LASTEXITCODE -ne 0) {
+          $proc = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn /l*v artifacts\uninstall.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
             Get-Content artifacts\uninstall.log -Tail 200
-            Write-Error "msiexec uninstall failed"
+            Write-Error "msiexec uninstall failed (exit code $($proc.ExitCode))"
             exit 1
           }
           if (Test-Path 'C:\Program Files\Winpepper\Winpepper.exe') {

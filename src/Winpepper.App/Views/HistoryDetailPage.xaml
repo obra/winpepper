@@ -25,7 +25,14 @@
             </Grid>
 
             <!-- WAV playback -->
-            <MediaPlayerElement x:Name="WavPlayer" AreTransportControlsEnabled="True" Height="60" />
+            <MediaPlayerElement x:Name="WavPlayer" AreTransportControlsEnabled="True" Height="60">
+                <MediaPlayerElement.TransportControls>
+                    <!-- Cast/full-window aren't WinUI 3 properties on MediaTransportControls;
+                         template parts are hidden in code-behind via OnWavPlayerLoaded. -->
+                    <MediaTransportControls Loaded="OnTransportControlsLoaded"
+                                            IsZoomButtonVisible="False" />
+                </MediaPlayerElement.TransportControls>
+            </MediaPlayerElement>
 
             <!-- Rerun transcription panel -->
             <StackPanel Spacing="8" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">

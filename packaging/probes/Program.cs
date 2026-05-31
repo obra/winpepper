@@ -6,18 +6,17 @@ internal static class Program
 {
     private static int Main(string[] args)
     {
+        if (args.Length > 0 && string.Equals(args[0], "--warn-no-dx12", StringComparison.OrdinalIgnoreCase))
+        {
+            WarnIfDirectX12Missing();
+            return 0;
+        }
+
         var dx12 = HasDirectX12() ? "1" : "0";
         var sdk = HasWinAppSdk() ? "1" : "0";
         var build = ReadWindowsBuildNumber() ?? "0";
 
-        var temp = Environment.GetEnvironmentVariable("TEMP")
-                   ?? Path.GetTempPath();
-        var path = Path.Combine(temp, "winpepper-probe.txt");
-        File.WriteAllText(
-            path,
-            $"WINPEPPER_DX12_PRESENT={dx12}\r\n" +
-            $"WINPEPPER_WINAPPSDK_PRESENT={sdk}\r\n" +
-            $"MSI_WIN_BUILD={build}\r\n");
+        WriteProbeOutput(dx12, sdk, build);
         return 0;
     }
 
@@ -27,6 +26,16 @@ internal static class Program
         int MinimumFeatureLevel,
         ref Guid riid,
         IntPtr ppDevice);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+    private static extern int MessageBoxW(
+        IntPtr hWnd,
+        string text,
+        string caption,
+        uint type);
+
+    private const uint MB_OK = 0x00000000;
+    private const uint MB_ICONWARNING = 0x00000030;
 
     private const int D3D_FEATURE_LEVEL_12_0 = 0xC000;
 
@@ -75,5 +84,31 @@ internal static class Program
         {
             return null;
         }
+    }
+
+    private static void WriteProbeOutput(string dx12, string sdk, string build)
+    {
+        var temp = Environment.GetEnvironmentVariable("TEMP")
+                   ?? Path.GetTempPath();
+        var path = Path.Combine(temp, "winpepper-probe.txt");
+        File.WriteAllText(
+            path,
+            $"WINPEPPER_DX12_PRESENT={dx12}\r\n" +
+            $"WINPEPPER_WINAPPSDK_PRESENT={sdk}\r\n" +
+            $"MSI_WIN_BUILD={build}\r\n");
+    }
+
+    private static void WarnIfDirectX12Missing()
+    {
+        if (HasDirectX12())
+        {
+            return;
+        }
+
+        MessageBoxW(
+            IntPtr.Zero,
+            "DirectX 12 is not available on this system. Winpepper will run on CPU; voice input will be slower. The app will still install.",
+            "Winpepper",
+            MB_OK | MB_ICONWARNING);
     }
 }

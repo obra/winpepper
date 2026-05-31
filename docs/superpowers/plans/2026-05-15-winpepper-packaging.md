@@ -660,14 +660,11 @@ The MSI installs to `C:\Program Files\Winpepper\` (per-machine, x64). It harvest
     <Property Id="ARPNOREPAIR" Value="1" />
     <Icon Id="WinpepperIcon" SourceFile="$(AppPublishDir)\Assets\AppIcon.ico" />
 
-    <!-- Spec §11: Windows 11 22H2+ via LaunchCondition. Build 22621 = 22H2.
-         VersionNT64 >= 1000 enforces Windows 10/11 x64; the build-number gate (MSI_WIN_BUILD,
-         set by the capability-probe CA in Task 8 from HKLM\…\CurrentBuildNumber) is the real
-         22H2+ check. MSI string comparison on >= is lexicographic, so this works correctly
-         only as long as CurrentBuildNumber is always a same-width number string — which it
-         is on Windows 10/11 (5 digits). WindowsBuild is NOT a stock MSI/WiX property and
-         must not be used here. -->
-    <Launch Condition='Installed OR (VersionNT64 &gt;= 1000 AND MSI_WIN_BUILD &gt;= "22621")'
+    <!-- Spec 11: Windows 11 22H2+ via LaunchCondition. Build 22621 = 22H2.
+         MSI_WIN_BUILD is read from
+         HKLM\Software\Microsoft\Windows NT\CurrentVersion\CurrentBuildNumber
+         by AppSearch before LaunchConditions. -->
+    <Launch Condition='Installed OR MSI_WIN_BUILD &gt;= "22621"'
             Message="[ProductName] requires Windows 11 22H2 (build 22621) or newer." />
 
     <Feature Id="MainFeature" Title="$(ProductName)" Level="1" ConfigurableDirectory="INSTALLFOLDER">
@@ -930,13 +927,13 @@ Both checks live in a small standalone exe `Winpepper.D3D12Probe.exe` shipped in
 
 - [ ] **Step 2: Write the probe entry point `packaging/probes/Program.cs`**
 
-The probe writes `%TEMP%\winpepper-probe.txt` with three `KEY=VALUE` lines:
+The probe writes `%TEMP%\winpepper-probe.txt` with three `KEY=VALUE` lines for direct diagnostics:
 
 - `WINPEPPER_DX12_PRESENT` — `1` if `D3D12CreateDevice` succeeds at FL 12.0, else `0`.
 - `WINPEPPER_WINAPPSDK_PRESENT` — `1` if `HKLM\SOFTWARE\Microsoft\WindowsAppRuntime\Installed\1.6` exists, else `0`.
 - `MSI_WIN_BUILD` — the value of `HKLM\Software\Microsoft\Windows NT\CurrentVersion\CurrentBuildNumber` (REG_SZ on every Windows since Vista; on 10/11 it's a 5-digit ASCII number like `22621`).
 
-The `ReadProbeOutput` VBScript CA later in this task parses those three keys into MSI session properties so the LaunchCondition in `winpepper.wxs` (Task 6) can compare `MSI_WIN_BUILD >= "22621"` for the Windows 11 22H2+ gate.
+The MSI no longer parses this file. To avoid depending on the optional VBScript runtime, `winpepper.wxs` reads `MSI_WIN_BUILD` directly with a WiX `RegistrySearch`/`AppSearch`, and the probe is invoked with `--warn-no-dx12` only for the nonblocking DirectX warning.
 
 ```csharp
 using System.Runtime.InteropServices;
@@ -951,9 +948,8 @@ internal static class Program
         var sdk = HasWinAppSdk() ? "1" : "0";
         var build = ReadWindowsBuildNumber() ?? "0";
 
-        // CA mode: write properties into the MSI session by emitting key=value to
-        // %TEMP%\winpepper-probe.txt — which the wxs custom action below reads via
-        // a follow-up "ReadProbeOutput" CA. This avoids needing a managed CA host.
+        // Diagnostic mode: write probe results for manual checks. The MSI build
+        // gate reads CurrentBuildNumber directly through AppSearch.
         var temp = Environment.GetEnvironmentVariable("TEMP")
                    ?? Path.GetTempPath();
         var path = Path.Combine(temp, "winpepper-probe.txt");
@@ -1059,20 +1055,16 @@ Inside `<Package>`, just before `<ui:WixUI …>`, add:
     <Binary Id="D3D12ProbeBinary" SourceFile="$(var.D3D12ProbeExe)" />
     <Binary Id="WinAppSdkBootstrapperBinary" SourceFile="$(var.WinAppSdkBootstrapper)" />
 
-    <!-- Properties the probe sets via the ReadProbeOutput CA below.
-         Secure="yes" makes them transferable from the immediate to the
-         deferred context if a future CA ever needs them there. -->
-    <Property Id="WINPEPPER_DX12_PRESENT" Secure="yes" />
-    <Property Id="WINPEPPER_WINAPPSDK_PRESENT" Secure="yes" />
-    <Property Id="MSI_WIN_BUILD" Secure="yes" />
-
-    <!-- Run probe before UI. -->
-    <CustomAction Id="RunCapabilityProbe"
-                  BinaryRef="D3D12ProbeBinary"
-                  ExeCommand=""
-                  Execute="immediate"
-                  Impersonate="yes"
-                  Return="ignore" />
+    <!-- The build gate reads CurrentBuildNumber directly from the registry, so
+         LaunchConditions do not depend on a script or external probe output. -->
+    <Property Id="MSI_WIN_BUILD" Secure="yes">
+      <RegistrySearch Id="SearchWindowsBuildNumber"
+                       Root="HKLM"
+                       Bitness="always64"
+                       Key="Software\Microsoft\Windows NT\CurrentVersion"
+                       Name="CurrentBuildNumber"
+                       Type="raw" />
+    </Property>
 
     <!-- Install the WinAppSDK runtime if absent. -->
     <CustomAction Id="InstallWinAppSdk"
@@ -1084,60 +1076,25 @@ Inside `<Package>`, just before `<ui:WixUI …>`, add:
 
     <!-- Show a one-time warning if DX12 is missing. -->
     <CustomAction Id="WarnNoDx12"
-                  Script="vbscript"
+                  BinaryRef="D3D12ProbeBinary"
+                  ExeCommand="--warn-no-dx12"
                   Execute="immediate"
-                  Return="ignore">
-      <![CDATA[
-        MsgBox "DirectX 12 is not available on this system. Winpepper will run on CPU; voice input will be slower. The app will still install.", 48, "Winpepper"
-      ]]>
-    </CustomAction>
+                  Impersonate="yes"
+                  Return="ignore" />
 
-    <!-- Read the probe's KEY=VALUE output file (written by RunCapabilityProbe)
-         and copy the three keys (WINPEPPER_DX12_PRESENT, WINPEPPER_WINAPPSDK_PRESENT,
-         MSI_WIN_BUILD) into MSI session properties. Generic KEY=VALUE parser, so
-         any future probe key flows through without a wxs edit. -->
-    <CustomAction Id="ReadProbeOutput"
-                  Script="vbscript"
-                  Execute="immediate"
-                  Return="ignore">
-      <![CDATA[
-        Dim fso, f, line, kv
-        Set fso = CreateObject("Scripting.FileSystemObject")
-        Dim path
-        path = Session.Property("TempFolder") & "winpepper-probe.txt"
-        If Not fso.FileExists(path) Then
-          path = Environ("TEMP") & "\winpepper-probe.txt"
-        End If
-        If fso.FileExists(path) Then
-          Set f = fso.OpenTextFile(path, 1, False)
-          Do Until f.AtEndOfStream
-            line = Trim(f.ReadLine)
-            kv = Split(line, "=", 2)
-            If UBound(kv) = 1 Then Session.Property(kv(0)) = kv(1)
-          Loop
-          f.Close
-        End If
-      ]]>
-    </CustomAction>
-
-    <!-- The probe + ReadProbeOutput pair must run in BOTH sequences so the
-         LaunchCondition's MSI_WIN_BUILD gate works under interactive (UI) AND
-         silent (/qn) installs. The UI sequence's LaunchConditions evaluates
-         before the execute sequence runs; without an InstallUISequence schedule,
-         an interactive install would silently fail-open on the build gate. -->
+    <!-- AppSearch must run before LaunchConditions so MSI_WIN_BUILD is set in
+         both UI and silent install flows. -->
     <InstallUISequence>
-      <Custom Action="RunCapabilityProbe" Before="LaunchConditions" />
-      <Custom Action="ReadProbeOutput"    After="RunCapabilityProbe" Before="LaunchConditions" />
+      <AppSearch Before="LaunchConditions" />
     </InstallUISequence>
     <InstallExecuteSequence>
-      <Custom Action="RunCapabilityProbe" Before="LaunchConditions" />
-      <Custom Action="ReadProbeOutput"    After="RunCapabilityProbe" Before="LaunchConditions" />
+      <AppSearch Before="LaunchConditions" />
       <Custom Action="WarnNoDx12"
               After="LaunchConditions"
-              Condition="WINPEPPER_DX12_PRESENT = &quot;0&quot; AND UILevel &gt;= 4 AND NOT REMOVE" />
+              Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED AND UILevel &gt;= 4 AND NOT REMOVE" />
       <Custom Action="InstallWinAppSdk"
               Before="InstallFinalize"
-              Condition="WINPEPPER_WINAPPSDK_PRESENT = &quot;0&quot; AND NOT REMOVE" />
+              Condition="0=1" />
     </InstallExecuteSequence>
 ```
 
@@ -1159,7 +1116,7 @@ git add packaging/bootstrapper/.gitignore
 
 - [ ] **Step 6: Run the probe directly on the VM and assert its output**
 
-This test (which runs on the VM, not Linux — the probe is a `win-x64` self-contained exe) calls `Winpepper.D3D12Probe.exe` and verifies that `%TEMP%\winpepper-probe.txt` contains all three of the expected `KEY=VALUE` lines: `WINPEPPER_DX12_PRESENT`, `WINPEPPER_WINAPPSDK_PRESENT`, and `MSI_WIN_BUILD`. The MSI_WIN_BUILD value must be a non-empty 4+ digit number string (Win 10/11 builds are always 5 digits — Windows 11 22H2 is `22621`). This is the critical assertion that catches the regression the reviewer identified: a missing `CurrentBuildNumber` read would silently leave the property empty and the LaunchCondition would silently fail-open.
+This test (which runs on the VM, not Linux — the probe is a `win-x64` self-contained exe) calls `Winpepper.D3D12Probe.exe` and verifies that `%TEMP%\winpepper-probe.txt` contains all three of the expected `KEY=VALUE` lines: `WINPEPPER_DX12_PRESENT`, `WINPEPPER_WINAPPSDK_PRESENT`, and `MSI_WIN_BUILD`. The MSI_WIN_BUILD value must be a non-empty 4+ digit number string (Win 10/11 builds are always 5 digits — Windows 11 22H2 is `22621`). The MSI launch condition is verified separately through the WiX `RegistrySearch`/`AppSearch` path so it does not depend on this temp file.
 
 First sync the probe to the VM, then publish it, then run it:
 
@@ -1177,7 +1134,7 @@ WINPEPPER_WINAPPSDK_PRESENT=0
 MSI_WIN_BUILD=22621
 ```
 
-(`WINPEPPER_DX12_PRESENT` is typically `0` in the QEMU VM with no DX12 driver; on a real Windows 11 22H2 host it's `1`. `WINPEPPER_WINAPPSDK_PRESENT` is `0` until the bootstrapper has run. `MSI_WIN_BUILD` is the only value the LaunchCondition gates on.)
+(`WINPEPPER_DX12_PRESENT` is typically `0` in the QEMU VM with no DX12 driver; on a real Windows 11 22H2 host it's `1`. `WINPEPPER_WINAPPSDK_PRESENT` is `0` until the bootstrapper has run. The MSI's launch condition gates on `MSI_WIN_BUILD`, but it reads that value directly from the registry with AppSearch.)
 
 Assert all three keys are present, and that `MSI_WIN_BUILD` parses to >= 22621 on the dev VM (the VM image is Windows 11 22H2 per `winpepper-vm.md`):
 
@@ -2000,7 +1957,7 @@ After completing all tasks, verify:
 - [ ] **Type consistency.** `BuildSignature.Describe` / `BuildSignature.IsSigned` (Task 2) is the same shape `AboutText.Body` (Task 3) and `SelftestProbe.Run` (Task 4) consume. `AutostartRunKey` component (Task 6) uses the same registry path (`Software\Microsoft\Windows\CurrentVersion\Run`) and value name (`Winpepper`) as `AutostartRegistry.RunKey` + `ValueName` from Plan 3. The MSI's autostart value string (`"[INSTALLFOLDER]Winpepper.exe" --tray`) matches Plan 3's `AutostartRegistry.Enable(exePath, "--tray")` formatting. `winpepper.exe` (lowercase in spec §7.7) is `Winpepper.exe` (the actual assembly name from `Winpepper.App.csproj`) — Windows paths are case-insensitive so this round-trips, and the `[INSTALLFOLDER]Winpepper.exe` bind from the MSI works either way.
 - [ ] **File paths.** Every `git add` references the paths created or modified in the same task's headers. The wxs `$(AppPublishDir)` (Task 7) matches the publish output path of `Winpepper.App.csproj` (verified in Task 11 Step 2).
 - [ ] **Carry-forward block honored.** Task 11 is explicitly conditional on `Winpepper.App` building; Task 13's CI nightly workflow is committed in a form that will fail loudly when the block is present, so the failure surfaces and triggers a fix.
-- [ ] **WiX v5 syntax.** All conditional Components use the `Condition="…"` attribute form (Task 6 `AutostartRunKey`), not the legacy `<Condition>` child element. All `<Launch>` elements use the `Condition="…"` attribute form (Task 6 22H2+ gate). The 22H2+ gate references `MSI_WIN_BUILD`, which is populated by the capability-probe CA (Task 8) reading `HKLM\Software\Microsoft\Windows NT\CurrentVersion\CurrentBuildNumber`; the probe + `ReadProbeOutput` pair is scheduled `Before="LaunchConditions"` in BOTH `InstallUISequence` and `InstallExecuteSequence` so the gate works under interactive AND `/qn` installs. The non-existent `WindowsBuild` MSI property is NOT used anywhere.
+- [ ] **WiX v5 syntax.** All conditional Components use the `Condition="…"` attribute form (Task 6 `AutostartRunKey`), not the legacy `<Condition>` child element. All `<Launch>` elements use the `Condition="…"` attribute form (Task 6 22H2+ gate). The 22H2+ gate references `MSI_WIN_BUILD`, which is populated by a WiX `RegistrySearch`/`AppSearch` reading `HKLM\Software\Microsoft\Windows NT\CurrentVersion\CurrentBuildNumber`; `AppSearch` is scheduled `Before="LaunchConditions"` in BOTH `InstallUISequence` and `InstallExecuteSequence` so the gate works under interactive AND `/qn` installs. The non-existent `WindowsBuild` MSI property is NOT used anywhere.
 
 ## What Plan 6 does NOT cover
 

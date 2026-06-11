@@ -258,12 +258,17 @@ public sealed class AppShell : IDisposable
 
     private async Task StartAsync()
     {
-        Pipeline.Start();
-        await Task.CompletedTask;
         var startHidden = Environment.GetEnvironmentVariable("WINPEPPER_START_HIDDEN") == "1";
         if (!Settings.OnboardingCompleted) ShowMain(navigateToOnboarding: true);
         else if (!startHidden) ShowMain(navigateToOnboarding: false);
         // else: stay tray-only (autostart with --tray).
+
+        // Start the pipeline only after the window is up so a missing or
+        // corrupt model can never block first paint (issue #6). TryStart
+        // reports a missing model on the error bus and leaves the pipeline
+        // disabled; the Models tab re-attempts after a download completes.
+        Pipeline.TryStart();
+        await Task.CompletedTask;
     }
 
     public void ShowMain() => ShowMain(navigateToOnboarding: false);

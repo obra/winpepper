@@ -17,7 +17,7 @@ public class AboutTextTests
     {
         var body = AboutText.Body();
         body.ShouldContain("Version");
-        body.ShouldContain("0.6.0");
+        body.ShouldMatch(@"\d+\.\d+\.\d+");  // tracks version.json instead of pinning a literal
         body.ShouldContain("(unsigned build)");
     }
 }

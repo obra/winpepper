@@ -55,7 +55,7 @@ We replaced dockur's bundled QEMU (no pulse) with raw QEMU + PulseAudio on the h
 ./scripts/setup-audio-host.sh    # installs PA, piper, QEMU; loads null-sink; grants /dev/kvm
 ```
 
-**Boot the VM** (with the existing `/home/jesse/windows-vm/storage` disk):
+**Boot the VM** (with the existing `$WINPEPPER_VM_ROOT/storage` disk; the VM root defaults to `~/.local/share/winpepper/windows-vm` and can be overridden with the `WINPEPPER_VM_ROOT` environment variable):
 ```sh
 ./scripts/launch-qemu.sh         # backgrounds itself; SSH on 2222, RDP on 3389
 ```

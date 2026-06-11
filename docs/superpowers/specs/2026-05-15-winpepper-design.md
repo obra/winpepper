@@ -411,7 +411,7 @@ Opt-in via `WINPEPPER_INTEGRATION=1`. Run on real Windows.
 ### 10.4 CI
 
 - Pre-merge: `dotnet build`, `dotnet test`, `dotnet format --verify-no-changes`.
-- Nightly on the Windows VM (`/home/jesse/windows-vm/`, dockur container on `localhost:2222`): integration tests + MSI smoke install.
+- Nightly on the Windows VM (`$WINPEPPER_VM_ROOT` (default `~/.local/share/winpepper/windows-vm/`), dockur container on `localhost:2222`): integration tests + MSI smoke install.
 
 ## 11. Packaging
 

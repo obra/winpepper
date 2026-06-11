@@ -20,7 +20,7 @@
 
 **Known carry-forward block: `Winpepper.App` does not build on the VM.** Plans 3, 4, and 5 all milestone-committed without a working `Winpepper.App` build because of a WinAppSDK 1.6/1.7 + .NET 9 XAML markup compiler `PlatformNotSupportedException` (`RuntimeEnvironment.GetRuntimeInterfaceAsObject`). Plan 6 cannot produce a runnable `winpepper-<version>-x64.msi` until that block is resolved upstream. **This plan is still completable end-to-end** — the wxs source, wixproj, custom-action binaries, `sign.ps1`, and CI workflow are all written, lint-validated (`wix build --bindFiles -outputType Package` or equivalent), and committed. The single task that depends on `Winpepper.App` actually building (Task 11 — full MSI build + install smoke on the VM) is explicitly flagged. The nightly CI workflow (Task 13) is written in a form that runs through `dotnet publish src/Winpepper.App` and will surface the WinUI failure as a CI failure on its first nightly run; that failure is the trigger for fixing the WinUI block, not a Plan 6 defect. Plan 6's deliverables — the WiX source, signing wrapper, autostart MSI logic, and CI workflow — are otherwise independent of XAML markup compilation.
 
-**Repo root throughout the plan:** `/home/jesse/git/winpepper/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced via `scripts/sync-to-vm.sh`).
+**Repo root throughout the plan:** `$REPO_ROOT/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced via `scripts/sync-to-vm.sh`).
 
 ---
 
@@ -41,10 +41,10 @@
 ## Task 1: Add `Nerdbank.GitVersioning` and `version.json`
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/version.json`
-- Modify: `/home/jesse/git/winpepper/Directory.Packages.props` — add `Nerdbank.GitVersioning` package version.
-- Modify: `/home/jesse/git/winpepper/Directory.Build.props` — reference the package and enable `PublicRelease` defaulting to false.
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/VersionStampTests.cs`
+- Create: `$REPO_ROOT/version.json`
+- Modify: `$REPO_ROOT/Directory.Packages.props` — add `Nerdbank.GitVersioning` package version.
+- Modify: `$REPO_ROOT/Directory.Build.props` — reference the package and enable `PublicRelease` defaulting to false.
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/VersionStampTests.cs`
 
 - [ ] **Step 1: Write `version.json`**
 
@@ -127,7 +127,7 @@ public class VersionStampTests
 - [ ] **Step 5: Run the test and confirm it fails**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet test tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj --filter "FullyQualifiedName~VersionStampTests"
 ```
@@ -161,9 +161,9 @@ git commit -m "build: add Nerdbank.GitVersioning with version.json (0.6.0-alpha)
 ## Task 2: Bake `unsigned build` marker into `Winpepper.App`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/Directory.Build.props` — read `WINPEPPER_SIGNED` env var, set `DefineConstants` accordingly.
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/BuildSignature.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/BuildSignatureTests.cs`
+- Modify: `$REPO_ROOT/Directory.Build.props` — read `WINPEPPER_SIGNED` env var, set `DefineConstants` accordingly.
+- Create: `$REPO_ROOT/src/Winpepper.Core/BuildSignature.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/BuildSignatureTests.cs`
 
 The About dialog (added in Plan 3) calls into `BuildSignature.Describe()` to render either `0.6.0-alpha.5+g1a2b3c4` or `0.6.0-alpha.5+g1a2b3c4 (unsigned build)`. The unsigned suffix appears whenever the build host did not export `WINPEPPER_SIGNED=1`.
 
@@ -273,8 +273,8 @@ git commit -m "feat(core): BuildSignature.Describe surfaces (unsigned build) mar
 ## Task 3: Bind the About dialog to `BuildSignature.Describe`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Views/MainWindow.xaml.cs` (or wherever Plan 3 placed the About dialog) — replace the literal version string with `BuildSignature.Describe()`.
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/AboutTextTests.cs` — pure-string assertion against a small `AboutText` helper (avoids needing a WinUI test host).
+- Modify: `$REPO_ROOT/src/Winpepper.App/Views/MainWindow.xaml.cs` (or wherever Plan 3 placed the About dialog) — replace the literal version string with `BuildSignature.Describe()`.
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/AboutTextTests.cs` — pure-string assertion against a small `AboutText` helper (avoids needing a WinUI test host).
 
 Because `Winpepper.App` does not currently build on the VM (see plan header), the About-page edit lands in a small pure helper in `Winpepper.Core` and a single-line call site in the XAML code-behind. The helper is testable on Linux; the call site change compiles whenever the WinUI block is resolved.
 
@@ -380,10 +380,10 @@ git commit -m "feat(app): About dialog reads BuildSignature.Describe"
 The CI nightly install smoke needs a way to invoke `winpepper.exe` after MSI install, verify the process starts, reaches the Idle state, and exits cleanly, without putting up any UI or installing models. The lowest-risk way is a `--selftest` argument that constructs the `SessionEngine` (added in Plan 1), confirms it boots to `Idle`, prints `WINPEPPER_SELFTEST_OK`, and exits with code 0.
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Program.cs` — add `--selftest` branch ahead of the WinUI bootstrap.
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Selftest.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/SelftestProbeTests.cs` (the pure logic lives in `Winpepper.Core.SelftestProbe`; the `Winpepper.App.Selftest` class is a thin shim that calls it).
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/SelftestProbe.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Program.cs` — add `--selftest` branch ahead of the WinUI bootstrap.
+- Create: `$REPO_ROOT/src/Winpepper.App/Selftest.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/SelftestProbeTests.cs` (the pure logic lives in `Winpepper.Core.SelftestProbe`; the `Winpepper.App.Selftest` class is a thin shim that calls it).
+- Create: `$REPO_ROOT/src/Winpepper.Core/SelftestProbe.cs`
 
 - [ ] **Step 1: Write the failing test `tests/Winpepper.Core.Tests/SelftestProbeTests.cs`**
 
@@ -465,7 +465,7 @@ Expected: pass.
 
 - [ ] **Step 5: Add the `--selftest` branch to `src/Winpepper.App/Program.cs`**
 
-Replace the existing `Main` body in `/home/jesse/git/winpepper/src/Winpepper.App/Program.cs` with the version below. The selftest branch runs *before* any WinUI/WinRT init so it does not depend on the WinUI block being resolved.
+Replace the existing `Main` body in `$REPO_ROOT/src/Winpepper.App/Program.cs` with the version below. The selftest branch runs *before* any WinUI/WinRT init so it does not depend on the WinUI block being resolved.
 
 ```csharp
 using System.Runtime.InteropServices;
@@ -526,10 +526,10 @@ git commit -m "feat(app): --selftest probe for MSI install smoke"
 ## Task 5: Create the `packaging/` directory and the wixproj skeleton
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/packaging/Winpepper.Msi.wixproj`
-- Create: `/home/jesse/git/winpepper/packaging/winpepper.wxs` (empty stub for now; populated in Tasks 6 and 7)
-- Modify: `/home/jesse/git/winpepper/winpepper.sln` — add the wixproj.
-- Create: `/home/jesse/git/winpepper/packaging/.gitignore` — `*.wixobj`, `*.wixpdb`.
+- Create: `$REPO_ROOT/packaging/Winpepper.Msi.wixproj`
+- Create: `$REPO_ROOT/packaging/winpepper.wxs` (empty stub for now; populated in Tasks 6 and 7)
+- Modify: `$REPO_ROOT/winpepper.sln` — add the wixproj.
+- Create: `$REPO_ROOT/packaging/.gitignore` — `*.wixobj`, `*.wixpdb`.
 
 - [ ] **Step 1: Create `packaging/.gitignore`**
 
@@ -592,7 +592,7 @@ ICE60 (font-installation check on non-installed-font files) is suppressed becaus
 - [ ] **Step 4: Add the wixproj to the solution**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet sln add packaging/Winpepper.Msi.wixproj
 ```
 
@@ -618,7 +618,7 @@ git commit -m "build(packaging): wixproj + stub winpepper.wxs skeleton"
 ## Task 6: Author the real `winpepper.wxs` — directories, files, shortcut, ARP entry
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/packaging/winpepper.wxs` — replace the stub with the real wxs.
+- Modify: `$REPO_ROOT/packaging/winpepper.wxs` — replace the stub with the real wxs.
 
 The MSI installs to `C:\Program Files\Winpepper\` (per-machine, x64). It harvests the entire publish directory of `Winpepper.App` (the app exe plus the WinAppSDK self-contained runtime). It creates a Start menu shortcut `Winpepper.lnk` pointing at `[INSTALLFOLDER]Winpepper.exe`. It registers an entry in Programs and Features through the standard `ARP*` properties.
 
@@ -769,8 +769,8 @@ git commit -m "build(packaging): real wxs — dirs/shortcut/ARP/upgrade/autostar
 ## Task 7: Wire `HarvestDirectory` to harvest the `Winpepper.App` publish output
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/packaging/Winpepper.Msi.wixproj` — add `HarvestDirectory` item.
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Winpepper.App.csproj` — set `<PublishDir>` so the wxs `AppPublishDir` constant matches what `dotnet publish` produces.
+- Modify: `$REPO_ROOT/packaging/Winpepper.Msi.wixproj` — add `HarvestDirectory` item.
+- Modify: `$REPO_ROOT/src/Winpepper.App/Winpepper.App.csproj` — set `<PublishDir>` so the wxs `AppPublishDir` constant matches what `dotnet publish` produces.
 
 The WiX 5 SDK exposes a `HarvestDirectory` MSBuild item that crawls a folder, generates a `ComponentGroup` (named via `ComponentGroupName`) referencing every file, and links it during build. The publish directory must exist at build time — the wixproj depends on the App project's publish target.
 
@@ -898,10 +898,10 @@ git commit -m "build(packaging): harvest publish dir, alias exe for shortcut+bin
 ## Task 8: DirectX 12 capability warning and WinAppSDK bootstrapper invocation
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/packaging/probes/Winpepper.D3D12Probe.csproj`
-- Create: `/home/jesse/git/winpepper/packaging/probes/Program.cs`
-- Modify: `/home/jesse/git/winpepper/packaging/winpepper.wxs` — add a `Property` set by the probe via custom action, and `Launch` conditions.
-- Modify: `/home/jesse/git/winpepper/packaging/Winpepper.Msi.wixproj` — build the probe alongside the MSI and include its binary.
+- Create: `$REPO_ROOT/packaging/probes/Winpepper.D3D12Probe.csproj`
+- Create: `$REPO_ROOT/packaging/probes/Program.cs`
+- Modify: `$REPO_ROOT/packaging/winpepper.wxs` — add a `Property` set by the probe via custom action, and `Launch` conditions.
+- Modify: `$REPO_ROOT/packaging/Winpepper.Msi.wixproj` — build the probe alongside the MSI and include its binary.
 
 Two prereqs from spec §11 are not pure-MSI predicates:
 
@@ -1146,9 +1146,9 @@ Inside `<Package>`, just before `<ui:WixUI …>`, add:
 The real bootstrapper ships with the Microsoft.WindowsAppSDK NuGet at `runtimes/win-x64/native/`. The CI workflow downloads it on demand (Task 13); for local Linux builds, drop a 1-byte placeholder so wix link succeeds. The MSI built on Linux will not install correctly because of the placeholder, but the wxs link step proves out.
 
 ```bash
-mkdir -p /home/jesse/git/winpepper/packaging/bootstrapper
-printf "stub" > /home/jesse/git/winpepper/packaging/bootstrapper/WindowsAppRuntimeInstall-x64.exe
-echo "WindowsAppRuntimeInstall-x64.exe" > /home/jesse/git/winpepper/packaging/bootstrapper/.gitignore
+mkdir -p $REPO_ROOT/packaging/bootstrapper
+printf "stub" > $REPO_ROOT/packaging/bootstrapper/WindowsAppRuntimeInstall-x64.exe
+echo "WindowsAppRuntimeInstall-x64.exe" > $REPO_ROOT/packaging/bootstrapper/.gitignore
 ```
 
 Also add `packaging/bootstrapper/` to the repo with only the `.gitignore`:
@@ -1196,7 +1196,7 @@ dotnet build packaging/Winpepper.Msi.wixproj -c Release \
   -p:AppPublishDir=/tmp/winpepper-publish-stub \
   -p:_SkipUpstreamProjectReferences=true \
   -p:BuildProjectReferences=false \
-  -p:WinAppSdkBootstrapper=/home/jesse/git/winpepper/packaging/bootstrapper/WindowsAppRuntimeInstall-x64.exe
+  -p:WinAppSdkBootstrapper=$REPO_ROOT/packaging/bootstrapper/WindowsAppRuntimeInstall-x64.exe
 ```
 
 Expected: the wixproj builds the probe project (which IS Linux-Windows-cross-compilable via `EnableWindowsTargeting`), then links the wxs. Output: `artifacts/winpepper-<version>-x64.msi`. Inspect with `7z l artifacts/winpepper-*-x64.msi | head -40` to confirm the probe exe and bootstrapper placeholder are embedded.
@@ -1213,8 +1213,8 @@ git commit -m "build(packaging): DX12 + WinAppSDK + Win11-build probe + CAs"
 ## Task 9: Write `packaging/sign.ps1`
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/packaging/sign.ps1`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/SignScriptTests.cs` — pure-text test that asserts the script's behavior contract on a small structural level (the real signing exercise lives in the manual-test doc; no signtool runs in CI).
+- Create: `$REPO_ROOT/packaging/sign.ps1`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/SignScriptTests.cs` — pure-text test that asserts the script's behavior contract on a small structural level (the real signing exercise lives in the manual-test doc; no signtool runs in CI).
 
 `sign.ps1` accepts either `-Thumbprint <sha1>` or `-PfxPath <path> -PfxPassword <password>` and signs every input file with `signtool sign`. With no args, it prints `WINPEPPER_SIGNING_DISABLED` and returns 0. Plan 6 keeps signing off in dev/CI by default — the script only does work when invoked explicitly by the release pipeline.
 
@@ -1408,7 +1408,7 @@ Expected: all four pass.
 - [ ] **Step 5: Smoke the disabled path on Linux (no signtool present)**
 
 ```bash
-pwsh /home/jesse/git/winpepper/packaging/sign.ps1
+pwsh $REPO_ROOT/packaging/sign.ps1
 ```
 
 Expected output: `WINPEPPER_SIGNING_DISABLED`. Exit code 0.
@@ -1432,7 +1432,7 @@ git commit -m "feat(packaging): sign.ps1 wrapper (off by default)"
 ## Task 10: Hook `sign.ps1` into the wixproj as an opt-in post-build step
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/packaging/Winpepper.Msi.wixproj` — add a `Target Name="SignArtifacts"` that runs after `Build` only when `WinpepperSigningThumbprint` or `WinpepperSigningPfx` is set.
+- Modify: `$REPO_ROOT/packaging/Winpepper.Msi.wixproj` — add a `Target Name="SignArtifacts"` that runs after `Build` only when `WinpepperSigningThumbprint` or `WinpepperSigningPfx` is set.
 
 The wixproj must NOT fail when signing is disabled. The signing target is no-op in that case.
 
@@ -1466,7 +1466,7 @@ dotnet build packaging/Winpepper.Msi.wixproj -c Release \
   -p:AppPublishDir=/tmp/winpepper-publish-stub \
   -p:_SkipUpstreamProjectReferences=true \
   -p:BuildProjectReferences=false \
-  -p:WinAppSdkBootstrapper=/home/jesse/git/winpepper/packaging/bootstrapper/WindowsAppRuntimeInstall-x64.exe
+  -p:WinAppSdkBootstrapper=$REPO_ROOT/packaging/bootstrapper/WindowsAppRuntimeInstall-x64.exe
 ```
 
 Expected: build succeeds, `SignArtifacts` is skipped (Condition false on Linux), no `signtool` invocation.
@@ -1485,7 +1485,7 @@ git commit -m "build(packaging): opt-in sign.ps1 post-build step"
 **This task DEPENDS on `Winpepper.App` building on the VM.** Per the plan header, that build is currently broken (WinAppSDK 1.6/1.7 + .NET 9 XAML markup compiler PNSE). When it is broken, **skip Steps 3–7** of this task; record the skip in `docs/manual-test.md` and proceed to Task 12. When it is fixed, return and execute all steps. The wxs source, signing wrapper, and CI workflow in surrounding tasks remain valid and committable independently.
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/docs/manual-test.md` — append the Plan 6 smoke procedure.
+- Modify: `$REPO_ROOT/docs/manual-test.md` — append the Plan 6 smoke procedure.
 
 - [ ] **Step 1: Check whether `Winpepper.App` builds on the VM**
 
@@ -1600,7 +1600,7 @@ git commit -m "docs(manual-test): Plan 6 MSI install/uninstall smoke procedure"
 ## Task 12: Document upgrade-survival expectations in `docs/manual-test.md`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/docs/manual-test.md`
+- Modify: `$REPO_ROOT/docs/manual-test.md`
 
 Spec §11 specifies: "Settings, corrections, history, and models survive upgrades because they live under `%LOCALAPPDATA%`." The MSI's `MajorUpgrade` is set to `AllowDowngrades="no"` and `Schedule="afterInstallInitialize"`. The autostart Run key is created only on fresh install (the `AutostartRunKey` component carries the WiX v5 attribute form `Condition="NOT WIX_UPGRADE_DETECTED AND NOT UPGRADINGPRODUCTCODE"` from Task 6).
 
@@ -1645,7 +1645,7 @@ git commit -m "docs(manual-test): Plan 6 MSI upgrade survival procedure"
 ## Task 13: Nightly CI workflow
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/.github/workflows/nightly.yml`
+- Create: `$REPO_ROOT/.github/workflows/nightly.yml`
 
 The nightly workflow runs on `windows-latest`, publishes `Winpepper.App`, builds the MSI, runs `msiexec /qn` install + selftest + uninstall, and uploads the MSI as an artifact. Failure is expected on the first run until the WinUI block is resolved — that's by design.
 
@@ -1783,7 +1783,7 @@ jobs:
 - [ ] **Step 2: Lint the workflow YAML**
 
 ```bash
-python3 -c "import yaml,sys; yaml.safe_load(open('/home/jesse/git/winpepper/.github/workflows/nightly.yml'))" && echo OK
+python3 -c "import yaml,sys; yaml.safe_load(open('$REPO_ROOT/.github/workflows/nightly.yml'))" && echo OK
 ```
 
 Expected: `OK`.
@@ -1800,7 +1800,7 @@ git commit -m "ci: nightly MSI build + install/uninstall smoke (windows-latest)"
 ## Task 14: Extend pre-merge CI to lint the wixproj
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/.github/workflows/ci.yml` — add a wixproj-lint step on `linux-build`.
+- Modify: `$REPO_ROOT/.github/workflows/ci.yml` — add a wixproj-lint step on `linux-build`.
 
 The wixproj is buildable on Linux (the WiX 5 SDK is fully managed). Adding a lint step catches wxs regressions on every PR even when the App publish output is absent.
 
@@ -1848,7 +1848,7 @@ Replace the `linux-build` job's steps with:
 - [ ] **Step 2: Lint the YAML**
 
 ```bash
-python3 -c "import yaml,sys; yaml.safe_load(open('/home/jesse/git/winpepper/.github/workflows/ci.yml'))" && echo OK
+python3 -c "import yaml,sys; yaml.safe_load(open('$REPO_ROOT/.github/workflows/ci.yml'))" && echo OK
 ```
 
 Expected: `OK`.
@@ -1865,7 +1865,7 @@ git commit -m "ci: lint packaging/winpepper.wxs on every PR (Linux build)"
 ## Task 15: Wire `version.json` cadence into the release flow
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/docs/release.md`
+- Create: `$REPO_ROOT/docs/release.md`
 
 A short doc that captures: how to bump the version, how to cut a release branch, how to invoke `sign.ps1`, and how the MSI gets attached to the GitHub release. No code; pure procedure that an engineer running a future release follows.
 
@@ -1939,7 +1939,7 @@ git commit -m "docs: release procedure (versioning, signing, GH release attach)"
 - [ ] **Step 1: Build the full solution on Linux**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet restore
 dotnet build -c Release

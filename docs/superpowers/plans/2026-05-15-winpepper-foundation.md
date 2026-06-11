@@ -10,9 +10,9 @@
 
 **Spec:** [docs/superpowers/specs/2026-05-15-winpepper-design.md](../specs/2026-05-15-winpepper-design.md). Plans 2–6 will cover cleanup, UI, history/lab, learning, packaging in turn.
 
-**Reference implementation:** the Rust crate `parakeet-rs` at `/home/jesse/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parakeet-rs-0.3.4/`. The C# code in this plan is a port of its TDT decoder (`src/model_tdt.rs`), audio preprocessing (`src/audio.rs`), and vocabulary loader (`src/vocab.rs`).
+**Reference implementation:** the Rust crate `parakeet-rs` at `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/parakeet-rs-0.3.4/`. The C# code in this plan is a port of its TDT decoder (`src/model_tdt.rs`), audio preprocessing (`src/audio.rs`), and vocabulary loader (`src/vocab.rs`).
 
-**Repo root throughout the plan:** `/home/jesse/git/winpepper/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced from Linux via `scripts/sync-to-vm.sh`).
+**Repo root throughout the plan:** `$REPO_ROOT/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced from Linux via `scripts/sync-to-vm.sh`).
 
 ---
 
@@ -37,17 +37,17 @@ The `scripts/winssh` wrapper in Task 2 abstracts this.
 ## Task 1: Repo bootstrap and solution scaffolding
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/.gitignore`
-- Create: `/home/jesse/git/winpepper/.editorconfig`
-- Create: `/home/jesse/git/winpepper/global.json`
-- Create: `/home/jesse/git/winpepper/Directory.Build.props`
-- Create: `/home/jesse/git/winpepper/Directory.Packages.props`
-- Create: `/home/jesse/git/winpepper/winpepper.sln`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Winpepper.Core.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/HelloWinpepper.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/HelloWinpepperTests.cs`
-- Create: `/home/jesse/git/winpepper/README.md`
+- Create: `$REPO_ROOT/.gitignore`
+- Create: `$REPO_ROOT/.editorconfig`
+- Create: `$REPO_ROOT/global.json`
+- Create: `$REPO_ROOT/Directory.Build.props`
+- Create: `$REPO_ROOT/Directory.Packages.props`
+- Create: `$REPO_ROOT/winpepper.sln`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Winpepper.Core.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Core/HelloWinpepper.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/HelloWinpepperTests.cs`
+- Create: `$REPO_ROOT/README.md`
 
 - [ ] **Step 1: Write `.gitignore`**
 
@@ -217,7 +217,7 @@ public class HelloWinpepperTests
 
 - [ ] **Step 10: Generate `winpepper.sln`**
 
-Run from `/home/jesse/git/winpepper/`:
+Run from `$REPO_ROOT/`:
 
 ```bash
 dotnet new sln -n winpepper
@@ -249,7 +249,7 @@ Windows-specific tests require the dev VM described in `docs/manual-test.md`.
 - [ ] **Step 12: Build and run tests**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet restore
 dotnet build
 dotnet test
@@ -269,11 +269,11 @@ git commit -m "scaffold: solution layout, core lib, smoke test"
 ## Task 2: Windows VM dev environment and sync tooling
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/scripts/winssh`
-- Create: `/home/jesse/git/winpepper/scripts/winrun`
-- Create: `/home/jesse/git/winpepper/scripts/sync-to-vm.sh`
-- Create: `/home/jesse/git/winpepper/scripts/provision-vm.ps1`
-- Create: `/home/jesse/git/winpepper/docs/manual-test.md`
+- Create: `$REPO_ROOT/scripts/winssh`
+- Create: `$REPO_ROOT/scripts/winrun`
+- Create: `$REPO_ROOT/scripts/sync-to-vm.sh`
+- Create: `$REPO_ROOT/scripts/provision-vm.ps1`
+- Create: `$REPO_ROOT/docs/manual-test.md`
 
 Notes for the worker: the Windows VM is a dockur container named `windows11` with SSH on `localhost:2222`, username `user`, password `password`. See `~/.claude/skills/windows-vm/SKILL.md` for the full setup. The container may currently be **stopped** — start it with `docker start windows11` and wait for SSH to respond (`sshpass -p 'password' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -p 2222 user@localhost "whoami"` should return `winpepper11\user` or similar).
 
@@ -305,7 +305,7 @@ fi
 ```
 
 ```bash
-chmod +x /home/jesse/git/winpepper/scripts/winssh
+chmod +x $REPO_ROOT/scripts/winssh
 ```
 
 - [ ] **Step 3: Write `scripts/winrun`** (sync + run a dotnet command on the VM)
@@ -321,7 +321,7 @@ sshpass -p 'password' ssh -o StrictHostKeyChecking=no -o LogLevel=ERROR -p 2222 
 ```
 
 ```bash
-chmod +x /home/jesse/git/winpepper/scripts/winrun
+chmod +x $REPO_ROOT/scripts/winrun
 ```
 
 - [ ] **Step 4: Write `scripts/sync-to-vm.sh`** (tarball-over-SSH sync; rsync on Windows is fiddly)
@@ -352,7 +352,7 @@ echo "Synced $HERE to localhost:2222 C:\\winpepper"
 ```
 
 ```bash
-chmod +x /home/jesse/git/winpepper/scripts/sync-to-vm.sh
+chmod +x $REPO_ROOT/scripts/sync-to-vm.sh
 ```
 
 - [ ] **Step 5: Write `scripts/provision-vm.ps1`** (one-shot installer for the dev environment)
@@ -426,7 +426,7 @@ Write-Host "  git:    $(& git --version)"
 - [ ] **Step 6: Run provisioning**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/winssh < scripts/provision-vm.ps1
 ```
 
@@ -486,8 +486,8 @@ git commit -m "tooling: VM provisioning + sync + remote-run scripts"
 ## Task 3: Atomic file IO
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Io/AtomicFile.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Io/AtomicFileTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Io/AtomicFile.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Io/AtomicFileTests.cs`
 
 - [ ] **Step 1: Write failing test `tests/Winpepper.Core.Tests/Io/AtomicFileTests.cs`**
 
@@ -548,7 +548,7 @@ public class AtomicFileTests : IDisposable
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~AtomicFileTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~AtomicFileTests"
 ```
 
 Expected: build fails (type `AtomicFile` not found).
@@ -600,7 +600,7 @@ public static class AtomicFile
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~AtomicFileTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~AtomicFileTests"
 ```
 
 Expected: 4 tests pass.
@@ -617,9 +617,9 @@ git commit -m "feat(core): atomic file writes"
 ## Task 4: Settings store
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Settings/AppSettings.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Settings/SettingsStore.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Settings/SettingsStoreTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Settings/AppSettings.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Settings/SettingsStore.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Settings/SettingsStoreTests.cs`
 
 - [ ] **Step 1: Write failing test `tests/Winpepper.Core.Tests/Settings/SettingsStoreTests.cs`**
 
@@ -793,9 +793,9 @@ git commit -m "feat(core): settings store with atomic persistence"
 ## Task 5: Logging infrastructure
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Core/Winpepper.Core.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Logging/WinpepperLogging.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Logging/WinpepperLoggingTests.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.Core/Winpepper.Core.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Logging/WinpepperLogging.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Logging/WinpepperLoggingTests.cs`
 
 - [ ] **Step 1: Modify `Winpepper.Core.csproj` to reference Serilog**
 
@@ -923,18 +923,18 @@ git commit -m "feat(core): serilog file + optional console logging"
 ## Task 6: Hotkey chord parsing and matching
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Winpepper.Platform.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Hotkeys/HotkeyChord.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Hotkeys/Modifier.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Hotkeys/HotkeyChordTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Winpepper.Platform.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Hotkeys/HotkeyChord.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Hotkeys/Modifier.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Hotkeys/HotkeyChordTests.cs`
 
 Pure-logic part of the hotkey system. Native hook comes in Task 7. Chord parsing is unit-testable on Linux.
 
 - [ ] **Step 1: Add the projects to the solution**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 mkdir -p src/Winpepper.Platform/Hotkeys tests/Winpepper.Platform.Tests/Hotkeys
 ```
 
@@ -1291,10 +1291,10 @@ git commit -m "feat(platform): hotkey chord parsing and matching"
 ## Task 7: Hotkey hook (WH_KEYBOARD_LL) native + manager
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Hotkeys/KeyboardHookNative.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Hotkeys/HotkeyEvent.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Hotkeys/HotkeyHook.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Hotkeys/HotkeyHookIntegrationTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Hotkeys/KeyboardHookNative.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Hotkeys/HotkeyEvent.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Hotkeys/HotkeyHook.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Hotkeys/HotkeyHookIntegrationTests.cs`
 
 Windows-only. Tests for this task are tagged `Platform=Windows` and only run on the VM.
 
@@ -1619,7 +1619,7 @@ public class HotkeyHookLogicTests
 - [ ] **Step 5: Verify Linux tests pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HotkeyHookLogicTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HotkeyHookLogicTests"
 ```
 
 Expected: 3 tests pass.
@@ -1709,10 +1709,10 @@ git commit -m "feat(platform): WH_KEYBOARD_LL hook with chord-aware event emissi
 ## Task 8: Text injection (SendInput, KEYEVENTF_UNICODE)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Injection/SendInputNative.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Injection/TextInjector.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Injection/TextInjectorTests.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Injection/TextInjectorIntegrationTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Injection/SendInputNative.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Injection/TextInjector.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Injection/TextInjectorTests.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Injection/TextInjectorIntegrationTests.cs`
 
 - [ ] **Step 1: Implement `src/Winpepper.Platform/Injection/SendInputNative.cs`**
 
@@ -1927,13 +1927,13 @@ git commit -m "feat(platform): SendInput-based unicode text injection"
 ## Task 9: Audio recorder (WASAPI via NAudio)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Audio/Winpepper.Audio.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Audio/AudioFormat.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Audio/IAudioRecorder.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Audio/WasapiRecorder.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Audio/DeviceEnumerator.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Audio.Tests/Winpepper.Audio.Tests.csproj`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Audio.Tests/WasapiRecorderIntegrationTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Audio/Winpepper.Audio.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Audio/AudioFormat.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Audio/IAudioRecorder.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Audio/WasapiRecorder.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Audio/DeviceEnumerator.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Audio.Tests/Winpepper.Audio.Tests.csproj`
+- Create: `$REPO_ROOT/tests/Winpepper.Audio.Tests/WasapiRecorderIntegrationTests.cs`
 
 - [ ] **Step 1: Write `src/Winpepper.Audio/Winpepper.Audio.csproj`**
 
@@ -2232,11 +2232,11 @@ git commit -m "feat(audio): WASAPI recorder with downmix + 16k resample"
 ## Task 10: Parakeet vocabulary loader
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Asr/Winpepper.Asr.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Asr/Vocabulary.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Asr.Tests/VocabularyTests.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Asr.Tests/fixtures/tiny-vocab.txt`
+- Create: `$REPO_ROOT/src/Winpepper.Asr/Winpepper.Asr.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Asr/Vocabulary.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj`
+- Create: `$REPO_ROOT/tests/Winpepper.Asr.Tests/VocabularyTests.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Asr.Tests/fixtures/tiny-vocab.txt`
 
 Reference: `parakeet-rs/src/vocab.rs` — one token per line, line index = token id; SentencePiece-style `▁` prefix means word boundary; last id is the blank token.
 
@@ -2402,11 +2402,11 @@ git commit -m "feat(asr): SentencePiece-style vocabulary loader and decode"
 ## Task 11: Mel-feature extraction for Parakeet TDT v3
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Asr/MelFeatureExtractor.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Asr/PreprocessorConfig.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Asr.Tests/MelFeatureExtractorTests.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Asr.Tests/fixtures/tone-440hz-1s.wav` (generated by step 1)
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Asr.Tests/fixtures/tone-440hz-1s.mel.json` (reference output, generated)
+- Create: `$REPO_ROOT/src/Winpepper.Asr/MelFeatureExtractor.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Asr/PreprocessorConfig.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Asr.Tests/MelFeatureExtractorTests.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Asr.Tests/fixtures/tone-440hz-1s.wav` (generated by step 1)
+- Create: `$REPO_ROOT/tests/Winpepper.Asr.Tests/fixtures/tone-440hz-1s.mel.json` (reference output, generated)
 
 Parakeet TDT v3 preprocessor (from `parakeet-rs/src/model_tdt.rs:32-44`):
 - 128 mel features
@@ -2531,7 +2531,7 @@ print(f"Wrote tone-440hz-1s.wav and tone-440hz-1s.mel.json shape={features.shape
 Run it:
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 python3 tests/Winpepper.Asr.Tests/fixtures/gen-fixture.py
 ```
 
@@ -2819,10 +2819,10 @@ git commit -m "feat(asr): mel feature extraction matching Parakeet TDT v3 prepro
 ## Task 12: Parakeet TDT v3 ONNX session + greedy decode
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Asr/ParakeetSession.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Asr/ParakeetTranscript.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Asr.Tests/ParakeetSessionIntegrationTests.cs`
-- Create: `/home/jesse/git/winpepper/scripts/download-parakeet.ps1`
+- Create: `$REPO_ROOT/src/Winpepper.Asr/ParakeetSession.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Asr/ParakeetTranscript.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Asr.Tests/ParakeetSessionIntegrationTests.cs`
+- Create: `$REPO_ROOT/scripts/download-parakeet.ps1`
 
 Reference: `parakeet-rs/src/model_tdt.rs:run_encoder` and `:greedy_decode`. The C# version uses `Microsoft.ML.OnnxRuntime.DirectML` with the same input/output names.
 
@@ -3145,8 +3145,8 @@ git commit -m "feat(asr): Parakeet TDT v3 ONNX session with DirectML EP and gree
 ## Task 13: Streaming transcriber wrapper
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Asr/StreamingTranscriber.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Asr.Tests/StreamingTranscriberTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Asr/StreamingTranscriber.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Asr.Tests/StreamingTranscriberTests.cs`
 
 The streaming wrapper for Plan 1 is intentionally simple: buffer until end, then transcribe in one shot via `ParakeetSession.Transcribe`. True window-by-window streaming (which produces partial transcripts mid-recording) is a Plan 2 optimization once we've validated full-batch correctness.
 
@@ -3256,10 +3256,10 @@ git commit -m "feat(asr): streaming transcriber wrapper (single-shot for v1)"
 ## Task 14: Session engine state machine
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Sessions/SessionState.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Sessions/SessionEvent.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Sessions/SessionEngine.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Sessions/SessionEngineTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Sessions/SessionState.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Sessions/SessionEvent.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Sessions/SessionEngine.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Sessions/SessionEngineTests.cs`
 
 - [ ] **Step 1: Write failing test `tests/Winpepper.Core.Tests/Sessions/SessionEngineTests.cs`**
 
@@ -3436,9 +3436,9 @@ git commit -m "feat(core): session state machine"
 ## Task 15: Pipeline wiring — Winpepper.Cli walking skeleton
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cli/Winpepper.Cli.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cli/Program.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cli/Pipeline.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cli/Winpepper.Cli.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Cli/Program.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cli/Pipeline.cs`
 
 The CLI is the production entry point for Plan 1 — it's how we manually test the end-to-end loop on the VM. It is replaced by the WinUI 3 shell in Plan 3.
 
@@ -3646,7 +3646,7 @@ git commit -m "feat(cli): walking-skeleton pipeline wiring hotkey/audio/asr/inje
 ## Task 16: End-to-end manual smoke test on the VM
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/docs/manual-test.md` — add the Plan 1 smoke procedure.
+- Modify: `$REPO_ROOT/docs/manual-test.md` — add the Plan 1 smoke procedure.
 
 The VM has no microphone hardware, but WASAPI in the dockur/QEMU stack returns a silent stream. That means transcription will produce empty or near-empty output — which still validates that the whole pipeline runs end-to-end without crashing.
 
@@ -3692,7 +3692,7 @@ git commit -m "docs: Plan 1 walking-skeleton smoke procedure"
 ## Task 17: CI baseline (GitHub Actions)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/.github/workflows/ci.yml`
+- Create: `$REPO_ROOT/.github/workflows/ci.yml`
 
 - [ ] **Step 1: Write `.github/workflows/ci.yml`**
 

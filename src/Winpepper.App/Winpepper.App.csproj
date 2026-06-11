@@ -14,6 +14,7 @@
     <WindowsPackageType>None</WindowsPackageType>
     <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
     <Nullable>enable</Nullable>
     <DefineConstants>$(DefineConstants);WINDOWS;DISABLE_XAML_GENERATED_MAIN</DefineConstants>
@@ -45,6 +46,9 @@
     <Content Include="Assets\start.wav" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\stop.wav" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\AppIcon.ico" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\StoreLogo.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\Square150x150Logo.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="Assets\Square44x44Logo.png" CopyToOutputDirectory="PreserveNewest" />
     <Content Include="Assets\AppIcon-Recording.ico" CopyToOutputDirectory="PreserveNewest" Condition="Exists('Assets\AppIcon-Recording.ico')" />
     <Content Include="Assets\AppIcon-Loading.ico"   CopyToOutputDirectory="PreserveNewest" Condition="Exists('Assets\AppIcon-Loading.ico')" />
     <Content Include="Assets\AppIcon-Error.ico"     CopyToOutputDirectory="PreserveNewest" Condition="Exists('Assets\AppIcon-Error.ico')" />

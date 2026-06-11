@@ -252,7 +252,8 @@ public sealed class AppShell : IDisposable
 
         Pill = new StatusPillWindow(sessionVm);
         Tray = new TrayIconHost(sessionVm, AppPaths.AssetsDir, "0.3.0",
-                                 openSettings: ShowMain, quit: Quit);
+                                 openSettings: ShowMain, quit: Quit,
+                                 log: factory.CreateLogger<TrayIconHost>());
         Main = new MainWindow(this);
     }
 

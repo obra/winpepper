@@ -1,6 +1,7 @@
 #if WINDOWS
 using System.ComponentModel;
 using H.NotifyIcon;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Winpepper.Core.ViewModels;
 
@@ -13,14 +14,16 @@ public sealed class TrayIconHost : IDisposable
     private readonly TrayMenu _menu;
     private readonly Action _openSettings;
     private readonly Action _quit;
+    private readonly ILogger _log;
     private bool _paused;
 
     public TrayIconHost(SessionViewModel session, string assetsDir, string versionString,
-                        Action openSettings, Action quit)
+                        Action openSettings, Action quit, ILogger<TrayIconHost>? log = null)
     {
         _session = session;
         _openSettings = openSettings;
         _quit = quit;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<TrayIconHost>.Instance;
         _menu = new TrayMenu();
         _icon = new TaskbarIcon
         {
@@ -44,7 +47,36 @@ public sealed class TrayIconHost : IDisposable
         _menu.VersionLabel.Text = $"Winpepper v{versionString}";
         _session.PropertyChanged += OnSessionChanged;
         UpdateFromSession();
+
+        // H.NotifyIcon 2.x registers the Shell_NotifyIcon lazily; without an
+        // explicit ForceCreate() the icon never appears and hide-to-tray
+        // strands the app with no window (issue #10). Efficiency mode stays
+        // off — it drops the process to EcoQoS, which hurts dictation latency.
+        var iconPath = Path.Combine(assetsDir, "AppIcon.ico");
+        if (!File.Exists(iconPath))
+            _log.LogWarning("Tray icon asset missing: {IconPath}", iconPath);
+        try
+        {
+            _icon.ForceCreate(enablesEfficiencyMode: false);
+            IsRegistered = _icon.IsCreated;
+            if (IsRegistered)
+                _log.LogInformation("Tray icon registered");
+            else
+                _log.LogWarning("Tray icon not created after ForceCreate(); window close will exit instead of hiding to tray");
+        }
+        catch (Exception ex)
+        {
+            IsRegistered = false;
+            _log.LogError(ex, "Tray icon registration failed; window close will exit instead of hiding to tray");
+        }
     }
+
+    /// <summary>
+    /// True when Shell_NotifyIcon registration succeeded. When false the tray
+    /// icon is not a usable recovery affordance, so closing the main window
+    /// must exit the app rather than hide it (issue #10).
+    /// </summary>
+    public bool IsRegistered { get; }
 
     public bool IsPaused => _paused;
 

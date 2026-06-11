@@ -7,19 +7,19 @@
     <ScrollViewer>
         <StackPanel Padding="24" Spacing="16" MaxWidth="640">
             <TextBlock Text="Recording" Style="{ThemeResource TitleTextBlockStyle}" />
-            <controls:HotkeyRecorderBox x:Name="HoldBox" Label="Hold to record" />
-            <controls:HotkeyRecorderBox x:Name="ToggleBox" Label="Toggle to record" />
+            <controls:HotkeyRecorderBox x:Name="HoldBox" Label="Hold to record" AutomationProperties.AutomationId="RecordingHoldHotkeyBox" />
+            <controls:HotkeyRecorderBox x:Name="ToggleBox" Label="Toggle to record" AutomationProperties.AutomationId="RecordingToggleHotkeyBox" />
             <StackPanel Spacing="6">
                 <TextBlock Text="Microphone" />
-                <ComboBox x:Name="MicCombo" PlaceholderText="Select an input device" Width="400" />
-                <ProgressBar x:Name="LevelMeter" Minimum="0" Maximum="1" Height="6" />
+                <ComboBox x:Name="MicCombo" AutomationProperties.AutomationId="RecordingMicCombo" PlaceholderText="Select an input device" Width="400" />
+                <ProgressBar x:Name="LevelMeter" AutomationProperties.AutomationId="RecordingLevelMeter" Minimum="0" Maximum="1" Height="6" />
             </StackPanel>
-            <ToggleSwitch x:Name="SoundsToggle" Header="Play start/stop sounds" />
-            <ToggleSwitch x:Name="SpeakerFilterToggle" Header="Speaker filter (experimental)" />
-            <ToggleSwitch x:Name="AutostartToggle" Header="Start with Windows" />
+            <ToggleSwitch x:Name="SoundsToggle" AutomationProperties.AutomationId="RecordingSoundsToggle" Header="Play start/stop sounds" />
+            <ToggleSwitch x:Name="SpeakerFilterToggle" AutomationProperties.AutomationId="RecordingSpeakerFilterToggle" Header="Speaker filter (experimental)" />
+            <ToggleSwitch x:Name="AutostartToggle" AutomationProperties.AutomationId="RecordingAutostartToggle" Header="Start with Windows" />
             <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBox x:Name="TestBox" PlaceholderText="Test dictation lands here..." Width="380" />
-                <Button Content="Focus" Click="OnFocusTestBox" />
+                <TextBox x:Name="TestBox" AutomationProperties.AutomationId="RecordingTestTextBox" PlaceholderText="Test dictation lands here..." Width="380" />
+                <Button Content="Focus" Click="OnFocusTestBox" AutomationProperties.AutomationId="RecordingFocusTestBoxButton" />
             </StackPanel>
         </StackPanel>
     </ScrollViewer>

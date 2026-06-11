@@ -5,23 +5,24 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <Grid>
         <NavigationView x:Name="Nav"
+                        AutomationProperties.AutomationId="MainNavView"
                         PaneDisplayMode="Left"
                         IsSettingsVisible="False"
                         ItemInvoked="OnNavItemInvoked">
             <NavigationView.MenuItems>
-                <NavigationViewItem Tag="recording"   Content="Recording" />
-                <NavigationViewItem Tag="cleanup"     Content="Cleanup" />
-                <NavigationViewItem Tag="corrections" Content="Corrections" />
+                <NavigationViewItem Tag="recording"   Content="Recording"   AutomationProperties.AutomationId="NavRecordingItem" />
+                <NavigationViewItem Tag="cleanup"     Content="Cleanup"     AutomationProperties.AutomationId="NavCleanupItem" />
+                <NavigationViewItem Tag="corrections" Content="Corrections" AutomationProperties.AutomationId="NavCorrectionsItem" />
                 <NavigationViewItemSeparator />
-                <NavigationViewItem Tag="history"     Content="History" />
-                <NavigationViewItem Tag="lab"         Content="Lab" />
-                <NavigationViewItem Tag="models"      Content="Models" />
-                <NavigationViewItem Tag="diagnostics" Content="Diagnostics" />
+                <NavigationViewItem Tag="history"     Content="History"     AutomationProperties.AutomationId="NavHistoryItem" />
+                <NavigationViewItem Tag="lab"         Content="Lab"         AutomationProperties.AutomationId="NavLabItem" />
+                <NavigationViewItem Tag="models"      Content="Models"      AutomationProperties.AutomationId="NavModelsItem" />
+                <NavigationViewItem Tag="diagnostics" Content="Diagnostics" AutomationProperties.AutomationId="NavDiagnosticsItem" />
             </NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>
-                <NavigationViewItem Tag="about" Content="About Winpepper" SelectsOnInvoked="False" />
+                <NavigationViewItem Tag="about" Content="About Winpepper" SelectsOnInvoked="False" AutomationProperties.AutomationId="NavAboutItem" />
             </NavigationView.FooterMenuItems>
-            <Frame x:Name="ContentFrame" />
+            <Frame x:Name="ContentFrame" AutomationProperties.AutomationId="MainContentFrame" />
         </NavigationView>
     </Grid>
 </Window>

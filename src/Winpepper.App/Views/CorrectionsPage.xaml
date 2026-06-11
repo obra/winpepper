@@ -9,7 +9,7 @@
 
             <StackPanel Spacing="6">
                 <TextBlock Text="Preferred transcriptions" Style="{ThemeResource SubtitleTextBlockStyle}" />
-                <ListView x:Name="PreferredList">
+                <ListView x:Name="PreferredList" AutomationProperties.AutomationId="CorrectionsPreferredList">
                     <ListView.ItemTemplate>
                         <DataTemplate>
                             <Grid ColumnDefinitions="*,Auto" Padding="4">
@@ -20,15 +20,15 @@
                     </ListView.ItemTemplate>
                 </ListView>
                 <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
-                    <TextBox x:Name="NewPreferredBox" PlaceholderText="Add a preferred transcription" />
-                    <Button Grid.Column="1" Content="Add" Click="OnAddPreferred" />
+                    <TextBox x:Name="NewPreferredBox" AutomationProperties.AutomationId="CorrectionsNewPreferredTextBox" PlaceholderText="Add a preferred transcription" />
+                    <Button Grid.Column="1" Content="Add" Click="OnAddPreferred" AutomationProperties.AutomationId="CorrectionsAddPreferredButton" />
                 </Grid>
-                <TextBlock x:Name="PreferredError" Foreground="OrangeRed" />
+                <TextBlock x:Name="PreferredError" AutomationProperties.AutomationId="CorrectionsPreferredErrorLabel" Foreground="OrangeRed" />
             </StackPanel>
 
             <StackPanel Spacing="6">
                 <TextBlock Text="Misheard replacements" Style="{ThemeResource SubtitleTextBlockStyle}" />
-                <ListView x:Name="ReplacementsList">
+                <ListView x:Name="ReplacementsList" AutomationProperties.AutomationId="CorrectionsReplacementsList">
                     <ListView.ItemTemplate>
                         <DataTemplate>
                             <Grid ColumnDefinitions="*,*,Auto" Padding="4" ColumnSpacing="8">
@@ -40,11 +40,11 @@
                     </ListView.ItemTemplate>
                 </ListView>
                 <Grid ColumnDefinitions="*,*,Auto" ColumnSpacing="8">
-                    <TextBox x:Name="NewWrongBox"  PlaceholderText="wrong (heard)" />
-                    <TextBox x:Name="NewRightBox"  Grid.Column="1" PlaceholderText="right (correct)" />
-                    <Button x:Name="AddReplacementButton" Grid.Column="2" Content="Add" Click="OnAddReplacement" />
+                    <TextBox x:Name="NewWrongBox" AutomationProperties.AutomationId="CorrectionsNewWrongTextBox"  PlaceholderText="wrong (heard)" />
+                    <TextBox x:Name="NewRightBox" AutomationProperties.AutomationId="CorrectionsNewRightTextBox"  Grid.Column="1" PlaceholderText="right (correct)" />
+                    <Button x:Name="AddReplacementButton" AutomationProperties.AutomationId="CorrectionsAddReplacementButton" Grid.Column="2" Content="Add" Click="OnAddReplacement" />
                 </Grid>
-                <TextBlock x:Name="ReplacementsError" Foreground="OrangeRed" />
+                <TextBlock x:Name="ReplacementsError" AutomationProperties.AutomationId="CorrectionsReplacementsErrorLabel" Foreground="OrangeRed" />
             </StackPanel>
         </StackPanel>
     </ScrollViewer>

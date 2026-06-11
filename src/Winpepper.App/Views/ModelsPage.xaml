@@ -21,11 +21,12 @@
             <StackPanel Grid.Column="0" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6" Spacing="8">
                 <TextBlock Text="ASR" Style="{StaticResource SubtitleTextBlockStyle}" />
                 <ComboBox x:Name="AsrCombo"
+                          AutomationProperties.AutomationId="ModelsAsrCombo"
                           ItemsSource="{x:Bind ViewModel.AsrCard.Available, Mode=OneWay}"
                           DisplayMemberPath="DisplayName"
                           SelectionChanged="OnAsrChanged" />
                 <TextBlock Text="Installed:" />
-                <TextBlock x:Name="AsrInstalledText" />
+                <TextBlock x:Name="AsrInstalledText" AutomationProperties.AutomationId="ModelsAsrInstalledLabel" />
                 <ListView ItemsSource="{x:Bind ViewModel.AsrCard.ProgressByFile, Mode=OneWay}">
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="models:DownloadProgress">
@@ -48,11 +49,12 @@
             <StackPanel Grid.Column="1" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6" Spacing="8">
                 <TextBlock Text="Cleanup" Style="{StaticResource SubtitleTextBlockStyle}" />
                 <ComboBox x:Name="CleanupCombo"
+                          AutomationProperties.AutomationId="ModelsCleanupCombo"
                           ItemsSource="{x:Bind ViewModel.CleanupCard.Available, Mode=OneWay}"
                           DisplayMemberPath="DisplayName"
                           SelectionChanged="OnCleanupChanged" />
                 <TextBlock Text="Installed:" />
-                <TextBlock x:Name="CleanupInstalledText" />
+                <TextBlock x:Name="CleanupInstalledText" AutomationProperties.AutomationId="ModelsCleanupInstalledLabel" />
                 <ListView ItemsSource="{x:Bind ViewModel.CleanupCard.ProgressByFile, Mode=OneWay}">
                     <ListView.ItemTemplate>
                         <DataTemplate x:DataType="models:DownloadProgress">
@@ -72,6 +74,6 @@
             </StackPanel>
         </Grid>
 
-        <Button Grid.Row="2" Content="Download Missing Models" Click="OnDownloadMissing" HorizontalAlignment="Right" />
+        <Button Grid.Row="2" Content="Download Missing Models" Click="OnDownloadMissing" AutomationProperties.AutomationId="ModelsDownloadButton" HorizontalAlignment="Right" />
     </Grid>
 </Page>

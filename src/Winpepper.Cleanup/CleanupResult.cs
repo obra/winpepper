@@ -16,4 +16,5 @@ public enum CleanupPath
     FallbackEllipsis,    // The LLM returned "..." (with or without whitespace).
     FallbackTimeout,     // The 15s timeout fired.
     FallbackBackendError, // The backend threw.
+    FallbackImplausible,  // The LLM output echoed prompt scaffolding or blew past plausible length.
 }

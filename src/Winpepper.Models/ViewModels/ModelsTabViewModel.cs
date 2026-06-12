@@ -16,16 +16,17 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
 
     public ModelsTabViewModel(ModelRegistry registry, string installRoot, IDownloader downloader,
                               string currentAsrName, string currentCleanupName,
-                              Action<string> promoteAsr, Action<string> promoteCleanup)
+                              Action<string> promoteAsr, Action<string> promoteCleanup,
+                              Action<Action>? dispatch = null)
     {
         _registry = registry;
         _installRoot = installRoot;
         _downloader = downloader;
 
         AsrCard = new ModelCardViewModel(ModelKind.Asr,
-            registry.ByKind(ModelKind.Asr), installRoot, currentAsrName, promoteAsr);
+            registry.ByKind(ModelKind.Asr), installRoot, currentAsrName, promoteAsr, dispatch);
         CleanupCard = new ModelCardViewModel(ModelKind.Cleanup,
-            registry.ByKind(ModelKind.Cleanup), installRoot, currentCleanupName, promoteCleanup);
+            registry.ByKind(ModelKind.Cleanup), installRoot, currentCleanupName, promoteCleanup, dispatch);
     }
 
     public ModelCardViewModel AsrCard { get; }

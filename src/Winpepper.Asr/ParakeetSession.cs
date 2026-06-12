@@ -78,6 +78,18 @@ public sealed class ParakeetSession : IDisposable
             Find("vocab.txt"));
     }
 
+    /// <summary>
+    /// True when <paramref name="modelDir"/> contains the encoder, decoder, and
+    /// vocab files this session needs. Lets callers (e.g. the app pipeline)
+    /// detect the missing-model condition without paying for a session load or
+    /// handling the constructor's <see cref="FileNotFoundException"/>.
+    /// </summary>
+    public static bool ModelFilesPresent(string modelDir)
+    {
+        try { ResolvePaths(modelDir); return true; }
+        catch (FileNotFoundException) { return false; }
+    }
+
     public ParakeetTranscript Transcribe(ReadOnlySpan<float> samples16k)
     {
         var features = _features.Extract(samples16k); // [T, 128]

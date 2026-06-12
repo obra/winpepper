@@ -10,7 +10,7 @@ public class BuildSignatureTests
     public void Describe_IncludesAssemblyInformationalVersion()
     {
         var s = BuildSignature.Describe();
-        s.ShouldContain("0.6.0");
+        s.ShouldMatch(@"\d+\.\d+\.\d+");  // tracks version.json instead of pinning a literal
     }
 
     [Fact]

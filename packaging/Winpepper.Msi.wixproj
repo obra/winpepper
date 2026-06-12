@@ -59,6 +59,28 @@
       <Properties>Configuration=$(Configuration);RuntimeIdentifier=win-x64;SelfContained=true;PublishSingleFile=true;PublishDir=$(MSBuildThisFileDirectory)probes\bin\$(Configuration)\publish\</Properties>
     </ProjectReference>
   </ItemGroup>
+  <!-- The self-contained win-x64 publish of Winpepper.App drags in RID-specific
+       native assets for every platform shipped by LLamaSharp/ONNX runtime packages
+       (runtimes/linux-*, osx-*, win-arm64, win-x86 ~220 MB across ~99 files). Only
+       runtimes/win-x64 is ever loadable from an x64 Windows install, so prune the
+       rest from the publish output before Heat harvests it. Heat's HarvestDirectory
+       target collects its file list in GetHarvestDirectoryContent, so this must run
+       first. Kept here (not in the App csproj) so dev builds/publishes are
+       unaffected; the ProjectReference re-publishes on each MSI build, so pruning
+       the publish dir is safe and repeatable. -->
+  <Target Name="PruneNonWinX64Runtimes"
+          BeforeTargets="GetHarvestDirectoryContent"
+          DependsOnTargets="ResolveProjectReferences"
+          Condition="Exists('$(AppPublishDir)\runtimes')">
+    <ItemGroup>
+      <_PublishRuntimeDir Include="$([System.IO.Directory]::GetDirectories('$(AppPublishDir)\runtimes'))" />
+      <_PruneRuntimeDir Include="@(_PublishRuntimeDir)" Condition="'%(Filename)%(Extension)' != 'win-x64'" />
+    </ItemGroup>
+    <Message Importance="high"
+             Condition="'@(_PruneRuntimeDir)' != ''"
+             Text="Pruning non-win-x64 runtime assets from publish output: @(_PruneRuntimeDir->'%(Filename)%(Extension)', ', ')" />
+    <RemoveDir Directories="@(_PruneRuntimeDir)" />
+  </Target>
   <Target Name="SignArtifacts" AfterTargets="Build"
           Condition="'$(OS)' == 'Windows_NT' AND ('$(WinpepperSigningThumbprint)' != '' OR '$(WinpepperSigningPfx)' != '')">
     <PropertyGroup>

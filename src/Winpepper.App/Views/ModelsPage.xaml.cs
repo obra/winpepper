@@ -35,7 +35,12 @@ public sealed partial class ModelsPage : Page
             {
                 var cur = settings.Load();
                 settings.Save(cur with { CleanupModelName = name });
-            });
+            },
+            // Download progress callbacks arrive on ThreadPool threads (the
+            // loop in DownloadMissingAsync resumes off-context after its
+            // ConfigureAwait(false) awaits). XAML-bound state must only be
+            // touched on the UI thread, so route mutations through it.
+            dispatch: a => App.Shell!.Ui.Post(a));
 
         AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
@@ -66,6 +71,10 @@ public sealed partial class ModelsPage : Page
     {
         await ViewModel.DownloadMissingAsync(CancellationToken.None);
         UpdateInstalledLabels();
+
+        // If the pipeline was left disabled at boot because models were
+        // missing (issue #6), bring it up now that the download finished.
+        App.Shell!.Pipeline.TryStart();
     }
 
     private void UpdateInstalledLabels()

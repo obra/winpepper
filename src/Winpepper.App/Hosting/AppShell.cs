@@ -81,8 +81,18 @@ public sealed class AppShell : IDisposable
                 {
                     if (t.IsCompletedSuccessfully && !string.IsNullOrEmpty(t.Result))
                     {
-                        uiThread.Post(() => (Winpepper.App.App.Shell?.Main as Winpepper.App.Views.MainWindow)?.NavigateToTag(t.Result));
-                        uiThread.Post(() => Winpepper.App.App.Shell?.ShowMain());
+                        // ShowMain() must run BEFORE NavigateToTag: when the
+                        // main window was closed, ShowMain() constructs a new
+                        // MainWindow, so navigating first targets the dead
+                        // window and the freshly shown one opens on its
+                        // default tab instead of the toast's deep link.
+                        uiThread.Post(() =>
+                        {
+                            var shell = Winpepper.App.App.Shell;
+                            if (shell is null) return;
+                            shell.ShowMain();
+                            (shell.Main as Winpepper.App.Views.MainWindow)?.NavigateToTag(t.Result);
+                        });
                     }
                 });
         });
@@ -252,18 +262,24 @@ public sealed class AppShell : IDisposable
 
         Pill = new StatusPillWindow(sessionVm);
         Tray = new TrayIconHost(sessionVm, AppPaths.AssetsDir, "0.3.0",
-                                 openSettings: ShowMain, quit: Quit);
+                                 openSettings: ShowMain, quit: Quit,
+                                 log: factory.CreateLogger<TrayIconHost>());
         Main = new MainWindow(this);
     }
 
     private async Task StartAsync()
     {
-        Pipeline.Start();
-        await Task.CompletedTask;
         var startHidden = Environment.GetEnvironmentVariable("WINPEPPER_START_HIDDEN") == "1";
         if (!Settings.OnboardingCompleted) ShowMain(navigateToOnboarding: true);
         else if (!startHidden) ShowMain(navigateToOnboarding: false);
         // else: stay tray-only (autostart with --tray).
+
+        // Start the pipeline only after the window is up so a missing or
+        // corrupt model can never block first paint (issue #6). TryStart
+        // reports a missing model on the error bus and leaves the pipeline
+        // disabled; the Models tab re-attempts after a download completes.
+        Pipeline.TryStart();
+        await Task.CompletedTask;
     }
 
     public void ShowMain() => ShowMain(navigateToOnboarding: false);

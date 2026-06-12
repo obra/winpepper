@@ -27,14 +27,14 @@
 
     <!-- ARP entry. -->
     <Property Id="ARPPRODUCTICON" Value="WinpepperIcon" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/jesse-michael-han/winpepper" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/obra/winpepper" />
     <Property Id="ARPNOREPAIR" Value="1" />
     <Icon Id="WinpepperIcon" SourceFile="$(AppPublishDir)\Assets\AppIcon.ico" />
 
     <!-- Spec §11: Windows 11 22H2+ via LaunchCondition. Build 22621 = 22H2.
          VersionNT64 >= 1000 enforces Windows 10/11 x64; the build-number gate (MSI_WIN_BUILD,
-         set by the capability-probe CA in Task 8 from HKLM\…\CurrentBuildNumber) is the real
-         22H2+ check. MSI string comparison on >= is lexicographic, so this works correctly
+         populated by the AppSearch registry search below from HKLM\…\CurrentBuildNumber)
+         is the real 22H2+ check. MSI string comparison on >= is lexicographic, so this works correctly
          only as long as CurrentBuildNumber is always a same-width number string — which it
          is on Windows 10/11 (5 digits). WindowsBuild is NOT a stock MSI/WiX property and
          must not be used here. -->
@@ -122,14 +122,30 @@
     <Binary Id="D3D12ProbeBinary" SourceFile="$(var.D3D12ProbeExe)" />
     <Binary Id="WinAppSdkBootstrapperBinary" SourceFile="$(var.WinAppSdkBootstrapper)" />
 
-    <!-- Properties the probe sets via the ReadProbeOutput CA below.
-         Secure="yes" makes them transferable from the immediate to the
-         deferred context if a future CA ever needs them there. -->
-    <Property Id="WINPEPPER_DX12_PRESENT" Secure="yes" />
-    <Property Id="WINPEPPER_WINAPPSDK_PRESENT" Secure="yes" />
-    <Property Id="MSI_WIN_BUILD" Secure="yes" />
+    <!-- MSI_WIN_BUILD feeds the launch condition above. It is populated by the
+         standard AppSearch action (sequenced before LaunchConditions in both the
+         UI and execute sequences), which needs no script engine. It used to be
+         copied out of the capability probe's output file by a VBScript custom
+         action; that failed with MSI error 2738 on Windows images that ship
+         without vbscript.dll (e.g. Windows Sandbox, hardened images), which made
+         the launch condition fire and the install abort with 1603 (issue #29).
+         CurrentBuildNumber is REG_SZ, so Type="raw" yields the bare digit string
+         and the lexicographic >= comparison caveat documented above still applies.
+         Secure="yes" makes the property transferable from the immediate to the
+         deferred context if a future CA ever needs it there. -->
+    <Property Id="MSI_WIN_BUILD" Secure="yes">
+      <RegistrySearch Id="MsiWinBuildRegSearch"
+                      Root="HKLM"
+                      Key="Software\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber"
+                      Type="raw"
+                      Bitness="always64" />
+    </Property>
 
-    <!-- Run probe before UI. -->
+    <!-- Best-effort capability probe. It writes %TEMP%\winpepper-probe.txt
+         (DX12 presence, WinAppSDK presence, Windows build) purely as a
+         support/diagnostics artifact; nothing in the install consumes it.
+         Return="ignore" keeps any probe failure nonfatal. -->
     <CustomAction Id="RunCapabilityProbe"
                   BinaryRef="D3D12ProbeBinary"
                   ExeCommand=""
@@ -145,45 +161,22 @@
                   Impersonate="no"
                   Return="check" />
 
-    <!-- Show a one-time warning if DX12 is missing.
-         WiX v5 requires script CAs to reference an external script file via
-         ScriptSourceFile (inline script bodies are no longer permitted). -->
-    <CustomAction Id="WarnNoDx12"
-                  Script="vbscript"
-                  ScriptSourceFile="scripts\WarnNoDx12.vbs"
-                  Execute="immediate"
-                  Return="ignore" />
-
-    <!-- Read the probe's KEY=VALUE output file (written by RunCapabilityProbe)
-         and copy the three keys (WINPEPPER_DX12_PRESENT, WINPEPPER_WINAPPSDK_PRESENT,
-         MSI_WIN_BUILD) into MSI session properties. Generic KEY=VALUE parser, so
-         any future probe key flows through without a wxs edit. -->
-    <CustomAction Id="ReadProbeOutput"
-                  Script="vbscript"
-                  ScriptSourceFile="scripts\ReadProbeOutput.vbs"
-                  Execute="immediate"
-                  Return="ignore" />
-
-    <!-- The probe + ReadProbeOutput pair must run in BOTH sequences so the
-         LaunchCondition's MSI_WIN_BUILD gate works under interactive (UI) AND
-         silent (/qn) installs. ReadProbeOutput is anchored After="RunCapabilityProbe"
-         (transitively before LaunchConditions). WiX v5 forbids both Before and
-         After on the same <Custom>. -->
+    <!-- The probe runs in BOTH sequences so the diagnostics file exists under
+         interactive (UI) AND silent (/qn) installs. It is anchored before
+         LaunchConditions only so it still runs (and leaves its artifact) when
+         the OS gate aborts the install; nothing downstream depends on it. -->
     <InstallUISequence>
       <Custom Action="RunCapabilityProbe" Before="LaunchConditions" />
-      <Custom Action="ReadProbeOutput"    After="RunCapabilityProbe" />
     </InstallUISequence>
     <InstallExecuteSequence>
       <Custom Action="RunCapabilityProbe" Before="LaunchConditions" />
-      <Custom Action="ReadProbeOutput"    After="RunCapabilityProbe" />
-      <Custom Action="WarnNoDx12"
-              After="LaunchConditions"
-              Condition="WINPEPPER_DX12_PRESENT = &quot;0&quot; AND UILevel &gt;= 4 AND NOT REMOVE" />
       <!-- InstallWinAppSdk CA gated FALSE: Winpepper.App is published with
            self-contained true, so the WinAppSDK runtime DLLs ship inside
-           the install folder. Re-enable by changing the condition to
-           WINPEPPER_WINAPPSDK_PRESENT = "0" AND NOT REMOVE once a real
-           WindowsAppRuntimeInstall-x64.exe is in packaging/bootstrapper/. -->
+           the install folder. Re-enabling it needs (a) a real
+           WindowsAppRuntimeInstall-x64.exe in packaging/bootstrapper/ and
+           (b) a script-free detection condition, e.g. an AppSearch
+           RegistrySearch on HKLM\SOFTWARE\Microsoft\WindowsAppRuntime\
+           Installed\1.6 (do NOT reintroduce a VBScript CA — see issue #29). -->
       <Custom Action="InstallWinAppSdk"
               Before="InstallFinalize"
               Condition="0=1" />
@@ -191,6 +184,12 @@
 
     <ui:WixUI Id="WixUI_InstallDir" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+
+    <!-- Real Apache-2.0 license text for the WixUI_InstallDir EULA dialog;
+         without this override WiX shows its lorem-ipsum placeholder.
+         Path is relative to the project directory (packaging/), same as the
+         ScriptSourceFile references above. -->
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
 
   </Package>
 

@@ -13,7 +13,7 @@
 **Prerequisites:** Plan 1 ([docs/superpowers/plans/2026-05-15-winpepper-foundation.md](2026-05-15-winpepper-foundation.md)) must be merged. The walking skeleton (`Winpepper.Cli` → Parakeet TDT v3 → SendInput) is committed on branch `plan-1/foundation` and is the integration target. Before starting Plan 2, verify on Linux:
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet build
 dotnet test --filter "Platform!=Windows"
@@ -28,7 +28,7 @@ and on the Windows VM:
 
 Both should be green. The Parakeet model must already be present at `%LOCALAPPDATA%\winpepper\models\parakeet-tdt-0.6b-v3\` on the VM (downloaded in Plan 1, Task 12).
 
-**Repo root throughout the plan:** `/home/jesse/git/winpepper/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced via `scripts/sync-to-vm.sh`).
+**Repo root throughout the plan:** `$REPO_ROOT/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced via `scripts/sync-to-vm.sh`).
 
 **Open implementation questions from spec §13 addressed in this plan:**
 
@@ -121,16 +121,16 @@ tests/
 ## Task 1: Project plumbing — add cleanup/corrections projects, packages, EnableWindowsTargeting
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/Directory.Build.props`
-- Modify: `/home/jesse/git/winpepper/Directory.Packages.props`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/Winpepper.Cleanup.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Corrections/Winpepper.Corrections.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/Placeholder.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Corrections/Placeholder.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Cleanup.Tests/Winpepper.Cleanup.Tests.csproj`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Cleanup.Tests/SanityTests.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Corrections.Tests/Winpepper.Corrections.Tests.csproj`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Corrections.Tests/SanityTests.cs`
+- Modify: `$REPO_ROOT/Directory.Build.props`
+- Modify: `$REPO_ROOT/Directory.Packages.props`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/Winpepper.Cleanup.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Corrections/Winpepper.Corrections.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/Placeholder.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Corrections/Placeholder.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Cleanup.Tests/Winpepper.Cleanup.Tests.csproj`
+- Create: `$REPO_ROOT/tests/Winpepper.Cleanup.Tests/SanityTests.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Corrections.Tests/Winpepper.Corrections.Tests.csproj`
+- Create: `$REPO_ROOT/tests/Winpepper.Corrections.Tests/SanityTests.cs`
 
 - [ ] **Step 1: Modify `Directory.Build.props` to allow Windows TFM cross-compile from Linux**
 
@@ -340,7 +340,7 @@ public class SanityTests
 - [ ] **Step 11: Add the four new projects to the solution**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet sln add src/Winpepper.Cleanup/Winpepper.Cleanup.csproj
 dotnet sln add src/Winpepper.Corrections/Winpepper.Corrections.csproj
@@ -351,7 +351,7 @@ dotnet sln add tests/Winpepper.Corrections.Tests/Winpepper.Corrections.Tests.csp
 - [ ] **Step 12: Restore + build on Linux (cross-compiling the Windows TFM)**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet restore
 dotnet build
@@ -391,9 +391,9 @@ git commit -m "scaffold(plan2): cleanup + corrections projects + packages"
 ## Task 2: CorrectionsData record + validation rules
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Corrections/CorrectionsData.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Corrections/CorrectionValidation.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Corrections.Tests/CorrectionValidationTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Corrections/CorrectionsData.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Corrections/CorrectionValidation.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Corrections.Tests/CorrectionValidationTests.cs`
 
 This task defines the in-memory schema and the input-validation rules from spec §7.3 (Corrections tab inline validation, repeated here so the data layer enforces them regardless of UI). Pure C#, runs everywhere.
 
@@ -439,7 +439,7 @@ public class CorrectionValidationTests
 - [ ] **Step 2: Run it to confirm failure**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet test --filter "FullyQualifiedName~CorrectionValidationTests"
 ```
@@ -531,8 +531,8 @@ git commit -m "feat(corrections): CorrectionsData schema + input validation rule
 ## Task 3: CorrectionStore — atomic JSON persistence
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Corrections/CorrectionStore.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Corrections.Tests/CorrectionStoreTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Corrections/CorrectionStore.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Corrections.Tests/CorrectionStoreTests.cs`
 
 - [ ] **Step 1: Write failing test `tests/Winpepper.Corrections.Tests/CorrectionStoreTests.cs`**
 
@@ -823,11 +823,11 @@ git commit -m "feat(corrections): CorrectionStore with atomic persistence + Add/
 ## Task 4: Cleanup result + options + profile + base prompt text
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/CleanupProfile.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/CleanupOptions.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/CleanupResult.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/BasePrompts.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Cleanup.Tests/BasePromptsTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/CleanupProfile.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/CleanupOptions.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/CleanupResult.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/BasePrompts.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Cleanup.Tests/BasePromptsTests.cs`
 
 Pure-data step. The texts here are the §6.3 default prompt and §6.4 literal-profile prompt. The build will start failing on the cleanup project until this lands because Task 5's `PromptBuilder` references `CleanupProfile`.
 
@@ -1086,8 +1086,8 @@ git commit -m "feat(cleanup): result/options/profile records + §6.3 default and
 ## Task 5: PromptBuilder — four-block assembly with omission rules
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/PromptBuilder.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Cleanup.Tests/PromptBuilderTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/PromptBuilder.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Cleanup.Tests/PromptBuilderTests.cs`
 
 Pure-string composition. Spec §6.2. Cross-platform, fully testable on Linux.
 
@@ -1336,8 +1336,8 @@ git commit -m "feat(cleanup): PromptBuilder with omission rules and 4000-char tr
 ## Task 6: ThinkSanitizer — strip `<think>` blocks and orphan opening tags
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/ThinkSanitizer.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Cleanup.Tests/ThinkSanitizerTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/ThinkSanitizer.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Cleanup.Tests/ThinkSanitizerTests.cs`
 
 Spec §5.5: "Strips `<think>…</think>` blocks and orphan opening `<think>` tags from the output." Pure C#.
 
@@ -1472,8 +1472,8 @@ git commit -m "feat(cleanup): <think> block sanitizer with orphan-tag handling"
 ## Task 7: CaseAwareReplacer — case-preserving deterministic substitution
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/CaseAwareReplacer.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Cleanup.Tests/CaseAwareReplacerTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/CaseAwareReplacer.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Cleanup.Tests/CaseAwareReplacerTests.cs`
 
 Spec §6.5: "CorrectionStore.Replacements is applied to the text as a final case-preserving substitution pass." Pure C#.
 
@@ -1675,10 +1675,10 @@ git commit -m "feat(cleanup): deterministic case-insensitive replacement pass (�
 ## Task 8: ILlamaCleanupBackend seam + CleanupRunner with fake-backend tests
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/ILlamaCleanupBackend.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/CleanupRunner.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Cleanup.Tests/CleanupRunnerTests.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Cleanup.Tests/Fakes/FakeLlamaCleanupBackend.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/ILlamaCleanupBackend.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/CleanupRunner.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Cleanup.Tests/CleanupRunnerTests.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Cleanup.Tests/Fakes/FakeLlamaCleanupBackend.cs`
 
 This is the orchestration brain. Drive everything through the `ILlamaCleanupBackend` seam so timeout / empty / `"..."` / error fallback paths are unit-testable on Linux. The real backend lands in Task 9.
 
@@ -2084,9 +2084,9 @@ git commit -m "feat(cleanup): CleanupRunner orchestration with timeout/empty/ell
 ## Task 9: LlamaCleanupBackend — real LLamaSharp implementation
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Cleanup/LlamaCleanupBackend.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Cleanup.Tests/LlamaCleanupBackendIntegrationTests.cs`
-- Create: `/home/jesse/git/winpepper/scripts/download-cleanup-model.ps1`
+- Create: `$REPO_ROOT/src/Winpepper.Cleanup/LlamaCleanupBackend.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Cleanup.Tests/LlamaCleanupBackendIntegrationTests.cs`
+- Create: `$REPO_ROOT/scripts/download-cleanup-model.ps1`
 
 Windows-only. The backend wraps `LLamaSharp` 0.27.0 + the Vulkan native backend. We expose `WarmAsync` so callers can pre-warm the KV cache at app start (spec §5.5).
 
@@ -2263,7 +2263,7 @@ public class LlamaCleanupBackendIntegrationTests
 - [ ] **Step 4: Cross-compile on Linux to verify the Windows TFM builds clean**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet build src/Winpepper.Cleanup/Winpepper.Cleanup.csproj -f net9.0-windows10.0.19041.0
 ```
@@ -2273,7 +2273,7 @@ Expected: build succeeds (no native execution; just compile + restore checks). I
 - [ ] **Step 5: Sync + download the model + run the integration tests on the VM**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/sync-to-vm.sh
 ./scripts/winssh < scripts/download-cleanup-model.ps1
 ./scripts/winrun "dotnet build"
@@ -2296,9 +2296,9 @@ git commit -m "feat(cleanup): LLamaSharp Vulkan backend with pre-warm hook"
 ## Task 10: WindowContext result + source types + pure-logic test scaffold
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/WindowContextSource.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/WindowContextResult.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/WindowContext/WindowContextResultTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/WindowContextSource.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/WindowContextResult.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/WindowContext/WindowContextResultTests.cs`
 
 These records are used by every other window-context type, so they land first. Pure C#, cross-platform.
 
@@ -2387,7 +2387,7 @@ public sealed record WindowContextResult(
 - [ ] **Step 4: Run the tests**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet test --filter "FullyQualifiedName~WindowContextResultTests"
 ```
@@ -2408,9 +2408,9 @@ git commit -m "feat(platform): WindowContextResult / Source records"
 ## Task 11: UIA tree-walking — pure-logic ordering & dedup
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/UiaExtractedElement.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/UiaTreeOrdering.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/WindowContext/UiaTreeOrderingTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/UiaExtractedElement.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/UiaTreeOrdering.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/WindowContext/UiaTreeOrderingTests.cs`
 
 Split the pure logic (reading-order sort, dedup, truncation) out from the COM-bound walk so it's testable on Linux. The COM walk lands in Task 12.
 
@@ -2611,12 +2611,12 @@ git commit -m "feat(platform): UIA reading-order sort + dedup + truncation logic
 ## Task 12: UIA native walk — `Winpepper.Platform.WindowContext.UiaTreeReader`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Platform/Winpepper.Platform.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/UiaNative.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/UiaTextExtraction.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/UiaTreeReader.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/ForegroundWindow.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/WindowContext/UiaIntegrationTests.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.Platform/Winpepper.Platform.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/UiaNative.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/UiaTextExtraction.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/UiaTreeReader.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/ForegroundWindow.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/WindowContext/UiaIntegrationTests.cs`
 
 Windows-only. UIA is reached through the in-box `UIAutomationClient` + `UIAutomationTypes` assemblies via `<FrameworkReference Include="Microsoft.WindowsDesktop.App" />`.
 
@@ -2885,7 +2885,7 @@ public class UiaIntegrationTests
 - [ ] **Step 7: Cross-compile on Linux and verify**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet build src/Winpepper.Platform/Winpepper.Platform.csproj -f net9.0-windows10.0.19041.0
 ```
@@ -2917,12 +2917,12 @@ git commit -m "feat(platform): UIA ContentView tree walk + pattern-preference te
 ## Task 13: OCR fallback — `PrintWindow` + `Windows.Media.Ocr`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/PrintWindowNative.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/OcrFallback.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/OcrLineSort.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/WindowContext/OcrLineSortTests.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/WindowContext/OcrIntegrationTests.cs`
+- Modify: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/PrintWindowNative.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/OcrFallback.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/OcrLineSort.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/WindowContext/OcrLineSortTests.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/WindowContext/OcrIntegrationTests.cs`
 
 Windows-only path. OCR is reached through the `Windows.Media.Ocr` projection that ships with the `net9.0-windows10.0.19041.0` TFM (no additional NuGet needed).
 
@@ -3021,7 +3021,7 @@ public class OcrLineSortTests
 - [ ] **Step 3: Run to confirm failure**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet test --filter "FullyQualifiedName~OcrLineSortTests"
 ```
@@ -3279,7 +3279,7 @@ public class OcrIntegrationTests
 - [ ] **Step 9: Cross-compile on Linux**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet build src/Winpepper.Platform/Winpepper.Platform.csproj -f net9.0-windows10.0.19041.0
 ```
@@ -3311,8 +3311,8 @@ git commit -m "feat(platform): OCR fallback via PrintWindow + Windows.Media.Ocr"
 ## Task 14: WindowContextPrefetch — UIA-first, OCR-fallback, cancellable, error-bus silent
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/WindowContext/WindowContextPrefetch.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/WindowContext/WindowContextPrefetchTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/WindowContext/WindowContextPrefetch.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/WindowContext/WindowContextPrefetchTests.cs`
 
 This is the public entry point used by `Winpepper.Cli` (and later the WinUI shell). It's a thin coordinator: try UIA → if `<80` chars or failure → OCR → if both empty → `WindowContextResult.Empty`. Silent on errors per spec §9.1 row "OCR / UIA → Any failure → Silent skip".
 
@@ -3525,9 +3525,9 @@ git commit -m "feat(platform): WindowContextPrefetch UIA-first OCR-fallback coor
 ## Task 15: Wire CleanupRunner + WindowContextPrefetch into `Winpepper.Cli`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Cli/Winpepper.Cli.csproj`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Cli/Program.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Cli/Pipeline.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.Cli/Winpepper.Cli.csproj`
+- Modify: `$REPO_ROOT/src/Winpepper.Cli/Program.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.Cli/Pipeline.cs`
 
 The CLI is the temporary entry point. After this task, the manual smoke procedure from Plan 1 Task 16 produces *cleaned* text in the focused window. The CLI is retired in Plan 3 when the WinUI shell lands.
 
@@ -3817,7 +3817,7 @@ public sealed class Pipeline : IDisposable
 - [ ] **Step 4: Build + test the CLI on Linux (cross-compile both TFMs)**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet build src/Winpepper.Cli/Winpepper.Cli.csproj
 ```
@@ -3844,7 +3844,7 @@ git commit -m "feat(cli): wire CleanupRunner + CorrectionStore + WindowContextPr
 ## Task 16: End-to-end manual smoke test on the VM
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/docs/manual-test.md`
+- Modify: `$REPO_ROOT/docs/manual-test.md`
 
 The headless VM mic returns silence, so transcription output will be empty. The cleanup path takes the empty-input branch (everything is empty); we mainly verify *no crash* and the cleanup runner is invoked. For a real demo, the operator runs on a physical Windows 11 machine.
 
@@ -3894,7 +3894,7 @@ correction post-pass maps any surviving "chat gbt" to "ChatGPT").
 - [ ] **Step 2: Run the smoke procedure on the VM and paste the log into the task tracker**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/sync-to-vm.sh
 ./scripts/winssh < scripts/download-cleanup-model.ps1
 ./scripts/winrun "dotnet build src/Winpepper.Cli/Winpepper.Cli.csproj -c Release"
@@ -3919,7 +3919,7 @@ git commit -m "docs: Plan 2 cleanup-pipeline smoke procedure"
 - [ ] **Step 1: Run the full test suite on Linux**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet test --filter "Platform!=Windows"
 ```

@@ -15,6 +15,18 @@ public sealed partial class MainWindow : Window
         Title = "Winpepper";
         Nav.SelectionChanged += OnNavSelectionChanged;
         Nav.SelectedItem = Nav.MenuItems[0];
+        AppWindow.Closing += OnAppWindowClosing;
+    }
+
+    // Closing the window must never strand the app (issue #10): hide to the
+    // tray only when the tray icon actually registered; otherwise exit
+    // outright so the user is never left with a windowless, tray-less process.
+    private void OnAppWindowClosing(Microsoft.UI.Windowing.AppWindow sender,
+                                    Microsoft.UI.Windowing.AppWindowClosingEventArgs args)
+    {
+        args.Cancel = true;
+        if (_shell.Tray.IsRegistered) sender.Hide();
+        else _shell.Quit();
     }
 
     public void NavigateToOnboarding()

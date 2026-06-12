@@ -16,7 +16,7 @@
 - **Plan 2** — `Winpepper.Cleanup.CleanupRunner`, `Winpepper.Cleanup.PromptBuilder`, `Winpepper.Corrections.CorrectionStore`, `Winpepper.Platform.WindowContext`. The Lab cleanup-rerun panel constructs a transient `CleanupRunner` and calls its public run method.
 - **Plan 3** — `Winpepper.App` (WinUI 3, packaged), `NavigationView` shell with placeholder pages, settings view-model base class, tray. Plan 4 fills in the History, History detail / Lab, and Models pages and adds the model-selection bindings to existing Cleanup/Recording settings view-models.
 
-**Repo root throughout the plan:** `/home/jesse/git/winpepper/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced from Linux via `scripts/sync-to-vm.sh`).
+**Repo root throughout the plan:** `$REPO_ROOT/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced from Linux via `scripts/sync-to-vm.sh`).
 
 ---
 
@@ -39,16 +39,16 @@
 ## Task 1: Scaffold `Winpepper.History` project
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Winpepper.History.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/PlaceholderType.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/Winpepper.History.Tests.csproj`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/PlaceholderTests.cs`
-- Modify: `/home/jesse/git/winpepper/winpepper.sln`
+- Create: `$REPO_ROOT/src/Winpepper.History/Winpepper.History.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.History/PlaceholderType.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/Winpepper.History.Tests.csproj`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/PlaceholderTests.cs`
+- Modify: `$REPO_ROOT/winpepper.sln`
 
 - [ ] **Step 1: Create directories**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 mkdir -p src/Winpepper.History tests/Winpepper.History.Tests
 ```
 
@@ -120,7 +120,7 @@ public class PlaceholderTests
 - [ ] **Step 6: Add both projects to the solution**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet sln add src/Winpepper.History/Winpepper.History.csproj
 dotnet sln add tests/Winpepper.History.Tests/Winpepper.History.Tests.csproj
 ```
@@ -128,7 +128,7 @@ dotnet sln add tests/Winpepper.History.Tests/Winpepper.History.Tests.csproj
 - [ ] **Step 7: Build and test**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet restore
 dotnet build
@@ -149,8 +149,8 @@ git commit -m "scaffold(history): create Winpepper.History project + test projec
 ## Task 2: `HistoryEntry` record
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/HistoryEntry.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/HistoryEntryTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/HistoryEntry.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/HistoryEntryTests.cs`
 
 A `HistoryEntry` captures everything we want to show in the History list and the Lab detail view. It is the unit the index file stores.
 
@@ -228,7 +228,7 @@ public class HistoryEntryTests
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryEntryTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryEntryTests"
 ```
 
 Expected: compile errors — `HistoryEntry` / `HistoryTimings` not found.
@@ -287,7 +287,7 @@ public sealed record HistoryEntry
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryEntryTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryEntryTests"
 ```
 
 Expected: 4 tests pass.
@@ -304,8 +304,8 @@ git commit -m "feat(history): HistoryEntry + HistoryTimings records"
 ## Task 3: `HistoryIndex` — schema-versioned envelope
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/HistoryIndex.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/HistoryIndexTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/HistoryIndex.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/HistoryIndexTests.cs`
 
 The on-disk index is a JSON object `{ "schema": 1, "entries": [...] }`. Future schema migrations live here.
 
@@ -363,7 +363,7 @@ public class HistoryIndexTests
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryIndexTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryIndexTests"
 ```
 
 Expected: `HistoryIndex` not found.
@@ -386,7 +386,7 @@ public sealed record HistoryIndex
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryIndexTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryIndexTests"
 ```
 
 Expected: 3 tests pass.
@@ -403,8 +403,8 @@ git commit -m "feat(history): HistoryIndex schema-versioned envelope"
 ## Task 4: `HistoryStore` — load/save/append with pruning
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/HistoryStore.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/HistoryStoreTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/HistoryStore.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/HistoryStoreTests.cs`
 
 The store owns:
 - The index file path (`%LOCALAPPDATA%\winpepper\history\index.json`).
@@ -593,7 +593,7 @@ public class HistoryStoreTests : IDisposable
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryStoreTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryStoreTests"
 ```
 
 Expected: `HistoryStore` not found.
@@ -750,7 +750,7 @@ public sealed class HistoryStore
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryStoreTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryStoreTests"
 ```
 
 Expected: 10 tests pass.
@@ -767,8 +767,8 @@ git commit -m "feat(history): HistoryStore with newest-first pruning to 50"
 ## Task 5: `WavWriter` — 16 kHz mono int16 PCM
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/WavWriter.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/WavWriterTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/WavWriter.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/WavWriterTests.cs`
 
 The pipeline produces `float[]` samples at 16 kHz mono (see `WasapiRecorder.Stop()` in Plan 1). To match the spec — "16 kHz mono int16" — we convert and write a minimal RIFF/WAVE header. Pure-managed (no NAudio dep on the History project), to keep `Winpepper.History` Linux-buildable.
 
@@ -865,7 +865,7 @@ public class WavWriterTests : IDisposable
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~WavWriterTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~WavWriterTests"
 ```
 
 Expected: `WavWriter` not found.
@@ -987,7 +987,7 @@ public static class WavWriter
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~WavWriterTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~WavWriterTests"
 ```
 
 Expected: 4 tests pass.
@@ -1004,8 +1004,8 @@ git commit -m "feat(history): pure-managed WAV writer/reader (16 kHz mono int16)
 ## Task 6: `HistoryArchiver` — finalize-time recorder
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/HistoryArchiver.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/HistoryArchiverTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/HistoryArchiver.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/HistoryArchiverTests.cs`
 
 `HistoryArchiver` is the single API the pipeline calls at session-finalize time. It:
 
@@ -1104,7 +1104,7 @@ public class HistoryArchiverTests : IDisposable
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryArchiverTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryArchiverTests"
 ```
 
 Expected: `HistoryArchiver` not found.
@@ -1183,7 +1183,7 @@ public sealed class HistoryArchiver
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryArchiverTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryArchiverTests"
 ```
 
 Expected: 3 tests pass.
@@ -1200,10 +1200,10 @@ git commit -m "feat(history): HistoryArchiver — WAV + index write at finalize"
 ## Task 7: Amend `PipelineHost` (Plan 3's orchestrator) to archive sessions
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Winpepper.App.csproj`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/PipelineHost.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/AppShell.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/AppPaths.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Winpepper.App.csproj`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/PipelineHost.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/AppShell.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/AppPaths.cs`
 
 **Cross-plan coordination note:** Plan 1's `Winpepper.Cli.Pipeline` recorded the WAV in memory and discarded it after transcription. Plan 3 Task 26 retires `Winpepper.Cli` entirely (its `Program.cs`/`Pipeline.cs` are deleted; `Winpepper.App` becomes the only entry point, with a `--tray` flag for autostart). Plans 1→2→3→4 run serially, so by the time Plan 4 Task 7 lands the CLI is gone — pipeline orchestration lives in `Winpepper.App.Hosting.PipelineHost` (Plan 3 Task 18). We therefore wire `HistoryArchiver` into `PipelineHost` at the same finalize point Plan 3 Task 24 chose for the cleanup runner (after `InjectionCompleted` is applied; mirrored in both the `HoldUp` and `Toggle` stop branches).
 
@@ -1416,7 +1416,7 @@ The `historyStore` instance is also reused by `HistoryServices` (Task 22 wires i
 - [ ] **Step 7: Build on the VM**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj"
 ```
 
@@ -1448,16 +1448,16 @@ git commit -m "feat(app): archive sessions via HistoryArchiver at finalize in Pi
 ## Task 8: Scaffold `Winpepper.Models` project
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/Winpepper.Models.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/PlaceholderType.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Models.Tests/PlaceholderTests.cs`
-- Modify: `/home/jesse/git/winpepper/winpepper.sln`
+- Create: `$REPO_ROOT/src/Winpepper.Models/Winpepper.Models.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.Models/PlaceholderType.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj`
+- Create: `$REPO_ROOT/tests/Winpepper.Models.Tests/PlaceholderTests.cs`
+- Modify: `$REPO_ROOT/winpepper.sln`
 
 - [ ] **Step 1: Create directories**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 mkdir -p src/Winpepper.Models tests/Winpepper.Models.Tests
 ```
 
@@ -1529,7 +1529,7 @@ public class PlaceholderTests
 - [ ] **Step 6: Add to solution**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet sln add src/Winpepper.Models/Winpepper.Models.csproj
 dotnet sln add tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj
 ```
@@ -1537,7 +1537,7 @@ dotnet sln add tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj
 - [ ] **Step 7: Build and test**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet restore
 dotnet build
@@ -1558,10 +1558,10 @@ git commit -m "scaffold(models): create Winpepper.Models project + test project"
 ## Task 9: `ModelKind` enum and `ModelFile` / `ModelDescriptor` records
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/ModelKind.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/ModelFile.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/ModelDescriptor.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Models.Tests/ModelDescriptorTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/ModelKind.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/ModelFile.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/ModelDescriptor.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Models.Tests/ModelDescriptorTests.cs`
 
 `ModelDescriptor` is the declarative record describing a model that lives in the registry. Each descriptor has 1..N `ModelFile`s (e.g., Parakeet ships encoder + decoder_joint + vocab; Qwen ships a single GGUF).
 
@@ -1648,7 +1648,7 @@ internal sealed class TempDir : IDisposable
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~ModelDescriptorTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~ModelDescriptorTests"
 ```
 
 Expected: types not found.
@@ -1738,7 +1738,7 @@ public sealed record ModelDescriptor
 - [ ] **Step 6: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~ModelDescriptorTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~ModelDescriptorTests"
 ```
 
 Expected: 3 tests pass.
@@ -1755,9 +1755,9 @@ git commit -m "feat(models): ModelKind, ModelFile, ModelDescriptor"
 ## Task 10: `ModelRegistry` — hard-coded catalog
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/ModelRegistry.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Models.Tests/ModelRegistryTests.cs`
-- Create: `/home/jesse/git/winpepper/scripts/verify-model-hashes.ps1`
+- Create: `$REPO_ROOT/src/Winpepper.Models/ModelRegistry.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Models.Tests/ModelRegistryTests.cs`
+- Create: `$REPO_ROOT/scripts/verify-model-hashes.ps1`
 
 The registry hard-codes one ASR model (the Parakeet bundle Plan 1 already downloads) and one cleanup model (a Qwen 0.5B GGUF). SHA-256 hashes are placeholders flagged `TODO(verify-at-exec)` and MUST be replaced before merge by the verification script in Step 4 below.
 
@@ -1838,7 +1838,7 @@ public class ModelRegistryTests
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~ModelRegistryTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~ModelRegistryTests"
 ```
 
 Expected: `ModelRegistry` not found.
@@ -1966,13 +1966,13 @@ finally {
 ```
 
 ```bash
-chmod +x /home/jesse/git/winpepper/scripts/verify-model-hashes.ps1
+chmod +x $REPO_ROOT/scripts/verify-model-hashes.ps1
 ```
 
 - [ ] **Step 5: Run the verifier and update placeholders**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/winssh < scripts/verify-model-hashes.ps1
 ```
 
@@ -1981,7 +1981,7 @@ For each printed `Sha256 = "..."` and `SizeBytes = ...`, edit `src/Winpepper.Mod
 - [ ] **Step 6: Verify pass (on Linux)**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet test --filter "FullyQualifiedName~ModelRegistryTests"
 ```
@@ -2000,8 +2000,8 @@ git commit -m "feat(models): ModelRegistry with Parakeet + Qwen 0.5B descriptors
 ## Task 11: `DownloadProgress` event type
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/DownloadProgress.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Models.Tests/DownloadProgressTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/DownloadProgress.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Models.Tests/DownloadProgressTests.cs`
 
 A `DownloadProgress` carries enough information for the Models tab to render a progress bar. Reported via `IProgress<DownloadProgress>` so the UI thread can marshal it onto the dispatcher.
 
@@ -2056,7 +2056,7 @@ public class DownloadProgressTests
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~DownloadProgressTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~DownloadProgressTests"
 ```
 
 Expected: type not found.
@@ -2095,7 +2095,7 @@ public sealed record DownloadProgress
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~DownloadProgressTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~DownloadProgressTests"
 ```
 
 Expected: 3 tests pass.
@@ -2112,8 +2112,8 @@ git commit -m "feat(models): DownloadProgress event record + DownloadPhase enum"
 ## Task 12: `ChecksumVerifier` — streaming SHA-256
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/ChecksumVerifier.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Models.Tests/ChecksumVerifierTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/ChecksumVerifier.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Models.Tests/ChecksumVerifierTests.cs`
 
 Reads a file in 1 MiB chunks and computes lowercase-hex SHA-256. Streaming because GGUF cleanup models are ~400 MB.
 
@@ -2188,7 +2188,7 @@ public class ChecksumVerifierTests : IDisposable
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~ChecksumVerifierTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~ChecksumVerifierTests"
 ```
 
 Expected: `ChecksumVerifier` not found.
@@ -2234,7 +2234,7 @@ public static class ChecksumVerifier
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~ChecksumVerifierTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~ChecksumVerifierTests"
 ```
 
 Expected: 5 tests pass.
@@ -2251,10 +2251,10 @@ git commit -m "feat(models): streaming SHA-256 checksum verifier"
 ## Task 13: `ModelDownloader` — `HttpClient` with range-resume
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/IHttpRangeClient.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/HttpClientRangeClient.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/ModelDownloader.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Models.Tests/ModelDownloaderTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/IHttpRangeClient.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/HttpClientRangeClient.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/ModelDownloader.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Models.Tests/ModelDownloaderTests.cs`
 
 The downloader does NOT use raw `HttpClient` in its tests — testing real HTTP would couple us to HuggingFace's availability. We introduce a tiny `IHttpRangeClient` abstraction so tests can supply a fake that streams bytes, throws mid-way to simulate disconnects, and asserts the resume `Range:` header.
 
@@ -2455,7 +2455,7 @@ internal sealed class FakeRangeClient : IHttpRangeClient
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~ModelDownloaderTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~ModelDownloaderTests"
 ```
 
 Expected: types not found.
@@ -2726,7 +2726,7 @@ public sealed class ModelDownloader
 - [ ] **Step 6: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~ModelDownloaderTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~ModelDownloaderTests"
 ```
 
 Expected: 5 tests pass.
@@ -2743,8 +2743,8 @@ git commit -m "feat(models): ModelDownloader with range-resume + sha256 verify"
 ## Task 14: `MissingModelsResolver` — find descriptors needing download
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/MissingModelsResolver.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Models.Tests/MissingModelsResolverTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/MissingModelsResolver.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Models.Tests/MissingModelsResolverTests.cs`
 
 The Models tab's "Download Missing Models" button calls this to decide which descriptors to enqueue.
 
@@ -2813,7 +2813,7 @@ public class MissingModelsResolverTests : IDisposable
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~MissingModelsResolverTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~MissingModelsResolverTests"
 ```
 
 Expected: type not found.
@@ -2846,7 +2846,7 @@ public sealed class MissingModelsResolver
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~MissingModelsResolverTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~MissingModelsResolverTests"
 ```
 
 Expected: 3 tests pass.
@@ -2863,11 +2863,11 @@ git commit -m "feat(models): MissingModelsResolver to scope downloads"
 ## Task 15: Add DiffPlex package and `WordDiff` service
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/Directory.Packages.props`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Diff/WordDiff.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Diff/WordDiffSegment.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/Diff/WordDiffTests.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.History/Winpepper.History.csproj`
+- Modify: `$REPO_ROOT/Directory.Packages.props`
+- Create: `$REPO_ROOT/src/Winpepper.History/Diff/WordDiff.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/Diff/WordDiffSegment.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/Diff/WordDiffTests.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.History/Winpepper.History.csproj`
 
 DiffPlex's `Differ` gives us inline diff blocks; we wrap it in a stable `WordDiff` API that returns a sequence of `WordDiffSegment` records (Equal / Insert / Delete) suitable for the Lab's side-by-side rendering.
 
@@ -2967,7 +2967,7 @@ public class WordDiffTests
 - [ ] **Step 4: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~WordDiffTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~WordDiffTests"
 ```
 
 Expected: `WordDiff` / `WordDiffSegment` not found.
@@ -3074,7 +3074,7 @@ public static class WordDiff
 - [ ] **Step 7: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet restore && dotnet test --filter "FullyQualifiedName~WordDiffTests"
+cd $REPO_ROOT && dotnet restore && dotnet test --filter "FullyQualifiedName~WordDiffTests"
 ```
 
 Expected: 5 tests pass.
@@ -3091,8 +3091,8 @@ git commit -m "feat(history): DiffPlex word-level diff service"
 ## Task 16: Extend `AppSettings` for cleanup-model selection
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Core/Settings/AppSettings.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Settings/AppSettingsCleanupModelTests.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.Core/Settings/AppSettings.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Settings/AppSettingsCleanupModelTests.cs`
 
 Plan 1's `AppSettings` already has `AsrModelName`. The Lab + Models tab need a corresponding `CleanupModelName` field and a way to flip the default from a Lab rerun ("Use as default"). The current-prompt selection used by Plan 2's `PromptBuilder` is also persisted here so the Lab can show it.
 
@@ -3128,7 +3128,7 @@ public class AppSettingsCleanupModelTests
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~AppSettingsCleanupModelTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~AppSettingsCleanupModelTests"
 ```
 
 Expected: `CleanupModelName` not found.
@@ -3170,7 +3170,7 @@ public record AppSettings
 - [ ] **Step 4: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~AppSettings"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~AppSettings"
 ```
 
 Expected: all settings tests (Plan 1's `SettingsStoreTests` + new `AppSettingsCleanupModelTests`) pass.
@@ -3187,11 +3187,11 @@ git commit -m "feat(settings): add CleanupModelName field"
 ## Task 17: Lab transcription-rerun service (transient `ParakeetSession`)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Lab/ITranscriptionRerunService.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Lab/TranscriptionRerunResult.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Lab/ParakeetTranscriptionRerunService.cs` (Windows-only)
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Lab/FakeTranscriptionRerunService.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/Lab/FakeTranscriptionRerunServiceTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/Lab/ITranscriptionRerunService.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/Lab/TranscriptionRerunResult.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/Lab/ParakeetTranscriptionRerunService.cs` (Windows-only)
+- Create: `$REPO_ROOT/src/Winpepper.History/Lab/FakeTranscriptionRerunService.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/Lab/FakeTranscriptionRerunServiceTests.cs`
 
 The Lab needs to construct a fresh `ParakeetSession` against a user-selected model directory, transcribe the entry's WAV bytes, and return the resulting text plus the model name. Nothing is persisted. The interface lets the WinUI page bind a fake during design-time tooling and lets cross-platform tests cover the happy path.
 
@@ -3356,7 +3356,7 @@ public class FakeTranscriptionRerunServiceTests : IDisposable
 - [ ] **Step 7: Build and test**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet restore
 dotnet build
@@ -3377,12 +3377,12 @@ git commit -m "feat(history): Lab transcription-rerun service + fake"
 ## Task 18: Lab cleanup-rerun service (transient `CleanupRunner`)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Lab/ICleanupRerunService.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Lab/CleanupRerunInput.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Lab/CleanupRerunResult.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Lab/LlamaCleanupRerunService.cs` (Windows-only)
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/Lab/FakeCleanupRerunService.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/Lab/FakeCleanupRerunServiceTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/Lab/ICleanupRerunService.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/Lab/CleanupRerunInput.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/Lab/CleanupRerunResult.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/Lab/LlamaCleanupRerunService.cs` (Windows-only)
+- Create: `$REPO_ROOT/src/Winpepper.History/Lab/FakeCleanupRerunService.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/Lab/FakeCleanupRerunServiceTests.cs`
 
 The cleanup-rerun service mirrors the transcription-rerun service: caller supplies the raw transcript, the user's chosen GGUF model path, optional custom-prompt override, and a window-context toggle; the service returns the cleaned text PLUS the fully assembled prompt and raw model output (so the "Show cleanup transcript" modal can display them).
 
@@ -3662,7 +3662,7 @@ public class FakeCleanupRerunServiceTests
 - [ ] **Step 8: Build and test**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet restore
 dotnet build
@@ -3683,9 +3683,9 @@ git commit -m "feat(history): Lab cleanup-rerun service + fake"
 ## Task 19: `HistoryListViewModel` (cross-platform)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/ViewModels/HistoryListViewModel.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/ViewModels/HistoryRowViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/ViewModels/HistoryListViewModelTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/ViewModels/HistoryListViewModel.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/ViewModels/HistoryRowViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/ViewModels/HistoryListViewModelTests.cs`
 
 View-models live in `Winpepper.History` (cross-platform) so they can be unit-tested on Linux. The Windows-only WinUI page (Task 22) just binds to them. They implement `INotifyPropertyChanged` manually — no MVVM toolkit dependency to keep this library tiny.
 
@@ -3766,7 +3766,7 @@ public class HistoryListViewModelTests : IDisposable
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryListViewModelTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryListViewModelTests"
 ```
 
 Expected: view-model types not found.
@@ -3843,7 +3843,7 @@ public sealed class HistoryListViewModel : INotifyPropertyChanged
 - [ ] **Step 5: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryListViewModelTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryListViewModelTests"
 ```
 
 Expected: 4 tests pass.
@@ -3860,9 +3860,9 @@ git commit -m "feat(history): HistoryListViewModel + HistoryRowViewModel"
 ## Task 20: `HistoryDetailViewModel` (Lab)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/ViewModels/HistoryDetailViewModel.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.History/ViewModels/RerunPanelViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.History.Tests/ViewModels/HistoryDetailViewModelTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/ViewModels/HistoryDetailViewModel.cs`
+- Create: `$REPO_ROOT/src/Winpepper.History/ViewModels/RerunPanelViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.History.Tests/ViewModels/HistoryDetailViewModelTests.cs`
 
 The detail VM exposes:
 - The original transcript + cleaned text (read-only).
@@ -4024,7 +4024,7 @@ public class HistoryDetailViewModelTests : IDisposable
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryDetailViewModelTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryDetailViewModelTests"
 ```
 
 Expected: types not found.
@@ -4206,7 +4206,7 @@ public sealed class HistoryDetailViewModel : INotifyPropertyChanged
 - [ ] **Step 5: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~HistoryDetailViewModelTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~HistoryDetailViewModelTests"
 ```
 
 Expected: 6 tests pass.
@@ -4223,9 +4223,9 @@ git commit -m "feat(history): HistoryDetailViewModel + RerunPanelViewModel"
 ## Task 21: `ModelsTabViewModel` (cross-platform)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/ViewModels/ModelCardViewModel.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/ViewModels/ModelCardViewModel.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs`
 
 The Models tab shows two cards (one per kind). Each card tracks:
 - Current selection (model name).
@@ -4342,7 +4342,7 @@ internal sealed class FakeDownloader : ModelsTabViewModel.IDownloader
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~ModelsTabViewModelTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~ModelsTabViewModelTests"
 ```
 
 Expected: types not found.
@@ -4483,7 +4483,7 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
 - [ ] **Step 5: Verify pass**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test --filter "FullyQualifiedName~ModelsTabViewModelTests"
+cd $REPO_ROOT && dotnet test --filter "FullyQualifiedName~ModelsTabViewModelTests"
 ```
 
 Expected: 4 tests pass.
@@ -4500,9 +4500,9 @@ git commit -m "feat(models): ModelsTabViewModel + ModelCardViewModel"
 ## Task 22: Wire `Winpepper.App` to consume `Winpepper.History` + `Winpepper.Models`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Winpepper.App.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Services/HistoryServices.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Services/ModelsServices.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Winpepper.App.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.App/Services/HistoryServices.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Services/ModelsServices.cs`
 
 **Cross-plan coordination note:** Plan 3 creates `Winpepper.App` as a WinUI 3 packaged project with placeholder pages for History, History detail, and Models. Plan 4 is responsible for filling those pages in. The exact paths for placeholder XAML files (`Views/HistoryPage.xaml`, `Views/HistoryDetailPage.xaml`, `Views/ModelsPage.xaml`) and Plan 3's `App.xaml.cs` DI bootstrap MUST match Plan 3's actual layout — re-read Plan 3 before starting this task and adjust the file paths if they differ.
 
@@ -4581,7 +4581,7 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IDisposable
 - [ ] **Step 4: Build on the VM**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj"
 ```
 
@@ -4599,8 +4599,8 @@ git commit -m "feat(app): wire History + Models services into Winpepper.App"
 ## Task 23: History page XAML (Windows-only)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/HistoryPage.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/HistoryPage.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/HistoryPage.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/HistoryPage.xaml.cs`
 
 Plan 3 Task 20 (lines 3322–3336) ships `MainWindow.xaml` with `Tag="history"` as a `NavigationViewItem` set to `IsEnabled="False"` and unwired in the `OnNavSelectionChanged` switch. Plan 3 ships NO placeholder `HistoryPage.xaml` — that file is born here. Task 23 must therefore (a) create the new `HistoryPage` XAML + code-behind, and (b) enable + route the History/Lab/Models nav items in `MainWindow`. The Lab and Models pages land in Tasks 24 and 25, so the switch case for "lab" and "models" is added now (forward-referencing types that build clean once Tasks 24 and 25 land — Plan 3's `MainWindow.xaml.cs` already lives under `Winpepper.App.Views`, the same namespace as the new pages).
 
@@ -4734,7 +4734,7 @@ Note: clicking "Lab" from the nav rail navigates to `HistoryDetailPage` with no 
 - [ ] **Step 4: Build on the VM**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj"
 ```
 
@@ -4755,10 +4755,10 @@ git commit -m "feat(app): History page + enable nav routing for history/lab/mode
 ## Task 24: History detail / Lab page XAML (Windows-only)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/HistoryDetailPage.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/HistoryDetailPage.xaml.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/DiffSegmentsControl.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/DiffSegmentsControl.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/HistoryDetailPage.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/HistoryDetailPage.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/DiffSegmentsControl.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/DiffSegmentsControl.xaml.cs`
 
 Plan 3 does NOT ship a placeholder `HistoryDetailPage`; Task 23 wires "lab" to `HistoryDetailPage`, so the type is born here. The Lab page has six panels: original-transcript, original-cleaned, transcription-rerun, cleanup-rerun, cleanup-transcript modal, and WAV playback. The diff rendering uses a small reusable `DiffSegmentsControl` UserControl that takes an `IReadOnlyList<WordDiffSegment>` and renders coloured runs.
 
@@ -5054,7 +5054,7 @@ public sealed partial class DiffSegmentsControl : UserControl
 - [ ] **Step 5: Build on the VM**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj"
 ```
 
@@ -5072,8 +5072,8 @@ git commit -m "feat(app): History detail / Lab page with diff control"
 ## Task 25: Models tab XAML (Windows-only)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/ModelsPage.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/ModelsPage.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/ModelsPage.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/ModelsPage.xaml.cs`
 
 Plan 3 ships no placeholder `ModelsPage`; Task 23 wires "models" to this type, so the file is born here.
 
@@ -5245,7 +5245,7 @@ public sealed partial class ModelsPage : Page
 - [ ] **Step 3: Build on the VM**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj"
 ```
 
@@ -5263,7 +5263,7 @@ git commit -m "feat(app): Models tab with download progress + selection"
 ## Task 26: Manual smoke test on the VM
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/docs/manual-test.md`
+- Modify: `$REPO_ROOT/docs/manual-test.md`
 
 - [ ] **Step 1: Append the Plan 4 smoke procedure**
 

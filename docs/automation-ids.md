@@ -62,6 +62,7 @@ instance first (e.g. `RecordingHoldHotkeyBox`), then search its descendants.
 
 | AutomationId | Control | Purpose |
 |---|---|---|
+| `HotkeyCancelButton` | Button | HotkeyRecorderBox | Cancels an in-progress hotkey recording |
 | `HotkeyRecordButton` | Button | Start recording a hotkey chord |
 | `HotkeyChordLabel` | TextBlock | Currently bound chord text |
 

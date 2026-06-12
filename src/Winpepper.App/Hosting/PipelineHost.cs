@@ -21,7 +21,8 @@ public sealed class PipelineHost : IDisposable
     private readonly ILogger<PipelineHost> _log;
     private readonly HotkeyHook _hook;
     private readonly TextInjector _injector;
-    private readonly ParakeetSession _asr;
+    private ParakeetSession? _asr;
+    private readonly string _modelDir;
     private readonly SessionEngine _engine;
     private readonly SessionViewModel _vm;
     private readonly ISoundEffectPlayer _sounds;
@@ -74,7 +75,7 @@ public sealed class PipelineHost : IDisposable
         _sounds = sounds;
         _hook = new HotkeyHook(hold, toggle, cancel, factory.CreateLogger<HotkeyHook>());
         _injector = new TextInjector(factory.CreateLogger<TextInjector>());
-        _asr = new ParakeetSession(modelDir);
+        _modelDir = modelDir;
         _archiver = archiver;
         _asrModelName = asrModelName;
         _cleanupModelName = cleanupModelName;
@@ -88,11 +89,46 @@ public sealed class PipelineHost : IDisposable
         _focusedCapturer = focusedCapturer;
     }
 
-    public void Start()
+    /// <summary>True once the ASR model is loaded and the hotkey pipeline is running.</summary>
+    public bool IsRunning { get; private set; }
+
+    /// <summary>
+    /// Loads the ASR model and starts the hotkey pipeline. Safe to call again
+    /// later — e.g. after the Models tab finishes downloading. When the model
+    /// files are missing (fresh install, issue #6) the pipeline stays disabled,
+    /// the condition is reported on the error bus (which deep-links to the
+    /// Models tab), and the method returns false instead of throwing.
+    /// </summary>
+    public bool TryStart()
     {
+        if (IsRunning) return true;
+        if (_asr is null)
+        {
+            if (!ParakeetSession.ModelFilesPresent(_modelDir))
+            {
+                _log.LogWarning("ASR model files missing in {ModelDir}; pipeline disabled until models are downloaded", _modelDir);
+                _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                    new FileNotFoundException("Speech model not installed. Open the Models tab to download it."),
+                    Guid.Empty);
+                return false;
+            }
+            try
+            {
+                _asr = new ParakeetSession(_modelDir);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Failed to load ASR model from {ModelDir}; pipeline disabled", _modelDir);
+                _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
+                return false;
+            }
+        }
         _hook.Start();
         _runCts = new CancellationTokenSource();
         _runTask = Task.Run(() => RunAsync(_runCts.Token));
+        IsRunning = true;
+        _log.LogInformation("Pipeline started (model dir {ModelDir})", _modelDir);
+        return true;
     }
 
     private async Task RunAsync(CancellationToken ct)
@@ -145,7 +181,7 @@ public sealed class PipelineHost : IDisposable
                 _sounds.PlayStop();
 
                 var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
-                var transcript = await Task.Run(() => _asr.Transcribe(samples), ct);
+                var transcript = await Task.Run(() => _asr!.Transcribe(samples), ct);
                 transcribeSw.Stop();
                 _engine.Apply(SessionEvent.TranscriptReady);
 
@@ -301,7 +337,7 @@ public sealed class PipelineHost : IDisposable
                     _sounds.PlayStop();
 
                     var transcribeSw2 = System.Diagnostics.Stopwatch.StartNew();
-                    var transcript2 = await Task.Run(() => _asr.Transcribe(samples2), ct);
+                    var transcript2 = await Task.Run(() => _asr!.Transcribe(samples2), ct);
                     transcribeSw2.Stop();
                     _engine.Apply(SessionEvent.TranscriptReady);
 
@@ -434,7 +470,7 @@ public sealed class PipelineHost : IDisposable
         _runCts?.Cancel();
         try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
         _hook.Dispose();
-        _asr.Dispose();
+        _asr?.Dispose();
         _recorder?.Dispose();
     }
 }

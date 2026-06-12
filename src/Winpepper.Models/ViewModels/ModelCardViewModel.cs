@@ -8,15 +8,21 @@ public sealed class ModelCardViewModel : INotifyPropertyChanged
 {
     private readonly string _installRoot;
     private readonly Action<string> _promote;
+    private readonly Action<Action> _dispatch;
 
     public ModelCardViewModel(ModelKind kind, IEnumerable<ModelDescriptor> available,
-                              string installRoot, string selectedName, Action<string> promote)
+                              string installRoot, string selectedName, Action<string> promote,
+                              Action<Action>? dispatch = null)
     {
         Kind = kind;
         Available = new ObservableCollection<ModelDescriptor>(available);
         _installRoot = installRoot;
         _selectedName = selectedName;
         _promote = promote;
+        // ObservableCollection/PropertyChanged feed XAML bindings, so all
+        // mutations must run on the UI thread. The host passes a UI-thread
+        // dispatcher; tests and headless callers get inline execution.
+        _dispatch = dispatch ?? (a => a());
     }
 
     public ModelKind Kind { get; }
@@ -38,6 +44,9 @@ public sealed class ModelCardViewModel : INotifyPropertyChanged
     public ObservableCollection<DownloadProgress> ProgressByFile { get; } = new();
 
     public void ReportProgress(DownloadProgress progress)
+        => _dispatch(() => ReportProgressCore(progress));
+
+    private void ReportProgressCore(DownloadProgress progress)
     {
         for (var i = 0; i < ProgressByFile.Count; i++)
         {
@@ -60,7 +69,7 @@ public sealed class ModelCardViewModel : INotifyPropertyChanged
     /// through <see cref="SelectedName"/>.
     /// </summary>
     public void RaiseIsSelectedInstalledChanged()
-        => OnPropertyChanged(nameof(IsSelectedInstalled));
+        => _dispatch(() => OnPropertyChanged(nameof(IsSelectedInstalled)));
 
     public event PropertyChangedEventHandler? PropertyChanged;
     private void OnPropertyChanged([CallerMemberName] string? name = null)

@@ -81,8 +81,18 @@ public sealed class AppShell : IDisposable
                 {
                     if (t.IsCompletedSuccessfully && !string.IsNullOrEmpty(t.Result))
                     {
-                        uiThread.Post(() => (Winpepper.App.App.Shell?.Main as Winpepper.App.Views.MainWindow)?.NavigateToTag(t.Result));
-                        uiThread.Post(() => Winpepper.App.App.Shell?.ShowMain());
+                        // ShowMain() must run BEFORE NavigateToTag: when the
+                        // main window was closed, ShowMain() constructs a new
+                        // MainWindow, so navigating first targets the dead
+                        // window and the freshly shown one opens on its
+                        // default tab instead of the toast's deep link.
+                        uiThread.Post(() =>
+                        {
+                            var shell = Winpepper.App.App.Shell;
+                            if (shell is null) return;
+                            shell.ShowMain();
+                            (shell.Main as Winpepper.App.Views.MainWindow)?.NavigateToTag(t.Result);
+                        });
                     }
                 });
         });

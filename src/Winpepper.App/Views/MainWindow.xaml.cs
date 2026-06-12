@@ -13,6 +13,13 @@ public sealed partial class MainWindow : Window
         _shell = shell;
         InitializeComponent();
         Title = "Winpepper";
+
+        // Mica gives the shell the standard Windows 11 layered backdrop. It
+        // can fail on older systems (no DWM/composition support), in which
+        // case the default opaque backdrop is kept.
+        try { SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop(); }
+        catch { /* Mica unsupported on this system; keep the default backdrop */ }
+
         Nav.SelectionChanged += OnNavSelectionChanged;
         Nav.SelectedItem = Nav.MenuItems[0];
         AppWindow.Closing += OnAppWindowClosing;

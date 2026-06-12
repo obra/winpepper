@@ -5,22 +5,74 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Winpepper.App.Views.Controls">
     <ScrollViewer>
-        <StackPanel Padding="24" Spacing="16" MaxWidth="640">
+        <StackPanel Padding="24" Spacing="12" MaxWidth="720" HorizontalAlignment="Left">
+
             <TextBlock Text="Recording" Style="{ThemeResource TitleTextBlockStyle}" />
-            <controls:HotkeyRecorderBox x:Name="HoldBox" Label="Hold to record" AutomationProperties.AutomationId="RecordingHoldHotkeyBox" />
-            <controls:HotkeyRecorderBox x:Name="ToggleBox" Label="Toggle to record" AutomationProperties.AutomationId="RecordingToggleHotkeyBox" />
-            <StackPanel Spacing="6">
-                <TextBlock Text="Microphone" />
-                <ComboBox x:Name="MicCombo" AutomationProperties.AutomationId="RecordingMicCombo" PlaceholderText="Select an input device" Width="400" />
-                <ProgressBar x:Name="LevelMeter" AutomationProperties.AutomationId="RecordingLevelMeter" Minimum="0" Maximum="1" Height="6" />
-            </StackPanel>
-            <ToggleSwitch x:Name="SoundsToggle" AutomationProperties.AutomationId="RecordingSoundsToggle" Header="Play start/stop sounds" />
-            <ToggleSwitch x:Name="SpeakerFilterToggle" AutomationProperties.AutomationId="RecordingSpeakerFilterToggle" Header="Speaker filter (experimental)" />
-            <ToggleSwitch x:Name="AutostartToggle" AutomationProperties.AutomationId="RecordingAutostartToggle" Header="Start with Windows" />
-            <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBox x:Name="TestBox" AutomationProperties.AutomationId="RecordingTestTextBox" PlaceholderText="Test dictation lands here..." Width="380" />
-                <Button Content="Focus" Click="OnFocusTestBox" AutomationProperties.AutomationId="RecordingFocusTestBoxButton" />
-            </StackPanel>
+            <TextBlock Text="Set up how you start and stop dictation, and which microphone Winpepper listens to."
+                       Style="{ThemeResource BodyTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,8" />
+
+            <!-- Hotkeys -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Hotkeys" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <TextBlock Text="Global shortcuts that work in any app."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <controls:HotkeyRecorderBox x:Name="HoldBox" Label="Hold to record" AutomationProperties.AutomationId="RecordingHoldHotkeyBox" />
+                    <controls:HotkeyRecorderBox x:Name="ToggleBox" Label="Toggle to record" AutomationProperties.AutomationId="RecordingToggleHotkeyBox" />
+                </StackPanel>
+            </Border>
+
+            <!-- Microphone -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Microphone" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <ComboBox x:Name="MicCombo" AutomationProperties.AutomationId="RecordingMicCombo" PlaceholderText="Select an input device" HorizontalAlignment="Stretch" />
+                    <ProgressBar x:Name="LevelMeter" AutomationProperties.AutomationId="RecordingLevelMeter" Minimum="0" Maximum="1" Height="6" />
+                    <TextBlock Text="Speak and the level meter should move."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+            </Border>
+
+            <!-- Options -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Options" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <ToggleSwitch x:Name="SoundsToggle" AutomationProperties.AutomationId="RecordingSoundsToggle" Header="Play start/stop sounds" />
+                    <ToggleSwitch x:Name="SpeakerFilterToggle" AutomationProperties.AutomationId="RecordingSpeakerFilterToggle" Header="Speaker filter (experimental)" />
+                    <ToggleSwitch x:Name="AutostartToggle" AutomationProperties.AutomationId="RecordingAutostartToggle" Header="Start with Windows" />
+                </StackPanel>
+            </Border>
+
+            <!-- Test -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Test dictation" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <TextBlock Text="Focus the box, press your hotkey, and say a sentence."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="TestBox" AutomationProperties.AutomationId="RecordingTestTextBox" PlaceholderText="Test dictation lands here..." />
+                        <Button Grid.Column="1" Content="Focus" Click="OnFocusTestBox" AutomationProperties.AutomationId="RecordingFocusTestBoxButton" VerticalAlignment="Bottom" />
+                    </Grid>
+                </StackPanel>
+            </Border>
         </StackPanel>
     </ScrollViewer>
 </Page>

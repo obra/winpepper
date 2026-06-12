@@ -23,4 +23,7 @@ public sealed record DownloadProgress
     public string? ErrorMessage { get; init; }
 
     public double PercentComplete => TotalBytes <= 0 ? 0.0 : 100.0 * BytesDownloaded / TotalBytes;
+
+    /// <summary>Caption shown next to the per-file progress bar, e.g. "42% - Downloading".</summary>
+    public string ProgressDisplay => $"{PercentComplete:0}% - {Phase}";
 }

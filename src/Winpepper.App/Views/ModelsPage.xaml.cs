@@ -79,8 +79,15 @@ public sealed partial class ModelsPage : Page
 
     private void UpdateInstalledLabels()
     {
-        AsrInstalledText.Text = ViewModel.AsrCard.IsSelectedInstalled ? "yes" : "no";
-        CleanupInstalledText.Text = ViewModel.CleanupCard.IsSelectedInstalled ? "yes" : "no";
+        var asrInstalled = ViewModel.AsrCard.IsSelectedInstalled;
+        AsrInstalledText.Text = asrInstalled ? "Installed" : "Not downloaded";
+        AsrInstalledIcon.Visibility = asrInstalled ? Visibility.Visible : Visibility.Collapsed;
+        AsrNotInstalledIcon.Visibility = asrInstalled ? Visibility.Collapsed : Visibility.Visible;
+
+        var cleanupInstalled = ViewModel.CleanupCard.IsSelectedInstalled;
+        CleanupInstalledText.Text = cleanupInstalled ? "Installed" : "Not downloaded";
+        CleanupInstalledIcon.Visibility = cleanupInstalled ? Visibility.Visible : Visibility.Collapsed;
+        CleanupNotInstalledIcon.Visibility = cleanupInstalled ? Visibility.Collapsed : Visibility.Visible;
     }
 }
 #endif

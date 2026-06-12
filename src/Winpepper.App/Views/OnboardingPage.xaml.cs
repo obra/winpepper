@@ -77,9 +77,19 @@ public sealed partial class OnboardingPage : Page
         Show(DonePanel,      OnboardingStep.Done);
 
         Border Dot(int i) => i switch { 1 => StepDot1, 2 => StepDot2, 3 => StepDot3, _ => StepDot4 };
+        // Prefer the theme brushes so the dots track light/dark mode and the
+        // user's accent color; fall back to fixed colors if lookup fails.
+        Microsoft.UI.Xaml.Media.Brush? active = null, inactive = null;
+        try
+        {
+            active = Application.Current.Resources["AccentFillColorDefaultBrush"] as Microsoft.UI.Xaml.Media.Brush;
+            inactive = Application.Current.Resources["ControlStrokeColorDefaultBrush"] as Microsoft.UI.Xaml.Media.Brush;
+        }
+        catch { /* resource missing on this OS build; use fallbacks below */ }
+        active ??= new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.SteelBlue);
+        inactive ??= new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Gray);
         for (var i = 1; i <= 4; i++)
-            Dot(i).Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(
-                ((int)_vm.Step) >= (i - 1) ? Microsoft.UI.Colors.SteelBlue : Microsoft.UI.Colors.Gray);
+            Dot(i).Background = ((int)_vm.Step) >= (i - 1) ? active : inactive;
 
         RefreshButtons();
     }

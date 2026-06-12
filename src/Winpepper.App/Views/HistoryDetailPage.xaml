@@ -3,101 +3,144 @@
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:local="using:Winpepper.App.Views"
       xmlns:models="using:Winpepper.Models">
-    <ScrollViewer Padding="24">
-        <Grid>
+    <ScrollViewer>
+        <Grid Padding="24" MaxWidth="800" HorizontalAlignment="Left">
 
             <!-- Empty state: the Lab nav item opens this page with no history
                  entry. Show a hint instead of dead editor chrome (issue #21). -->
             <StackPanel x:Name="EmptyStatePanel" Visibility="Collapsed" Spacing="12"
-                        HorizontalAlignment="Center" Margin="0,120,0,0">
-                <TextBlock Text="Pick a history entry from the History tab to begin."
+                        HorizontalAlignment="Center" Margin="0,120,0,0" MaxWidth="380">
+                <FontIcon Glyph="&#xE81C;" FontSize="48"
+                          Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                          HorizontalAlignment="Center" />
+                <TextBlock Text="Nothing to experiment on yet"
                            Style="{StaticResource SubtitleTextBlockStyle}"
                            HorizontalAlignment="Center" />
-                <Button Content="Go to History" HorizontalAlignment="Center" Click="OnGoToHistory" />
+                <TextBlock Text="Pick a history entry from the History tab to begin. The Lab lets you replay a dictation and rerun it through different models and prompts."
+                           Style="{ThemeResource BodyTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           TextAlignment="Center" />
+                <Button Content="Go to History" HorizontalAlignment="Center" Click="OnGoToHistory" Style="{StaticResource AccentButtonStyle}" />
             </StackPanel>
 
-        <StackPanel x:Name="EditorRoot" Spacing="16">
+            <StackPanel x:Name="EditorRoot" Spacing="12">
 
-            <TextBlock Text="History detail" Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock Text="Lab" Style="{StaticResource TitleTextBlockStyle}" />
+                <TextBlock Text="Inspect this dictation, replay the audio, and rerun it through different models and prompts."
+                           Style="{ThemeResource BodyTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                           TextWrapping="Wrap"
+                           Margin="0,0,0,8" />
 
-            <!-- Original side-by-side -->
-            <Grid ColumnSpacing="16">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0">
-                    <TextBlock Text="Original transcript" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock x:Name="OriginalTranscriptText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                </StackPanel>
-                <StackPanel Grid.Column="1">
-                    <TextBlock Text="Original cleaned text" Style="{StaticResource SubtitleTextBlockStyle}" />
-                    <TextBlock x:Name="OriginalCleanedText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
-                </StackPanel>
-            </Grid>
+                <!-- Original texts side-by-side -->
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" CornerRadius="8" Padding="16">
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="8">
+                            <TextBlock Text="Original transcript" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock x:Name="OriginalTranscriptText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                        </StackPanel>
+                        <StackPanel Grid.Column="1" Spacing="8">
+                            <TextBlock Text="Original cleaned text" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock x:Name="OriginalCleanedText" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
+                        </StackPanel>
+                    </Grid>
+                </Border>
 
-            <!-- WAV playback. We don't use MediaPlayerElement because its default
-                 MediaTransportControls template includes Cast-to-Device, Aspect
-                 Ratio, and Full-Window buttons that make no sense for a few-
-                 second dictation clip, and WinUI 3 exposes no public API to hide
-                 the Cast and Full-Window buttons. A minimal Play/Seek/Time row
-                 driven by a bare MediaPlayer is enough here. -->
-            <Grid x:Name="WavPlayerRow" ColumnSpacing="8" Height="40">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <Button x:Name="PlayPauseBtn" Grid.Column="0" Click="OnPlayPauseClicked"
-                        IsEnabled="False" Width="40" Height="32" Padding="0">
-                    <FontIcon x:Name="PlayPauseIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
-                              Glyph="&#xE768;" FontSize="14" />
-                </Button>
-                <Button x:Name="MuteBtn" Grid.Column="1" Click="OnMuteClicked"
-                        IsEnabled="False" Width="40" Height="32" Padding="0">
-                    <FontIcon x:Name="MuteIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
-                              Glyph="&#xE767;" FontSize="14" />
-                </Button>
-                <TextBlock x:Name="PositionText" Grid.Column="2" Text="0:00"
-                           VerticalAlignment="Center" FontFamily="Cascadia Mono,Consolas,monospace" />
-                <Slider x:Name="SeekSlider" Grid.Column="3" Minimum="0" Maximum="1"
-                        StepFrequency="0.001" IsEnabled="False"
-                        VerticalAlignment="Center"
-                        ValueChanged="OnSeekChanged" />
-                <TextBlock x:Name="DurationText" Grid.Column="4" Text="0:00"
-                           VerticalAlignment="Center" FontFamily="Cascadia Mono,Consolas,monospace" />
-            </Grid>
+                <!-- WAV playback. We don't use MediaPlayerElement because its default
+                     MediaTransportControls template includes Cast-to-Device, Aspect
+                     Ratio, and Full-Window buttons that make no sense for a few-
+                     second dictation clip, and WinUI 3 exposes no public API to hide
+                     the Cast and Full-Window buttons. A minimal Play/Seek/Time row
+                     driven by a bare MediaPlayer is enough here. -->
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" CornerRadius="8" Padding="16,8">
+                    <Grid x:Name="WavPlayerRow" ColumnSpacing="8" Height="40">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Button x:Name="PlayPauseBtn" Grid.Column="0" Click="OnPlayPauseClicked"
+                                IsEnabled="False" Width="40" Height="32" Padding="0"
+                                ToolTipService.ToolTip="Play / pause">
+                            <FontIcon x:Name="PlayPauseIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
+                                      Glyph="&#xE768;" FontSize="14" />
+                        </Button>
+                        <Button x:Name="MuteBtn" Grid.Column="1" Click="OnMuteClicked"
+                                IsEnabled="False" Width="40" Height="32" Padding="0"
+                                ToolTipService.ToolTip="Mute / unmute">
+                            <FontIcon x:Name="MuteIcon" FontFamily="Segoe Fluent Icons,Segoe MDL2 Assets"
+                                      Glyph="&#xE767;" FontSize="14" />
+                        </Button>
+                        <TextBlock x:Name="PositionText" Grid.Column="2" Text="0:00"
+                                   VerticalAlignment="Center" FontFamily="Cascadia Mono,Consolas,monospace" />
+                        <Slider x:Name="SeekSlider" Grid.Column="3" Minimum="0" Maximum="1"
+                                StepFrequency="0.001" IsEnabled="False"
+                                VerticalAlignment="Center"
+                                ValueChanged="OnSeekChanged" />
+                        <TextBlock x:Name="DurationText" Grid.Column="4" Text="0:00"
+                                   VerticalAlignment="Center" FontFamily="Cascadia Mono,Consolas,monospace" />
+                    </Grid>
+                </Border>
 
-            <!-- Rerun transcription panel -->
-            <StackPanel Spacing="8" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">
-                <TextBlock Text="Rerun transcription" Style="{StaticResource SubtitleTextBlockStyle}" />
-                <ComboBox x:Name="AsrModelPicker"
-                          ItemsSource="{x:Bind AvailableAsrModels, Mode=OneWay}"
-                          DisplayMemberPath="DisplayName"
-                          SelectionChanged="OnAsrSelectionChanged" />
-                <Button Content="Run" Click="OnRunTranscriptionRerun" />
-                <local:DiffSegmentsControl x:Name="TranscriptionDiff" />
-                <Button Content="Use as default ASR" Click="OnPromoteAsr" />
+                <!-- Rerun transcription panel -->
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="Rerun transcription" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock Text="Run the recorded audio through another speech model and compare."
+                                   Style="{ThemeResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <ComboBox x:Name="AsrModelPicker"
+                                  Header="Model"
+                                  HorizontalAlignment="Stretch"
+                                  ItemsSource="{x:Bind AvailableAsrModels, Mode=OneWay}"
+                                  DisplayMemberPath="DisplayName"
+                                  SelectionChanged="OnAsrSelectionChanged" />
+                        <Button Content="Run" Click="OnRunTranscriptionRerun" Style="{StaticResource AccentButtonStyle}" MinWidth="100" />
+                        <local:DiffSegmentsControl x:Name="TranscriptionDiff" />
+                        <Button Content="Use as default ASR" Click="OnPromoteAsr" />
+                    </StackPanel>
+                </Border>
+
+                <!-- Rerun cleanup panel -->
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1" CornerRadius="8" Padding="16">
+                    <StackPanel Spacing="12">
+                        <TextBlock Text="Rerun cleanup" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                        <TextBlock Text="Re-polish the transcript with another cleanup model or prompt and compare."
+                                   Style="{ThemeResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <ComboBox x:Name="CleanupModelPicker"
+                                  Header="Model"
+                                  HorizontalAlignment="Stretch"
+                                  ItemsSource="{x:Bind AvailableCleanupModels, Mode=OneWay}"
+                                  DisplayMemberPath="DisplayName"
+                                  SelectionChanged="OnCleanupSelectionChanged" />
+                        <TextBox x:Name="CustomPromptBox" PlaceholderText="Optional custom base prompt..."
+                                 AcceptsReturn="True" TextWrapping="Wrap" Height="120" />
+                        <ToggleSwitch x:Name="WindowContextToggle" Header="Include window context" />
+                        <Button Content="Run" Click="OnRunCleanupRerun" Style="{StaticResource AccentButtonStyle}" MinWidth="100" />
+                        <local:DiffSegmentsControl x:Name="CleanupDiff" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Show cleanup transcript" Click="OnShowCleanupTranscript" />
+                            <Button Content="Use as default cleanup" Click="OnPromoteCleanup" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
             </StackPanel>
-
-            <!-- Rerun cleanup panel -->
-            <StackPanel Spacing="8" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6">
-                <TextBlock Text="Rerun cleanup" Style="{StaticResource SubtitleTextBlockStyle}" />
-                <ComboBox x:Name="CleanupModelPicker"
-                          ItemsSource="{x:Bind AvailableCleanupModels, Mode=OneWay}"
-                          DisplayMemberPath="DisplayName"
-                          SelectionChanged="OnCleanupSelectionChanged" />
-                <TextBox x:Name="CustomPromptBox" PlaceholderText="Optional custom base prompt..."
-                         AcceptsReturn="True" TextWrapping="Wrap" Height="120" />
-                <ToggleSwitch x:Name="WindowContextToggle" Header="Include window context" />
-                <Button Content="Run" Click="OnRunCleanupRerun" />
-                <local:DiffSegmentsControl x:Name="CleanupDiff" />
-                <Button Content="Show cleanup transcript" Click="OnShowCleanupTranscript" />
-                <Button Content="Use as default cleanup" Click="OnPromoteCleanup" />
-            </StackPanel>
-        </StackPanel>
         </Grid>
     </ScrollViewer>
 </Page>

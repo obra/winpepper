@@ -37,6 +37,11 @@ public static class Program
             return 0;
         }
 
+        // We are the primary instance. Second launches redirect their
+        // activation here (see above); surface the main window so relaunching
+        // the app is a reliable way to get the UI back (issue #10).
+        instance.Activated += OnActivationRedirected;
+
         WinRT.ComWrappersSupport.InitializeComWrappers();
         Application.Start((p) =>
         {
@@ -45,6 +50,13 @@ public static class Program
             _ = new App();
         });
         return 0;
+    }
+
+    private static void OnActivationRedirected(object? sender, AppActivationArguments e)
+    {
+        // Raised on a non-UI thread; hop to the dispatcher via the shell.
+        var shell = App.Shell;
+        shell?.Ui.Post(() => shell.ShowMain());
     }
 
     private static void OnAppDomainUnhandled(object sender, System.UnhandledExceptionEventArgs e)

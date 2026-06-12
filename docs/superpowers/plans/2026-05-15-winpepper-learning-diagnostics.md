@@ -19,7 +19,7 @@
 
 **Known WinUI build carry-forward.** As of Plans 3 and 4, `dotnet build src/Winpepper.App` on the VM fails during the WinAppSDK 1.6/1.7 + .NET 9 XAML markup compiler step (`PlatformNotSupportedException: RuntimeEnvironment.GetRuntimeInterfaceAsObject` — diagnosed in the Plan 3 milestone commit). Plan 5 does **not** try to fix this. Tasks that touch `Winpepper.App` XAML or its code-behind (Tasks 14, 15, 16, 17, 18, 19, 21, 23) are written for the eventual fixed-toolchain world. When you reach one of those tasks, write the code exactly as specified, run the build, observe the same WinUI-toolchain failure, commit the code as-written, and move on. The view-model / pure-C# pieces (everything in `Winpepper.Core`, `Winpepper.Corrections`, `Winpepper.Platform` (non-XAML), and the Diagnostics view-model in `Winpepper.App` if it builds standalone) compile and test on Linux throughout.
 
-**Repo root throughout:** `/home/jesse/git/winpepper/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced via `scripts/sync-to-vm.sh`).
+**Repo root throughout:** `$REPO_ROOT/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced via `scripts/sync-to-vm.sh`).
 
 ---
 
@@ -44,10 +44,10 @@
 ## Task 1: Scaffold `ErrorBus` in `Winpepper.Core`
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Errors/ErrorRecord.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Errors/ErrorStage.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Errors/ErrorBus.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Errors/ErrorBusTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Errors/ErrorRecord.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Errors/ErrorStage.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Errors/ErrorBus.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Errors/ErrorBusTests.cs`
 
 The spec (§9.1) calls for a single channel that every pipeline stage funnels failures through. The tray, the Diagnostics page, and the toast service all subscribe. Implementation: a small in-process pub/sub with an in-memory ring of the last N records (so a late subscriber can render the most recent error).
 
@@ -114,7 +114,7 @@ public class ErrorBusTests
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet test tests/Winpepper.Core.Tests --filter "FullyQualifiedName~ErrorBusTests"
 ```
 
@@ -263,9 +263,9 @@ git commit -m "feat(core): ErrorBus pub/sub with capped recent buffer"
 ## Task 2: `LogRingBuffer` ring-buffer for the Diagnostics live tail
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Logging/LogRingBuffer.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Logging/LogTailEntry.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Logging/LogRingBufferTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Logging/LogRingBuffer.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Logging/LogTailEntry.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Logging/LogRingBufferTests.cs`
 
 Spec §7.3: "Live log tail (rolling last 2000 lines)". This is a thread-safe FIFO ring that the Serilog sink writes into and the Diagnostics view-model reads.
 
@@ -416,9 +416,9 @@ git commit -m "feat(core): LogRingBuffer for Diagnostics live tail"
 ## Task 3: Serilog sink that writes into `LogRingBuffer`
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Logging/RingBufferSink.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Core/Logging/WinpepperLogging.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Logging/RingBufferSinkTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Logging/RingBufferSink.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.Core/Logging/WinpepperLogging.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Logging/RingBufferSinkTests.cs`
 
 Plan 1's `WinpepperLogging.Create(...)` returns an `ILoggerFactory` and wires Serilog's file and console sinks. We extend it with a third sink that appends into a shared `LogRingBuffer`. The buffer is returned alongside the factory so `AppShell` can hand it to the Diagnostics view-model.
 
@@ -608,11 +608,11 @@ git commit -m "feat(logging): Serilog ring-buffer sink for Diagnostics tail"
 ## Task 4: Token-level Levenshtein + learning-diff acceptance
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/LevenshteinDistance.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/LearningCandidate.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/LearningDiffAnalyzer.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Learning/LevenshteinDistanceTests.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Learning/LearningDiffAnalyzerTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/LevenshteinDistance.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/LearningCandidate.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/LearningDiffAnalyzer.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Learning/LevenshteinDistanceTests.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Learning/LearningDiffAnalyzerTests.cs`
 
 Spec §8.2 (4): the analyzer must apply pepper-x's constraints — minimum word length 3, edit distance ≤ 60 % of the word's length, no whitespace-only diffs, no punctuation drift, no common autocomplete patterns. Anchored at a single word position in the diff window. The pure-C# analyzer lives in `Winpepper.Core.Learning` so it's testable on Linux.
 
@@ -644,7 +644,7 @@ public class LevenshteinDistanceTests
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet test tests/Winpepper.Core.Tests --filter "FullyQualifiedName~LevenshteinDistanceTests"
 ```
 
@@ -910,10 +910,10 @@ git commit -m "feat(learning): token-level Levenshtein diff with pepper-x constr
 ## Task 5: `IFocusedElementTextWatcher` abstraction + in-memory fake
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/IFocusedElementTextWatcher.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/FocusedElementTextChange.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/FakeFocusedElementTextWatcher.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Learning/FakeFocusedElementTextWatcherTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/IFocusedElementTextWatcher.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/FocusedElementTextChange.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/FakeFocusedElementTextWatcher.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Learning/FakeFocusedElementTextWatcherTests.cs`
 
 The Windows-specific UIA subscription goes in `Winpepper.Platform.Learning` in Task 7. `Winpepper.Core.PostPasteWatcher` (Task 6) depends only on the abstraction so it's tested without UIA.
 
@@ -1072,11 +1072,11 @@ git commit -m "feat(learning): IFocusedElementTextWatcher abstraction + fake"
 ## Task 6: `PostPasteWatcher` — the learning orchestrator
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/PostPasteContext.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/PostPasteDecision.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/IPostPasteToastPrompt.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/PostPasteWatcher.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Learning/PostPasteWatcherTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/PostPasteContext.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/PostPasteDecision.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/IPostPasteToastPrompt.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/PostPasteWatcher.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Learning/PostPasteWatcherTests.cs`
 
 Spec §8.2 (1)–(7). The watcher takes a context captured at injection time, subscribes via `IFocusedElementTextWatcher`, runs each change through `LearningDiffAnalyzer`, and — on the first accepted candidate — calls `IPostPasteToastPrompt.AskAsync(...)` to render the non-modal Yes/Preferred/No toast. The toast prompt is an abstraction so tests assert on the call without a real WinUI toast. Behaviour per spec:
 
@@ -1555,9 +1555,9 @@ git commit -m "feat(learning): PostPasteWatcher with toast prompt + correction w
 ## Task 7: Windows `UiaFocusedElementTextWatcher`
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Learning/UiaFocusedElementCapture.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Learning/UiaFocusedElementTextWatcher.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Learning/UiaFocusedElementCaptureTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Learning/UiaFocusedElementCapture.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Learning/UiaFocusedElementTextWatcher.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Learning/UiaFocusedElementCaptureTests.cs`
 
 Spec §8.2 (2): subscribe to UIA `TextEdit_TextChangedEvent` on the focused element (fallback `Text_TextChangedEvent`). Two pieces:
 
@@ -1601,7 +1601,7 @@ public class UiaFocusedElementCaptureTests
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet test tests/Winpepper.Platform.Tests --filter "FullyQualifiedName~UiaFocusedElementCaptureTests"
 ```
 
@@ -1775,9 +1775,9 @@ git commit -m "feat(platform): UIA-backed IFocusedElementTextWatcher implementat
 ## Task 8: Capture the focused UIA element at injection time
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Learning/FocusedElementSnapshot.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Learning/FocusedElementCapturer.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Learning/FocusedElementSnapshotTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Learning/FocusedElementSnapshot.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Learning/FocusedElementCapturer.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Learning/FocusedElementSnapshotTests.cs`
 
 Spec §8.2 (1): "After injection completes, record `(foregroundWindowHandle, focusedElementRuntimeId, injectedText, injectionEndTime)`." We capture the foreground hwnd + the focused `AutomationElement` and the stringified RuntimeId. The capture API is Windows-only; the record type is cross-platform.
 
@@ -1938,10 +1938,10 @@ git commit -m "feat(platform): FocusedElementCapturer + FocusedElementSnapshot"
 ## Task 9: Diagnostics bundle assembler
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Diagnostics/DiagnosticsBundle.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Diagnostics/DiagnosticsSysInfo.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Diagnostics/DiagnosticsBundleBuilder.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Diagnostics/DiagnosticsBundleBuilderTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Diagnostics/DiagnosticsBundle.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Diagnostics/DiagnosticsSysInfo.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Diagnostics/DiagnosticsBundleBuilder.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Diagnostics/DiagnosticsBundleBuilderTests.cs`
 
 Spec §7.3 + §9.5: "zips logs + system info + recent history metadata, never audio".
 
@@ -2191,8 +2191,8 @@ git commit -m "feat(diagnostics): bundle builder zips logs/history/settings/sysi
 ## Task 10: `DiagnosticsViewModel`
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/DiagnosticsViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/ViewModels/DiagnosticsViewModelTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/ViewModels/DiagnosticsViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/ViewModels/DiagnosticsViewModelTests.cs`
 
 The view-model exposes:
 
@@ -2411,11 +2411,11 @@ git commit -m "feat(viewmodels): DiagnosticsViewModel with bound log tail"
 ## Task 11: `CrashHandler` + `MiniDumpWriter`
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Crash/MiniDumpWriter.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Crash/DbgHelpNative.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Crash/CrashHandler.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Crash/ICrashSink.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Crash/CrashHandlerTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Crash/MiniDumpWriter.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Crash/DbgHelpNative.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Crash/CrashHandler.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Crash/ICrashSink.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Crash/CrashHandlerTests.cs`
 
 Spec §9.3: catch `AppDomain.UnhandledException` and `TaskScheduler.UnobservedTaskException`. Log. Write a minidump via `dbghelp.dll!MiniDumpWriteDump`. Attempt state-machine reset to Idle. Exit only if reset fails.
 
@@ -2750,10 +2750,10 @@ git commit -m "feat(crash): CrashHandler + MiniDumpWriter (dbghelp P/Invoke)"
 ## Task 12: `IToastService` + fake
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Notifications/IToastService.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Notifications/ToastButton.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Notifications/FakeToastService.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Notifications/FakeToastServiceTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Notifications/IToastService.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Notifications/ToastButton.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Notifications/FakeToastService.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Notifications/FakeToastServiceTests.cs`
 
 Spec §5.6: "the cleaned text is copied to the clipboard and a toast says so". Spec §8.2 (5): the post-paste learning prompt is a non-modal toast. We unify both flows behind one interface.
 
@@ -2888,8 +2888,8 @@ git commit -m "feat(notifications): IToastService abstraction + fake"
 ## Task 13: `ToastPostPasteToastPrompt` adapter
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Learning/ToastPostPasteToastPrompt.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Learning/ToastPostPasteToastPromptTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Learning/ToastPostPasteToastPrompt.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Learning/ToastPostPasteToastPromptTests.cs`
 
 Bridges `IPostPasteToastPrompt` (Task 6) to `IToastService` (Task 12). Per spec §8.2 (5)–(6): three buttons (Yes / Preferred / No), 8 s timeout, timeout treated as No.
 
@@ -3028,8 +3028,8 @@ git commit -m "feat(learning): ToastPostPasteToastPrompt adapter"
 ## Task 14: WinUI `AppNotificationToastService`
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Notifications/AppNotificationToastService.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Winpepper.App.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.App/Notifications/AppNotificationToastService.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Winpepper.App.csproj`
 
 > **WinUI build carry-forward:** This task lives inside `Winpepper.App`. The XAML-compiler PNSE that Plans 3 and 4 hit still applies. Write the code as specified, run the build, observe the failure, commit, move on.
 
@@ -3130,10 +3130,10 @@ git commit -m "feat(app): WinAppSDK-backed AppNotificationToastService"
 ## Task 15: Wire `ErrorBus` through `PipelineHost`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/PipelineHost.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/AppShell.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/SessionViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/ViewModels/SessionViewModelErrorBusTests.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/PipelineHost.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/AppShell.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.Core/ViewModels/SessionViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/ViewModels/SessionViewModelErrorBusTests.cs`
 
 > **WinUI build carry-forward:** `PipelineHost` and `AppShell` are Windows-only. Build to verify the diff isn't a typo and commit as-written.
 
@@ -3499,9 +3499,9 @@ git commit -m "feat(errors): route pipeline failures through ErrorBus"
 ## Task 16: Clipboard fallback + clipboard toast
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Injection/ClipboardFallback.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/PipelineHost.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Injection/ClipboardFallbackTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Injection/ClipboardFallback.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/PipelineHost.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Injection/ClipboardFallbackTests.cs`
 
 > **WinUI build carry-forward:** `PipelineHost` edits still hit the WinUI compiler. Commit as-written.
 
@@ -3736,8 +3736,8 @@ git commit -m "feat(injection): clipboard fallback with toast when SendInput ref
 ## Task 17: Wire `PostPasteWatcher` into `PipelineHost`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/PipelineHost.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/AppShell.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/PipelineHost.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/AppShell.cs`
 
 > **WinUI build carry-forward.**
 
@@ -3865,8 +3865,8 @@ git commit -m "feat(learning): fire PostPasteWatcher after every successful inje
 ## Task 18: Wire `CrashHandler` into `Program.Main`
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Program.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/App.xaml.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Program.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/App.xaml.cs`
 
 > **WinUI build carry-forward.**
 
@@ -3986,9 +3986,9 @@ git commit -m "feat(crash): register global handlers + wire MiniDumpWriter"
 ## Task 19: Tray icon Error state surfaces last error
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Tray/TrayIconHost.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Tray/TrayIconStateMapper.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Tray/TrayIconStateMapperTests.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Tray/TrayIconHost.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Tray/TrayIconStateMapper.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Tray/TrayIconStateMapperTests.cs`
 
 > **WinUI build carry-forward.** The Linux test in this task is for the pure-C# mapper.
 
@@ -4160,8 +4160,8 @@ git commit -m "feat(tray): icon state mapper with Error tooltip surface"
 ## Task 20: Per-stage error deep links
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Errors/ErrorDeepLink.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Errors/ErrorDeepLinkTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Errors/ErrorDeepLink.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Errors/ErrorDeepLinkTests.cs`
 
 Spec §9.1 table: "Mic unavailable" → device picker; "Model load fails" → Models tab. A pure-C# helper maps `ErrorStage` to a `NavigationTarget` string. `MainWindow` (Task 21) reads this when the user clicks the error toast.
 
@@ -4281,12 +4281,12 @@ git commit -m "feat(errors): ErrorDeepLink maps stages to nav tags + labels"
 ## Task 21: Diagnostics page XAML + nav routing + error-toast deep links
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/DiagnosticsPage.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/DiagnosticsPage.xaml.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Views/MainWindow.xaml`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Views/MainWindow.xaml.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/DiagnosticsHost.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/AppShell.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/DiagnosticsPage.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/DiagnosticsPage.xaml.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Views/MainWindow.xaml`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Views/MainWindow.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Hosting/DiagnosticsHost.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/AppShell.cs`
 
 > **WinUI build carry-forward.**
 
@@ -4569,7 +4569,7 @@ git commit -m "feat(diagnostics): Diagnostics page + error-toast deep links"
 ## Task 22: Manual smoke procedure
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/docs/manual-test.md` — append a Plan 5 section.
+- Modify: `$REPO_ROOT/docs/manual-test.md` — append a Plan 5 section.
 
 Plan 5 introduces non-trivial Windows-only behaviour that the integration test suite can't drive (UIA on real apps, crash dump on real process). Manual smoke covers it.
 
@@ -4638,9 +4638,9 @@ git commit -m "docs: Plan 5 manual smoke procedure"
 ## Task 23: Debug-build crash trigger (developer-only)
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Tray/TrayMenu.xaml`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Tray/TrayMenu.xaml.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Tray/TrayIconHost.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Tray/TrayMenu.xaml`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Tray/TrayMenu.xaml.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Tray/TrayIconHost.cs`
 
 > **WinUI build carry-forward.**
 
@@ -4700,8 +4700,8 @@ git commit -m "feat(tray): debug-only 'Throw synthetic crash' menu item"
 ## Task 24: Integration test — `PostPasteWatcher` end-to-end with `CorrectionStore`
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.IntegrationTests/PostPasteLearningEndToEndTests.cs`
-- Modify: `/home/jesse/git/winpepper/tests/Winpepper.IntegrationTests/Winpepper.IntegrationTests.csproj` (add `Winpepper.Core` + `Winpepper.Corrections` refs if missing)
+- Create: `$REPO_ROOT/tests/Winpepper.IntegrationTests/PostPasteLearningEndToEndTests.cs`
+- Modify: `$REPO_ROOT/tests/Winpepper.IntegrationTests/Winpepper.IntegrationTests.csproj` (add `Winpepper.Core` + `Winpepper.Corrections` refs if missing)
 
 Spec §10.2: integration tests are opt-in via `WINPEPPER_INTEGRATION=1`. This test exercises the end-to-end `FakeFocusedElementTextWatcher` → `LearningDiffAnalyzer` → `ToastPostPasteToastPrompt` → `CorrectionStore` flow using a real on-disk `corrections.json` (atomic-file path).
 
@@ -4758,7 +4758,7 @@ public class PostPasteLearningEndToEndTests : IDisposable
 - [ ] **Step 2: Run the test**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet test tests/Winpepper.IntegrationTests --filter "FullyQualifiedName~PostPasteLearningEndToEndTests"
 ```
 
@@ -4783,7 +4783,7 @@ git commit -m "test(integration): post-paste learning end-to-end with disk-backe
 - [ ] **Step 1: Full Linux test run**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet test --filter "Platform!=Windows"
 ```
 

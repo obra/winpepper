@@ -39,7 +39,7 @@ Note that `CleanupRunner.RunAsync` takes a `Task<string?>?` (the text), not a `T
 
 If a Plan 2 task is still in flight, leave the corresponding binding behind an `#if true` guard so Plan 3 work can land. Mark the guard with `// PLAN2-TYPE` so the search is easy.
 
-**Repo root throughout:** `/home/jesse/git/winpepper/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced via `scripts/sync-to-vm.sh`).
+**Repo root throughout:** `$REPO_ROOT/` (Linux). Windows VM build/test directory: `C:\winpepper\` (synced via `scripts/sync-to-vm.sh`).
 
 ---
 
@@ -64,7 +64,7 @@ If a Plan 2 task is still in flight, leave the corresponding binding behind an `
 ## Task 1: Provision WinAppSDK runtime on the VM
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/scripts/provision-vm.ps1` — append a WinAppSDK runtime install block.
+- Modify: `$REPO_ROOT/scripts/provision-vm.ps1` — append a WinAppSDK runtime install block.
 
 The packaged `Winpepper.App` needs the WinApp Runtime installed on every machine that runs it. The MSI in Plan 6 will bootstrap it for end users; for development on the VM we install it once here.
 
@@ -92,7 +92,7 @@ if (-not $winAppSdkInstalled) {
 - [ ] **Step 2: Run on the VM**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/winssh < scripts/provision-vm.ps1
 ```
 
@@ -118,11 +118,11 @@ git commit -m "scripts(vm): install Windows App SDK 1.6 runtime"
 ## Task 2: Package versions for WinUI 3 and MVVM
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/Directory.Packages.props` — add WinAppSDK, H.NotifyIcon, CommunityToolkit.Mvvm.
+- Modify: `$REPO_ROOT/Directory.Packages.props` — add WinAppSDK, H.NotifyIcon, CommunityToolkit.Mvvm.
 
 - [ ] **Step 1: Append package versions to `Directory.Packages.props`**
 
-Open `/home/jesse/git/winpepper/Directory.Packages.props` and insert these `<PackageVersion>` entries inside the existing `<ItemGroup>` (keep the existing entries — do not remove anything):
+Open `$REPO_ROOT/Directory.Packages.props` and insert these `<PackageVersion>` entries inside the existing `<ItemGroup>` (keep the existing entries — do not remove anything):
 
 ```xml
     <PackageVersion Include="Microsoft.WindowsAppSDK" Version="1.6.241114003" />
@@ -135,7 +135,7 @@ Open `/home/jesse/git/winpepper/Directory.Packages.props` and insert these `<Pac
 - [ ] **Step 2: Restore on Linux to confirm version graph resolves**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 dotnet restore
 ```
@@ -154,8 +154,8 @@ git commit -m "deps: add WinAppSDK, H.NotifyIcon, MVVM toolkit, registry"
 ## Task 3: Settings schema additions for Plan 3
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Core/Settings/AppSettings.cs`
-- Modify: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Settings/SettingsStoreTests.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.Core/Settings/AppSettings.cs`
+- Modify: `$REPO_ROOT/tests/Winpepper.Core.Tests/Settings/SettingsStoreTests.cs`
 
 We're adding the settings keys the new UI binds to: autostart, completion of onboarding, the speaker-filter toggle (placeholder — actual filter is later), and a `LastVersionSeen` for future migrations. Cleanup/correction settings live in Plan 2's own files.
 
@@ -197,7 +197,7 @@ Add inside the `SettingsStoreTests` class, after the existing tests:
 - [ ] **Step 2: Verify failure**
 
 ```bash
-cd /home/jesse/git/winpepper && dotnet test tests/Winpepper.Core.Tests --filter "FullyQualifiedName~SettingsStoreTests"
+cd $REPO_ROOT && dotnet test tests/Winpepper.Core.Tests --filter "FullyQualifiedName~SettingsStoreTests"
 ```
 
 Expected: build fails — `AppSettings` has no `AutostartEnabled` etc.
@@ -234,9 +234,9 @@ git commit -m "feat(settings): add autostart, onboarding, speaker-filter, versio
 ## Task 4: IUiThread abstraction
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Threading/IUiThread.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Threading/SynchronousUiThread.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Threading/SynchronousUiThreadTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Threading/IUiThread.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Threading/SynchronousUiThread.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Threading/SynchronousUiThreadTests.cs`
 
 `IUiThread` lets view models and the tray hand work to the UI without referencing `Microsoft.UI.Dispatching.DispatcherQueue`. WinUI provides a concrete `DispatcherQueueUiThread` in `Winpepper.App` (Task 9); unit tests use `SynchronousUiThread` which runs callbacks inline.
 
@@ -326,9 +326,9 @@ git commit -m "feat(core): IUiThread abstraction with sync test impl"
 ## Task 5: Reactive SettingsViewModel with debounced writes
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Settings/ISettingsWriter.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Settings/DebouncedSettingsWriter.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Settings/DebouncedSettingsWriterTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Settings/ISettingsWriter.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Settings/DebouncedSettingsWriter.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Settings/DebouncedSettingsWriterTests.cs`
 
 The view models in `Winpepper.App` fire `PropertyChanged` on every keystroke; we don't want to hit `settings.json` that often. `DebouncedSettingsWriter` coalesces writes over a 400 ms window.
 
@@ -493,9 +493,9 @@ git commit -m "feat(settings): debounced writer coalesces UI bursts"
 ## Task 6: SessionViewModel — observable session state
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/SessionStage.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/SessionViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/ViewModels/SessionViewModelTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/ViewModels/SessionStage.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/ViewModels/SessionViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/ViewModels/SessionViewModelTests.cs`
 
 `SessionViewModel` is the single source of truth that the status pill, the tray menu, and the main window all bind to. It does NOT contain the state machine — `SessionEngine` (Plan 1) still owns transitions. The view model subscribes to `SessionEngine.StateChanged` and projects a UI-friendly `Stage` enum, `ElapsedMs`, and `StatusText`.
 
@@ -713,8 +713,8 @@ git commit -m "feat(core): SessionViewModel binds engine state to UI"
 ## Task 7: HotkeyChord conflict detection
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Hotkeys/HotkeyConflicts.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Hotkeys/HotkeyConflictsTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Hotkeys/HotkeyConflicts.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Hotkeys/HotkeyConflictsTests.cs`
 
 The onboarding hotkey-recorder needs to warn if the user picks a chord that conflicts with a well-known shortcut (Win+L, Ctrl+Alt+Del, Alt+Tab, Alt+F4, Ctrl+C/V/X/Z, Win+D, Win+E). Pure-logic; runs anywhere.
 
@@ -844,11 +844,11 @@ git commit -m "feat(platform): hotkey-conflict detector for onboarding"
 ## Task 8: AutostartRegistry helper
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Autostart/IAutostartRegistry.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Autostart/AutostartRegistry.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Platform/Autostart/InMemoryAutostartRegistry.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Platform.Tests/Autostart/InMemoryAutostartRegistryTests.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.Platform/Winpepper.Platform.csproj` — add `Microsoft.Win32.Registry` reference.
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Autostart/IAutostartRegistry.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Autostart/AutostartRegistry.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Platform/Autostart/InMemoryAutostartRegistry.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Platform.Tests/Autostart/InMemoryAutostartRegistryTests.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.Platform/Winpepper.Platform.csproj` — add `Microsoft.Win32.Registry` reference.
 
 Spec §7.7: toggling autostart writes / deletes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Winpepper`. The real Win32 implementation gets a Windows-only `#if WINDOWS` guard; tests use an in-memory fake.
 
@@ -1000,14 +1000,14 @@ git commit -m "feat(platform): autostart registry helper (HKCU Run key)"
 ## Task 9: Winpepper.App project scaffold (packaged WinUI 3)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Winpepper.App.csproj`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Package.appxmanifest`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/app.manifest`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Assets/.gitkeep`
-- Create: `/home/jesse/git/winpepper/scripts/make-placeholder-icon.ps1` — generates a 16x16 ICO on the VM.
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Assets/AppIcon.ico` (placeholder — generated by the script above; replaced by a real icon in Plan 6).
-- Modify: `/home/jesse/git/winpepper/winpepper.sln` (add `Winpepper.App`)
-- Modify: `/home/jesse/git/winpepper/Directory.Build.props` — exclude `Winpepper.App` from Linux build via condition.
+- Create: `$REPO_ROOT/src/Winpepper.App/Winpepper.App.csproj`
+- Create: `$REPO_ROOT/src/Winpepper.App/Package.appxmanifest`
+- Create: `$REPO_ROOT/src/Winpepper.App/app.manifest`
+- Create: `$REPO_ROOT/src/Winpepper.App/Assets/.gitkeep`
+- Create: `$REPO_ROOT/scripts/make-placeholder-icon.ps1` — generates a 16x16 ICO on the VM.
+- Create: `$REPO_ROOT/src/Winpepper.App/Assets/AppIcon.ico` (placeholder — generated by the script above; replaced by a real icon in Plan 6).
+- Modify: `$REPO_ROOT/winpepper.sln` (add `Winpepper.App`)
+- Modify: `$REPO_ROOT/Directory.Build.props` — exclude `Winpepper.App` from Linux build via condition.
 
 The packaged-app csproj uses WinAppSDK self-contained mode so the VM doesn't need `Microsoft.VCLibs.x64.14.00` separately. The XAML compiler refuses to run on Linux, so `Directory.Build.props` skips this project there.
 
@@ -1119,7 +1119,7 @@ The packaged-app csproj uses WinAppSDK self-contained mode so the VM doesn't nee
 
 The reviewer's concern with hand-rolled ICO byte streams is real — a BITMAPINFOHEADER size/stride mismatch produces an ICO that opens in Explorer but rejects loads from WinUI's `BitmapImage`. Generate the ICO on the VM via `System.Drawing.Common`, which emits a known-good 16x16 BITMAPINFOHEADER + correctly-sized AND/XOR masks.
 
-Write `/home/jesse/git/winpepper/scripts/make-placeholder-icon.ps1`:
+Write `$REPO_ROOT/scripts/make-placeholder-icon.ps1`:
 
 ```powershell
 # Generates a 16x16 placeholder ICO at the path passed as $args[0]. The icon is
@@ -1151,8 +1151,8 @@ try {
 - [ ] **Step 5: Run the script on the VM to materialize the ICO**
 
 ```bash
-mkdir -p /home/jesse/git/winpepper/src/Winpepper.App/Assets
-touch /home/jesse/git/winpepper/src/Winpepper.App/Assets/.gitkeep
+mkdir -p $REPO_ROOT/src/Winpepper.App/Assets
+touch $REPO_ROOT/src/Winpepper.App/Assets/.gitkeep
 ./scripts/sync-to-vm.sh
 ./scripts/winrun "powershell -ExecutionPolicy Bypass -File scripts\make-placeholder-icon.ps1 -Out src\Winpepper.App\Assets\AppIcon.ico"
 ./scripts/sync-from-vm.sh src/Winpepper.App/Assets/AppIcon.ico
@@ -1178,7 +1178,7 @@ Append before the closing `</Project>`:
 - [ ] **Step 7: Add to solution**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet sln add src/Winpepper.App/Winpepper.App.csproj
 ```
 
@@ -1219,13 +1219,13 @@ git commit -m "scaffold(app): Winpepper.App WinUI 3 packaged project"
 ## Task 10: Bundled start/stop sound effects
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/scripts/gen-sounds.ps1` — generates `start.wav` and `stop.wav` on the VM.
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Assets/start.wav` (generated)
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Assets/stop.wav` (generated)
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Audio/ISoundEffectPlayer.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/Audio/NoopSoundEffectPlayer.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Audio/WinUiSoundEffectPlayer.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/Audio/NoopSoundEffectPlayerTests.cs`
+- Create: `$REPO_ROOT/scripts/gen-sounds.ps1` — generates `start.wav` and `stop.wav` on the VM.
+- Create: `$REPO_ROOT/src/Winpepper.App/Assets/start.wav` (generated)
+- Create: `$REPO_ROOT/src/Winpepper.App/Assets/stop.wav` (generated)
+- Create: `$REPO_ROOT/src/Winpepper.Core/Audio/ISoundEffectPlayer.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/Audio/NoopSoundEffectPlayer.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Audio/WinUiSoundEffectPlayer.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/Audio/NoopSoundEffectPlayerTests.cs`
 
 Spec §7.6: short two-tone WAV (~150 ms) played via `System.Media.SoundPlayer`, gated by the `PlaySounds` setting. We generate WAVs deterministically once on the VM and commit them under `Assets/` so the build doesn't depend on PowerShell.
 
@@ -1275,7 +1275,7 @@ Write-Host "Wrote $OutDir\start.wav and $OutDir\stop.wav"
 - [ ] **Step 2: Generate the WAVs on the VM and pull them back**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 ./scripts/winrun "powershell -ExecutionPolicy Bypass -File scripts/gen-sounds.ps1"
 # Pull the generated WAVs back into the Linux working copy:
 sshpass -p 'password' scp -P 2222 -o StrictHostKeyChecking=no \
@@ -1400,8 +1400,8 @@ git commit -m "feat(app): bundled start/stop WAVs and sound-effect player"
 ## Task 11: SettingsViewModel for the Recording tab
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/RecordingSettingsViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/ViewModels/RecordingSettingsViewModelTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/ViewModels/RecordingSettingsViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/ViewModels/RecordingSettingsViewModelTests.cs`
 
 The Recording tab binds `HoldHotkey`, `ToggleHotkey`, `MicDeviceId`, `PlaySounds`, `SpeakerFilterEnabled`. The view model raises `INotifyPropertyChanged` and queues writes via `ISettingsWriter`. It also exposes a `string? HoldHotkeyConflict` derived field (used by the UI to show a warning row).
 
@@ -1652,7 +1652,7 @@ Replace the `Conflicting_HoldHotkey_Sets_Conflict_Message` and `Same_Chord_For_H
 
 - [ ] **Step 5: Implement `PlatformHotkeyValidator` in `Winpepper.Platform`**
 
-Create `/home/jesse/git/winpepper/src/Winpepper.Platform/Hotkeys/PlatformHotkeyValidator.cs`:
+Create `$REPO_ROOT/src/Winpepper.Platform/Hotkeys/PlatformHotkeyValidator.cs`:
 
 ```csharp
 using Winpepper.Core.ViewModels;
@@ -1700,8 +1700,8 @@ git commit -m "feat(core): RecordingSettingsViewModel + IHotkeyValidator strateg
 ## Task 12: CleanupSettingsViewModel for the Cleanup tab
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/CleanupSettingsViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/ViewModels/CleanupSettingsViewModelTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/ViewModels/CleanupSettingsViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/ViewModels/CleanupSettingsViewModelTests.cs`
 
 The Cleanup tab binds Plan 2's `CleanupSettings`. The view model is a thin reactive shell around that record. Until Plan 2 lands, we mirror its expected shape locally so the file compiles — Plan 2 swaps the type alias for the real one.
 
@@ -1914,9 +1914,9 @@ git commit -m "feat(core): CleanupSettingsViewModel with sliders + clamping"
 ## Task 13: CorrectionsViewModel for the Corrections tab
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/CorrectionEntry.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/CorrectionsViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/ViewModels/CorrectionsViewModelTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/ViewModels/CorrectionEntry.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/ViewModels/CorrectionsViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/ViewModels/CorrectionsViewModelTests.cs`
 
 Two lists: `Preferred` (single string per row) and `Replacements` (wrong → right). Inline validation per row: no empty, no duplicates, no self-mappings, min length 2. The view model accepts an `Action<IReadOnlyList<string>, IReadOnlyDictionary<string,string>>` persistence callback rather than depending on Plan 2's `CorrectionStore` directly — wiring up `CorrectionStore` happens in Task 18 (AppShell).
 
@@ -2163,9 +2163,9 @@ git commit -m "feat(core): CorrectionsViewModel with inline validation"
 ## Task 14: OnboardingViewModel
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/OnboardingStep.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.Core/ViewModels/OnboardingViewModel.cs`
-- Create: `/home/jesse/git/winpepper/tests/Winpepper.Core.Tests/ViewModels/OnboardingViewModelTests.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/ViewModels/OnboardingStep.cs`
+- Create: `$REPO_ROOT/src/Winpepper.Core/ViewModels/OnboardingViewModel.cs`
+- Create: `$REPO_ROOT/tests/Winpepper.Core.Tests/ViewModels/OnboardingViewModelTests.cs`
 
 State machine for the four-step onboarding (§7.4): `PickMic → PickHotkeys → DownloadModels → TestDictation → Done`. Each step has a `CanAdvance` predicate. Plan 3 wires the UI; the actual model downloader is stubbed and returns `Task.CompletedTask` (real downloader is Plan 4).
 
@@ -2477,7 +2477,7 @@ git commit -m "feat(core): OnboardingViewModel state machine"
 ## Task 15: DispatcherQueueUiThread (WinUI bridge)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Threading/DispatcherQueueUiThread.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Threading/DispatcherQueueUiThread.cs`
 
 Concrete `IUiThread` for WinUI 3. No unit test — the type is two lines and is exercised manually by the smoke procedure in Task 25.
 
@@ -2520,9 +2520,9 @@ git commit -m "feat(app): WinUI DispatcherQueue IUiThread implementation"
 ## Task 16: App.xaml and App.xaml.cs entry point
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/App.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/App.xaml.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Program.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/App.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/App.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Program.cs`
 
 Entry point. `Program.Main` uses `Microsoft.UI.Xaml.Application.Start`. `App.OnLaunched` instantiates the `AppShell` (Task 18), boots the pipeline, and decides between showing onboarding vs. tray-only.
 
@@ -2625,9 +2625,9 @@ git commit -m "feat(app): App entry point + single-instance guard"
 ## Task 17: TrayIconHost
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Tray/TrayIconHost.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Tray/TrayMenu.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Tray/TrayMenu.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Tray/TrayIconHost.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Tray/TrayMenu.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Tray/TrayMenu.xaml.cs`
 
 §7.1. `H.NotifyIcon.WinUI` provides the tray icon. The tooltip and menu are data-bound to `SessionViewModel`; the icon image swaps based on `SessionStage`. The menu items are Settings, Diagnostics, Pause, Quit. Diagnostics navigates to the existing main window but the Diagnostics tab itself ships in Plan 5 — for Plan 3 the menu item is disabled with a tooltip "Available in Plan 5".
 
@@ -2777,9 +2777,9 @@ git commit -m "feat(app): TrayIconHost bound to SessionViewModel"
 ## Task 18: AppShell — single-instance host wiring the pipeline
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/AppShell.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/AppPaths.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/PipelineHost.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Hosting/AppShell.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Hosting/AppPaths.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Hosting/PipelineHost.cs`
 
 `AppShell` owns the long-lived objects: logger, settings store + writer, view models, tray, status pill, main window. It boots the pipeline (re-using `Winpepper.Cli.Pipeline` logic, copied here and refactored into `PipelineHost`).
 
@@ -3086,9 +3086,9 @@ git commit -m "feat(app): AppShell wires logger, settings, pipeline, tray, windo
 ## Task 19: StatusPillWindow — frameless click-through AppWindow
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/StatusPillWindow.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/StatusPillWindow.xaml.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/StatusPillWindow.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/StatusPillWindow.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs`
 
 Spec §7.2. Frameless, transparent, top-most, click-through, anchored bottom-center of the foreground window's screen, 600 ms hide-delay after Idle.
 
@@ -3305,8 +3305,8 @@ git commit -m "feat(app): click-through status pill with §13.3 style ordering"
 ## Task 20: MainWindow shell (NavigationView)
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/MainWindow.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/MainWindow.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/MainWindow.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/MainWindow.xaml.cs`
 
 Main window holds the `NavigationView` and a `Frame` for page navigation. Plan 3 ships three pages plus the onboarding view: `RecordingPage`, `CleanupPage`, `CorrectionsPage`, `OnboardingPage`. History/Lab/Models/Diagnostics are nav items but are disabled with "Available in Plan 4/5" tooltips.
 
@@ -3400,10 +3400,10 @@ git commit -m "feat(app): MainWindow NavigationView shell"
 ## Task 21: RecordingPage
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/RecordingPage.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/RecordingPage.xaml.cs`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/Controls/HotkeyRecorderBox.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/Controls/HotkeyRecorderBox.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/RecordingPage.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/RecordingPage.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/Controls/HotkeyRecorderBox.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/Controls/HotkeyRecorderBox.xaml.cs`
 
 UI for §7.3 Recording: hold-to-record + toggle-to-record hotkey recorders, mic picker (populated from `Winpepper.Audio.DeviceEnumerator`), live-level meter (shows a `ProgressBar` driven by `WasapiRecorder.FramesAvailable`), sound-effect toggle, speaker-filter toggle, "Test dictation" button. The "Test dictation" button just focuses a TextBox so the next dictation lands in it.
 
@@ -3679,8 +3679,8 @@ git commit -m "feat(app): RecordingPage with hotkey recorder, mic picker, level 
 ## Task 22: CleanupPage
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/CleanupPage.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/CleanupPage.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/CleanupPage.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/CleanupPage.xaml.cs`
 
 §7.3 Cleanup tab. Binds `CleanupSettingsViewModel`. RichEditBox uses monospaced font.
 
@@ -3802,8 +3802,8 @@ git commit -m "feat(app): CleanupPage bound to CleanupSettingsViewModel"
 ## Task 23: CorrectionsPage
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/CorrectionsPage.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/CorrectionsPage.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/CorrectionsPage.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/CorrectionsPage.xaml.cs`
 
 §7.3 Corrections. Two `ListView`s with inline TextBox + a Remove button each. New-row inputs at the bottom of each list. Validation errors render in red below the input.
 
@@ -3937,8 +3937,8 @@ git commit -m "feat(app): CorrectionsPage with two ObservableCollection-backed l
 ## Task 24: Wire CleanupRunner + WindowContext into PipelineHost (Plan 2 hookup)
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/PipelineHost.cs`
-- Modify: `/home/jesse/git/winpepper/src/Winpepper.App/Hosting/AppShell.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/PipelineHost.cs`
+- Modify: `$REPO_ROOT/src/Winpepper.App/Hosting/AppShell.cs`
 
 Plan 2 publishes `Winpepper.Cleanup.CleanupRunner`, `Winpepper.Corrections.CorrectionStore`, and `Winpepper.Platform.WindowContext.WindowContextPrefetch`. This task replaces the raw-transcript-to-injection path with: transcript → cleanup runner (with optional window-context Task piped in) → injection.
 
@@ -4192,8 +4192,8 @@ git commit -m "feat(app): wire cleanup runner + window-context prefetch into Pip
 ## Task 25: OnboardingPage
 
 **Files:**
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/OnboardingPage.xaml`
-- Create: `/home/jesse/git/winpepper/src/Winpepper.App/Views/OnboardingPage.xaml.cs`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/OnboardingPage.xaml`
+- Create: `$REPO_ROOT/src/Winpepper.App/Views/OnboardingPage.xaml.cs`
 
 §7.4. Four-step flow driven by `OnboardingViewModel`. Page uses a `Frame`-less stepper UI: header pills + a Grid showing the current step's content.
 
@@ -4393,18 +4393,18 @@ git commit -m "feat(app): WinUI 3 shell, tray, status pill, recording/cleanup/co
 ## Task 26: Retire Winpepper.Cli
 
 **Files:**
-- Delete: `/home/jesse/git/winpepper/src/Winpepper.Cli/Program.cs`
-- Delete: `/home/jesse/git/winpepper/src/Winpepper.Cli/Pipeline.cs`
-- Delete: `/home/jesse/git/winpepper/src/Winpepper.Cli/Winpepper.Cli.csproj`
-- Modify: `/home/jesse/git/winpepper/winpepper.sln` — remove the `Winpepper.Cli` project entry.
-- Modify: `/home/jesse/git/winpepper/docs/manual-test.md` — replace the Plan 1 walking-skeleton smoke section with a pointer to the new Plan 3 procedure (Task 27).
+- Delete: `$REPO_ROOT/src/Winpepper.Cli/Program.cs`
+- Delete: `$REPO_ROOT/src/Winpepper.Cli/Pipeline.cs`
+- Delete: `$REPO_ROOT/src/Winpepper.Cli/Winpepper.Cli.csproj`
+- Modify: `$REPO_ROOT/winpepper.sln` — remove the `Winpepper.Cli` project entry.
+- Modify: `$REPO_ROOT/docs/manual-test.md` — replace the Plan 1 walking-skeleton smoke section with a pointer to the new Plan 3 procedure (Task 27).
 
 The walking-skeleton CLI was always temporary scaffolding. After Plan 3, `Winpepper.App` is the only entry point. Its `Program.cs` accepts `--tray` (start hidden — used by autostart) but no `--cli` flag is needed; the pipeline is identical to what the CLI ran.
 
 - [ ] **Step 1: Remove the project from the solution**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 dotnet sln remove src/Winpepper.Cli/Winpepper.Cli.csproj
 ```
 
@@ -4435,7 +4435,7 @@ Then in `AppShell.StartAsync` (replace the `if (!Settings.OnboardingCompleted)` 
 - [ ] **Step 5: Build everything on Linux to confirm nothing else referenced the CLI**
 
 ```bash
-cd /home/jesse/git/winpepper
+cd $REPO_ROOT
 export DOTNET_ROOT="$HOME/.dotnet"
 for proj in src/Winpepper.Core src/Winpepper.Audio src/Winpepper.Asr src/Winpepper.Platform; do
   dotnet build "$proj"
@@ -4465,7 +4465,7 @@ git commit -m "refactor: retire Winpepper.Cli; Winpepper.App is the entry point"
 ## Task 27: Manual smoke test on the VM
 
 **Files:**
-- Modify: `/home/jesse/git/winpepper/docs/manual-test.md` — add a Plan 3 smoke section.
+- Modify: `$REPO_ROOT/docs/manual-test.md` — add a Plan 3 smoke section.
 
 The VM has no real desktop and no real mic, but the audio-passthrough setup from Plan 1 (Plan 1 Task 16 / `scripts/say.sh`) drives `WasapiCapture` with synthetic speech. For Plan 3 we verify the WinUI 3 packaged app starts, the tray icon appears, the main window navigates, onboarding can be completed, and a synthetic dictation lands in `TestBox`.
 

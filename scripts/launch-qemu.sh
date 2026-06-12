@@ -8,15 +8,23 @@
 #   1. PulseAudio installed and running as user service
 #   2. winpepper_mic null-sink loaded (creates winpepper_mic.monitor source)
 #   3. User in the kvm group (or /dev/kvm chmod 0666)
-#   4. /home/jesse/windows-vm/storage already populated by a prior dockur run
+#   4. $WINPEPPER_VM_ROOT/storage already populated by a prior dockur run
+#      (default: ~/.local/share/winpepper/windows-vm)
 #
-# Logs: /home/jesse/windows-vm/{qemu.log,qemu-serial.log}
-# Monitor socket: /home/jesse/windows-vm/qemu-monitor.sock
+# Logs: $WINPEPPER_VM_ROOT/{qemu.log,qemu-serial.log}
+# Monitor socket: $WINPEPPER_VM_ROOT/qemu-monitor.sock
 
 set -euo pipefail
-STORAGE=/home/jesse/windows-vm/storage
-LOGDIR=/home/jesse/windows-vm
+VM_ROOT="${WINPEPPER_VM_ROOT:-$HOME/.local/share/winpepper/windows-vm}"
+STORAGE="$VM_ROOT/storage"
+LOGDIR="$VM_ROOT"
 PULSE_SOCKET=/run/user/$(id -u)/pulse/native
+
+if [ ! -d "$STORAGE" ]; then
+    echo "VM storage not found at $STORAGE." >&2
+    echo "Set WINPEPPER_VM_ROOT to the directory that contains storage/ from your dockur run." >&2
+    exit 1
+fi
 
 if [ ! -S "$PULSE_SOCKET" ]; then
     echo "PulseAudio socket not found at $PULSE_SOCKET. Start it with:" >&2

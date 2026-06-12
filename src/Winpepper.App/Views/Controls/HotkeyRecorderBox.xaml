@@ -7,8 +7,11 @@
         <TextBlock x:Name="LabelBlock" Text="Hotkey" />
         <Border BorderBrush="{ThemeResource ControlElevationBorderBrush}" BorderThickness="1" CornerRadius="4" Padding="8,4">
             <Grid>
-                <TextBlock x:Name="ChordText" Text="(press a chord)" Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
-                <Button x:Name="RecordButton" Content="Record" HorizontalAlignment="Right" Click="OnRecordClick" />
+                <TextBlock x:Name="ChordText" Text="(press a chord)" Foreground="{ThemeResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Right">
+                    <Button x:Name="RecordButton" Content="Record" Click="OnRecordClick" />
+                    <Button x:Name="CancelButton" Content="Cancel" Click="OnCancelClick" Visibility="Collapsed" />
+                </StackPanel>
             </Grid>
         </Border>
         <TextBlock x:Name="ErrorText" Foreground="OrangeRed" Visibility="Collapsed" />

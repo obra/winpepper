@@ -6,11 +6,11 @@
     <ScrollViewer>
         <StackPanel Padding="24" Spacing="16" MaxWidth="700">
             <TextBlock Text="Cleanup" Style="{ThemeResource TitleTextBlockStyle}" />
-            <ToggleSwitch x:Name="EnabledSwitch" Header="Enable cleanup LLM" />
-            <ToggleSwitch x:Name="WindowCtxSwitch" Header="Use window context (UIA + OCR)" />
+            <ToggleSwitch x:Name="EnabledSwitch" AutomationProperties.AutomationId="CleanupEnabledToggle" Header="Enable cleanup LLM" />
+            <ToggleSwitch x:Name="WindowCtxSwitch" AutomationProperties.AutomationId="CleanupWindowContextToggle" Header="Use window context (UIA + OCR)" />
             <StackPanel Spacing="4">
                 <TextBlock Text="Prompt profile" />
-                <ComboBox x:Name="ProfileCombo" SelectedValuePath="Tag" Width="280">
+                <ComboBox x:Name="ProfileCombo" AutomationProperties.AutomationId="CleanupProfileCombo" SelectedValuePath="Tag" Width="280">
                     <ComboBoxItem Content="Ordinary Dictation" Tag="Ordinary" />
                     <ComboBoxItem Content="Literal Dictation"  Tag="Literal" />
                     <ComboBoxItem Content="Custom"              Tag="Custom" />
@@ -19,6 +19,7 @@
             <StackPanel Spacing="4">
                 <TextBlock Text="Custom prompt" />
                 <TextBox x:Name="CustomPromptBox"
+                         AutomationProperties.AutomationId="CleanupCustomPromptTextBox"
                          Height="220"
                          AcceptsReturn="True"
                          TextWrapping="Wrap"
@@ -27,11 +28,11 @@
             </StackPanel>
             <StackPanel Spacing="4">
                 <TextBlock x:Name="MaxTokLabel" Text="Max new tokens: 512" />
-                <Slider x:Name="MaxTokSlider" Minimum="64" Maximum="4096" StepFrequency="32" Width="380" />
+                <Slider x:Name="MaxTokSlider" AutomationProperties.AutomationId="CleanupMaxTokensSlider" Minimum="64" Maximum="4096" StepFrequency="32" Width="380" />
             </StackPanel>
             <StackPanel Spacing="4">
                 <TextBlock x:Name="TimeoutLabel" Text="Timeout: 15000 ms" />
-                <Slider x:Name="TimeoutSlider" Minimum="2000" Maximum="60000" StepFrequency="500" Width="380" />
+                <Slider x:Name="TimeoutSlider" AutomationProperties.AutomationId="CleanupTimeoutSlider" Minimum="2000" Maximum="60000" StepFrequency="500" Width="380" />
             </StackPanel>
         </StackPanel>
     </ScrollViewer>

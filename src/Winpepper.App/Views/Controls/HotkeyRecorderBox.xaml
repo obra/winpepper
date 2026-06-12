@@ -3,17 +3,40 @@
     x:Class="Winpepper.App.Views.Controls.HotkeyRecorderBox"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <StackPanel Spacing="4">
+    <StackPanel Spacing="6">
         <TextBlock x:Name="LabelBlock" Text="Hotkey" />
-        <Border BorderBrush="{ThemeResource ControlElevationBorderBrush}" BorderThickness="1" CornerRadius="4" Padding="8,4">
-            <Grid>
-                <TextBlock x:Name="ChordText" Text="(press a chord)" Foreground="{ThemeResource TextFillColorPrimaryBrush}" VerticalAlignment="Center" />
-                <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Right">
-                    <Button x:Name="RecordButton" Content="Record" Click="OnRecordClick" />
-                    <Button x:Name="CancelButton" Content="Cancel" Click="OnCancelClick" Visibility="Collapsed" />
-                </StackPanel>
-            </Grid>
-        </Border>
-        <TextBlock x:Name="ErrorText" Foreground="OrangeRed" Visibility="Collapsed" />
+        <Grid ColumnSpacing="8">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <!-- Keycap-style chip showing the current chord -->
+            <Border Grid.Column="0"
+                    Background="{ThemeResource ControlFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource ControlStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="4"
+                    Padding="8,4"
+                    MinWidth="160"
+                    MinHeight="32"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Center">
+                <TextBlock x:Name="ChordText"
+                           AutomationProperties.AutomationId="HotkeyChordLabel"
+                           Text="(press a chord)"
+                           Style="{ThemeResource BodyStrongTextBlockStyle}"
+                           Foreground="{ThemeResource TextFillColorPrimaryBrush}"
+                           VerticalAlignment="Center" />
+            </Border>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
+                <Button x:Name="RecordButton" AutomationProperties.AutomationId="HotkeyRecordButton" Content="Record" Click="OnRecordClick" />
+                <Button x:Name="CancelButton" AutomationProperties.AutomationId="HotkeyCancelButton" Content="Cancel" Click="OnCancelClick" Visibility="Collapsed" />
+            </StackPanel>
+        </Grid>
+        <TextBlock x:Name="ErrorText"
+                   Style="{ThemeResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                   TextWrapping="Wrap"
+                   Visibility="Collapsed" />
     </StackPanel>
 </UserControl>

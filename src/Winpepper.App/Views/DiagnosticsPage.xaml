@@ -12,13 +12,14 @@
         <TextBlock Grid.Row="0" Text="Diagnostics" Style="{StaticResource TitleTextBlockStyle}" />
 
         <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="12">
-            <Button x:Name="OpenLogFolderBtn" Content="Open log folder" Click="OnOpenLogFolder" />
-            <Button x:Name="CopyBundleBtn" Content="Copy diagnostics bundle" Click="OnCopyBundle" />
-            <TextBlock x:Name="LastBundleLabel" VerticalAlignment="Center" />
+            <Button x:Name="OpenLogFolderBtn" AutomationProperties.AutomationId="DiagnosticsOpenLogFolderButton" Content="Open log folder" Click="OnOpenLogFolder" />
+            <Button x:Name="CopyBundleBtn" AutomationProperties.AutomationId="DiagnosticsCopyBundleButton" Content="Copy diagnostics bundle" Click="OnCopyBundle" />
+            <TextBlock x:Name="LastBundleLabel" AutomationProperties.AutomationId="DiagnosticsLastBundleLabel" VerticalAlignment="Center" />
         </StackPanel>
 
         <ListView Grid.Row="2"
                   x:Name="TailList"
+                  AutomationProperties.AutomationId="DiagnosticsTailList"
                   ItemsSource="{x:Bind ViewModel.Tail, Mode=OneWay}"
                   SelectionMode="None">
             <ListView.ItemTemplate>

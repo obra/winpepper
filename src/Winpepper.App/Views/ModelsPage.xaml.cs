@@ -66,6 +66,10 @@ public sealed partial class ModelsPage : Page
     {
         await ViewModel.DownloadMissingAsync(CancellationToken.None);
         UpdateInstalledLabels();
+
+        // If the pipeline was left disabled at boot because models were
+        // missing (issue #6), bring it up now that the download finished.
+        App.Shell!.Pipeline.TryStart();
     }
 
     private void UpdateInstalledLabels()

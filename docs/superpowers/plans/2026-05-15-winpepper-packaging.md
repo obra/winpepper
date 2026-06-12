@@ -656,7 +656,7 @@ The MSI installs to `C:\Program Files\Winpepper\` (per-machine, x64). It harvest
 
     <!-- ARP entry. -->
     <Property Id="ARPPRODUCTICON" Value="WinpepperIcon" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/jesse-michael-han/winpepper" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/obra/winpepper" />
     <Property Id="ARPNOREPAIR" Value="1" />
     <Icon Id="WinpepperIcon" SourceFile="$(AppPublishDir)\Assets\AppIcon.ico" />
 

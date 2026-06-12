@@ -41,9 +41,15 @@ public sealed partial class HistoryDetailPage : Page
     {
         // Task 23 routes the "Lab" nav-rail click to this page with no
         // parameter; only a row click from HistoryPage hands us an entry.
-        // Bail out cleanly when the parameter is missing so the empty Lab
-        // shows instead of throwing.
-        if (e.Parameter is not HistoryEntry entry) return;
+        // Show the empty-state hint instead of dead editor chrome (issue #21).
+        if (e.Parameter is not HistoryEntry entry)
+        {
+            EditorRoot.Visibility = Visibility.Collapsed;
+            EmptyStatePanel.Visibility = Visibility.Visible;
+            return;
+        }
+        EmptyStatePanel.Visibility = Visibility.Collapsed;
+        EditorRoot.Visibility = Visibility.Visible;
 
         var history = App.Shell!.HistoryServices;
         var models = App.Shell!.ModelsServices;
@@ -92,6 +98,9 @@ public sealed partial class HistoryDetailPage : Page
                 CleanupDiff.Segments = ViewModel.CleanupPanel.Diff;
         };
     }
+
+    private void OnGoToHistory(object sender, RoutedEventArgs e) =>
+        App.Shell?.Main.NavigateToTag("history");
 
     private void OnAsrSelectionChanged(object sender, SelectionChangedEventArgs e)
     {

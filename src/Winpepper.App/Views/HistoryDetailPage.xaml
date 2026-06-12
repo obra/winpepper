@@ -4,7 +4,19 @@
       xmlns:local="using:Winpepper.App.Views"
       xmlns:models="using:Winpepper.Models">
     <ScrollViewer Padding="24">
-        <StackPanel Spacing="16">
+        <Grid>
+
+            <!-- Empty state: the Lab nav item opens this page with no history
+                 entry. Show a hint instead of dead editor chrome (issue #21). -->
+            <StackPanel x:Name="EmptyStatePanel" Visibility="Collapsed" Spacing="12"
+                        HorizontalAlignment="Center" Margin="0,120,0,0">
+                <TextBlock Text="Pick a history entry from the History tab to begin."
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+                <Button Content="Go to History" HorizontalAlignment="Center" Click="OnGoToHistory" />
+            </StackPanel>
+
+        <StackPanel x:Name="EditorRoot" Spacing="16">
 
             <TextBlock Text="History detail" Style="{StaticResource TitleTextBlockStyle}" />
 
@@ -86,5 +98,6 @@
                 <Button Content="Use as default cleanup" Click="OnPromoteCleanup" />
             </StackPanel>
         </StackPanel>
+        </Grid>
     </ScrollViewer>
 </Page>

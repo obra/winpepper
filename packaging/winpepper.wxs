@@ -192,6 +192,12 @@
     <ui:WixUI Id="WixUI_InstallDir" />
     <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
 
+    <!-- Real Apache-2.0 license text for the WixUI_InstallDir EULA dialog;
+         without this override WiX shows its lorem-ipsum placeholder.
+         Path is relative to the project directory (packaging/), same as the
+         ScriptSourceFile references above. -->
+    <WixVariable Id="WixUILicenseRtf" Value="License.rtf" />
+
   </Package>
 
   <!-- Override harvested file id for the main exe so wxs can bind to it

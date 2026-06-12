@@ -7,20 +7,53 @@
         <NavigationView x:Name="Nav"
                         AutomationProperties.AutomationId="MainNavView"
                         PaneDisplayMode="Left"
+                        OpenPaneLength="220"
                         IsSettingsVisible="False"
                         ItemInvoked="OnNavItemInvoked">
             <NavigationView.MenuItems>
-                <NavigationViewItem Tag="recording"   Content="Recording"   AutomationProperties.AutomationId="NavRecordingItem" />
-                <NavigationViewItem Tag="cleanup"     Content="Cleanup"     AutomationProperties.AutomationId="NavCleanupItem" />
-                <NavigationViewItem Tag="corrections" Content="Corrections" AutomationProperties.AutomationId="NavCorrectionsItem" />
+                <NavigationViewItem Tag="recording" Content="Recording" AutomationProperties.AutomationId="NavRecordingItem">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE720;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Tag="cleanup" Content="Cleanup" AutomationProperties.AutomationId="NavCleanupItem">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE90F;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Tag="corrections" Content="Corrections" AutomationProperties.AutomationId="NavCorrectionsItem">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE70F;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItemSeparator />
-                <NavigationViewItem Tag="history"     Content="History"     AutomationProperties.AutomationId="NavHistoryItem" />
-                <NavigationViewItem Tag="lab"         Content="Lab"         AutomationProperties.AutomationId="NavLabItem" />
-                <NavigationViewItem Tag="models"      Content="Models"      AutomationProperties.AutomationId="NavModelsItem" />
-                <NavigationViewItem Tag="diagnostics" Content="Diagnostics" AutomationProperties.AutomationId="NavDiagnosticsItem" />
+                <NavigationViewItem Tag="history" Content="History" AutomationProperties.AutomationId="NavHistoryItem">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE81C;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Tag="lab" Content="Lab" AutomationProperties.AutomationId="NavLabItem">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xEA80;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Tag="models" Content="Models" AutomationProperties.AutomationId="NavModelsItem">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE8F1;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Tag="diagnostics" Content="Diagnostics" AutomationProperties.AutomationId="NavDiagnosticsItem">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE9D9;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>
-                <NavigationViewItem Tag="about" Content="About Winpepper" SelectsOnInvoked="False" AutomationProperties.AutomationId="NavAboutItem" />
+                <NavigationViewItem Tag="about" Content="About Winpepper" SelectsOnInvoked="False" AutomationProperties.AutomationId="NavAboutItem">
+                    <NavigationViewItem.Icon>
+                        <FontIcon Glyph="&#xE946;" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
             </NavigationView.FooterMenuItems>
             <Frame x:Name="ContentFrame" AutomationProperties.AutomationId="MainContentFrame" />
         </NavigationView>

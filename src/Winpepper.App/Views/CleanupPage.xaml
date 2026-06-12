@@ -4,36 +4,72 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <ScrollViewer>
-        <StackPanel Padding="24" Spacing="16" MaxWidth="700">
+        <StackPanel Padding="24" Spacing="12" MaxWidth="720" HorizontalAlignment="Left">
+
             <TextBlock Text="Cleanup" Style="{ThemeResource TitleTextBlockStyle}" />
-            <ToggleSwitch x:Name="EnabledSwitch" AutomationProperties.AutomationId="CleanupEnabledToggle" Header="Enable cleanup LLM" />
-            <ToggleSwitch x:Name="WindowCtxSwitch" AutomationProperties.AutomationId="CleanupWindowContextToggle" Header="Use window context (UIA + OCR)" />
-            <StackPanel Spacing="4">
-                <TextBlock Text="Prompt profile" />
-                <ComboBox x:Name="ProfileCombo" AutomationProperties.AutomationId="CleanupProfileCombo" SelectedValuePath="Tag" Width="280">
-                    <ComboBoxItem Content="Ordinary Dictation" Tag="Ordinary" />
-                    <ComboBoxItem Content="Literal Dictation"  Tag="Literal" />
-                    <ComboBoxItem Content="Custom"              Tag="Custom" />
-                </ComboBox>
-            </StackPanel>
-            <StackPanel Spacing="4">
-                <TextBlock Text="Custom prompt" />
-                <TextBox x:Name="CustomPromptBox"
-                         AutomationProperties.AutomationId="CleanupCustomPromptTextBox"
-                         Height="220"
-                         AcceptsReturn="True"
-                         TextWrapping="Wrap"
-                         FontFamily="Cascadia Mono,Consolas,monospace"
-                         ScrollViewer.VerticalScrollBarVisibility="Auto" />
-            </StackPanel>
-            <StackPanel Spacing="4">
-                <TextBlock x:Name="MaxTokLabel" Text="Max new tokens: 512" />
-                <Slider x:Name="MaxTokSlider" AutomationProperties.AutomationId="CleanupMaxTokensSlider" Minimum="64" Maximum="4096" StepFrequency="32" Width="380" />
-            </StackPanel>
-            <StackPanel Spacing="4">
-                <TextBlock x:Name="TimeoutLabel" Text="Timeout: 15000 ms" />
-                <Slider x:Name="TimeoutSlider" AutomationProperties.AutomationId="CleanupTimeoutSlider" Minimum="2000" Maximum="60000" StepFrequency="500" Width="380" />
-            </StackPanel>
+            <TextBlock Text="Polish raw transcripts with an on-device language model before they are typed."
+                       Style="{ThemeResource BodyTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,8" />
+
+            <!-- Behavior -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="8">
+                    <TextBlock Text="Behavior" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <ToggleSwitch x:Name="EnabledSwitch" AutomationProperties.AutomationId="CleanupEnabledToggle" Header="Enable cleanup LLM" />
+                    <ToggleSwitch x:Name="WindowCtxSwitch" AutomationProperties.AutomationId="CleanupWindowContextToggle" Header="Use window context (UIA + OCR)" />
+                </StackPanel>
+            </Border>
+
+            <!-- Prompt -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Prompt" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Prompt profile" />
+                        <ComboBox x:Name="ProfileCombo" AutomationProperties.AutomationId="CleanupProfileCombo" SelectedValuePath="Tag" MinWidth="280">
+                            <ComboBoxItem Content="Ordinary Dictation" Tag="Ordinary" />
+                            <ComboBoxItem Content="Literal Dictation"  Tag="Literal" />
+                            <ComboBoxItem Content="Custom"              Tag="Custom" />
+                        </ComboBox>
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                        <TextBlock Text="Custom prompt" />
+                        <TextBox x:Name="CustomPromptBox"
+                                 AutomationProperties.AutomationId="CleanupCustomPromptTextBox"
+                                 Height="220"
+                                 AcceptsReturn="True"
+                                 TextWrapping="Wrap"
+                                 FontFamily="Cascadia Mono,Consolas,monospace"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                        <TextBlock Text="Used when the profile is set to Custom."
+                                   Style="{ThemeResource CaptionTextBlockStyle}"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Limits -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Limits" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <StackPanel Spacing="4">
+                        <TextBlock x:Name="MaxTokLabel" Text="Max new tokens: 512" />
+                        <Slider x:Name="MaxTokSlider" AutomationProperties.AutomationId="CleanupMaxTokensSlider" Minimum="64" Maximum="4096" StepFrequency="32" HorizontalAlignment="Stretch" />
+                    </StackPanel>
+                    <StackPanel Spacing="4">
+                        <TextBlock x:Name="TimeoutLabel" Text="Timeout: 15000 ms" />
+                        <Slider x:Name="TimeoutSlider" AutomationProperties.AutomationId="CleanupTimeoutSlider" Minimum="2000" Maximum="60000" StepFrequency="500" HorizontalAlignment="Stretch" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
         </StackPanel>
     </ScrollViewer>
 </Page>

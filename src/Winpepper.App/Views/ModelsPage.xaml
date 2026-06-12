@@ -2,78 +2,141 @@
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:models="using:Winpepper.Models">
-    <Grid Padding="24" RowSpacing="16">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
+    <ScrollViewer>
+        <StackPanel Padding="24" Spacing="12" MaxWidth="720" HorizontalAlignment="Left">
 
-        <TextBlock Grid.Row="0" Text="Models" Style="{StaticResource TitleTextBlockStyle}" />
-
-        <Grid Grid.Row="1" ColumnSpacing="16">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="*" />
-            </Grid.ColumnDefinitions>
+            <TextBlock Text="Models" Style="{StaticResource TitleTextBlockStyle}" />
+            <TextBlock Text="Pick the speech and cleanup models Winpepper runs. Everything stays on this PC."
+                       Style="{ThemeResource BodyTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,8" />
 
             <!-- ASR card -->
-            <StackPanel Grid.Column="0" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6" Spacing="8">
-                <TextBlock Text="ASR" Style="{StaticResource SubtitleTextBlockStyle}" />
-                <ComboBox x:Name="AsrCombo"
-                          AutomationProperties.AutomationId="ModelsAsrCombo"
-                          ItemsSource="{x:Bind ViewModel.AsrCard.Available, Mode=OneWay}"
-                          DisplayMemberPath="DisplayName"
-                          SelectionChanged="OnAsrChanged" />
-                <TextBlock Text="Installed:" />
-                <TextBlock x:Name="AsrInstalledText" AutomationProperties.AutomationId="ModelsAsrInstalledLabel" />
-                <ListView ItemsSource="{x:Bind ViewModel.AsrCard.ProgressByFile, Mode=OneWay}">
-                    <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="models:DownloadProgress">
-                            <Grid ColumnSpacing="8">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="80" />
-                                    <ColumnDefinition Width="100" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="{x:Bind FileRelativePath}" TextTrimming="CharacterEllipsis" />
-                                <TextBlock Grid.Column="1" Text="{x:Bind PercentComplete}" />
-                                <TextBlock Grid.Column="2" Text="{x:Bind Phase}" />
-                            </Grid>
-                        </DataTemplate>
-                    </ListView.ItemTemplate>
-                </ListView>
-            </StackPanel>
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="12">
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <FontIcon Glyph="&#xE720;" FontSize="18" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                        <StackPanel>
+                            <TextBlock Text="Speech recognition" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="ASR model — turns your voice into raw text"
+                                       Style="{ThemeResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon x:Name="AsrInstalledIcon" Glyph="&#xE73E;" FontSize="14" Foreground="{ThemeResource SystemFillColorSuccessBrush}" VerticalAlignment="Center" />
+                        <FontIcon x:Name="AsrNotInstalledIcon" Glyph="&#xE896;" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" Visibility="Collapsed" />
+                        <TextBlock x:Name="AsrInstalledText" AutomationProperties.AutomationId="ModelsAsrInstalledLabel" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <ComboBox x:Name="AsrCombo"
+                              AutomationProperties.AutomationId="ModelsAsrCombo"
+                              Header="Active model"
+                              HorizontalAlignment="Stretch"
+                              ItemsSource="{x:Bind ViewModel.AsrCard.Available, Mode=OneWay}"
+                              DisplayMemberPath="DisplayName"
+                              SelectionChanged="OnAsrChanged" />
+                    <ListView ItemsSource="{x:Bind ViewModel.AsrCard.ProgressByFile, Mode=OneWay}" SelectionMode="None">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="MinHeight" Value="0" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="models:DownloadProgress">
+                                <StackPanel Spacing="4" Padding="0,6">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Bind FileRelativePath}"
+                                                   Style="{ThemeResource CaptionTextBlockStyle}"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind ProgressDisplay}"
+                                                   Style="{ThemeResource CaptionTextBlockStyle}"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </Grid>
+                                    <ProgressBar Value="{x:Bind PercentComplete}" Minimum="0" Maximum="100" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </StackPanel>
+            </Border>
 
             <!-- Cleanup card -->
-            <StackPanel Grid.Column="1" Padding="12" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="6" Spacing="8">
-                <TextBlock Text="Cleanup" Style="{StaticResource SubtitleTextBlockStyle}" />
-                <ComboBox x:Name="CleanupCombo"
-                          AutomationProperties.AutomationId="ModelsCleanupCombo"
-                          ItemsSource="{x:Bind ViewModel.CleanupCard.Available, Mode=OneWay}"
-                          DisplayMemberPath="DisplayName"
-                          SelectionChanged="OnCleanupChanged" />
-                <TextBlock Text="Installed:" />
-                <TextBlock x:Name="CleanupInstalledText" AutomationProperties.AutomationId="ModelsCleanupInstalledLabel" />
-                <ListView ItemsSource="{x:Bind ViewModel.CleanupCard.ProgressByFile, Mode=OneWay}">
-                    <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="models:DownloadProgress">
-                            <Grid ColumnSpacing="8">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="80" />
-                                    <ColumnDefinition Width="100" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0" Text="{x:Bind FileRelativePath}" TextTrimming="CharacterEllipsis" />
-                                <TextBlock Grid.Column="1" Text="{x:Bind PercentComplete}" />
-                                <TextBlock Grid.Column="2" Text="{x:Bind Phase}" />
-                            </Grid>
-                        </DataTemplate>
-                    </ListView.ItemTemplate>
-                </ListView>
-            </StackPanel>
-        </Grid>
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16">
+                <StackPanel Spacing="12">
+                    <StackPanel Orientation="Horizontal" Spacing="12">
+                        <FontIcon Glyph="&#xE90F;" FontSize="18" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
+                        <StackPanel>
+                            <TextBlock Text="Cleanup" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="Language model — polishes raw transcripts into clean text"
+                                       Style="{ThemeResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon x:Name="CleanupInstalledIcon" Glyph="&#xE73E;" FontSize="14" Foreground="{ThemeResource SystemFillColorSuccessBrush}" VerticalAlignment="Center" />
+                        <FontIcon x:Name="CleanupNotInstalledIcon" Glyph="&#xE896;" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" Visibility="Collapsed" />
+                        <TextBlock x:Name="CleanupInstalledText" AutomationProperties.AutomationId="ModelsCleanupInstalledLabel" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <ComboBox x:Name="CleanupCombo"
+                              AutomationProperties.AutomationId="ModelsCleanupCombo"
+                              Header="Active model"
+                              HorizontalAlignment="Stretch"
+                              ItemsSource="{x:Bind ViewModel.CleanupCard.Available, Mode=OneWay}"
+                              DisplayMemberPath="DisplayName"
+                              SelectionChanged="OnCleanupChanged" />
+                    <ListView ItemsSource="{x:Bind ViewModel.CleanupCard.ProgressByFile, Mode=OneWay}" SelectionMode="None">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="MinHeight" Value="0" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="models:DownloadProgress">
+                                <StackPanel Spacing="4" Padding="0,6">
+                                    <Grid ColumnSpacing="8">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="{x:Bind FileRelativePath}"
+                                                   Style="{ThemeResource CaptionTextBlockStyle}"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Grid.Column="1" Text="{x:Bind ProgressDisplay}"
+                                                   Style="{ThemeResource CaptionTextBlockStyle}"
+                                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                    </Grid>
+                                    <ProgressBar Value="{x:Bind PercentComplete}" Minimum="0" Maximum="100" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </StackPanel>
+            </Border>
 
-        <Button Grid.Row="2" Content="Download Missing Models" Click="OnDownloadMissing" AutomationProperties.AutomationId="ModelsDownloadButton" HorizontalAlignment="Right" />
-    </Grid>
+            <Button Click="OnDownloadMissing"
+                    AutomationProperties.AutomationId="ModelsDownloadButton"
+                    Style="{StaticResource AccentButtonStyle}"
+                    HorizontalAlignment="Left">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE896;" FontSize="16" />
+                    <TextBlock Text="Download missing models" />
+                </StackPanel>
+            </Button>
+        </StackPanel>
+    </ScrollViewer>
 </Page>

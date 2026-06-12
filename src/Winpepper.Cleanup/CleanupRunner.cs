@@ -100,6 +100,27 @@ public sealed class CleanupRunner
         if (sanitized.Trim() == "...")
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackEllipsis, sw);
 
+        // 6.5) Implausible output -> fallback. A small cleanup model fed an
+        // out-of-distribution prompt can go into open-ended completion mode,
+        // echoing the prompt scaffolding (few-shot "Input:/Output:" pairs,
+        // chat-template markers) instead of cleaning the transcript. Cleanup
+        // must never inject text that doesn't plausibly derive from what the
+        // user said: reject scaffold markers the user didn't speak, and any
+        // output that dramatically outgrew the raw transcript (cleanup only
+        // removes fillers and adds punctuation; it never doubles the text).
+        if (LooksLikePromptEcho(sanitized, rawTranscript))
+        {
+            _log.LogWarning("Cleanup output contains prompt-scaffold markers absent from the transcript; falling back. Output preview: {Preview}",
+                sanitized.Length > 120 ? sanitized[..120] : sanitized);
+            return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw);
+        }
+        if (sanitized.Length > rawTranscript.Length * 2 + 64)
+        {
+            _log.LogWarning("Cleanup output implausibly long ({OutLen} chars from {InLen}-char transcript); falling back",
+                sanitized.Length, rawTranscript.Length);
+            return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw);
+        }
+
         // 7) Apply deterministic correction post-pass.
         var withCorrections = CaseAwareReplacer.Apply(sanitized, corrections.Replacements);
 
@@ -110,6 +131,52 @@ public sealed class CleanupRunner
             RawModelOutput: raw,
             AssembledPrompt: assembled,
             Elapsed: sw.Elapsed);
+    }
+
+    // Hard markers: structural scaffolding (prompt-block tags, chat-template
+    // tokens, Alpaca instruction markers) that never appears in legitimately
+    // cleaned dictation. Counted whenever present in the output but not
+    // literally present in the raw transcript.
+    private static readonly string[] HardEchoMarkers =
+    {
+        "<BASE-PROMPT>", "</BASE-PROMPT>", "<USER-INPUT>", "</USER-INPUT>",
+        "<CORRECTION-HINTS>", "<WINDOW-OCR-CONTENT>", "<OCR-RULES>",
+        "<OUTPUT>", "</OUTPUT>",
+        "<|im_start|>", "<|im_end|>",
+        "### Instruction", "### Response",
+    };
+
+    // Soft markers: dialogue-turn labels the model emits when it slips into
+    // transcript-completion mode. A user can legitimately dictate these
+    // (e.g. "output colon forty two" -> "Output: forty-two."), so they only
+    // count when the spoken transcript doesn't contain the base word at all.
+    private static readonly (string Marker, string SpokenWord)[] SoftEchoMarkers =
+    {
+        ("Human:", "human"),
+        ("Assistant:", "assistant"),
+        ("Input:", "input"),
+        ("Output:", "output"),
+    };
+
+    internal static bool LooksLikePromptEcho(string cleaned, string rawTranscript)
+    {
+        foreach (var marker in HardEchoMarkers)
+        {
+            if (cleaned.Contains(marker, StringComparison.OrdinalIgnoreCase) &&
+                !rawTranscript.Contains(marker, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        foreach (var (marker, spokenWord) in SoftEchoMarkers)
+        {
+            if (cleaned.Contains(marker, StringComparison.OrdinalIgnoreCase) &&
+                !rawTranscript.Contains(spokenWord, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static CleanupResult Finalize(

@@ -17,7 +17,6 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
 {
     private readonly ILogger<LlamaCleanupBackend> _log;
     private readonly LLamaWeights _weights;
-    private readonly LLamaContext _context;
     private readonly ModelParams _params;
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
 
@@ -32,11 +31,10 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
         };
         _log.LogInformation("Loading cleanup model: {Path}", modelPath);
         _weights = LLamaWeights.LoadFromFile(_params);
-        _context = _weights.CreateContext(_params);
         _log.LogInformation("Cleanup model loaded.");
     }
 
-    /// <summary>Pre-warm the KV cache. Spec §5.5.</summary>
+    /// <summary>Pre-warm: pages in weights and shader pipeline (no persistent KV cache with StatelessExecutor). Spec §5.5.</summary>
     public async Task WarmAsync(CancellationToken ct)
     {
         const string warmupPrompt = "Hello.";
@@ -57,11 +55,23 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var executor = new InstructExecutor(_context);
+            // StatelessExecutor: a fresh context per call, so consecutive
+            // dictations never share KV-cache state. The previous
+            // InstructExecutor-over-shared-LLamaContext setup corrupted the
+            // context after the first call (llama_decode 'InvalidInputBatch'
+            // on every subsequent dictation) and wrapped the prompt in
+            // Alpaca-style "### Instruction:" markers that qwen2.5-instruct
+            // was never trained on, sending the model into open-ended
+            // completion. ApplyTemplate=true formats the prompt with the
+            // model's own chat template (ChatML for Qwen) as a user message.
+            var executor = new StatelessExecutor(_weights, _params, _log)
+            {
+                ApplyTemplate = true,
+            };
             var inferenceParams = new InferenceParams
             {
                 MaxTokens = maxNewTokens,
-                AntiPrompts = new List<string> { "</USER-INPUT>", "<USER-INPUT>", "<BASE-PROMPT>" },
+                AntiPrompts = new List<string> { "</USER-INPUT>", "<USER-INPUT>", "<BASE-PROMPT>", "<|im_end|>" },
                 SamplingPipeline = new DefaultSamplingPipeline
                 {
                     Temperature = temperature,
@@ -86,7 +96,6 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
 
     public void Dispose()
     {
-        _context.Dispose();
         _weights.Dispose();
         _gate.Dispose();
     }

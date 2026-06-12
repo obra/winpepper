@@ -25,13 +25,17 @@ public sealed class HotkeyHook : IDisposable
     private LowLevelKeyboardProc? _callback;
     private Modifier _modifiers;
     private bool _holding;
+    private readonly HashSet<int> _swallowedKeys = new();
     private readonly ManualResetEventSlim _ready = new(initialState: false);
 
     public ChannelReader<HotkeyEvent> Events => _events.Reader;
 
     /// <summary>
     /// Public for tests: synchronously evaluate a key event against the registered
-    /// chords. Used by integration tests that don't want to install a real hook.
+    /// chords. The return value means "swallow this event" (hide it from the
+    /// foreground app); <paramref name="evt"/> is set when a hotkey event fired.
+    /// The two are independent: a key-up can emit HoldUp yet still pass through
+    /// when its key-down was visible to the system.
     /// </summary>
     public bool TryProcessKey(int vk, bool down, out HotkeyEvent? evt)
     {
@@ -40,31 +44,45 @@ public sealed class HotkeyHook : IDisposable
 
         if (down)
         {
+            // Autorepeat of a key whose down we swallowed: keep swallowing it,
+            // but do not emit a duplicate event. Without this, repeats of the
+            // chord-completing modifier leak to the foreground app, and a held
+            // toggle chord fires Toggle once per repeat.
+            if (_swallowedKeys.Contains(vk)) return true;
+
             if (_cancel.Matches(vk, _modifiers))
             {
                 evt = new HotkeyEvent(HotkeyEventKind.Cancel, DateTimeOffset.UtcNow);
+                _swallowedKeys.Add(vk);
                 return true;
             }
             if (_toggle.Matches(vk, _modifiers))
             {
                 evt = new HotkeyEvent(HotkeyEventKind.Toggle, DateTimeOffset.UtcNow);
+                _swallowedKeys.Add(vk);
                 return true;
             }
             if (_hold.Matches(vk, _modifiers) && !_holding)
             {
                 _holding = true;
                 evt = new HotkeyEvent(HotkeyEventKind.HoldDown, DateTimeOffset.UtcNow);
+                _swallowedKeys.Add(vk);
                 return true;
             }
+            return false;
         }
-        else if (_holding && !_hold.Matches(vk, _modifiers))
+
+        // Key up: swallow only when we swallowed the matching key-down, so the
+        // system's view of every physical key stays down/up symmetric. Swallowing
+        // an up whose down passed through leaves that key logically stuck down
+        // system-wide (e.g. Shift stuck after a RightCtrl+RightShift hold chord).
+        var swallow = _swallowedKeys.Remove(vk);
+        if (_holding && !_hold.Matches(vk, _modifiers))
         {
             _holding = false;
             evt = new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow);
-            return true;
         }
-
-        return false;
+        return swallow;
     }
 
     public HotkeyHook(HotkeyChord hold, HotkeyChord toggle, HotkeyChord cancel, ILogger<HotkeyHook> log)
@@ -118,12 +136,11 @@ public sealed class HotkeyHook : IDisposable
 
         if (down || up)
         {
-            if (TryProcessKey((int)data.VkCode, down, out var evt) && evt is not null)
-            {
-                _events.Writer.TryWrite(evt);
-                // Swallow the chord so the foreground app doesn't see it.
-                return (IntPtr)1;
-            }
+            var swallow = TryProcessKey((int)data.VkCode, down, out var evt);
+            if (evt is not null) _events.Writer.TryWrite(evt);
+            // Swallow chord keys we own so the foreground app doesn't see them,
+            // but never hide a key-up whose key-down already reached the system.
+            if (swallow) return (IntPtr)1;
         }
 
         return CallNextHookEx(_hookHandle, nCode, wParam, lParam);

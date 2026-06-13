@@ -14,6 +14,7 @@ public sealed class HotkeyHook : IDisposable
     private readonly HotkeyChord _hold;
     private readonly HotkeyChord _toggle;
     private readonly HotkeyChord _cancel;
+    private readonly Func<bool> _cancelEnabled;
     private readonly ILogger<HotkeyHook> _log;
 
     private readonly Channel<HotkeyEvent> _events =
@@ -26,6 +27,7 @@ public sealed class HotkeyHook : IDisposable
     private Modifier _modifiers;
     private bool _holding;
     private readonly HashSet<int> _swallowedKeys = new();
+    private readonly HashSet<int> _observedCancelKeys = new();
     private readonly ManualResetEventSlim _ready = new(initialState: false);
 
     public ChannelReader<HotkeyEvent> Events => _events.Reader;
@@ -50,11 +52,11 @@ public sealed class HotkeyHook : IDisposable
             // toggle chord fires Toggle once per repeat.
             if (_swallowedKeys.Contains(vk)) return true;
 
-            if (_cancel.Matches(vk, _modifiers))
+            if (CancelEnabled() && _cancel.Matches(vk, _modifiers))
             {
-                evt = new HotkeyEvent(HotkeyEventKind.Cancel, DateTimeOffset.UtcNow);
-                _swallowedKeys.Add(vk);
-                return true;
+                if (_observedCancelKeys.Add(vk))
+                    evt = new HotkeyEvent(HotkeyEventKind.Cancel, DateTimeOffset.UtcNow);
+                return false;
             }
             if (_toggle.Matches(vk, _modifiers))
             {
@@ -76,6 +78,7 @@ public sealed class HotkeyHook : IDisposable
         // system's view of every physical key stays down/up symmetric. Swallowing
         // an up whose down passed through leaves that key logically stuck down
         // system-wide (e.g. Shift stuck after a RightCtrl+RightShift hold chord).
+        _observedCancelKeys.Remove(vk);
         var swallow = _swallowedKeys.Remove(vk);
         if (_holding && !_hold.Matches(vk, _modifiers))
         {
@@ -85,9 +88,28 @@ public sealed class HotkeyHook : IDisposable
         return swallow;
     }
 
-    public HotkeyHook(HotkeyChord hold, HotkeyChord toggle, HotkeyChord cancel, ILogger<HotkeyHook> log)
+    public HotkeyHook(
+        HotkeyChord hold,
+        HotkeyChord toggle,
+        HotkeyChord cancel,
+        ILogger<HotkeyHook> log,
+        Func<bool>? cancelEnabled = null)
     {
         _hold = hold; _toggle = toggle; _cancel = cancel; _log = log;
+        _cancelEnabled = cancelEnabled ?? (() => true);
+    }
+
+    private bool CancelEnabled()
+    {
+        try
+        {
+            return _cancelEnabled();
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Cancel hotkey gate threw; ignoring cancel chord");
+            return false;
+        }
     }
 
     public void Start()

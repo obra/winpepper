@@ -44,8 +44,8 @@ public sealed class ChordRecorder
     /// Feeds one key press. <paramref name="keyName"/> is null for keys that
     /// cannot finish a chord; <paramref name="modifierPrefix"/> is the
     /// "LeftCtrl+LeftShift+"-style prefix of currently held modifiers. Esc
-    /// always cancels — it doubles as the global cancel hotkey, so it can
-    /// never be recorded as part of a chord.
+    /// always cancels local chord recording, so it can never be recorded as
+    /// part of a chord.
     /// </summary>
     public ChordKeyResult OnKey(string? keyName, string modifierPrefix, bool isEscape)
     {

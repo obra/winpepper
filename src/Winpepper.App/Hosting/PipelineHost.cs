@@ -73,7 +73,12 @@ public sealed class PipelineHost : IDisposable
         _engine = engine;
         _vm = vm;
         _sounds = sounds;
-        _hook = new HotkeyHook(hold, toggle, cancel, factory.CreateLogger<HotkeyHook>());
+        _hook = new HotkeyHook(
+            hold,
+            toggle,
+            cancel,
+            factory.CreateLogger<HotkeyHook>(),
+            cancelEnabled: () => _engine.State != SessionState.Idle);
         _injector = new TextInjector(factory.CreateLogger<TextInjector>());
         _modelDir = modelDir;
         _archiver = archiver;

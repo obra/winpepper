@@ -10,9 +10,10 @@ public class HotkeyHookLogicTests
 {
     private static HotkeyHook NewHook(string hold = "RightCtrl+RightShift",
                                        string toggle = "Ctrl+Shift+Space",
-                                       string cancel = "Esc")
+                                       string cancel = "Esc",
+                                       Func<bool>? cancelEnabled = null)
         => new(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle), HotkeyChord.Parse(cancel),
-               new NullLogger<HotkeyHook>());
+               new NullLogger<HotkeyHook>(), cancelEnabled);
 
     [Fact]
     public void HoldChord_PressAndRelease_EmitsHoldDownThenHoldUp()
@@ -109,20 +110,50 @@ public class HotkeyHookLogicTests
     }
 
     [Fact]
-    public void CancelChord_EscUp_SwallowedSymmetrically()
+    public void CancelChord_EscUp_PassesThrough()
     {
         var hook = NewHook();
-        hook.TryProcessKey(0x1B, down: true,  out var ev).ShouldBeTrue();
+        hook.TryProcessKey(0x1B, down: true,  out var ev).ShouldBeFalse();
         ev!.Kind.ShouldBe(HotkeyEventKind.Cancel);
-        hook.TryProcessKey(0x1B, down: false, out var up).ShouldBeTrue();
+        hook.TryProcessKey(0x1B, down: false, out var up).ShouldBeFalse();
         up.ShouldBeNull();
     }
 
     [Fact]
-    public void CancelChord_PlainEsc_Fires()
+    public void CancelChord_PlainEsc_EmitsCancelWithoutSwallowing()
     {
         var hook = NewHook();
-        hook.TryProcessKey(0x1B, down: true, out var ev).ShouldBeTrue();
+        hook.TryProcessKey(0x1B, down: true, out var ev).ShouldBeFalse();
         ev!.Kind.ShouldBe(HotkeyEventKind.Cancel);
+    }
+
+    [Fact]
+    public void CancelChord_Autorepeat_EmitsCancelOnlyOnceWithoutSwallowing()
+    {
+        var hook = NewHook();
+
+        hook.TryProcessKey(0x1B, down: true, out var first).ShouldBeFalse();
+        first!.Kind.ShouldBe(HotkeyEventKind.Cancel);
+
+        for (var i = 0; i < 3; i++)
+        {
+            hook.TryProcessKey(0x1B, down: true, out var repeat).ShouldBeFalse();
+            repeat.ShouldBeNull();
+        }
+
+        hook.TryProcessKey(0x1B, down: false, out var up).ShouldBeFalse();
+        up.ShouldBeNull();
+    }
+
+    [Fact]
+    public void CancelChord_WhenDisabled_PlainEscPassesThrough()
+    {
+        var hook = NewHook(cancelEnabled: () => false);
+
+        hook.TryProcessKey(0x1B, down: true, out var down).ShouldBeFalse();
+        down.ShouldBeNull();
+
+        hook.TryProcessKey(0x1B, down: false, out var up).ShouldBeFalse();
+        up.ShouldBeNull();
     }
 }

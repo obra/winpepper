@@ -11,9 +11,10 @@ namespace Winpepper.Platform.Hotkeys;
 /// </summary>
 public sealed class HotkeyHook : IDisposable
 {
-    private readonly HotkeyChord _hold;
-    private readonly HotkeyChord _toggle;
-    private readonly HotkeyChord _cancel;
+    private sealed record HotkeyBindings(HotkeyChord Hold, HotkeyChord Toggle, HotkeyChord Cancel);
+
+    private HotkeyBindings _bindings;
+    private readonly Func<bool> _cancelEnabled;
     private readonly ILogger<HotkeyHook> _log;
 
     private readonly Channel<HotkeyEvent> _events =
@@ -25,51 +26,142 @@ public sealed class HotkeyHook : IDisposable
     private LowLevelKeyboardProc? _callback;
     private Modifier _modifiers;
     private bool _holding;
+    private readonly HashSet<int> _swallowedKeys = new();
+    private readonly HashSet<int> _observedCancelKeys = new();
+    private readonly HashSet<int> _captureKeysDown = new();
+    private int _suspendRequested;
     private readonly ManualResetEventSlim _ready = new(initialState: false);
 
     public ChannelReader<HotkeyEvent> Events => _events.Reader;
 
     /// <summary>
     /// Public for tests: synchronously evaluate a key event against the registered
-    /// chords. Used by integration tests that don't want to install a real hook.
+    /// chords. The return value means "swallow this event" (hide it from the
+    /// foreground app); <paramref name="evt"/> is set when a hotkey event fired.
+    /// The two are independent: a key-up can emit HoldUp yet still pass through
+    /// when its key-down was visible to the system.
     /// </summary>
     public bool TryProcessKey(int vk, bool down, out HotkeyEvent? evt)
     {
         evt = null;
+        var modifiersBeforeEvent = _modifiers;
         UpdateModifierState(vk, down);
+        var bindings = Volatile.Read(ref _bindings);
+
+        var suspendRequested = Volatile.Read(ref _suspendRequested) != 0;
+        if (suspendRequested || _captureKeysDown.Count != 0)
+        {
+            // Keep passing through every key involved in capture until all of
+            // them are released. This drain phase prevents typematic repeats
+            // from firing a just-recorded chord after the UI requests resume.
+            if (down)
+            {
+                _captureKeysDown.Add(vk);
+                return false;
+            }
+            _captureKeysDown.Remove(vk);
+            _observedCancelKeys.Remove(vk);
+
+            // Finish any chord that was already active when capture began, but
+            // otherwise pass keys through so the settings control can see them.
+            var swallowWhileSuspended = _swallowedKeys.Remove(vk);
+            if (_holding && !bindings.Hold.Matches(vk, _modifiers))
+            {
+                _holding = false;
+                evt = new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow);
+            }
+            return swallowWhileSuspended;
+        }
 
         if (down)
         {
-            if (_cancel.Matches(vk, _modifiers))
+            // Autorepeat of a key whose down we swallowed: keep swallowing it,
+            // but do not emit a duplicate event. Without this, repeats of the
+            // chord-completing modifier leak to the foreground app, and a held
+            // toggle chord fires Toggle once per repeat.
+            if (_swallowedKeys.Contains(vk)) return true;
+
+            if (CancelEnabled()
+                && ActivatesOnKeyDown(bindings.Cancel, vk, modifiersBeforeEvent, _modifiers))
             {
-                evt = new HotkeyEvent(HotkeyEventKind.Cancel, DateTimeOffset.UtcNow);
-                return true;
+                if (_observedCancelKeys.Add(vk))
+                    evt = new HotkeyEvent(HotkeyEventKind.Cancel, DateTimeOffset.UtcNow);
+                return false;
             }
-            if (_toggle.Matches(vk, _modifiers))
+            if (ActivatesOnKeyDown(bindings.Toggle, vk, modifiersBeforeEvent, _modifiers))
             {
                 evt = new HotkeyEvent(HotkeyEventKind.Toggle, DateTimeOffset.UtcNow);
+                _swallowedKeys.Add(vk);
                 return true;
             }
-            if (_hold.Matches(vk, _modifiers) && !_holding)
+            if (ActivatesOnKeyDown(bindings.Hold, vk, modifiersBeforeEvent, _modifiers) && !_holding)
             {
                 _holding = true;
                 evt = new HotkeyEvent(HotkeyEventKind.HoldDown, DateTimeOffset.UtcNow);
+                _swallowedKeys.Add(vk);
                 return true;
             }
+            return false;
         }
-        else if (_holding && !_hold.Matches(vk, _modifiers))
+
+        // Key up: swallow only when we swallowed the matching key-down, so the
+        // system's view of every physical key stays down/up symmetric. Swallowing
+        // an up whose down passed through leaves that key logically stuck down
+        // system-wide (e.g. Shift stuck after a RightCtrl+RightShift hold chord).
+        _observedCancelKeys.Remove(vk);
+        var swallow = _swallowedKeys.Remove(vk);
+        if (_holding && !bindings.Hold.Matches(vk, _modifiers))
         {
             _holding = false;
             evt = new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow);
-            return true;
         }
-
-        return false;
+        return swallow;
     }
 
-    public HotkeyHook(HotkeyChord hold, HotkeyChord toggle, HotkeyChord cancel, ILogger<HotkeyHook> log)
+    public HotkeyHook(
+        HotkeyChord hold,
+        HotkeyChord toggle,
+        HotkeyChord cancel,
+        ILogger<HotkeyHook> log,
+        Func<bool>? cancelEnabled = null)
     {
-        _hold = hold; _toggle = toggle; _cancel = cancel; _log = log;
+        _bindings = new HotkeyBindings(hold, toggle, cancel);
+        _log = log;
+        _cancelEnabled = cancelEnabled ?? (() => true);
+    }
+
+    private bool CancelEnabled()
+    {
+        try
+        {
+            return _cancelEnabled();
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Cancel hotkey gate threw; ignoring cancel chord");
+            return false;
+        }
+    }
+
+    /// <summary>Atomically replaces the active hold and toggle chords.</summary>
+    public void UpdateChords(HotkeyChord hold, HotkeyChord toggle)
+    {
+        ArgumentNullException.ThrowIfNull(hold);
+        ArgumentNullException.ThrowIfNull(toggle);
+
+        var current = Volatile.Read(ref _bindings);
+        Volatile.Write(ref _bindings, new HotkeyBindings(hold, toggle, current.Cancel));
+        _log.LogInformation("Hotkeys updated: hold={Hold}, toggle={Toggle}", hold, toggle);
+    }
+
+    /// <summary>
+    /// Lets the settings UI receive key events without the global hook firing
+    /// or swallowing the chord currently being captured.
+    /// </summary>
+    public void SetSuspended(bool suspended)
+    {
+        Volatile.Write(ref _suspendRequested, suspended ? 1 : 0);
+        _log.LogDebug("Hotkey hook {State} for chord capture", suspended ? "suspended" : "resumed");
     }
 
     public void Start()
@@ -118,12 +210,11 @@ public sealed class HotkeyHook : IDisposable
 
         if (down || up)
         {
-            if (TryProcessKey((int)data.VkCode, down, out var evt) && evt is not null)
-            {
-                _events.Writer.TryWrite(evt);
-                // Swallow the chord so the foreground app doesn't see it.
-                return (IntPtr)1;
-            }
+            var swallow = TryProcessKey((int)data.VkCode, down, out var evt);
+            if (evt is not null) _events.Writer.TryWrite(evt);
+            // Swallow chord keys we own so the foreground app doesn't see them,
+            // but never hide a key-up whose key-down already reached the system.
+            if (swallow) return (IntPtr)1;
         }
 
         return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
@@ -131,7 +222,31 @@ public sealed class HotkeyHook : IDisposable
 
     private void UpdateModifierState(int vk, bool down)
     {
-        var mod = vk switch
+        var mod = ModifierForVirtualKey(vk);
+        if (mod == Modifier.None) return;
+        if (down) _modifiers |= mod; else _modifiers &= ~mod;
+    }
+
+    private static bool ActivatesOnKeyDown(HotkeyChord chord, int vk,
+                                           Modifier modifiersBeforeEvent,
+                                           Modifier currentModifiers)
+    {
+        if (chord.VirtualKey != 0)
+            return chord.Matches(vk, currentModifiers);
+
+        // Modifier-only chords are state matches, so Matches alone would also
+        // return true for an unrelated key pressed while the modifiers remain
+        // held. Activate only when this modifier keydown changes the chord from
+        // incomplete to complete.
+        var pressedModifier = ModifierForVirtualKey(vk);
+        return pressedModifier != Modifier.None
+            && (chord.Modifiers & pressedModifier) != Modifier.None
+            && !chord.Matches(0, modifiersBeforeEvent)
+            && chord.Matches(0, currentModifiers);
+    }
+
+    private static Modifier ModifierForVirtualKey(int vk)
+        => vk switch
         {
             VK_LCONTROL => Modifier.LeftCtrl,
             VK_RCONTROL => Modifier.RightCtrl,
@@ -143,9 +258,6 @@ public sealed class HotkeyHook : IDisposable
             VK_RWIN     => Modifier.RightWin,
             _           => Modifier.None,
         };
-        if (mod == Modifier.None) return;
-        if (down) _modifiers |= mod; else _modifiers &= ~mod;
-    }
 
     public void Dispose()
     {

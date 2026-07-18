@@ -47,6 +47,15 @@ public class HotkeyChordTests
     }
 
     [Fact]
+    public void Matches_RejectsExtraModifierGroup()
+    {
+        var chord = HotkeyChord.Parse("LeftCtrl+LeftShift");
+
+        chord.Matches(0, Modifier.LeftCtrl | Modifier.LeftShift | Modifier.LeftAlt).ShouldBeFalse();
+        chord.Matches(0, Modifier.LeftCtrl | Modifier.LeftShift | Modifier.RightWin).ShouldBeFalse();
+    }
+
+    [Fact]
     public void ToString_RoundTrips_Through_Parse()
     {
         var original = HotkeyChord.Parse("Ctrl+Shift+Space");

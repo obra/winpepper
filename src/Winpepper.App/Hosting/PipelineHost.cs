@@ -73,7 +73,12 @@ public sealed class PipelineHost : IDisposable
         _engine = engine;
         _vm = vm;
         _sounds = sounds;
-        _hook = new HotkeyHook(hold, toggle, cancel, factory.CreateLogger<HotkeyHook>());
+        _hook = new HotkeyHook(
+            hold,
+            toggle,
+            cancel,
+            factory.CreateLogger<HotkeyHook>(),
+            cancelEnabled: () => _engine.State != SessionState.Idle);
         _injector = new TextInjector(factory.CreateLogger<TextInjector>());
         _modelDir = modelDir;
         _archiver = archiver;
@@ -91,6 +96,12 @@ public sealed class PipelineHost : IDisposable
 
     /// <summary>True once the ASR model is loaded and the hotkey pipeline is running.</summary>
     public bool IsRunning { get; private set; }
+
+    public void UpdateHotkeys(string hold, string toggle)
+        => _hook.UpdateChords(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle));
+
+    public void SetHotkeyCaptureActive(bool active)
+        => _hook.SetSuspended(active);
 
     /// <summary>
     /// Loads the ASR model and starts the hotkey pipeline. Safe to call again

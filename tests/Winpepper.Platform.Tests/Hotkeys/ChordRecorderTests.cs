@@ -75,6 +75,59 @@ public class ChordRecorderTests
     }
 
     [Fact]
+    public void ModifierOnlyChord_CommitsLargestObservedChord_OnFirstRelease()
+    {
+        var r = new ChordRecorder();
+        r.Begin();
+
+        r.OnModifierKeyDown("LeftCtrl+").ShouldBe(ChordKeyResult.Ignored);
+        r.OnModifierKeyDown("LeftCtrl+LeftShift+").ShouldBe(ChordKeyResult.Ignored);
+
+        r.OnModifierKeyUp().ShouldBe(ChordKeyResult.Committed);
+        r.CommittedChord.ShouldBe("LeftCtrl+LeftShift");
+        r.IsRecording.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void ModifierCandidate_DoesNotPreemptChordWithNonModifierKey()
+    {
+        var r = new ChordRecorder();
+        r.Begin();
+
+        r.OnModifierKeyDown("LeftCtrl+").ShouldBe(ChordKeyResult.Ignored);
+        r.OnModifierKeyDown("LeftCtrl+LeftShift+").ShouldBe(ChordKeyResult.Ignored);
+        r.OnKey("A", "LeftCtrl+LeftShift+", isEscape: false).ShouldBe(ChordKeyResult.Committed);
+
+        r.CommittedChord.ShouldBe("LeftCtrl+LeftShift+A");
+        r.OnModifierKeyUp().ShouldBe(ChordKeyResult.Ignored);
+    }
+
+    [Fact]
+    public void UnmappedNonModifier_ClearsModifierOnlyCandidate()
+    {
+        var r = new ChordRecorder();
+        r.Begin();
+
+        r.OnModifierKeyDown("LeftCtrl+").ShouldBe(ChordKeyResult.Ignored);
+        r.OnKey(null, "LeftCtrl+", isEscape: false).ShouldBe(ChordKeyResult.Ignored);
+
+        r.OnModifierKeyUp().ShouldBe(ChordKeyResult.Ignored);
+        r.IsRecording.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Cancel_ClearsModifierOnlyCandidate()
+    {
+        var r = new ChordRecorder();
+        r.Begin();
+        r.OnModifierKeyDown("LeftCtrl+LeftShift+").ShouldBe(ChordKeyResult.Ignored);
+
+        r.Cancel().ShouldBeTrue();
+        r.OnModifierKeyUp().ShouldBe(ChordKeyResult.Ignored);
+        r.CommittedChord.ShouldBeNull();
+    }
+
+    [Fact]
     public void UnparseableCombination_ReturnsInvalid_AndRecordingStaysArmed()
     {
         var r = new ChordRecorder();

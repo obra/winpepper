@@ -11,6 +11,7 @@ namespace Winpepper.App.Views.Controls;
 public sealed partial class HotkeyRecorderBox : UserControl
 {
     public event Action<string>? ChordRecorded;
+    public event Action<bool>? RecordingStateChanged;
 
     private readonly ChordRecorder _recorder = new();
     private string _chordBeforeRecording = "";
@@ -31,6 +32,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
     {
         InitializeComponent();
         KeyDown += OnKeyDown;
+        KeyUp += OnKeyUp;
         LostFocus += OnLostFocus;
         IsTabStop = true;
     }
@@ -46,6 +48,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
     {
         _chordBeforeRecording = ChordText.Text;
         _recorder.Begin();
+        RecordingStateChanged?.Invoke(true);
         ChordText.Text = "(press a chord - Esc cancels)";
         RecordButton.Visibility = Visibility.Collapsed;
         CancelButton.Visibility = Visibility.Visible;
@@ -68,6 +71,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
     private void CancelRecording(string reason)
     {
         if (!_recorder.Cancel()) return;
+        RecordingStateChanged?.Invoke(false);
         ChordText.Text = _chordBeforeRecording;
         ResetButtons();
         Log?.LogInformation("Hotkey recording cancelled ({Label}): {Reason}", Label, reason);
@@ -82,20 +86,38 @@ public sealed partial class HotkeyRecorderBox : UserControl
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (!_recorder.IsRecording) return;
-        if (e.Key is VirtualKey.Control or VirtualKey.Shift or VirtualKey.Menu
-                  or VirtualKey.LeftControl or VirtualKey.RightControl
-                  or VirtualKey.LeftShift or VirtualKey.RightShift
-                  or VirtualKey.LeftMenu or VirtualKey.RightMenu
-                  or VirtualKey.LeftWindows or VirtualKey.RightWindows)
-            return; // bare modifier — keep waiting for the full chord
 
-        string mods;
+        if (IsModifierKey(e.Key))
+        {
+            if (!TryGetCurrentModifierPrefix(e, out var heldModifiers)) return;
+            HandleRecorderResult(_recorder.OnModifierKeyDown(heldModifiers), e);
+            return;
+        }
+
+        if (!TryGetCurrentModifierPrefix(e, out var mods)) return;
+        HandleRecorderResult(_recorder.OnKey(KeyToName(e.Key), mods, e.Key == VirtualKey.Escape), e);
+    }
+
+    private void OnKeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        if (!_recorder.IsRecording || !IsModifierKey(e.Key)) return;
+
+        // Modifier-only chords are complete when the user begins releasing
+        // them. The recorder retained the largest modifier set observed on
+        // key-down, before InputKeyboardSource dropped the released key.
+        HandleRecorderResult(_recorder.OnModifierKeyUp(), e);
+    }
+
+    private bool TryGetCurrentModifierPrefix(KeyRoutedEventArgs e, out string modifiers)
+    {
         try
         {
-            mods = CurrentModifierPrefix();
+            modifiers = CurrentModifierPrefix();
+            return true;
         }
         catch (Exception ex)
         {
+            modifiers = "";
             // InputKeyboardSource reads keyboard state through COM and can
             // fail (E_ACCESSDENIED) while focus is moving between windows
             // (issue #11). Cancel cleanly and surface the error instead of
@@ -105,24 +127,23 @@ public sealed partial class HotkeyRecorderBox : UserControl
             CancelRecording("modifier state unavailable");
             SetChord(_chordBeforeRecording, "Couldn't read the keyboard state. Try recording again.");
             e.Handled = true;
-            return;
+            return false;
         }
+    }
 
-        var result = _recorder.OnKey(KeyToName(e.Key), mods, e.Key == VirtualKey.Escape);
+    private void HandleRecorderResult(ChordKeyResult result, KeyRoutedEventArgs e)
+    {
         switch (result)
         {
             case ChordKeyResult.Cancelled:
+                RecordingStateChanged?.Invoke(false);
                 ChordText.Text = _chordBeforeRecording;
                 ResetButtons();
                 Log?.LogInformation("Hotkey recording cancelled ({Label}): Esc", Label);
                 e.Handled = true;
                 break;
             case ChordKeyResult.Committed:
-                var chord = _recorder.CommittedChord!;
-                SetChord(chord, null);
-                ResetButtons();
-                ChordRecorded?.Invoke(chord);
-                Log?.LogInformation("Hotkey recording committed ({Label}): {Chord}", Label, chord);
+                CommitRecordedChord();
                 e.Handled = true;
                 break;
             case ChordKeyResult.Invalid:
@@ -132,8 +153,25 @@ public sealed partial class HotkeyRecorderBox : UserControl
         }
     }
 
+    private void CommitRecordedChord()
+    {
+        var chord = _recorder.CommittedChord!;
+        SetChord(chord, null);
+        ResetButtons();
+        ChordRecorded?.Invoke(chord);
+        RecordingStateChanged?.Invoke(false);
+        Log?.LogInformation("Hotkey recording committed ({Label}): {Chord}", Label, chord);
+    }
+
+    private static bool IsModifierKey(VirtualKey key) => key is
+        VirtualKey.Control or VirtualKey.Shift or VirtualKey.Menu or
+        VirtualKey.LeftControl or VirtualKey.RightControl or
+        VirtualKey.LeftShift or VirtualKey.RightShift or
+        VirtualKey.LeftMenu or VirtualKey.RightMenu or
+        VirtualKey.LeftWindows or VirtualKey.RightWindows;
+
     // Reads modifier states with InputKeyboardSource (WinUI 3 API). COM-backed;
-    // callers must be ready for it to throw (see OnKeyDown).
+    // callers must be ready for it to throw (see TryGetCurrentModifierPrefix).
     private static string CurrentModifierPrefix()
     {
         bool IsDown(VirtualKey vk) =>

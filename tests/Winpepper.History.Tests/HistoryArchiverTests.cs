@@ -16,8 +16,9 @@ public class HistoryArchiverTests : IDisposable
     [Fact]
     public void Archive_WritesWavAndAppendsIndex()
     {
+        var now = DateTime.UtcNow;
         var store = new HistoryStore(_root);
-        var archiver = new HistoryArchiver(store, () => new DateTime(2026, 5, 15, 10, 0, 0, DateTimeKind.Utc));
+        var archiver = new HistoryArchiver(store, () => now);
 
         var samples = new float[16000]; // 1s silence
         var input = new HistoryArchiveInput
@@ -37,7 +38,7 @@ public class HistoryArchiverTests : IDisposable
 
         entry.RawTranscript.ShouldBe("hello world");
         entry.CleanedText.ShouldBe("Hello, world.");
-        entry.WavRelativePath.ShouldBe($"2026-05-15/{entry.Id}.wav");
+        entry.WavRelativePath.ShouldBe($"{now:yyyy-MM-dd}/{entry.Id}.wav");
         entry.DurationMs.ShouldBe(1000); // 16000 samples / 16 kHz = 1 second
 
         // WAV exists on disk

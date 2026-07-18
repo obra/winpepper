@@ -21,6 +21,8 @@ public enum ChordKeyResult
 /// </summary>
 public sealed class ChordRecorder
 {
+    private string? _modifierOnlyCandidate;
+
     public bool IsRecording { get; private set; }
 
     /// <summary>The chord captured by the most recent Committed transition.</summary>
@@ -30,6 +32,7 @@ public sealed class ChordRecorder
     {
         IsRecording = true;
         CommittedChord = null;
+        _modifierOnlyCandidate = null;
     }
 
     /// <summary>Cancels an in-flight recording. Returns false when idle (no-op).</summary>
@@ -37,15 +40,57 @@ public sealed class ChordRecorder
     {
         if (!IsRecording) return false;
         IsRecording = false;
+        _modifierOnlyCandidate = null;
         return true;
+    }
+
+    /// <summary>
+    /// Remembers the modifier-only chord currently held by the user. It is not
+    /// committed until a modifier is released, which gives the user time to
+    /// press a multi-modifier chord such as LeftCtrl+LeftShift.
+    /// </summary>
+    public ChordKeyResult OnModifierKeyDown(string modifierPrefix)
+    {
+        if (!IsRecording) return ChordKeyResult.Ignored;
+
+        var chord = modifierPrefix.TrimEnd('+');
+        if (chord.Length == 0) return ChordKeyResult.Ignored;
+
+        try
+        {
+            if (HotkeyChord.Parse(chord).VirtualKey != 0)
+                return ChordKeyResult.Invalid;
+        }
+        catch (FormatException)
+        {
+            return ChordKeyResult.Invalid;
+        }
+
+        _modifierOnlyCandidate = chord;
+        return ChordKeyResult.Ignored;
+    }
+
+    /// <summary>
+    /// Commits the largest modifier-only chord observed during this recording
+    /// when the user starts releasing it.
+    /// </summary>
+    public ChordKeyResult OnModifierKeyUp()
+    {
+        if (!IsRecording || _modifierOnlyCandidate is null)
+            return ChordKeyResult.Ignored;
+
+        CommittedChord = _modifierOnlyCandidate;
+        IsRecording = false;
+        _modifierOnlyCandidate = null;
+        return ChordKeyResult.Committed;
     }
 
     /// <summary>
     /// Feeds one key press. <paramref name="keyName"/> is null for keys that
     /// cannot finish a chord; <paramref name="modifierPrefix"/> is the
     /// "LeftCtrl+LeftShift+"-style prefix of currently held modifiers. Esc
-    /// always cancels — it doubles as the global cancel hotkey, so it can
-    /// never be recorded as part of a chord.
+    /// always cancels local chord recording, so it can never be recorded as
+    /// part of a chord.
     /// </summary>
     public ChordKeyResult OnKey(string? keyName, string modifierPrefix, bool isEscape)
     {
@@ -53,9 +98,16 @@ public sealed class ChordRecorder
         if (isEscape)
         {
             IsRecording = false;
+            _modifierOnlyCandidate = null;
             return ChordKeyResult.Cancelled;
         }
-        if (keyName is null) return ChordKeyResult.Ignored;
+        if (keyName is null)
+        {
+            // An unmapped non-modifier key means the remembered modifier state
+            // is no longer a reliable representation of the intended chord.
+            _modifierOnlyCandidate = null;
+            return ChordKeyResult.Ignored;
+        }
 
         var chord = modifierPrefix + keyName;
         try
@@ -64,11 +116,13 @@ public sealed class ChordRecorder
         }
         catch (FormatException)
         {
+            _modifierOnlyCandidate = null;
             return ChordKeyResult.Invalid;
         }
 
         CommittedChord = chord;
         IsRecording = false;
+        _modifierOnlyCandidate = null;
         return ChordKeyResult.Committed;
     }
 }

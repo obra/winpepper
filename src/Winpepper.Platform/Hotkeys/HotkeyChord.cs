@@ -118,10 +118,10 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
         if (HasAny(Modifier.Win))   requiredGroups |= Modifier.Win;
 
         var currentGroups =
-            (HasAny(current & Modifier.Ctrl)  ? Modifier.Ctrl  : Modifier.None) |
-            (HasAny(current & Modifier.Shift) ? Modifier.Shift : Modifier.None) |
-            (HasAny(current & Modifier.Alt)   ? Modifier.Alt   : Modifier.None) |
-            (HasAny(current & Modifier.Win)   ? Modifier.Win   : Modifier.None);
+            (HasAny(current, Modifier.Ctrl)  ? Modifier.Ctrl  : Modifier.None) |
+            (HasAny(current, Modifier.Shift) ? Modifier.Shift : Modifier.None) |
+            (HasAny(current, Modifier.Alt)   ? Modifier.Alt   : Modifier.None) |
+            (HasAny(current, Modifier.Win)   ? Modifier.Win   : Modifier.None);
         if (currentGroups != requiredGroups) return false;
 
         return true;

@@ -12,3 +12,4 @@ TestResults/
 .vscode/
 node_modules/
 *.log
+.worktrees/

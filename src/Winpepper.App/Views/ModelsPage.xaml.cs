@@ -1,4 +1,5 @@
 #if WINDOWS
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
@@ -9,6 +10,8 @@ namespace Winpepper.App.Views;
 
 public sealed partial class ModelsPage : Page
 {
+    private bool _downloadInProgress;
+
     public ModelsTabViewModel ViewModel { get; private set; } = null!;
 
     public ModelsPage()
@@ -36,11 +39,14 @@ public sealed partial class ModelsPage : Page
                 var cur = settings.Load();
                 settings.Save(cur with { CleanupModelName = name });
             },
-            // Download progress callbacks arrive on ThreadPool threads (the
-            // loop in DownloadMissingAsync resumes off-context after its
-            // ConfigureAwait(false) awaits). XAML-bound state must only be
-            // touched on the UI thread, so route mutations through it.
-            dispatch: a => App.Shell!.Ui.Post(a));
+            // The progress bridge requires an observable enqueue result: if
+            // navigation/app shutdown has closed this queue, fail its drain
+            // instead of waiting forever for a callback that cannot run.
+            dispatch: a =>
+            {
+                if (!DispatcherQueue.TryEnqueue(() => a()))
+                    throw new InvalidOperationException("The UI dispatcher rejected model progress work.");
+            });
 
         AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
@@ -69,12 +75,37 @@ public sealed partial class ModelsPage : Page
 
     private async void OnDownloadMissing(object sender, RoutedEventArgs e)
     {
-        await ViewModel.DownloadMissingAsync(CancellationToken.None);
-        UpdateInstalledLabels();
+        if (_downloadInProgress) return;
+        _downloadInProgress = true;
+        var button = sender as Button;
+        if (button is not null) button.IsEnabled = false;
 
-        // If the pipeline was left disabled at boot because models were
-        // missing (issue #6), bring it up now that the download finished.
-        App.Shell!.Pipeline.TryStart();
+        try
+        {
+            await ViewModel.DownloadMissingAsync(CancellationToken.None);
+            UpdateInstalledLabels();
+
+            // If the pipeline was left disabled at boot because models were
+            // missing (issue #6), bring it up now that the download finished.
+            App.Shell!.Pipeline.TryStart();
+        }
+        catch (OperationCanceledException)
+        {
+            // A future cancel button can use this path without surfacing a
+            // cancellation as an application crash.
+        }
+        catch (Exception ex)
+        {
+            var shell = App.Shell!;
+            shell.LogFactory.CreateLogger<ModelsPage>()
+                .LogError(ex, "Model download failed");
+            shell.ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
+        }
+        finally
+        {
+            if (button is not null) button.IsEnabled = true;
+            _downloadInProgress = false;
+        }
     }
 
     private void UpdateInstalledLabels()

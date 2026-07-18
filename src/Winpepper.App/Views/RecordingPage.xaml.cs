@@ -16,14 +16,31 @@ public sealed partial class RecordingPage : Page
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
-        _shell = (AppShell)e.Parameter;
-        var vm = _shell.RecordingVm;
+        var shell = (AppShell)e.Parameter;
+        _shell = shell;
+        var vm = shell.RecordingVm;
 
         HoldBox.SetChord(vm.HoldHotkey, vm.HoldHotkeyConflict);
         ToggleBox.SetChord(vm.ToggleHotkey, vm.ToggleHotkeyConflict);
 
-        HoldBox.ChordRecorded   += chord => vm.HoldHotkey = chord;
-        ToggleBox.ChordRecorded += chord => vm.ToggleHotkey = chord;
+        void ApplyHotkeysIfValid()
+        {
+            if (vm.HoldHotkeyConflict is null && vm.ToggleHotkeyConflict is null)
+                shell.Pipeline.UpdateHotkeys(vm.HoldHotkey, vm.ToggleHotkey);
+        }
+
+        HoldBox.ChordRecorded += chord =>
+        {
+            vm.HoldHotkey = chord;
+            ApplyHotkeysIfValid();
+        };
+        ToggleBox.ChordRecorded += chord =>
+        {
+            vm.ToggleHotkey = chord;
+            ApplyHotkeysIfValid();
+        };
+        HoldBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
+        ToggleBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
         vm.PropertyChanged += (_, _) =>
         {
             HoldBox.SetChord(vm.HoldHotkey, vm.HoldHotkeyConflict);
@@ -86,6 +103,7 @@ public sealed partial class RecordingPage : Page
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         _levelRecorder?.Dispose();
+        _shell?.Pipeline.SetHotkeyCaptureActive(false);
     }
 }
 #endif

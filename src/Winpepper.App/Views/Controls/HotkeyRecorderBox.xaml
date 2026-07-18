@@ -29,7 +29,7 @@
                            VerticalAlignment="Center" />
             </Border>
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-                <Button x:Name="RecordButton" AutomationProperties.AutomationId="HotkeyRecordButton" Content="Record" Click="OnRecordClick" />
+                <Button x:Name="RecordButton" AutomationProperties.AutomationId="HotkeyRecordButton" Content="Set hotkey" Click="OnRecordClick" />
                 <Button x:Name="CancelButton" AutomationProperties.AutomationId="HotkeyCancelButton" Content="Cancel" Click="OnCancelClick" Visibility="Collapsed" />
             </StackPanel>
         </Grid>

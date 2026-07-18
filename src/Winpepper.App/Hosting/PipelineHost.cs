@@ -97,6 +97,12 @@ public sealed class PipelineHost : IDisposable
     /// <summary>True once the ASR model is loaded and the hotkey pipeline is running.</summary>
     public bool IsRunning { get; private set; }
 
+    public void UpdateHotkeys(string hold, string toggle)
+        => _hook.UpdateChords(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle));
+
+    public void SetHotkeyCaptureActive(bool active)
+        => _hook.SetSuspended(active);
+
     /// <summary>
     /// Loads the ASR model and starts the hotkey pipeline. Safe to call again
     /// later — e.g. after the Models tab finishes downloading. When the model

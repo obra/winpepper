@@ -18,9 +18,10 @@ public sealed partial class OnboardingPage : Page
 
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
-        _shell = (AppShell)e.Parameter;
+        var shell = (AppShell)e.Parameter;
+        _shell = shell;
         // The stub returns immediately for Plan 3. Plan 4 swaps in the real downloader.
-        _vm = new OnboardingViewModel(_shell.SettingsWriter, () => Task.CompletedTask,
+        _vm = new OnboardingViewModel(shell.SettingsWriter, () => Task.CompletedTask,
                                        new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator());
 
         var devices = DeviceEnumerator.List();
@@ -36,8 +37,28 @@ public sealed partial class OnboardingPage : Page
             RefreshButtons();
         };
 
-        HoldBox.ChordRecorded   += chord => { _vm.HoldHotkey = chord; HoldBox.SetChord(chord, _vm.HoldHotkeyError);   RefreshButtons(); };
-        ToggleBox.ChordRecorded += chord => { _vm.ToggleHotkey = chord; ToggleBox.SetChord(chord, _vm.ToggleHotkeyError); RefreshButtons(); };
+        void ApplyHotkeysIfValid()
+        {
+            if (_vm.HoldHotkeyError is null && _vm.ToggleHotkeyError is null)
+                shell.Pipeline.UpdateHotkeys(_vm.HoldHotkey, _vm.ToggleHotkey);
+        }
+
+        HoldBox.ChordRecorded += chord =>
+        {
+            _vm.HoldHotkey = chord;
+            HoldBox.SetChord(chord, _vm.HoldHotkeyError);
+            ApplyHotkeysIfValid();
+            RefreshButtons();
+        };
+        ToggleBox.ChordRecorded += chord =>
+        {
+            _vm.ToggleHotkey = chord;
+            ToggleBox.SetChord(chord, _vm.ToggleHotkeyError);
+            ApplyHotkeysIfValid();
+            RefreshButtons();
+        };
+        HoldBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
+        ToggleBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
         HoldBox.SetChord(_vm.HoldHotkey, _vm.HoldHotkeyError);
         ToggleBox.SetChord(_vm.ToggleHotkey, _vm.ToggleHotkeyError);
 
@@ -120,6 +141,10 @@ public sealed partial class OnboardingPage : Page
         try { _meterRecorder.Start(); } catch { /* mic unavailable in this VM */ }
     }
 
-    protected override void OnNavigatedFrom(NavigationEventArgs e) { _meterRecorder?.Dispose(); }
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        _meterRecorder?.Dispose();
+        _shell?.Pipeline.SetHotkeyCaptureActive(false);
+    }
 }
 #endif

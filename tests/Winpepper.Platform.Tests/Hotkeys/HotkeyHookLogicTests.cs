@@ -19,15 +19,12 @@ public class HotkeyHookLogicTests
     public void HoldChord_PressAndRelease_EmitsHoldDownThenHoldUp()
     {
         var hook = NewHook();
-        // Right Ctrl down, then Right Shift down should fire HoldDown.
-        hook.TryProcessKey(VK_RCONTROL, down: true,  out _).ShouldBeFalse();
-        hook.TryProcessKey(VK_RSHIFT,   down: true,  out var down).ShouldBeTrue();
+        hook.TryProcessKey(VK_RCONTROL, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_RSHIFT, down: true, out var down).ShouldBeTrue();
         down!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
 
-        // Releasing either modifier should fire HoldUp.
         hook.TryProcessKey(VK_RSHIFT, down: false, out var up).ShouldBeTrue();
         up!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
-
         hook.TryProcessKey(VK_RCONTROL, down: false, out _).ShouldBeFalse();
     }
 
@@ -36,31 +33,25 @@ public class HotkeyHookLogicTests
     {
         var hook = NewHook();
         hook.TryProcessKey(VK_LCONTROL, down: true, out _).ShouldBeFalse();
-        hook.TryProcessKey(VK_LSHIFT,   down: true, out _).ShouldBeFalse();
-        hook.TryProcessKey(0x20 /*Space*/, down: true, out var ev).ShouldBeTrue();
+        hook.TryProcessKey(VK_LSHIFT, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(0x20 /* Space */, down: true, out var ev).ShouldBeTrue();
         ev!.Kind.ShouldBe(HotkeyEventKind.Toggle);
     }
-
-    // Regression tests for stuck modifiers (asymmetric swallowing).
-    // The hook must only swallow a key-up when it swallowed that key's down;
-    // otherwise the OS sees a down with no up and the key sticks.
 
     [Fact]
     public void HoldChord_ReleasingPassedThroughModifierFirst_EmitsHoldUpWithoutSwallowing()
     {
         var hook = NewHook();
-        // RShift pressed first: its down does NOT complete the chord, so it
-        // passes through to the system. RCtrl completes the chord (swallowed).
-        hook.TryProcessKey(VK_RSHIFT,   down: true, out _).ShouldBeFalse();
-        hook.TryProcessKey(VK_RCONTROL, down: true, out var downEvt).ShouldBeTrue();
-        downEvt!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+        // RShift pressed first: its down passes through. RCtrl completes the
+        // chord and is swallowed.
+        hook.TryProcessKey(VK_RSHIFT, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_RCONTROL, down: true, out var down).ShouldBeTrue();
+        down!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
 
-        // Releasing RShift breaks the chord: HoldUp must fire, but the key-up
-        // must NOT be swallowed — the system saw its key-down.
-        hook.TryProcessKey(VK_RSHIFT, down: false, out var upEvt).ShouldBeFalse();
-        upEvt!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
-
-        // RCtrl's down was swallowed, so its up must be swallowed too.
+        // The system saw RShift down, so its matching up must pass through even
+        // though it also ends the hold chord.
+        hook.TryProcessKey(VK_RSHIFT, down: false, out var up).ShouldBeFalse();
+        up!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
         hook.TryProcessKey(VK_RCONTROL, down: false, out var none).ShouldBeTrue();
         none.ShouldBeNull();
     }
@@ -70,12 +61,9 @@ public class HotkeyHookLogicTests
     {
         var hook = NewHook();
         hook.TryProcessKey(VK_RCONTROL, down: true, out _).ShouldBeFalse();
-        hook.TryProcessKey(VK_RSHIFT,   down: true, out var evt).ShouldBeTrue();
+        hook.TryProcessKey(VK_RSHIFT, down: true, out var evt).ShouldBeTrue();
         evt!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
 
-        // Windows autorepeats the last-pressed key while the chord is held.
-        // Repeats must stay swallowed (no leak to the foreground app) and must
-        // not emit duplicate events.
         for (var i = 0; i < 3; i++)
         {
             hook.TryProcessKey(VK_RSHIFT, down: true, out var repeat).ShouldBeTrue();
@@ -92,7 +80,7 @@ public class HotkeyHookLogicTests
     {
         var hook = NewHook();
         hook.TryProcessKey(VK_LCONTROL, down: true, out _).ShouldBeFalse();
-        hook.TryProcessKey(VK_LSHIFT,   down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LSHIFT, down: true, out _).ShouldBeFalse();
         hook.TryProcessKey(0x20, down: true, out var first).ShouldBeTrue();
         first!.Kind.ShouldBe(HotkeyEventKind.Toggle);
 
@@ -102,18 +90,100 @@ public class HotkeyHookLogicTests
             repeat.ShouldBeNull();
         }
 
-        // Space's down was swallowed; its up is swallowed too. The modifiers
-        // passed through on the way down, so their ups pass through as well.
         hook.TryProcessKey(0x20, down: false, out _).ShouldBeTrue();
-        hook.TryProcessKey(VK_LSHIFT,   down: false, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LSHIFT, down: false, out _).ShouldBeFalse();
         hook.TryProcessKey(VK_LCONTROL, down: false, out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void ModifierOnlyToggle_UnrelatedKeyWhileHeld_DoesNotToggleAgain()
+    {
+        var hook = NewHook(toggle: "LeftCtrl+LeftShift");
+
+        hook.TryProcessKey(VK_LCONTROL, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LSHIFT, down: true, out var toggle).ShouldBeTrue();
+        toggle!.Kind.ShouldBe(HotkeyEventKind.Toggle);
+
+        hook.TryProcessKey(0x41 /* A */, down: true, out var unrelated).ShouldBeFalse();
+        unrelated.ShouldBeNull();
+        hook.TryProcessKey(0x41, down: false, out _).ShouldBeFalse();
+
+        hook.TryProcessKey(VK_LSHIFT, down: false, out _).ShouldBeTrue();
+        hook.TryProcessKey(VK_LCONTROL, down: false, out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void UpdateChords_ReplacesActiveHoldChord()
+    {
+        var hook = NewHook();
+        hook.UpdateChords(HotkeyChord.Parse("LeftCtrl+LeftShift"), HotkeyChord.Parse("LeftAlt+F12"));
+
+        hook.TryProcessKey(VK_RCONTROL, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_RSHIFT, down: true, out var oldChord).ShouldBeFalse();
+        oldChord.ShouldBeNull();
+        hook.TryProcessKey(VK_RSHIFT, down: false, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_RCONTROL, down: false, out _).ShouldBeFalse();
+
+        hook.TryProcessKey(VK_LCONTROL, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LSHIFT, down: true, out var newChord).ShouldBeTrue();
+        newChord!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+    }
+
+    [Fact]
+    public void SuspendedHook_PassesCaptureChordThrough_AndResumesAfterward()
+    {
+        var hook = NewHook(hold: "LeftCtrl+LeftShift");
+        hook.SetSuspended(true);
+
+        hook.TryProcessKey(VK_LCONTROL, down: true, out var first).ShouldBeFalse();
+        first.ShouldBeNull();
+        hook.TryProcessKey(VK_LSHIFT, down: true, out var second).ShouldBeFalse();
+        second.ShouldBeNull();
+        hook.TryProcessKey(VK_LSHIFT, down: false, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LCONTROL, down: false, out _).ShouldBeFalse();
+
+        hook.SetSuspended(false);
+        hook.TryProcessKey(VK_LCONTROL, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LSHIFT, down: true, out var resumed).ShouldBeTrue();
+        resumed!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+    }
+
+    [Fact]
+    public void ResumeAfterCapture_WaitsForCapturedKeysAndRepeatsToBeReleased()
+    {
+        var hook = NewHook();
+        hook.SetSuspended(true);
+
+        hook.TryProcessKey(VK_LCONTROL, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LSHIFT, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(0x41 /* A */, down: true, out _).ShouldBeFalse();
+
+        hook.UpdateChords(
+            HotkeyChord.Parse("LeftCtrl+LeftShift+A"),
+            HotkeyChord.Parse("LeftAlt+F12"));
+        hook.SetSuspended(false);
+
+        for (var i = 0; i < 3; i++)
+        {
+            hook.TryProcessKey(0x41, down: true, out var repeat).ShouldBeFalse();
+            repeat.ShouldBeNull();
+        }
+
+        hook.TryProcessKey(0x41, down: false, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LSHIFT, down: false, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LCONTROL, down: false, out _).ShouldBeFalse();
+
+        hook.TryProcessKey(VK_LCONTROL, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(VK_LSHIFT, down: true, out _).ShouldBeFalse();
+        hook.TryProcessKey(0x41, down: true, out var fresh).ShouldBeTrue();
+        fresh!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
     }
 
     [Fact]
     public void CancelChord_EscUp_PassesThrough()
     {
         var hook = NewHook();
-        hook.TryProcessKey(0x1B, down: true,  out var ev).ShouldBeFalse();
+        hook.TryProcessKey(0x1B, down: true, out var ev).ShouldBeFalse();
         ev!.Kind.ShouldBe(HotkeyEventKind.Cancel);
         hook.TryProcessKey(0x1B, down: false, out var up).ShouldBeFalse();
         up.ShouldBeNull();
@@ -131,7 +201,6 @@ public class HotkeyHookLogicTests
     public void CancelChord_Autorepeat_EmitsCancelOnlyOnceWithoutSwallowing()
     {
         var hook = NewHook();
-
         hook.TryProcessKey(0x1B, down: true, out var first).ShouldBeFalse();
         first!.Kind.ShouldBe(HotkeyEventKind.Cancel);
 
@@ -152,7 +221,6 @@ public class HotkeyHookLogicTests
 
         hook.TryProcessKey(0x1B, down: true, out var down).ShouldBeFalse();
         down.ShouldBeNull();
-
         hook.TryProcessKey(0x1B, down: false, out var up).ShouldBeFalse();
         up.ShouldBeNull();
     }

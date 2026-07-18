@@ -64,6 +64,114 @@ public class ModelsTabViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadMissingAsync_DoesNotCaptureAmbientUiContextForEitherDescriptor()
+    {
+        var dispatcher = new ManualDispatcher();
+        var context = new CountingSynchronizationContext();
+        var vm = new ModelsTabViewModel(new ModelRegistry(), _root, new FakeDownloader(),
+            currentAsrName: "parakeet-tdt-0.6b-v3",
+            currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
+            promoteAsr: _ => { }, promoteCleanup: _ => { },
+            dispatch: dispatcher.Post,
+            progressInterval: TimeSpan.Zero);
+
+        var previous = SynchronizationContext.Current;
+        Task download;
+        try
+        {
+            SynchronizationContext.SetSynchronizationContext(context);
+            download = vm.DownloadMissingAsync(CancellationToken.None);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previous);
+        }
+
+        await dispatcher.RunUntilAsync(() => download.IsCompleted);
+        await download;
+
+        context.PostCount.ShouldBe(0,
+            "the progress bridge must not inherit Progress<T>'s ambient UI-context hop");
+        // The bridge itself is single-flight. Completion then posts one
+        // installed-state notification per card, so the whole tab's constant
+        // upper bound is two rather than scaling with download chunks.
+        dispatcher.MaxPendingCount.ShouldBeLessThanOrEqualTo(2);
+        vm.AsrCard.ProgressByFile.Single().Phase.ShouldBe(DownloadPhase.Complete);
+        vm.CleanupCard.ProgressByFile.Single().Phase.ShouldBe(DownloadPhase.Complete);
+    }
+
+    [Fact]
+    public async Task DownloadMissingAsync_ShowsIntermediateBurstProgressWithoutGrowingUiQueue()
+    {
+        var dispatcher = new ManualDispatcher();
+        var downloader = new GatedBurstDownloader();
+        var vm = new ModelsTabViewModel(new ModelRegistry(), _root, downloader,
+            currentAsrName: "parakeet-tdt-0.6b-v3",
+            currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
+            promoteAsr: _ => { }, promoteCleanup: _ => { },
+            dispatch: dispatcher.Post,
+            progressInterval: TimeSpan.Zero);
+        var asrPhases = new List<DownloadPhase>();
+        vm.AsrCard.ProgressByFile.CollectionChanged += (_, e) =>
+        {
+            if (e.NewItems?[0] is DownloadProgress progress) asrPhases.Add(progress.Phase);
+        };
+
+        var download = vm.DownloadMissingAsync(CancellationToken.None);
+        await downloader.BurstReported;
+
+        dispatcher.MaxPendingCount.ShouldBe(1);
+        await dispatcher.RunUntilAsync(() =>
+            vm.AsrCard.ProgressByFile.Any(progress =>
+                progress.Phase == DownloadPhase.Downloading && progress.BytesDownloaded > 0));
+
+        download.IsCompleted.ShouldBeFalse();
+        var intermediate = vm.AsrCard.ProgressByFile.Single();
+        intermediate.PercentComplete.ShouldBeGreaterThan(0.0);
+        intermediate.PercentComplete.ShouldBeLessThan(100.0);
+        dispatcher.MaxPendingCount.ShouldBe(1);
+
+        downloader.Release();
+        await dispatcher.RunUntilAsync(() => download.IsCompleted);
+        await download;
+
+        vm.AsrCard.ProgressByFile.ShouldAllBe(progress => progress.Phase == DownloadPhase.Complete);
+        vm.AsrCard.ProgressByFile.ShouldAllBe(progress => progress.PercentComplete == 100.0);
+        asrPhases.ShouldContain(DownloadPhase.Verifying);
+        asrPhases[^1].ShouldBe(DownloadPhase.Complete);
+        vm.CleanupCard.ProgressByFile.ShouldAllBe(progress => progress.Phase == DownloadPhase.Complete);
+        dispatcher.MaxPendingCount.ShouldBeLessThanOrEqualTo(2);
+    }
+
+    [Fact]
+    public async Task DownloadMissingAsync_SerializesViewModelsSharingDownloader()
+    {
+        var downloader = new GatedBurstDownloader();
+        var firstVm = new ModelsTabViewModel(new ModelRegistry(), _root, downloader,
+            currentAsrName: "parakeet-tdt-0.6b-v3",
+            currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
+            promoteAsr: _ => { }, promoteCleanup: _ => { });
+        var secondVm = new ModelsTabViewModel(new ModelRegistry(), _root, downloader,
+            currentAsrName: "parakeet-tdt-0.6b-v3",
+            currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
+            promoteAsr: _ => { }, promoteCleanup: _ => { });
+
+        var first = firstVm.DownloadMissingAsync(CancellationToken.None);
+        await downloader.BurstReported;
+        var second = secondVm.DownloadMissingAsync(CancellationToken.None);
+
+        downloader.DownloadCount.ShouldBe(1);
+        second.IsCompleted.ShouldBeFalse(
+            "a newly navigated Models page must share the active service operation gate");
+
+        downloader.Release();
+        await Task.WhenAll(first, second);
+
+        downloader.DownloadCount.ShouldBe(4,
+            "each request may re-check both models, but downloader calls must never overlap");
+    }
+
+    [Fact]
     public void SetAsrSelection_FiresPromote()
     {
         var registry = new ModelRegistry();
@@ -76,6 +184,50 @@ public class ModelsTabViewModelTests : IDisposable
         vm.AsrCard.SelectedName = "parakeet-tdt-0.6b-v3";
         vm.AsrCard.CommitSelection();
         promoted.ShouldBe("parakeet-tdt-0.6b-v3");
+    }
+}
+
+internal sealed class CountingSynchronizationContext : SynchronizationContext
+{
+    private int _postCount;
+    public int PostCount => Volatile.Read(ref _postCount);
+    public override void Post(SendOrPostCallback d, object? state)
+        => Interlocked.Increment(ref _postCount);
+}
+
+internal sealed class ManualDispatcher
+{
+    private readonly object _gate = new();
+    private readonly Queue<Action> _queued = new();
+
+    public int MaxPendingCount { get; private set; }
+
+    public void Post(Action action)
+    {
+        lock (_gate)
+        {
+            _queued.Enqueue(action);
+            MaxPendingCount = Math.Max(MaxPendingCount, _queued.Count);
+        }
+    }
+
+    public async Task RunUntilAsync(Func<bool> done)
+    {
+        for (var attempt = 0; attempt < 100_000; attempt++)
+        {
+            if (done()) return;
+
+            Action? action = null;
+            lock (_gate)
+            {
+                if (_queued.Count > 0) action = _queued.Dequeue();
+            }
+
+            if (action is not null) action();
+            else await Task.Yield();
+        }
+
+        throw new TimeoutException("The model download did not drain through the manual dispatcher.");
     }
 }
 
@@ -97,4 +249,46 @@ internal sealed class FakeDownloader : ModelsTabViewModel.IDownloader
         });
         return Task.CompletedTask;
     }
+}
+
+internal sealed class GatedBurstDownloader : ModelsTabViewModel.IDownloader
+{
+    private readonly TaskCompletionSource<bool> _burstReported =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<bool> _release =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _downloadCount;
+
+    public Task BurstReported => _burstReported.Task;
+    public int DownloadCount => Volatile.Read(ref _downloadCount);
+    public void Release() => _release.TrySetResult(true);
+
+    public async Task DownloadAsync(ModelDescriptor descriptor, string installRoot,
+                                    IProgress<DownloadProgress> progress, CancellationToken ct)
+    {
+        var file = descriptor.Files[0];
+        if (Interlocked.Increment(ref _downloadCount) == 1)
+        {
+            progress.Report(Report(descriptor, file, 0, DownloadPhase.Downloading));
+            var halfway = file.SizeBytes / 2;
+            for (var i = 1; i <= 10_000; i++)
+                progress.Report(Report(descriptor, file, halfway * i / 10_000, DownloadPhase.Downloading));
+
+            _burstReported.TrySetResult(true);
+            await _release.Task.WaitAsync(ct).ConfigureAwait(false);
+            progress.Report(Report(descriptor, file, file.SizeBytes, DownloadPhase.Verifying));
+        }
+
+        progress.Report(Report(descriptor, file, file.SizeBytes, DownloadPhase.Complete));
+    }
+
+    private static DownloadProgress Report(ModelDescriptor descriptor, ModelFile file,
+                                           long bytes, DownloadPhase phase) => new()
+    {
+        DescriptorName = descriptor.Name,
+        FileRelativePath = file.RelativePath,
+        BytesDownloaded = bytes,
+        TotalBytes = file.SizeBytes,
+        Phase = phase,
+    };
 }

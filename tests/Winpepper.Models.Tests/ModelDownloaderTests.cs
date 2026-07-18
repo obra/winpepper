@@ -79,11 +79,22 @@ public class ModelDownloaderTests : IDisposable
             "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589");
 
         var dl = new ModelDownloader(fake);
-        await dl.DownloadAsync(d, _root, new Progress<DownloadProgress>(_ => { }), CancellationToken.None);
+        var reports = new List<DownloadProgress>();
+        await dl.DownloadAsync(d, _root,
+            new SyncProgress<DownloadProgress>(reports.Add), CancellationToken.None);
 
         fake.RequestsFor("https://x/a").Single().RangeStart.ShouldBe(3L);
         File.ReadAllText(Path.Combine(_root, "test", "a.bin")).ShouldBe("hello");
         File.Exists(Path.Combine(_root, "test", "a.bin.partial")).ShouldBeFalse();
+
+        var aReports = reports.Where(p => p.FileRelativePath == "a.bin").ToList();
+        var downloading = aReports.Where(p => p.Phase == DownloadPhase.Downloading).ToList();
+        downloading[0].BytesDownloaded.ShouldBe(3L);
+        downloading.Select(p => p.BytesDownloaded)
+            .ShouldBe(downloading.Select(p => p.BytesDownloaded).OrderBy(bytes => bytes));
+        aReports[^2].Phase.ShouldBe(DownloadPhase.Verifying);
+        aReports[^1].Phase.ShouldBe(DownloadPhase.Complete);
+        aReports[^1].PercentComplete.ShouldBe(100.0);
     }
 
     [Fact]

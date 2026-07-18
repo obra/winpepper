@@ -9,10 +9,13 @@ public sealed class ModelCardViewModel : INotifyPropertyChanged
     private readonly string _installRoot;
     private readonly Action<string> _promote;
     private readonly Action<Action> _dispatch;
+    private readonly DownloadProgressUiBridge? _progressBridge;
 
     public ModelCardViewModel(ModelKind kind, IEnumerable<ModelDescriptor> available,
                               string installRoot, string selectedName, Action<string> promote,
-                              Action<Action>? dispatch = null)
+                              Action<Action>? dispatch = null,
+                              TimeSpan? progressInterval = null,
+                              Func<TimeSpan, Task>? progressDelay = null)
     {
         Kind = kind;
         Available = new ObservableCollection<ModelDescriptor>(available);
@@ -23,6 +26,13 @@ public sealed class ModelCardViewModel : INotifyPropertyChanged
         // mutations must run on the UI thread. The host passes a UI-thread
         // dispatcher; tests and headless callers get inline execution.
         _dispatch = dispatch ?? (a => a());
+        if (dispatch is not null)
+        {
+            _progressBridge = new DownloadProgressUiBridge(
+                dispatch, ReportProgressCore,
+                progressInterval ?? TimeSpan.FromMilliseconds(100),
+                progressDelay);
+        }
     }
 
     public ModelKind Kind { get; }
@@ -44,7 +54,15 @@ public sealed class ModelCardViewModel : INotifyPropertyChanged
     public ObservableCollection<DownloadProgress> ProgressByFile { get; } = new();
 
     public void ReportProgress(DownloadProgress progress)
-        => _dispatch(() => ReportProgressCore(progress));
+    {
+        if (_progressBridge is null) ReportProgressCore(progress);
+        else _progressBridge.Report(progress);
+    }
+
+    public Task DrainProgressAsync()
+        => _progressBridge?.DrainAsync() ?? Task.CompletedTask;
+
+    internal void ResetProgressAfterRun() => _progressBridge?.ResetAfterRun();
 
     private void ReportProgressCore(DownloadProgress progress)
     {

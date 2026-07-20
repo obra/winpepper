@@ -11,7 +11,7 @@
            Manufacturer="$(Manufacturer)"
            Version="!(bind.FileVersion.WinpepperExe)"
            UpgradeCode="$(UpgradeCodeGuid)"
-           Scope="perMachine"
+           Scope="perUser"
            Compressed="yes"
            InstallerVersion="500">
 
@@ -50,11 +50,21 @@
       <ComponentGroupRef Id="WinpepperExeAliasGroup" />
       <ComponentRef Id="StartMenuShortcut" />
       <ComponentRef Id="AutostartRunKey" />
-      <ComponentRef Id="HKLMVersionStamp" />
+      <ComponentRef Id="HKCUVersionStamp" />
     </Feature>
 
-    <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="$(ProductName)" />
+    <!-- Per-user install: %LOCALAPPDATA%\Programs\Winpepper (the VS Code /
+         Squirrel per-user convention). Scope="perUser" installs without
+         elevation; the Installer resolves LocalAppDataFolder to the invoking
+         user's %LOCALAPPDATA%. Nesting under LocalAppDataFolder is supported;
+         note that file components under a per-user profile dir raise ICE38
+         (error) + ICE64/ICE91 (warnings) at build time, which is inherent to
+         per-user installs and is handled by suppressing those ICEs in the
+         wixproj (Step 6d), not by scope, which cannot affect static ICEs. -->
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="$(ProductName)" />
+      </Directory>
     </StandardDirectory>
 
     <StandardDirectory Id="ProgramMenuFolder">
@@ -95,17 +105,23 @@
                      KeyPath="yes" />
     </Component>
 
-    <!-- A marker so future MSIs can detect a prior install location. -->
-    <Component Id="HKLMVersionStamp"
+    <!-- A marker so future MSIs can detect a prior install location. Per-user
+         install => the stamp lives in HKCU (writing HKLM would require
+         elevation). The autostart Run key below is already HKCU. NEW GUID:
+         Windows Installer component rules require a fresh component code when a
+         resource's keypath root changes (HKLM -> HKCU). Reusing the old GUID
+         across the per-machine->per-user boundary would risk cross-context
+         identity collision if a prior per-machine install is still present. -->
+    <Component Id="HKCUVersionStamp"
                Directory="INSTALLFOLDER"
-               Guid="6c0b2a36-9d4f-44cf-9a3e-a3a4f0c1ed05">
-      <RegistryValue Root="HKLM"
+               Guid="17b56ae2-a240-4026-82cf-62258ca9a839">
+      <RegistryValue Root="HKCU"
                      Key="Software\Winpepper"
                      Name="InstallVersion"
                      Type="string"
                      Value="!(bind.FileVersion.WinpepperExe)"
                      KeyPath="yes" />
-      <RegistryValue Root="HKLM"
+      <RegistryValue Root="HKCU"
                      Key="Software\Winpepper"
                      Name="InstallDir"
                      Type="string"
@@ -182,8 +198,10 @@
               Condition="0=1" />
     </InstallExecuteSequence>
 
-    <ui:WixUI Id="WixUI_InstallDir" />
-    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <!-- WixUI_Minimal (no directory-browse). WixUI_InstallDir's Browse dialog
+         could retarget install to Program Files and reintroduce UAC in a
+         per-user package; the install location is fixed by convention. -->
+    <ui:WixUI Id="WixUI_Minimal" />
 
     <!-- Real Apache-2.0 license text for the WixUI_InstallDir EULA dialog;
          without this override WiX shows its lorem-ipsum placeholder.
@@ -197,7 +215,10 @@
        via [#WinpepperExe] (Shortcut Target) and !(bind.FileVersion.WinpepperExe). -->
   <Fragment>
     <DirectoryRef Id="INSTALLFOLDER">
-      <Component Id="WinpepperExeAlias" Guid="6c0b2a36-9d4f-44cf-9a3e-a3a4f0c1ed06" Bitness="always64">
+      <!-- Fresh GUID: the exe's install location moved ProgramFiles64Folder ->
+           LocalAppDataFolder\Programs\Winpepper; component rules require a new
+           component code when a resource's target location changes. -->
+      <Component Id="WinpepperExeAlias" Guid="caac54b1-ecba-402d-af89-eadebf23834c" Bitness="always64">
         <File Id="WinpepperExe"
               Source="$(var.AppPublishDir)\Winpepper.exe"
               KeyPath="yes" />

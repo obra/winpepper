@@ -40,6 +40,12 @@ public sealed class HotkeyHook : IDisposable
     /// foreground app); <paramref name="evt"/> is set when a hotkey event fired.
     /// The two are independent: a key-up can emit HoldUp yet still pass through
     /// when its key-down was visible to the system.
+    ///
+    /// Invariant: modifier keys (Ctrl/Shift/Alt/Win, left or right) are NEVER
+    /// swallowed. A modifier used in a hotkey still fires the event but always
+    /// passes through to Windows so it keeps working system-wide. Only a
+    /// non-modifier trigger key (e.g. the Space in Ctrl+Shift+Space) is
+    /// swallowed.
     /// </summary>
     public bool TryProcessKey(int vk, bool down, out HotkeyEvent? evt)
     {
@@ -91,6 +97,10 @@ public sealed class HotkeyHook : IDisposable
             if (ActivatesOnKeyDown(bindings.Toggle, vk, modifiersBeforeEvent, _modifiers))
             {
                 evt = new HotkeyEvent(HotkeyEventKind.Toggle, DateTimeOffset.UtcNow);
+                // Modifier keys always pass through to Windows so they keep
+                // working system-wide (e.g. Shift still shifts). Only a
+                // non-modifier trigger key is hidden from the foreground app.
+                if (IsModifierKey(vk)) return false;
                 _swallowedKeys.Add(vk);
                 return true;
             }
@@ -98,6 +108,9 @@ public sealed class HotkeyHook : IDisposable
             {
                 _holding = true;
                 evt = new HotkeyEvent(HotkeyEventKind.HoldDown, DateTimeOffset.UtcNow);
+                // Modifier keys always pass through (see the Toggle branch
+                // above); only a non-modifier trigger key is swallowed.
+                if (IsModifierKey(vk)) return false;
                 _swallowedKeys.Add(vk);
                 return true;
             }
@@ -244,6 +257,14 @@ public sealed class HotkeyHook : IDisposable
             && !chord.Matches(0, modifiersBeforeEvent)
             && chord.Matches(0, currentModifiers);
     }
+
+    /// <summary>
+    /// True when <paramref name="vk"/> is one of the eight modifier keys
+    /// (Ctrl/Shift/Alt/Win, left or right). Modifier keys are always passed
+    /// through to Windows so they keep functioning system-wide, even while the
+    /// app uses them in a hotkey.
+    /// </summary>
+    private static bool IsModifierKey(int vk) => ModifierForVirtualKey(vk) != Modifier.None;
 
     private static Modifier ModifierForVirtualKey(int vk)
         => vk switch

@@ -25,6 +25,15 @@ exercised through fakes — no P/Invoke, no LlamaSharp runtime.
 - **SDK:** .NET SDK satisfying `global.json` — `sdk 9.0.100`,
   `rollForward: latestFeature`. `dotnet` is **not** on PATH in this worktree;
   it must be provisioned locally (Task 0).
+- **Network required for the first restore/build (Task 0 Step 4).** The
+  provisioned SDK and the local NuGet cache are cold for this work: the SDK
+  install script is fetched over the network, and restore evaluates the
+  `net9.0-windows10.0.19041.0` TFM of `Winpepper.Cleanup` (even when building
+  only `-f net9.0`), which pulls `LLamaSharp` + `LLamaSharp.Backend.Vulkan`
+  `0.27.0` and the .NET Windows targeting packs — none of which are in
+  `~/.nuget`. All of these are confirmed reachable on nuget.org / dot.net, so
+  Task 0 works online; if a run has no outbound network, the first
+  `dotnet build` will fail at restore. No offline pre-seed is provided here.
 - **Test runner:** The VSTest host (`dotnet test`) **crashes on this
   machine**. Pure-managed tests MUST run via the xUnit v3 **in-process
   runner**: `dotnet exec <TestAssembly>.dll`. Exclude Windows-only tests with

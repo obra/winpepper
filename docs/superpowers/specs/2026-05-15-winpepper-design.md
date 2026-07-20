@@ -315,7 +315,7 @@ Bundled `start.wav` and `stop.wav` (short two-tone, ~150 ms each), played via `S
 
 ### 7.7 Autostart
 
-Stored at `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Winpepper` = `"C:\Program Files\Winpepper\winpepper.exe" --tray`. `--tray` starts hidden. MSI sets this on first install only; toggling autostart in Settings writes/deletes the value directly thereafter.
+Stored at `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Winpepper` = `"%LOCALAPPDATA%\Programs\Winpepper\winpepper.exe" --tray`. `--tray` starts hidden. MSI sets this on first install only (via `[INSTALLFOLDER]`); toggling autostart in Settings writes/deletes the value directly thereafter.
 
 ## 8. Corrections and post-paste learning
 
@@ -419,13 +419,13 @@ WiX v5 (`Wix.Toolset.Sdk` MSBuild SDK). Single `packaging/winpepper.wxs`.
 
 Components:
 
-- App binaries → `C:\Program Files\Winpepper\` (per-machine; requires elevation).
+- App binaries → `%LOCALAPPDATA%\Programs\Winpepper\` (per-user; **no elevation / UAC required**). WiX `Package/@Scope="perUser"`; install tree under `LocalAppDataFolder\Programs\Winpepper` (the VS Code / Squirrel convention). Rationale: Winpepper is a single-user desktop app, and a per-machine install forced a UAC prompt on every dev-loop build-install — per-user removes that friction with no functional loss, since all user data already lives in `%LOCALAPPDATA%`.
 - Empty model directory under `%LOCALAPPDATA%\winpepper\models\` created on first run, not by the MSI.
 - Start menu shortcut.
 - Programs and Features entry.
 - Per-user autostart `Run` key (set on fresh install only; not overwritten on upgrade).
 
-Upgrade rules: `MajorUpgrade.AllowDowngrades=no`, `Schedule=afterInstallInitialize`. Settings, corrections, history, and models survive upgrades because they live under `%LOCALAPPDATA%`.
+Upgrade rules: `MajorUpgrade.AllowDowngrades=no`, `Schedule=afterInstallInitialize`. A per-user `MajorUpgrade` only detects prior **per-user** installs of the same `UpgradeCode` — the intended end state. Migration: anyone with a pre-existing per-machine install (`C:\Program Files\Winpepper`) must uninstall it once (that removal needs elevation) before the per-user package will manage upgrades. Settings, corrections, history, and models survive upgrades because they live under `%LOCALAPPDATA%`.
 
 Prereqs:
 

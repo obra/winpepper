@@ -86,6 +86,73 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
         return new HotkeyChord(mods, key ?? 0);
     }
 
+    // VK_F1 (0x70) .. VK_F24 (0x87). Only function keys are conventional as
+    // bare (modifier-less) global hotkeys; every other common key would be
+    // swallowed system-wide if bound as a hold/toggle trigger.
+    private static bool IsBareTriggerAllowed(int vk) => vk is >= 0x70 and <= 0x87;
+
+    /// <summary>
+    /// Policy gate for hold/toggle trigger bindings. Returns null when the
+    /// binding is safe, otherwise a human-readable reason it was rejected.
+    /// Enforced both in the settings UI validator and when loading a hand-edited
+    /// settings file. Rules:
+    ///  * A modifier-only chord (VirtualKey == 0) is safe - its trigger is a
+    ///    modifier, which the hook never swallows.
+    ///  * A chord with modifiers plus a non-modifier key is safe.
+    ///  * A bare (modifier-less) non-modifier key is rejected UNLESS it is an
+    ///    F-key, because the hook swallows the trigger and a bare common key
+    ///    (Esc/Tab/Enter/Space/letter/digit/arrow/...) would then be dead
+    ///    system-wide.
+    ///  * The trigger key may never equal the Cancel chord's key, so the
+    ///    pass-through Cancel/Esc key can never be turned into a swallowed trigger.
+    /// </summary>
+    public static string? ValidateTriggerBinding(HotkeyChord chord, HotkeyChord cancel)
+    {
+        ArgumentNullException.ThrowIfNull(chord);
+        ArgumentNullException.ThrowIfNull(cancel);
+
+        if (chord.VirtualKey != 0 && cancel.VirtualKey != 0 && chord.VirtualKey == cancel.VirtualKey)
+            return $"'{chord}' uses the Cancel key, which must stay available system-wide.";
+
+        if (chord.VirtualKey == 0) return null;                  // modifier-only: safe
+        if (chord.Modifiers != Modifier.None) return null;       // modifier + key: safe
+        if (IsBareTriggerAllowed(chord.VirtualKey)) return null; // bare F-key: safe
+
+        return $"'{chord}' has no modifier and would be swallowed system-wide. " +
+               "Add a modifier (e.g. Ctrl+Shift+...) or use an F-key.";
+    }
+
+    /// <summary>
+    /// Parses a configured hold/toggle chord and enforces
+    /// <see cref="ValidateTriggerBinding"/>. If the value cannot be parsed or is
+    /// an unsafe trigger, returns <paramref name="defaultChord"/> parsed and
+    /// invokes <paramref name="onRejected"/> with a warning message, so a
+    /// hand-edited settings file can never bind a swallowed common key.
+    /// </summary>
+    public static HotkeyChord ParseTriggerOrDefault(
+        string configured, string defaultChord, HotkeyChord cancel, Action<string>? onRejected = null)
+    {
+        HotkeyChord parsed;
+        try
+        {
+            parsed = Parse(configured);
+        }
+        catch (FormatException ex)
+        {
+            onRejected?.Invoke($"Hotkey '{configured}' is invalid ({ex.Message}); using default '{defaultChord}'.");
+            return Parse(defaultChord);
+        }
+
+        var reason = ValidateTriggerBinding(parsed, cancel);
+        if (reason is not null)
+        {
+            onRejected?.Invoke($"Hotkey '{configured}' rejected: {reason} Using default '{defaultChord}'.");
+            return Parse(defaultChord);
+        }
+
+        return parsed;
+    }
+
     /// <summary>
     /// True when the supplied key + modifier state satisfies this chord.
     /// If <see cref="VirtualKey"/> is 0, only modifiers are compared.

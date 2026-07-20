@@ -183,9 +183,17 @@ public sealed class AppShell : IDisposable
         var modelsServices = new Winpepper.App.Services.ModelsServices(Path.Combine(AppPaths.Root, "models"));
         var cleanupModelName = settings.CleanupModelName;
 
-        var hold   = HotkeyChord.Parse(settings.HoldHotkey);
-        var toggle = HotkeyChord.Parse(settings.ToggleHotkey);
         var cancel = HotkeyChord.Parse("Esc");
+        var hotkeyLog = factory.CreateLogger("Winpepper.App.Hotkeys");
+        // A hand-edited settings file must never bind a bare common key (it would
+        // be swallowed system-wide). Unsafe/invalid values fall back to the
+        // built-in defaults with a logged warning.
+        var hold   = HotkeyChord.ParseTriggerOrDefault(
+            settings.HoldHotkey, "RightCtrl+RightShift", cancel,
+            m => hotkeyLog.LogWarning("{HotkeyWarning}", m));
+        var toggle = HotkeyChord.ParseTriggerOrDefault(
+            settings.ToggleHotkey, "Ctrl+Shift+Space", cancel,
+            m => hotkeyLog.LogWarning("{HotkeyWarning}", m));
         var clipboard = new Winpepper.App.Hosting.WindowsClipboard();
         var clipboardFallback = new Winpepper.Platform.Injection.ClipboardFallback(clipboard);
 

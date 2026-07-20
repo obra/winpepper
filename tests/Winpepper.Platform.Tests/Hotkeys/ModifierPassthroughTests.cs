@@ -74,4 +74,27 @@ public class ModifierPassthroughTests
         hook.TryProcessKey(VK_LSHIFT, down: false, out _).ShouldBeFalse();
         hook.TryProcessKey(VK_LCONTROL, down: false, out _).ShouldBeFalse();
     }
+
+    [Theory]
+    [InlineData("LeftCtrl", VK_LCONTROL)]
+    [InlineData("RightCtrl", VK_RCONTROL)]
+    [InlineData("LeftShift", VK_LSHIFT)]
+    [InlineData("RightShift", VK_RSHIFT)]
+    [InlineData("LeftAlt", VK_LMENU)]
+    [InlineData("RightAlt", VK_RMENU)]
+    [InlineData("LeftWin", VK_LWIN)]
+    [InlineData("RightWin", VK_RWIN)]
+    public void AnyModifierUsedAsHotkey_IsNeverSwallowed(string chord, int vk)
+    {
+        var hook = NewHook(hold: chord);
+
+        // Whatever modifier the user configured, its key-down fires the hold
+        // but must still reach Windows so the modifier keeps working.
+        hook.TryProcessKey(vk, down: true, out var down).ShouldBeFalse();
+        down!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+
+        // The key-up is symmetric and also passes through.
+        hook.TryProcessKey(vk, down: false, out var up).ShouldBeFalse();
+        up!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+    }
 }

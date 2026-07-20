@@ -6,9 +6,9 @@
     Runs the machine-checkable half of docs/windows-smoke-test.md on a real
     Windows machine where Winpepper was installed from the MSI:
 
-      * install payload under Program Files
+      * install payload under %LOCALAPPDATA%\Programs\Winpepper
       * Add/Remove Programs (ARP) registry entry
-      * HKLM Software\Winpepper version stamp
+      * HKCU Software\Winpepper version stamp
       * HKCU autostart Run key
       * app launches (--tray) and the process stays alive
       * newest log file is fresh and contains "Hotkey hook installed"
@@ -29,7 +29,7 @@
 [CmdletBinding()]
 param(
     # Where the MSI installed the app.
-    [string]$InstallDir = (Join-Path $env:ProgramFiles 'Winpepper'),
+    [string]$InstallDir = (Join-Path (Join-Path $env:LOCALAPPDATA 'Programs') 'Winpepper'),
 
     # Per-user state root.
     [string]$DataDir = (Join-Path $env:LOCALAPPDATA 'winpepper'),
@@ -86,6 +86,9 @@ if (Test-Path -LiteralPath $icoPath) {
 
 # ---------------------------------------------------------- ARP / registry ---
 $arpRoots = @(
+    # Per-user MSI registers ARP under HKCU. HKLM roots kept as a fallback so
+    # this script still detects a legacy per-machine install during migration.
+    'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'
 )
@@ -104,12 +107,12 @@ if ($arp) {
     Add-Result 'ArpEntry' 'FAIL' 'no Add/Remove Programs entry named "Winpepper"'
 }
 
-$stampKey = 'HKLM:\SOFTWARE\Winpepper'
+$stampKey = 'HKCU:\SOFTWARE\Winpepper'
 if (Test-Path $stampKey) {
     $stamp = Get-ItemProperty $stampKey
-    Add-Result 'HklmVersionStamp' 'PASS' ("InstallVersion {0}, InstallDir {1}" -f $stamp.InstallVersion, $stamp.InstallDir)
+    Add-Result 'HkcuVersionStamp' 'PASS' ("InstallVersion {0}, InstallDir {1}" -f $stamp.InstallVersion, $stamp.InstallDir)
 } else {
-    Add-Result 'HklmVersionStamp' 'FAIL' "missing $stampKey"
+    Add-Result 'HkcuVersionStamp' 'FAIL' "missing $stampKey"
 }
 
 # ---------------------------------------------------------------- autostart ---

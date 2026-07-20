@@ -36,27 +36,55 @@ and `HotkeyChord` static methods, so tests run cross-platform on Linux.
 - **.NET SDK prerequisite (verify before Task 1):** a .NET SDK satisfying
   `global.json` (`sdk 9.0.100`, `rollForward: latestFeature`) must be on `PATH`.
   Confirm with `dotnet --version`. If absent (a known state of this bare Linux
-  worktree), provision the SDK first exactly as the prior plan
-  `docs/plans/2026-07-20-modifier-key-passthrough.md` describes (local SDK
-  provisioning). All hardened logic is pure managed (`net9.0`, no P/Invoke on
-  the test path), so once the SDK is present the tests run on Linux.
+  worktree — and the prior plan `docs/plans/2026-07-20-modifier-key-passthrough.md`
+  only *states* the prerequisite, it does not script it), provision a local SDK
+  into the worktree with the pinned recipe below (the `dot.net` install script host
+  and the .NET 9 SDK CDN are reachable from this environment):
+
+  ```bash
+  # Pin to 9.0.100 exactly so it satisfies global.json regardless of the
+  # latestFeature roll-forward band (a bare `--channel 9.0` can resolve to a
+  # newer feature band that does NOT satisfy latestFeature off 9.0.100).
+  curl -sSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh
+  bash /tmp/dotnet-install.sh --version 9.0.100 --install-dir "$PWD/.dotnet"
+  export DOTNET_ROOT="$PWD/.dotnet"
+  export PATH="$PWD/.dotnet:$PATH"
+  dotnet --version   # expect 9.0.100
+  ```
+
+  Only the test project (`net9.0`, pure managed) is built here; it does NOT pull
+  the `WixToolset.Sdk` msbuild-sdk pinned in `global.json` (that binds only to
+  `packaging/Winpepper.Msi.wixproj`, which is not in the test project's reference
+  closure). NuGet restore of the test packages (`xunit.v3`,
+  `xunit.runner.visualstudio`, `Microsoft.NET.Test.Sdk`, `Shouldly`,
+  `coverlet.collector`) reaches `api.nuget.org` from this environment. All
+  hardened logic is pure managed (`net9.0`, no P/Invoke on the test path), so once
+  the SDK is present the tests run on Linux.
 - **Test execution convention (VSTest host crashes on this machine — do NOT use
   `dotnet test`).** Build the test project for `net9.0` and run the built dll
-  directly through the xUnit v3 in-process runner (Microsoft Testing Platform)
-  via `dotnet exec`. Use these exact forms everywhere this plan says "build &
-  run":
+  directly through the xUnit v3 **native** in-process runner via `dotnet exec`.
+  This project does NOT enable Microsoft Testing Platform mode (no
+  `UseMicrosoftTestingPlatformRunner` / `TestingPlatformDotnetTestSupport`
+  property is set; `xunit.v3` is pinned to 1.0.0), so the runnable dll uses xUnit
+  v3's **native** command-line flags — `-class` / `-method` / `-trait-` — NOT the
+  MTP `--filter-*` flags (the native runner rejects the MTP flags). Use these
+  exact forms everywhere this plan says "build & run":
   - Build: `dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Debug -f net9.0`
   - Test dll: `tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll`
-  - Run one class: `dotnet exec <test-dll> --filter-class "<FullyQualifiedClassName>"`
-  - Run one method: `dotnet exec <test-dll> --filter-method "<FullyQualifiedClassName>.<Method>"`
-  - Run whole non-Windows suite: `dotnet exec <test-dll> --filter-not-trait "Platform=Windows"`
+  - Run one class: `dotnet exec <test-dll> -class "<FullyQualifiedClassName>"`
+  - Run one method: `dotnet exec <test-dll> -method "<FullyQualifiedClassName>.<Method>"`
+  - Run whole non-Windows suite: `dotnet exec <test-dll> -trait- "Platform=Windows"`
+  (Native xUnit v3 CLI: `-class`/`-method` select; `-trait-` EXCLUDES a trait —
+  the MTP equivalents would be `--filter-class`/`--filter-method`/
+  `--filter-not-trait`, which are inactive here. See the xUnit v3 native↔MTP
+  mapping table: https://xunit.net/docs/getting-started/v3/microsoft-testing-platform.)
   You MUST rebuild before each run — `dotnet exec` runs the last-built dll.
 - **C# TDD reality:** a test that references a not-yet-added member/parameter
   fails at COMPILE time. That compile failure IS the RED state. Where a RED
   step below says "build FAILS with CSxxxx", that is the expected failing test.
 - Target framework for logic tests on Linux: `net9.0`. The
   `net9.0-windows10.0.19041.0` target and `[Trait("Platform","Windows")]` tests
-  are Windows-only and excluded via `--filter-not-trait "Platform=Windows"`.
+  are Windows-only and excluded via `-trait- "Platform=Windows"`.
 - **Preserve every existing pass-through invariant (must hold for every task):**
   - Modifier keys (Ctrl/Shift/Alt/Win, left or right) are NEVER swallowed
     (`IsModifierKey` guards at `HotkeyHook.cs:103` and `:113`).
@@ -435,7 +463,11 @@ above `private static bool IsModifierKey(int vk)` (currently `:267`):
     /// Drops stale entries from the tracked key dictionaries, healing keys whose
     /// key-up was lost. <paramref name="exceptVk"/> is the key of the current
     /// event, which the normal down/up logic handles explicitly (so happy-path
-    /// swallow/up symmetry is preserved).
+    /// swallow/up symmetry is preserved). Excluding the current key is also
+    /// correctness-critical on Windows: per the LowLevelKeyboardProc contract the
+    /// callback runs BEFORE the current key's async state is updated, so a
+    /// GetAsyncKeyState probe of that key would read a stale value; every OTHER
+    /// tracked key's async state is already settled and safe to probe.
     /// </summary>
     private void PruneStaleKeys(DateTimeOffset now, int exceptVk)
     {
@@ -558,7 +590,7 @@ Run:
 ```bash
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Debug -f net9.0
 dotnet exec tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll \
-  --filter-class "Winpepper.Platform.Tests.Hotkeys.SwallowSelfHealTests"
+  -class "Winpepper.Platform.Tests.Hotkeys.SwallowSelfHealTests"
 ```
 Expected: build succeeds; run reports **3 passed, 0 failed**.
 
@@ -567,7 +599,7 @@ Expected: build succeeds; run reports **3 passed, 0 failed**.
 Run:
 ```bash
 dotnet exec tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll \
-  --filter-not-trait "Platform=Windows"
+  -trait- "Platform=Windows"
 ```
 Expected: **0 failed.** Existing tests use the default probe (returns `true` on
 Linux) and default clock, so entries are only removed on real key-up exactly as
@@ -681,7 +713,7 @@ Run:
 ```bash
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Debug -f net9.0
 dotnet exec tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll \
-  --filter-class "Winpepper.Platform.Tests.Hotkeys.CaptureDrainSelfHealTests"
+  -class "Winpepper.Platform.Tests.Hotkeys.CaptureDrainSelfHealTests"
 ```
 Expected: build succeeds; run reports **1 failed**. `_captureKeysDown` still
 holds `A` (its key-up was lost), so the drain branch keeps passing keys through
@@ -758,7 +790,7 @@ Run:
 ```bash
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Debug -f net9.0
 dotnet exec tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll \
-  --filter-class "Winpepper.Platform.Tests.Hotkeys.CaptureDrainSelfHealTests"
+  -class "Winpepper.Platform.Tests.Hotkeys.CaptureDrainSelfHealTests"
 ```
 Expected: **1 passed, 0 failed.** On the `VK_RCONTROL` down event, `PruneStaleKeys`
 sees `A` physically up and drops it, `_captureKeysDown.Count` becomes 0, the drain
@@ -769,7 +801,7 @@ branch is skipped, and `RightCtrl+RightShift` fires `HoldDown`.
 Run:
 ```bash
 dotnet exec tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll \
-  --filter-not-trait "Platform=Windows"
+  -trait- "Platform=Windows"
 ```
 Expected: **0 failed.** In particular
 `ResumeAfterCapture_WaitsForCapturedKeysAndRepeatsToBeReleased` still passes:
@@ -958,7 +990,7 @@ Run:
 ```bash
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Debug -f net9.0
 dotnet exec tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll \
-  --filter-class "Winpepper.Platform.Tests.Hotkeys.RecorderSuspendCoordinatorTests"
+  -class "Winpepper.Platform.Tests.Hotkeys.RecorderSuspendCoordinatorTests"
 ```
 Expected: **4 passed, 0 failed.**
 
@@ -1157,7 +1189,7 @@ Re-run the full non-Windows suite to confirm nothing else regressed:
 ```bash
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Debug -f net9.0
 dotnet exec tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll \
-  --filter-not-trait "Platform=Windows"
+  -trait- "Platform=Windows"
 ```
 Expected: **0 failed.**
 
@@ -1379,7 +1411,7 @@ Run:
 ```bash
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Debug -f net9.0
 dotnet exec tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll \
-  --filter-class "Winpepper.Platform.Tests.Hotkeys.HotkeyChordValidationTests"
+  -class "Winpepper.Platform.Tests.Hotkeys.HotkeyChordValidationTests"
 ```
 Expected: **all passed, 0 failed** (9 bare-key rejects + 6 safe accepts + 4
 `Fact`s).
@@ -1477,7 +1509,7 @@ Run:
 ```bash
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Debug -f net9.0
 dotnet exec tests/Winpepper.Platform.Tests/bin/Debug/net9.0/Winpepper.Platform.Tests.dll \
-  --filter-not-trait "Platform=Windows"
+  -trait- "Platform=Windows"
 ```
 Expected: **0 failed.** The only defaults shipped (`RightCtrl+RightShift`,
 `Ctrl+Shift+Space`) and every chord asserted valid in existing tests are safe
@@ -1537,8 +1569,13 @@ EOF
   `ModifierPassthroughTests` (modifiers never swallowed),
   `CancelChord_PlainEsc_EmitsCancelWithoutSwallowing` (Esc pass-through), and
   key-up symmetry tests are re-run green at each task's regression step (1.9,
-  2.7, 3.6, 4.7). Default probe returns `true` on Linux and the default clock
-  does not advance, so pre-existing behavior is byte-for-byte preserved. ✓
+  2.7, 3.6, 4.7). The default probe returns `true` on Linux, and although the
+  default clock (`DateTimeOffset.UtcNow`) does advance, every existing test drives
+  `TryProcessKey` synchronously with no sleeps/awaits, so the elapsed time within a
+  sequence is orders of magnitude below `StaleKeyTimeout` (1500 ms) — no entry is
+  ever pruned and pre-existing behavior is preserved. (An entry is dropped only
+  when the probe reports the key physically up OR the entry outlives 1500 ms;
+  neither happens under the always-true Linux probe within a µs-scale test.) ✓
 
 **1b. No silent deferrals.** No stubs, mocks, fake providers, or synthetic
 seams. Every requirement is proven against real production logic:

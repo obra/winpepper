@@ -26,11 +26,23 @@ public sealed class HotkeyHook : IDisposable
     private LowLevelKeyboardProc? _callback;
     private Modifier _modifiers;
     private bool _holding;
-    private readonly HashSet<int> _swallowedKeys = new();
+    // vk -> timestamp the swallow was last observed. Entries self-heal (drop)
+    // when the physical key is no longer held or the entry outlives
+    // StaleKeyTimeout, so a lost key-up can never swallow a key forever.
+    private readonly Dictionary<int, DateTimeOffset> _swallowedKeys = new();
     private readonly HashSet<int> _observedCancelKeys = new();
     private readonly HashSet<int> _captureKeysDown = new();
     private int _suspendRequested;
     private readonly ManualResetEventSlim _ready = new(initialState: false);
+
+    // Longer than Windows' max autorepeat initial delay (~1s) and far longer
+    // than LowLevelHooksTimeout (~300ms), so a genuinely held key (refreshed by
+    // autorepeat) is never falsely healed, but a lost key-up cannot strand an
+    // entry for more than this bounded window.
+    private static readonly TimeSpan StaleKeyTimeout = TimeSpan.FromMilliseconds(1500);
+
+    private readonly Func<DateTimeOffset> _now;
+    private readonly Func<int, bool> _keyPhysicallyDown;
 
     public ChannelReader<HotkeyEvent> Events => _events.Reader;
 
@@ -50,9 +62,15 @@ public sealed class HotkeyHook : IDisposable
     public bool TryProcessKey(int vk, bool down, out HotkeyEvent? evt)
     {
         evt = null;
+        var now = _now();
         var modifiersBeforeEvent = _modifiers;
         UpdateModifierState(vk, down);
         var bindings = Volatile.Read(ref _bindings);
+
+        // Self-heal: drop any tracked entry whose physical key is no longer held
+        // or that outlived StaleKeyTimeout, so a lost key-up can never leave a
+        // key swallowed or the hook wedged. The current key is handled below.
+        PruneStaleKeys(now, exceptVk: vk);
 
         var suspendRequested = Volatile.Read(ref _suspendRequested) != 0;
         if (suspendRequested || _captureKeysDown.Count != 0)
@@ -85,7 +103,18 @@ public sealed class HotkeyHook : IDisposable
             // but do not emit a duplicate event. Without this, repeats of the
             // chord-completing modifier leak to the foreground app, and a held
             // toggle chord fires Toggle once per repeat.
-            if (_swallowedKeys.Contains(vk)) return true;
+            // Autorepeat of a key we own: keep swallowing while it is live, and
+            // refresh its liveness timestamp. If the entry is stale (lost
+            // key-up), drop it and treat this as a fresh press below.
+            if (_swallowedKeys.TryGetValue(vk, out var swallowedSince))
+            {
+                if (IsKeyEntryLive(vk, swallowedSince, now))
+                {
+                    _swallowedKeys[vk] = now;
+                    return true;
+                }
+                _swallowedKeys.Remove(vk);
+            }
 
             if (CancelEnabled()
                 && ActivatesOnKeyDown(bindings.Cancel, vk, modifiersBeforeEvent, _modifiers))
@@ -101,7 +130,7 @@ public sealed class HotkeyHook : IDisposable
                 // working system-wide (e.g. Shift still shifts). Only a
                 // non-modifier trigger key is hidden from the foreground app.
                 if (IsModifierKey(vk)) return false;
-                _swallowedKeys.Add(vk);
+                _swallowedKeys[vk] = now;
                 return true;
             }
             if (ActivatesOnKeyDown(bindings.Hold, vk, modifiersBeforeEvent, _modifiers) && !_holding)
@@ -111,7 +140,7 @@ public sealed class HotkeyHook : IDisposable
                 // Modifier keys always pass through (see the Toggle branch
                 // above); only a non-modifier trigger key is swallowed.
                 if (IsModifierKey(vk)) return false;
-                _swallowedKeys.Add(vk);
+                _swallowedKeys[vk] = now;
                 return true;
             }
             return false;
@@ -136,12 +165,22 @@ public sealed class HotkeyHook : IDisposable
         HotkeyChord toggle,
         HotkeyChord cancel,
         ILogger<HotkeyHook> log,
-        Func<bool>? cancelEnabled = null)
+        Func<bool>? cancelEnabled = null,
+        Func<DateTimeOffset>? timeProvider = null,
+        Func<int, bool>? keyPhysicallyDown = null)
     {
         _bindings = new HotkeyBindings(hold, toggle, cancel);
         _log = log;
         _cancelEnabled = cancelEnabled ?? (() => true);
+        _now = timeProvider ?? (() => DateTimeOffset.UtcNow);
+        _keyPhysicallyDown = keyPhysicallyDown ?? DefaultKeyPhysicallyDown;
     }
+
+    // Real physical key-state probe. Guarded so it is only P/Invoked on Windows;
+    // on other platforms (Linux test host) production never installs the hook,
+    // and unit tests inject their own probe, so returning true here is inert.
+    private static bool DefaultKeyPhysicallyDown(int vk)
+        => !OperatingSystem.IsWindows() || (GetAsyncKeyState(vk) & 0x8000) != 0;
 
     private bool CancelEnabled()
     {
@@ -256,6 +295,42 @@ public sealed class HotkeyHook : IDisposable
             && (chord.Modifiers & pressedModifier) != Modifier.None
             && !chord.Matches(0, modifiersBeforeEvent)
             && chord.Matches(0, currentModifiers);
+    }
+
+    /// <summary>
+    /// A tracked key entry is "live" only while the physical key is still held
+    /// AND the entry has not outlived <see cref="StaleKeyTimeout"/>. Anything
+    /// else is stale and must be dropped so a lost key-up can never strand it.
+    /// </summary>
+    private bool IsKeyEntryLive(int vk, DateTimeOffset since, DateTimeOffset now)
+        => _keyPhysicallyDown(vk) && (now - since) <= StaleKeyTimeout;
+
+    /// <summary>
+    /// Drops stale entries from the tracked key dictionaries, healing keys whose
+    /// key-up was lost. <paramref name="exceptVk"/> is the key of the current
+    /// event, which the normal down/up logic handles explicitly (so happy-path
+    /// swallow/up symmetry is preserved). Excluding the current key is also
+    /// correctness-critical on Windows: per the LowLevelKeyboardProc contract the
+    /// callback runs BEFORE the current key's async state is updated, so a
+    /// GetAsyncKeyState probe of that key would read a stale value; every OTHER
+    /// tracked key's async state is already settled and safe to probe.
+    /// </summary>
+    private void PruneStaleKeys(DateTimeOffset now, int exceptVk)
+    {
+        PruneStale(_swallowedKeys, now, exceptVk);
+    }
+
+    private void PruneStale(Dictionary<int, DateTimeOffset> keys, DateTimeOffset now, int exceptVk)
+    {
+        if (keys.Count == 0) return;
+        List<int>? stale = null;
+        foreach (var (vk, since) in keys)
+        {
+            if (vk == exceptVk) continue;
+            if (!IsKeyEntryLive(vk, since, now)) (stale ??= new()).Add(vk);
+        }
+        if (stale is null) return;
+        foreach (var vk in stale) keys.Remove(vk);
     }
 
     /// <summary>

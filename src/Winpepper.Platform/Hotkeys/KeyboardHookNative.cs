@@ -62,6 +62,9 @@ internal static partial class KeyboardHookNative
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool PostThreadMessageW(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
 
+    [LibraryImport("user32.dll")]
+    public static partial short GetAsyncKeyState(int vKey);
+
     public const uint WM_QUIT = 0x0012;
 
     [StructLayout(LayoutKind.Sequential)]

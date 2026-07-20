@@ -782,7 +782,7 @@ Upgrade rules: `MajorUpgrade.AllowDowngrades=no`, `Schedule=afterInstallInitiali
 - [ ] **Step 4: Verify the spec no longer mandates per-machine**
 
 Run: `grep -n "Program Files\\\\Winpepper\|per-machine" docs/superpowers/specs/2026-05-15-winpepper-design.md; echo "exit=$?"`
-Expected: exit=1 (no per-machine install mandate remains in the spec).
+Expected: exit=0 — the ONLY remaining match is the §11 migration note added in Step 3 ("anyone with a pre-existing per-machine install (`C:\Program Files\Winpepper`) must uninstall it once…"). Confirm that single line is the sole match and describes the one-time migration, not an active per-machine install mandate. If any *other* line matches, the sweep is incomplete — fix the offending line before committing.
 
 - [ ] **Step 5: Commit**
 
@@ -1050,17 +1050,21 @@ grep -rIn 'Program Files\\Winpepper\|ProgramFiles%\\Winpepper' \
   --include='*.wxs' --include='*.ps1' --include='*.cs' --include='*.md' . \
   | grep -v 'docs/superpowers/plans/' \
   | grep -v 'docs/plans/2026-07-20-per-user-msi-scope.md' \
-  | grep -v 'README.md.*[Mm]igrat' ; echo "grep-exit=$?"
+  | grep -v 'README.md.*[Mm]igrat' \
+  | grep -v 'winpepper-design.md.*[Mm]igrat' ; echo "grep-exit=$?"
 ```
-Expected: prints only the README **migration note** line (the single intentional
-mention of the old path) and nothing else. Concretely: 0 lines from `.wxs`,
-`.ps1`, `.cs`; 0 lines from `docs/windows-smoke-test.md`, `docs/manual-test.md`,
-`docs/release.md`, `docs/superpowers/specs/`. If any of those appear, the sweep
-is incomplete — fix the offending file before committing.
+Expected: prints only the two intentional **migration note** lines — the README
+note and the §11 spec note (each the single deliberate mention of the old path in
+its file) — and nothing else. Concretely: 0 lines from `.wxs`, `.ps1`, `.cs`;
+0 lines from `docs/windows-smoke-test.md`, `docs/manual-test.md`,
+`docs/release.md`; and from `docs/superpowers/specs/` only the one §11 migration
+note line. If anything else appears, the sweep is incomplete — fix the offending
+file before committing.
 
-> The `grep -v` filters exclude the three legitimate homes for the string: the
-> historical build logs under `docs/superpowers/plans/`, this plan document, and
-> the README migration note. Everything else must be clean.
+> The `grep -v` filters exclude the four legitimate homes for the string: the
+> historical build logs under `docs/superpowers/plans/`, this plan document, the
+> README migration note, and the spec's §11 migration note. Everything else must
+> be clean.
 
 - [ ] **Step 4: Confirm no orphaned old identifiers survive anywhere**
 

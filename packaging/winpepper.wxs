@@ -203,7 +203,7 @@
          per-user package; the install location is fixed by convention. -->
     <ui:WixUI Id="WixUI_Minimal" />
 
-    <!-- Real Apache-2.0 license text for the WixUI_InstallDir EULA dialog;
+    <!-- Real Apache-2.0 license text for WixUI_Minimal's combined welcome/EULA dialog;
          without this override WiX shows its lorem-ipsum placeholder.
          Path is relative to the project directory (packaging/), same as the
          ScriptSourceFile references above. -->

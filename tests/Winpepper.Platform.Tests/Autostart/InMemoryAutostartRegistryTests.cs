@@ -17,9 +17,9 @@ public class InMemoryAutostartRegistryTests
     public void Enable_Then_IsEnabled_True()
     {
         var r = new InMemoryAutostartRegistry();
-        r.Enable(@"C:\Program Files\Winpepper\winpepper.exe", "--tray");
+        r.Enable(@"C:\Users\me\AppData\Local\Programs\Winpepper\winpepper.exe", "--tray");
         r.IsEnabled().ShouldBeTrue();
-        r.CurrentCommand().ShouldBe("\"C:\\Program Files\\Winpepper\\winpepper.exe\" --tray");
+        r.CurrentCommand().ShouldBe("\"C:\\Users\\me\\AppData\\Local\\Programs\\Winpepper\\winpepper.exe\" --tray");
     }
 
     [Fact]

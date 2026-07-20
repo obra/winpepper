@@ -7,7 +7,13 @@
          DLLs from the WinAppSDK self-contained publish carry non-MSI-friendly
          Language metadata that the validator rejects. The files install
          correctly; the validation is cosmetic. -->
-    <SuppressIces>ICE60;ICE03;ICE69</SuppressIces>
+    <!-- ICE38/ICE64/ICE91 are the documented per-user-install ICEs: file-keypath
+         components under a user-profile dir (LocalAppDataFolder) trip ICE38
+         (error) + ICE64/ICE91 (warnings). This is inherent to per-user installs
+         and cannot be fixed by scope; suppressing them is the standard remedy.
+         ICE43 is NOT suppressed (it does not fire: StartMenuShortcut has an HKCU
+         keypath; the exe is a File component, not a non-advertised shortcut). -->
+    <SuppressIces>ICE60;ICE03;ICE69;ICE38;ICE64;ICE91</SuppressIces>
     <OutputPath>$(MSBuildThisFileDirectory)..\artifacts\</OutputPath>
     <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(Configuration)\</IntermediateOutputPath>
     <AppPublishDir Condition=" '$(AppPublishDir)' == '' ">$(MSBuildThisFileDirectory)..\src\Winpepper.App\bin\$(Configuration)\net9.0-windows10.0.19041.0\win-x64\publish</AppPublishDir>

@@ -26,6 +26,15 @@ cross-platform (no P/Invoke), so tests run on Linux.
 
 ## Global Constraints
 
+- **Environment prerequisite (verify before Task 1):** every RED/GREEN step in
+  this plan runs `dotnet test`, so a .NET SDK satisfying `global.json`
+  (`sdk 9.0.100`, `rollForward: latestFeature`) must be installed and on `PATH`.
+  Confirm with `dotnet --version` before running any step. If `dotnet` is absent
+  (e.g. a bare Linux checkout without the SDK — a known state of this worktree),
+  provision the SDK first, or run the `dotnet test` gates on the Windows VM / CI
+  where the SDK is present (the repo's established pattern — see `README.md`).
+  All logic here is pure managed code (`net9.0`, no P/Invoke), so once the SDK is
+  available the tests run on Linux.
 - Target framework for running/inspecting logic tests on Linux: `net9.0`
   (the `net9.0-windows10.0.19041.0` target and `[Trait("Platform","Windows")]`
   tests are Windows-only and are excluded via `--filter "Platform!=Windows"`).

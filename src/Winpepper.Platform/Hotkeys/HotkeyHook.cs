@@ -31,7 +31,9 @@ public sealed class HotkeyHook : IDisposable
     // StaleKeyTimeout, so a lost key-up can never swallow a key forever.
     private readonly Dictionary<int, DateTimeOffset> _swallowedKeys = new();
     private readonly HashSet<int> _observedCancelKeys = new();
-    private readonly HashSet<int> _captureKeysDown = new();
+    // vk -> timestamp last observed during capture. Same self-heal as
+    // _swallowedKeys: a lost key-up must not wedge drain mode forever.
+    private readonly Dictionary<int, DateTimeOffset> _captureKeysDown = new();
     private int _suspendRequested;
     private readonly ManualResetEventSlim _ready = new(initialState: false);
 
@@ -80,7 +82,7 @@ public sealed class HotkeyHook : IDisposable
             // from firing a just-recorded chord after the UI requests resume.
             if (down)
             {
-                _captureKeysDown.Add(vk);
+                _captureKeysDown[vk] = now;
                 return false;
             }
             _captureKeysDown.Remove(vk);
@@ -318,6 +320,7 @@ public sealed class HotkeyHook : IDisposable
     private void PruneStaleKeys(DateTimeOffset now, int exceptVk)
     {
         PruneStale(_swallowedKeys, now, exceptVk);
+        PruneStale(_captureKeysDown, now, exceptVk);
     }
 
     private void PruneStale(Dictionary<int, DateTimeOffset> keys, DateTimeOffset now, int exceptVk)

@@ -278,7 +278,7 @@ Tray autostart variant: after onboarding completes, restart the app with `dotnet
    line and no `Return value 3`.
 6. Run the self-test from the installed location:
    ```bash
-   ./scripts/winrun "& 'C:\\Program Files\\Winpepper\\Winpepper.exe' --selftest"
+   ./scripts/winrun "& \"$env:LOCALAPPDATA\\Programs\\Winpepper\\Winpepper.exe\" --selftest"
    ```
    Expected: stdout contains `WINPEPPER_SELFTEST_OK`; exit code `0`.
 7. Verify autostart is registered:
@@ -290,14 +290,14 @@ Tray autostart variant: after onboarding completes, restart the app with `dotnet
    ```bash
    ./scripts/winrun "msiexec /x artifacts\\winpepper-<version>-x64.msi /qn /l*v artifacts\\uninstall.log"
    ```
-   Expected: exit code `0`; `C:\Program Files\Winpepper` is gone; the
+   Expected: exit code `0`; `%LOCALAPPDATA%\Programs\Winpepper` is gone; the
    `HKCU\...\Run\Winpepper` value is gone.
 9. Confirm per-user data survives uninstall:
    ```bash
    ./scripts/winrun "Test-Path $env:LOCALAPPDATA\\winpepper"
    ```
    Expected: `True` (models, settings, history, corrections, logs all
-   preserved on uninstall — only `%ProgramFiles%\Winpepper` is removed).
+   preserved on uninstall — only `%LOCALAPPDATA%\Programs\Winpepper` is removed).
 
 **Acceptance bar for Plan 6 on the VM:** steps 2–4 build green; step 5 installs
 with exit code 0; step 6 prints `WINPEPPER_SELFTEST_OK`; step 7 finds the Run

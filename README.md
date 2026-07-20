@@ -71,15 +71,25 @@ The MSI is currently **unsigned.** Windows will throw a SmartScreen warning on f
 launch — click "More info" → "Run anyway". A signed build is on the roadmap; the
 `packaging/sign.ps1` wrapper just needs a code-signing certificate wired in.
 
+Winpepper installs **per-user** — no administrator rights and **no UAC prompt**
+for install, upgrade, or uninstall.
+
 After install:
-- Files land in `C:\Program Files\Winpepper\`
+- Files land in `%LOCALAPPDATA%\Programs\Winpepper\` (per-user; not `Program Files`)
 - User data (settings, corrections, downloaded models, audio history) lives in
-  `%LOCALAPPDATA%\winpepper\` — survives reinstalls and uninstalls
+  `%LOCALAPPDATA%\winpepper\` — a separate folder that survives reinstalls and
+  uninstalls
 - Autostart is enabled: `HKCU\…\Run\Winpepper` runs the app hidden in the tray on
   logon
 
-To uninstall: standard Add/Remove Programs entry. User data is preserved; delete
-`%LOCALAPPDATA%\winpepper\` yourself if you want a fully clean slate.
+To uninstall: standard Add/Remove Programs entry (no elevation needed). User data
+is preserved; delete `%LOCALAPPDATA%\winpepper\` yourself if you want a fully
+clean slate.
+
+> **Migrating from an older per-machine build?** Earlier releases installed to
+> `C:\Program Files\Winpepper` (per-machine). Uninstall that one first — that one
+> removal still needs elevation — before installing this per-user package, so
+> upgrades track correctly afterward.
 
 ## Performance: what to expect
 

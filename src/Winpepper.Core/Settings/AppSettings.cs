@@ -18,6 +18,19 @@ public record AppSettings
     public string AsrProvider { get; init; } = "local"; // "local" | "assemblyai"
     public string AssemblyAiModel { get; init; } = "universal-2"; // speech_model id sent to AssemblyAI
 
+    // AssemblyAI retention: delete the remote transcript after we have the text
+    // so dictated audio/text does not persist on AssemblyAI servers. On by default.
+    public bool AssemblyAiDeleteAfterTranscribe { get; init; } = true;
+
+    // Single owned cloud budget (seconds). FallbackTranscriber cancels the cloud
+    // attempt after this and falls back to local immediately. Clamped to [5,30].
+    public int AssemblyAiCloudDeadlineSeconds { get; init; } = 10;
+
+    // Send Preferred terms as AssemblyAI keyterms_prompt. Off by default: this is
+    // a paid add-on on some tiers. Replacements always map to custom_spelling
+    // (safe on all tiers) regardless of this flag.
+    public bool AssemblyAiKeytermsEnabled { get; init; } = false;
+
     // Cleanup model selection. Bound to Winpepper.Models.ModelRegistry.DefaultCleanupName.
     public string CleanupModelName { get; init; } = "qwen2.5-0.5b-instruct-q4_k_m";
 

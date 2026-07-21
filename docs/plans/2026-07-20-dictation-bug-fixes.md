@@ -116,11 +116,14 @@ WinUI + live WASAPI + a real GGUF model. That whole-system verification is the
   `tests/Winpepper.Core.Tests/ViewModels/RecordingSettingsViewModelTests.cs`.
 
 **Bug 1 — status pill freeze (WinUI, Windows-only, smoke-verified):**
-- `src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs` — drop `WS_EX_LAYERED`
-  + `SetLayeredWindowAttributes` from the click-through setup.
-- `src/Winpepper.App/Views/StatusPillWindow.xaml` — whole-window alpha via XAML.
-- `src/Winpepper.App/Views/StatusPillWindow.xaml.cs` — one-time
-  `Activate()` → `Hide()` island init; explanatory comment.
+- `src/Winpepper.App/Views/StatusPillWindow.xaml.cs` — **primary fix**: one-time
+  `Activate()` → `Hide()` island init; explanatory comment. Click-through/layered
+  setup left UNCHANGED.
+- **Contingency only** (applied via the Windows smoke gate if the pill is still
+  frozen): `src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs` — drop
+  `WS_EX_LAYERED` + `SetLayeredWindowAttributes`; `StatusPillWindow.xaml` —
+  whole-window alpha via XAML `Opacity`. See Task 10 for why this is not the
+  default (cross-process click-through relies on the layered style).
 
 ---
 
@@ -1526,8 +1529,15 @@ dotnet exec tests/Winpepper.Cleanup.Tests/bin/Debug/net9.0/Winpepper.Cleanup.Tes
     -notrait "Platform=Windows"
 ```
 Expected: **PASS** — `Failed: 0`. The five new regression tests pass; all prior
-`CleanupRunnerTests` still pass (their raws are ≤6 words with overlapping
-outputs, so the floor never trips them).
+`CleanupRunnerTests` still pass. Note on why they survive the new floor: this
+depends on Task 3 having already rewritten their raw transcripts to ≥4 words with
+overlapping outputs (Task 3 runs before this task). Most rewritten raws are ≤6
+words or keep ≥0.40 content-word retention, so the floor does not change their
+outcome. A couple of tests (e.g. `Run_MaxNewTokens`, whose raw is long and cleaned
+output is a single char) DO internally trip the floor and return
+`FallbackImplausible` — they still pass only because they assert a pre-floor value
+(`LastMaxNewTokens`), not `Path`/`CleanedText`. Do NOT add `Path`/`CleanedText`
+assertions to those raws without re-checking the floor.
 
 - [ ] **Step 6: Commit**
 
@@ -2020,6 +2030,7 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
     private readonly WarmCaptureBuffer _buffer = new(RingCapacitySamples);
     private readonly object _captureLock = new();
     private WasapiCapture? _capture;
+    private string? _activeDeviceId; // endpoint the live _capture was built on (Bug-2 default-change recheck)
 
     public WarmWasapiRecorder(bool prewarm, string? deviceId = null)
     {
@@ -2030,10 +2041,46 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
 
     public void StartSession(int includePrerollMs)
     {
+        // Bug-2 default-device change: a persistent warm WasapiCapture does NOT
+        // auto-follow a change of the Windows default input device -- WASAPI does
+        // not signal a running capture, so without this check the pill would keep
+        // recording the OLD mic. That is a regression vs the previous per-press
+        // cold-start, which re-resolved the default endpoint on every press. When
+        // we are following the default (no explicit _deviceId), re-resolve it here
+        // and rebuild the stream if it drifted. (A fuller solution is an
+        // IMMNotificationClient via RegisterEndpointNotificationCallback reacting to
+        // OnDefaultDeviceChanged; this per-session recheck is the minimal fix that
+        // restores parity and covers the "change default, then dictate" case.)
+        if (string.IsNullOrEmpty(_deviceId)) RebuildIfDefaultChanged();
         // Cold mode (or a previously faulted warm stream): (re)start capture now.
         if (_capture is null) TryStartCapture();
         var prerollSamples = _prewarm ? Math.Max(0, includePrerollMs) * (SampleRate16k / 1000) : 0;
         _buffer.StartSession(prerollSamples);
+    }
+
+    private void RebuildIfDefaultChanged()
+    {
+        lock (_captureLock)
+        {
+            if (_capture is null) return; // nothing running; TryStartCapture will pick the current default
+            try
+            {
+                using var enumerator = new MMDeviceEnumerator();
+                var current = enumerator.GetDefaultAudioEndpoint(DataFlow.Capture, Role.Multimedia);
+                if (current.ID != _activeDeviceId)
+                {
+                    // Default moved. _captureLock is a reentrant Monitor, so calling
+                    // StopCapture()/TryStartCapture() (which re-take it) is safe here.
+                    StopCapture();     // drop the old-device stream
+                    TryStartCapture(); // rebuild on the new default
+                }
+            }
+            catch
+            {
+                // Enumeration failed (e.g. no capture device). Keep the current
+                // stream; the fault path / next StartSession retries.
+            }
+        }
     }
 
     public float[] StopSession()
@@ -2060,6 +2107,7 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
                 capture.RecordingStopped += OnRecordingStopped;
                 capture.StartRecording();
                 _capture = capture;
+                _activeDeviceId = device.ID; // remember the endpoint for the default-change recheck
             }
             catch
             {
@@ -2081,6 +2129,7 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
             _capture.RecordingStopped -= OnRecordingStopped;
             try { _capture.Dispose(); } catch { }
             _capture = null;
+            _activeDeviceId = null;
         }
     }
 
@@ -2393,62 +2442,135 @@ EOF
 
 ## Task 10: Unfreeze the status pill (Windows)
 
-Bug 1 root cause: the pill window is frozen at its first composed frame because
-(a) `MakeClickThroughTopmostTool` ORs in `WS_EX_LAYERED` and calls
-`SetLayeredWindowAttributes(hwnd,0,alpha,LWA_ALPHA)` — legacy layered-window
-redirection freezes a WinUI 3 DirectComposition window's presented content — and
-(b) the window content island is never initialized (only
-`appWindow.Show(activateWindow:false)`). Fix both: drop the layered path
-(translucency via XAML), and initialize the island once with
-`Activate()` → `Hide()`.
+Bug 1 has two INDEPENDENT candidate causes, and the load-bearing-validation pass
+found the original "drop the layered window" fix both un-attributable and
+self-contradictory (see the root-cause note). This task therefore isolates the
+better-evidenced fix and treats dropping the layered window as a *contingency*,
+not the default:
 
-**Research note (click-through without WS_EX_LAYERED).** The traditional
-click-through recipe is `WS_EX_LAYERED | WS_EX_TRANSPARENT` (StackOverflow
-"Click-through Transparent window"; Microsoft Q&A "DirectComposition click
-through in transparent areas"). But `SetLayeredWindowAttributes` puts the window
-on the legacy redirection-surface composition path, which is exactly what
-freezes a DirectComposition (WinUI 3) window — and `alpha=255` does not change
-that (the window is still layered-redirected). The animation value-chain
-(`LevelMeterModel`, `PillAnimationMap`, the 100 ms tick writing
-`DotScale.ScaleX/Y` and `Dot.Opacity`) was verified correct, so the freeze is
-purely compositional. **Decision:** drop `WS_EX_LAYERED`/`SetLayeredWindowAttributes`
-and keep `WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` +
-`WS_EX_TOPMOST`/`HWND_TOPMOST`. `WS_EX_TRANSPARENT` returns `HTTRANSPARENT` from
-hit-testing and, combined with `WS_EX_NOACTIVATE` (the window never activates on
-click), passes clicks through on a composited (DWM) desktop. The Windows smoke
-checklist explicitly verifies click-through. The `WS_EX_LAYERED`, `LWA_ALPHA`,
-and `SetLayeredWindowAttributes` P/Invoke are left defined but unused so the
-documented fallback (re-add `WS_EX_LAYERED` + `SetLayeredWindowAttributes(hwnd,
-0, 255, LWA_ALPHA)`) is a one-line change if the smoke test finds click-through
-regressed. This layer is Linux-untestable; verification is the smoke checklist,
-not a deferral.
+- **(a) The content island is never initialized.** The window is only ever
+  `appWindow.Show(activateWindow:false)`'d and never `Activate()`'d, so a WinUI 3
+  window never composes a live DirectComposition tree and presents a frozen first
+  frame. This is directly evidenced in the current code and is the PRIMARY fix.
+- **(b) The legacy layered path *may* also interfere.** `MakeClickThroughTopmostTool`
+  ORs in `WS_EX_LAYERED` + `SetLayeredWindowAttributes`. This *might* contribute to
+  the freeze, but that specific symptom is uncorroborated — and the same layered
+  style is what makes click-through reliable (below). So we do **not** drop it by
+  default.
 
-**Files:**
-- Modify: `src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs:31-43`
-- Modify: `src/Winpepper.App/Views/StatusPillWindow.xaml`
-- Modify: `src/Winpepper.App/Views/StatusPillWindow.xaml.cs:33-34,66`
+**Default fix (this task): initialize the island, keep everything else.** Add the
+one-time `Activate()` → `Hide()`. Leave `WS_EX_LAYERED`/`SetLayeredWindowAttributes`
+and the `alpha: 230` translucency exactly as they are. Click-through — which
+currently WORKS — is untouched.
 
-- [ ] **Step 1: Remove the layered path from MakeClickThroughTopmostTool**
+**Root-cause note (validated).** Click-through here overlays *other applications'*
+windows (cross-process) on a composited (DWM) desktop. Independent, tested
+implementations (GLFW, Wails, Electron, Godot, GTK-on-win32) converge that reliable
+cross-process click-through needs `WS_EX_LAYERED | WS_EX_TRANSPARENT` **together** —
+`WS_EX_TRANSPARENT`'s `HTTRANSPARENT` hit-test alone is *not* a blanket passthrough
+(Raymond Chen, "WS_EX_TRANSPARENT is a lie"). Meanwhile the "layered redirection
+freezes the DirectComposition content at frame 0" claim is plausible but has **no**
+matching bug report; the better-evidenced freeze cause is the un-realized island
+(a). The original plan bundled (a)+(b) into one change and kept "re-add
+`WS_EX_LAYERED`" as its fallback — but if (b) is the freeze cause, that fallback
+re-introduces the freeze, so neither the primary nor the fallback would yield a pill
+that both animates AND is click-through. Isolating (a) removes that contradiction
+and refuses to risk working click-through on an uncorroborated hypothesis. This
+layer is Linux-untestable; the smoke checklist decides whether the contingency is
+needed.
+
+**Files (default fix):**
+- Modify: `src/Winpepper.App/Views/StatusPillWindow.xaml.cs:66` (add `Activate()`
+  before the final `Hide()`; the `MakeClickThroughTopmostTool(_hwnd, alpha: 230)`
+  call at line 34 is left UNCHANGED).
+- Contingency files (only if the smoke test still shows a frozen pill):
+  `src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs`,
+  `src/Winpepper.App/Views/StatusPillWindow.xaml` — see the Contingency block below.
+
+- [ ] **Step 1: Initialize the content island once (the primary fix)**
+
+In `src/Winpepper.App/Views/StatusPillWindow.xaml.cs`, leave the call at line 34
+UNCHANGED (`ExtendedWindowStyle.MakeClickThroughTopmostTool(_hwnd, alpha: 230)` —
+the layered/translucent click-through setup stays as-is). Replace ONLY the final
+constructor line — the standalone `appWindow.Hide();` at the very end of the
+constructor (currently line 66), **not** the `appWindow.Hide();` inside the
+hide-timer lambda (~line 50) — with:
+```csharp
+        // Bug-1: initialize the content island exactly once. A WinUI 3 window
+        // that is only ever Show(activateWindow:false)'d never composes a live
+        // DirectComposition tree, so it presents a frozen first frame. Activate()
+        // once realizes the island; Hide() immediately in the same pump keeps it
+        // off-screen. WS_EX_NOACTIVATE (already set in MakeClickThroughTopmostTool)
+        // is intended to prevent focus theft/flash; the smoke checklist verifies no
+        // flash and no focus steal. Subsequent Show(activateWindow:false) calls then
+        // present live content.
+        this.Activate();
+        appWindow.Hide();
+```
+
+- [ ] **Step 2: Static verification (Linux — no App build possible)**
+
+Run:
+```bash
+grep -n "this.Activate();" src/Winpepper.App/Views/StatusPillWindow.xaml.cs
+grep -n "MakeClickThroughTopmostTool(_hwnd, alpha: 230)" src/Winpepper.App/Views/StatusPillWindow.xaml.cs
+grep -n "SetLayeredWindowAttributes" src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs
+```
+Expected: `this.Activate();` present; the `alpha: 230` click-through call still
+present (layered path retained, unchanged); `SetLayeredWindowAttributes` still
+called in setup (unchanged). Rendering / animation / click-through are decided by
+the smoke checklist.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/Winpepper.App/Views/StatusPillWindow.xaml.cs
+git commit -m "$(cat <<'EOF'
+fix: unfreeze status pill by initializing the WinUI content island
+
+Bug-1: the pill window was only ever Show(activateWindow:false)'d and never
+Activate()'d, so its WinUI 3 content island never composed a live
+DirectComposition tree and presented a frozen first frame (no pulse, frozen
+elapsed-ms). Activate() once then Hide() realizes the island; later Show() then
+presents live content. The click-through/layered setup is intentionally left
+untouched -- it works today, and reliable cross-process click-through relies on
+WS_EX_LAYERED (dropping it is a documented contingency only).
+
+🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
+
+Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.com>
+EOF
+)"
+```
+
+### Contingency (apply ONLY if the smoke checklist shows the pill STILL frozen after Step 1, with the layered window retained)
+
+If — and only if — the pill is still frozen after the island-init above, cause
+(b) (the legacy layered-redirection path) is implicated. Only then, drop it and
+move translucency into XAML. Do this as a SEPARATE commit so the two fixes stay
+attributable.
+
+- [ ] **C1: Remove the layered path from MakeClickThroughTopmostTool**
 
 In `src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs`, replace the
-`MakeClickThroughTopmostTool` method (lines 31-43) with:
+`MakeClickThroughTopmostTool` method (currently lines 31-43) with:
 
 ```csharp
     public static void MakeClickThroughTopmostTool(IntPtr hwnd)
     {
-        // Bug-1: DO NOT use WS_EX_LAYERED + SetLayeredWindowAttributes here.
-        // That puts the window on the legacy layered-redirection composition
-        // path, which freezes a WinUI 3 / DirectComposition window at its first
-        // presented frame (the pill stopped pulsing and its elapsed-ms froze).
-        // Translucency is done in XAML instead (StatusPillWindow.xaml root
-        // Opacity + the semi-transparent pill brush).
+        // Bug-1 contingency: the legacy WS_EX_LAYERED + SetLayeredWindowAttributes
+        // path puts the window on the layered-redirection composition path, which
+        // can freeze a WinUI 3 / DirectComposition window's presented content.
+        // Applied ONLY after the island-init fix proved insufficient in the smoke
+        // test. Translucency now comes from XAML (StatusPillWindow.xaml root Opacity).
         //
-        // Click-through: WS_EX_TRANSPARENT returns HTTRANSPARENT from hit-testing
-        // and, with WS_EX_NOACTIVATE (we never activate on click), passes clicks
-        // through on a composited desktop. WS_EX_TOPMOST is the *style* bit;
-        // SetWindowPos(HWND_TOPMOST) actually inserts us into the topmost band.
-        // The WS_EX_LAYERED constant/P-Invoke below is retained (unused) as the
-        // documented fallback if the smoke test finds click-through regressed.
+        // Click-through WITHOUT the layered style is NOT guaranteed for a
+        // cross-process overlay: WS_EX_TRANSPARENT returns HTTRANSPARENT from
+        // hit-testing but, per tested implementations (GLFW/Wails/Electron/Godot),
+        // that alone often does not pass clicks to a window in ANOTHER process on
+        // modern DWM. The smoke checklist MUST re-verify click-through after this
+        // change; if it regresses, use a non-layered passthrough (see C3) rather
+        // than re-adding SetLayeredWindowAttributes, which would re-freeze the pill.
         var existing = (long)GetWindowLongPtr64(hwnd, GWL_EXSTYLE);
         var updated  = existing | WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
         SetWindowLongPtr64(hwnd, GWL_EXSTYLE, new IntPtr(updated));
@@ -2457,79 +2579,31 @@ In `src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs`, replace the
 ```
 
 (Leave the `WS_EX_LAYERED`, `LWA_ALPHA` constants and the
-`SetLayeredWindowAttributes` P/Invoke declared — they document the fallback.)
+`SetLayeredWindowAttributes` P/Invoke declared but unused.)
 
-- [ ] **Step 2: Apply whole-window translucency in XAML**
+- [ ] **C2: Apply whole-window translucency in XAML + drop the alpha arg**
 
-In `src/Winpepper.App/Views/StatusPillWindow.xaml`, set the root `Grid`'s
-`Opacity` so the whole pill keeps its previous ~0.9 alpha (was
-`alpha: 230` / 255) without a layered window. Change:
+In `src/Winpepper.App/Views/StatusPillWindow.xaml`, change:
 ```xml
     <Grid Background="Transparent" Padding="12,6">
 ```
-to:
+to (0.9 = the prior `alpha: 230`/255):
 ```xml
     <Grid Background="Transparent" Padding="12,6" Opacity="0.9">
 ```
+and in `src/Winpepper.App/Views/StatusPillWindow.xaml.cs` line 34, change
+`MakeClickThroughTopmostTool(_hwnd, alpha: 230)` to
+`MakeClickThroughTopmostTool(_hwnd)`.
 
-- [ ] **Step 3: Update the call site + initialize the content island once**
+- [ ] **C3: Re-validate click-through — do NOT re-add the layered alpha**
 
-In `src/Winpepper.App/Views/StatusPillWindow.xaml.cs`, change the call at
-line 34:
-```csharp
-        ExtendedWindowStyle.MakeClickThroughTopmostTool(_hwnd, alpha: 230);
-```
-to:
-```csharp
-        ExtendedWindowStyle.MakeClickThroughTopmostTool(_hwnd);
-```
-
-Then replace the final constructor line, `appWindow.Hide();` (line 66), with:
-```csharp
-        // Bug-1: initialize the content island exactly once. A WinUI 3 window
-        // that is only ever Show(activateWindow:false)'d never composes a live
-        // DirectComposition tree, so it presents a frozen first frame. Activate()
-        // once realizes the island; Hide() immediately in the same pump keeps it
-        // off-screen. WS_EX_NOACTIVATE (set above) prevents focus theft/flash.
-        // Subsequent Show(activateWindow:false) calls then present live content.
-        this.Activate();
-        appWindow.Hide();
-```
-
-- [ ] **Step 4: Static verification (Linux — no App build possible)**
-
-Run:
-```bash
-grep -n "WS_EX_LAYERED" src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs
-grep -n "SetLayeredWindowAttributes(hwnd" src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs || echo "OK: no SLWA call in setup"
-grep -n "this.Activate();" src/Winpepper.App/Views/StatusPillWindow.xaml.cs
-grep -n 'Opacity="0.9"' src/Winpepper.App/Views/StatusPillWindow.xaml
-```
-Expected: `WS_EX_LAYERED` still *declared* (fallback constant) but **not** ORed
-into `updated` and **no** `SetLayeredWindowAttributes(hwnd, ...)` call inside
-`MakeClickThroughTopmostTool`; `this.Activate();` present; the XAML `Opacity`
-present. Rendering/click-through are verified in the smoke checklist.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/Winpepper.App/Views/Native/ExtendedWindowStyle.cs \
-        src/Winpepper.App/Views/StatusPillWindow.xaml \
-        src/Winpepper.App/Views/StatusPillWindow.xaml.cs
-git commit -m "$(cat <<'EOF'
-fix: unfreeze status pill by dropping layered window + init island
-
-Bug-1: SetLayeredWindowAttributes put the pill on the legacy layered-redirection
-path, freezing the DirectComposition content (no pulse, frozen elapsed-ms). Do
-translucency in XAML (root Opacity) and keep WS_EX_TRANSPARENT/NOACTIVATE for
-click-through; Activate() once then Hide() so Show() presents live content.
-
-🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
-
-Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.com>
-EOF
-)"
-```
+Dropping `WS_EX_LAYERED` is EXPECTED to risk cross-process click-through. Re-run
+the smoke click-through check. If it regresses, do **not** restore
+`SetLayeredWindowAttributes` (that re-introduces the freeze this contingency exists
+to fix); instead adopt a non-layered passthrough (e.g. an
+`InputNonClientPointerSource` region configuration, or a low-level mouse-hook
+passthrough) and track it as a follow-up. The primary path (Step 1, layered
+retained) avoids this entire trade-off, which is why it is the default.
 
 ---
 
@@ -2575,10 +2649,17 @@ verification for Bugs 1 and the Windows halves of Bugs 2 and 3 — not optional.
 - [ ] During the transcribing/cleaning phase, the "thinking" **pulse is visible**
       (dot opacity oscillates).
 - [ ] The pill is **click-through**: clicking where it overlaps another window
-      activates the window beneath, not the pill. *(If this regresses, apply the
-      documented fallback: re-add `WS_EX_LAYERED` in `MakeClickThroughTopmostTool`
-      and call `SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)`, rebuild,
-      and re-verify pill animation + click-through together.)*
+      activates the window beneath, not the pill. *(The default Task-10 fix keeps
+      the layered window, so click-through should be UNCHANGED from before.)*
+- [ ] **Decision gate for Task 10.** If the elapsed-ms/pulse checks above still
+      show a **frozen** pill after the default fix (island-init with the layered
+      window retained), apply the **Contingency** (Task 10 C1-C3: drop
+      `WS_EX_LAYERED`, move translucency to XAML `Opacity`). Then RE-VERIFY both
+      the animation checks AND click-through. If click-through then regresses, do
+      **not** re-add `SetLayeredWindowAttributes` (it re-freezes the pill — that is
+      the whole reason the layered path was dropped); use a non-layered passthrough
+      (`InputNonClientPointerSource` region or a low-level mouse hook) and track it
+      as a follow-up.
 - [ ] The pill **never steals focus** (the caret/foreground window is unchanged
       when the pill shows) and shows **no flash** on first appearance.
 - [ ] The pill stays **topmost** over other windows.
@@ -2591,8 +2672,17 @@ verification for Bugs 1 and the Windows halves of Bugs 2 and 3 — not optional.
 - [ ] Toggling **Settings → Recording → "Keep the mic warm…"** off restores
       cold-start (mic-in-use indicator only lights while dictating); dictation
       still works (start-of-speech may be slightly clipped, as before).
-- [ ] Changing the default input device, then dictating again, still records
-      (warm stream recreated).
+- [ ] **Changing the Windows default input device, then dictating again, records
+      from the NEW device** (not the old one). The `StartSession` default-endpoint
+      recheck rebuilds the warm stream when the default drifts. *(WASAPI does not
+      signal a running capture on a default change, so without this the pill would
+      silently keep recording the old mic — verify the correct device is actually
+      captured, not merely that "something records".)*
+- [ ] **Unplugging the active input device, then dictating**, still records (the
+      `RecordingStopped`-with-exception fault path disposes and lazily recreates the
+      stream). *(If a preference-only default change is ever found to slip through
+      the per-session recheck, the fuller fix is an `IMMNotificationClient` via
+      `RegisterEndpointNotificationCallback`.)*
 
 **Bug 3 — cleanup safety (`CleanupRunner`, `LlamaCleanupBackend` with the real
 Qwen2.5-0.5B model):**

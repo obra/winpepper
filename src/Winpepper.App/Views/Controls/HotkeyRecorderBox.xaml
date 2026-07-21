@@ -5,6 +5,11 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
     <StackPanel Spacing="6">
         <TextBlock x:Name="LabelBlock" Text="Hotkey" />
+        <TextBlock x:Name="HintBlock"
+                   Visibility="Collapsed"
+                   Style="{ThemeResource CaptionTextBlockStyle}"
+                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                   TextWrapping="Wrap" />
         <Grid ColumnSpacing="8">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />

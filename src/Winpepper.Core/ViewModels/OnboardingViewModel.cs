@@ -214,7 +214,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged, IDisposable
 
     private string? Validate(string chord, string other, bool isToggle)
     {
-        var sys = _validator.Validate(chord);
+        var sys = _validator.Validate(chord, allowLongPressSpace: !isToggle);
         if (sys is not null) return sys;
         if (_validator.Clash(chord, other))
             return isToggle ? "Same as Hold." : "Same as Toggle.";

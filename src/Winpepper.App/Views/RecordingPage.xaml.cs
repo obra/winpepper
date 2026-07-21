@@ -103,7 +103,7 @@ public sealed partial class RecordingPage : Page
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         _levelRecorder?.Dispose();
-        _shell?.Pipeline.SetHotkeyCaptureActive(false);
+        _shell?.Pipeline.CancelHotkeyCapture();
     }
 }
 #endif

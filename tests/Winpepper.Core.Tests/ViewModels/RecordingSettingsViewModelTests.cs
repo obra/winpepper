@@ -18,8 +18,22 @@ public class RecordingSettingsViewModelTests
 
     private sealed class FakeValidator : IHotkeyValidator
     {
-        public string? Validate(string chord) => chord == "Ctrl+C" ? "Conflicts with Copy" : null;
+        public string? Validate(string chord, bool allowLongPressSpace = false)
+            => chord == "Ctrl+C" || (chord == "Space" && !allowLongPressSpace)
+                ? "Conflicts with Copy" : null;
         public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Space_IsAcceptedForHoldButRejectedForToggle()
+    {
+        var vm = new RecordingSettingsViewModel(new AppSettings(), new FakeWriter(), new FakeValidator());
+        vm.HoldHotkey = "Space";
+        vm.HoldHotkeyConflict.ShouldBeNull();
+
+        vm.HoldHotkey = "F24";
+        vm.ToggleHotkey = "Space";
+        vm.ToggleHotkeyConflict.ShouldNotBeNull();
     }
 
     [Fact]

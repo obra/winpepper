@@ -51,7 +51,7 @@ public class OnboardingViewModelTests
 
     private sealed class PermissiveValidator : IHotkeyValidator
     {
-        public string? Validate(string chord) => null;
+        public string? Validate(string chord, bool allowLongPressSpace = false) => null;
         public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
     }
 
@@ -60,8 +60,9 @@ public class OnboardingViewModelTests
         private readonly HashSet<string> _conflicting;
         public FakeValidator(params string[] conflicting) =>
             _conflicting = new HashSet<string>(conflicting, StringComparer.Ordinal);
-        public string? Validate(string chord) =>
-            _conflicting.Contains(chord) ? $"{chord} conflicts with a system shortcut" : null;
+        public string? Validate(string chord, bool allowLongPressSpace = false) =>
+            _conflicting.Contains(chord) || (chord == "Space" && !allowLongPressSpace)
+                ? $"{chord} conflicts with a system shortcut" : null;
         public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
     }
 

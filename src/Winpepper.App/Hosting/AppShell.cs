@@ -199,7 +199,8 @@ public sealed class AppShell : IDisposable
         // built-in defaults with a logged warning.
         var hold   = HotkeyChord.ParseTriggerOrDefault(
             settings.HoldHotkey, "RightCtrl+RightShift", cancel,
-            m => hotkeyLog.LogWarning("{HotkeyWarning}", m));
+            m => hotkeyLog.LogWarning("{HotkeyWarning}", m),
+            allowLongPressSpace: true);
         var toggle = HotkeyChord.ParseTriggerOrDefault(
             settings.ToggleHotkey, "Ctrl+Shift+Space", cancel,
             m => hotkeyLog.LogWarning("{HotkeyWarning}", m));

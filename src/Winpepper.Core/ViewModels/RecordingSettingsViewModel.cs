@@ -7,7 +7,7 @@ namespace Winpepper.Core.ViewModels;
 public interface IHotkeyValidator
 {
     /// <summary>Returns null when valid; an error or conflict description otherwise.</summary>
-    string? Validate(string chord);
+    string? Validate(string chord, bool allowLongPressSpace = false);
     /// <summary>Returns true when the two chords would fire on the same key event.</summary>
     bool Clash(string a, string b);
 }
@@ -37,7 +37,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
 
     private sealed class NullHotkeyValidator : IHotkeyValidator
     {
-        public string? Validate(string chord) => null;
+        public string? Validate(string chord, bool allowLongPressSpace = false) => null;
         public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
     }
 
@@ -110,7 +110,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
 
     private string? DescribeChord(string chord, string other, bool isToggle)
     {
-        var sys = _validator.Validate(chord);
+        var sys = _validator.Validate(chord, allowLongPressSpace: !isToggle);
         if (sys is not null) return sys;
         if (_validator.Clash(chord, other))
             return isToggle ? "Same as Hold hotkey." : "Same as Toggle hotkey.";

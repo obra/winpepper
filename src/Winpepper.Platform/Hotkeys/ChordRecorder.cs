@@ -22,6 +22,7 @@ public enum ChordKeyResult
 public sealed class ChordRecorder
 {
     private string? _modifierOnlyCandidate;
+    private Modifier _rawModifiers;
 
     public bool IsRecording { get; private set; }
 
@@ -33,6 +34,7 @@ public sealed class ChordRecorder
         IsRecording = true;
         CommittedChord = null;
         _modifierOnlyCandidate = null;
+        _rawModifiers = Modifier.None;
     }
 
     /// <summary>Cancels an in-flight recording. Returns false when idle (no-op).</summary>
@@ -41,6 +43,7 @@ public sealed class ChordRecorder
         if (!IsRecording) return false;
         IsRecording = false;
         _modifierOnlyCandidate = null;
+        _rawModifiers = Modifier.None;
         return true;
     }
 
@@ -120,9 +123,39 @@ public sealed class ChordRecorder
             return ChordKeyResult.Invalid;
         }
 
-        CommittedChord = chord;
+        CommittedChord = HotkeyChord.Parse(chord).ToString();
         IsRecording = false;
         _modifierOnlyCandidate = null;
+        _rawModifiers = Modifier.None;
         return ChordKeyResult.Committed;
+    }
+
+    /// <summary>
+    /// Feeds a transition from the low-level hook. This path is independent of
+    /// WinUI focus and retains the raw left/right modifier identity.
+    /// </summary>
+    public ChordKeyResult OnRawKey(RawKeyTransition transition)
+    {
+        if (!IsRecording || transition.IsInjected || transition.IsRepeat)
+            return ChordKeyResult.Ignored;
+
+        var modifier = VirtualKeyCatalog.ModifierForVirtualKey(transition.VirtualKey);
+        if (modifier != Modifier.None)
+        {
+            if (transition.IsDown)
+            {
+                _rawModifiers |= modifier;
+                return OnModifierKeyDown(VirtualKeyCatalog.FormatModifierPrefix(_rawModifiers));
+            }
+
+            var result = OnModifierKeyUp();
+            _rawModifiers &= ~modifier;
+            return result;
+        }
+
+        if (!transition.IsDown) return ChordKeyResult.Ignored;
+        VirtualKeyCatalog.TryGetRecordableKeyName(transition.VirtualKey, out var keyName);
+        return OnKey(keyName, VirtualKeyCatalog.FormatModifierPrefix(_rawModifiers),
+            transition.VirtualKey == 0x1B);
     }
 }

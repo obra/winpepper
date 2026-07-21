@@ -158,7 +158,7 @@ public sealed partial class OnboardingPage : Page
         _lifetimeCts = null;
         _meterRecorder?.Dispose();
         _vm?.Dispose();
-        _shell?.Pipeline.SetHotkeyCaptureActive(false);
+        _shell?.Pipeline.CancelHotkeyCapture();
     }
 }
 #endif

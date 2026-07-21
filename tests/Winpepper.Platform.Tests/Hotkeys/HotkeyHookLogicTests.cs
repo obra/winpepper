@@ -31,6 +31,31 @@ public class HotkeyHookLogicTests
     }
 
     [Fact]
+    public void NonModifierHoldTrigger_OwnRelease_EmitsHoldUp()
+    {
+        var hook = NewHook(hold: "F24");
+
+        hook.TryProcessKey(0x87, down: true, out var down).ShouldBeTrue();
+        down!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+
+        hook.TryProcessKey(0x87, down: false, out var up).ShouldBeTrue();
+        up!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+    }
+
+    [Fact]
+    public void NonModifierHoldTrigger_RepeatDoesNotEmitAnotherHoldDown()
+    {
+        var hook = NewHook(hold: "F24");
+
+        hook.TryProcessKey(0x87, down: true, out var first).ShouldBeTrue();
+        first!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+        hook.TryProcessKey(0x87, down: true, out var repeat).ShouldBeTrue();
+        repeat.ShouldBeNull();
+        hook.TryProcessKey(0x87, down: false, out var up).ShouldBeTrue();
+        up!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+    }
+
+    [Fact]
     public void ToggleChord_KeyDown_FiresToggleOnce()
     {
         var hook = NewHook();

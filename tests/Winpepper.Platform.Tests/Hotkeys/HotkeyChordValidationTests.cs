@@ -36,6 +36,10 @@ public class HotkeyChordValidationTests
     [InlineData("RightCtrl+RightShift")] // modifier-only: trigger is a modifier
     [InlineData("F1")]                   // bare F-keys are allowed
     [InlineData("F12")]
+    [InlineData("F24")]
+    [InlineData("Application")]
+    [InlineData("Copilot")]
+    [InlineData("Alt+Win")]
     public void ValidateTriggerBinding_SafeBinding_IsAccepted(string chord)
         => HotkeyChord.ValidateTriggerBinding(HotkeyChord.Parse(chord), Cancel).ShouldBeNull();
 
@@ -70,5 +74,17 @@ public class HotkeyChordValidationTests
             "Ctrl+NotAKey", "RightCtrl+RightShift", Cancel);
 
         chord.ShouldBe(HotkeyChord.Parse("RightCtrl+RightShift"));
+    }
+
+    [Fact]
+    public void ParseTriggerOrDefault_AllowsSpaceOnlyForExplicitLongPressHoldPolicy()
+    {
+        HotkeyChord.ParseTriggerOrDefault(
+            "Space", "RightCtrl+RightShift", Cancel,
+            allowLongPressSpace: true).ShouldBe(HotkeyChord.Parse("Space"));
+
+        HotkeyChord.ParseTriggerOrDefault(
+            "Space", "Ctrl+Shift+Space", Cancel,
+            allowLongPressSpace: false).ShouldBe(HotkeyChord.Parse("Ctrl+Shift+Space"));
     }
 }

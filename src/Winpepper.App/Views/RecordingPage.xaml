@@ -23,7 +23,9 @@
                     <TextBlock Text="Global shortcuts that work in any app."
                                Style="{ThemeResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                    <controls:HotkeyRecorderBox x:Name="HoldBox" Label="Hold to record" AutomationProperties.AutomationId="RecordingHoldHotkeyBox" />
+                    <controls:HotkeyRecorderBox x:Name="HoldBox" Label="Hold to record"
+                                                Hint="Choose Space to type on a tap and record after holding for 300 ms."
+                                                AutomationProperties.AutomationId="RecordingHoldHotkeyBox" />
                     <controls:HotkeyRecorderBox x:Name="ToggleBox" Label="Toggle to record" AutomationProperties.AutomationId="RecordingToggleHotkeyBox" />
                 </StackPanel>
             </Border>

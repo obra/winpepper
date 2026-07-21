@@ -20,6 +20,7 @@ public sealed class PipelineHost : IDisposable
 {
     private readonly ILogger<PipelineHost> _log;
     private readonly HotkeyHook _hook;
+    private IDisposable? _hotkeyCaptureLease;
     private readonly TextInjector _injector;
     private ParakeetSession? _asr;
     private readonly string _modelDir;
@@ -100,8 +101,22 @@ public sealed class PipelineHost : IDisposable
     public void UpdateHotkeys(string hold, string toggle)
         => _hook.UpdateChords(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle));
 
-    public void SetHotkeyCaptureActive(bool active)
-        => _hook.SetSuspended(active);
+    public void SetHotkeyCaptureActive(bool active, Action<RawKeyTransition> sink)
+    {
+        if (active)
+        {
+            _hotkeyCaptureLease?.Dispose();
+            _hotkeyCaptureLease = _hook.BeginRawCapture(sink);
+        }
+        else
+        {
+            _hotkeyCaptureLease?.Dispose();
+            _hotkeyCaptureLease = null;
+        }
+    }
+
+    public void CancelHotkeyCapture()
+        => SetHotkeyCaptureActive(false, _ => { });
 
     /// <summary>
     /// Loads the ASR model and starts the hotkey pipeline. Safe to call again
@@ -478,6 +493,8 @@ public sealed class PipelineHost : IDisposable
 
     public void Dispose()
     {
+        _hotkeyCaptureLease?.Dispose();
+        _hotkeyCaptureLease = null;
         _runCts?.Cancel();
         try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
         _hook.Dispose();

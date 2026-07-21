@@ -11,7 +11,7 @@ namespace Winpepper.App.Views.Controls;
 public sealed partial class HotkeyRecorderBox : UserControl
 {
     public event Action<string>? ChordRecorded;
-    public event Action<bool>? RecordingStateChanged;
+    public event Action<bool, Action<RawKeyTransition>>? RecordingStateChanged;
 
     private readonly ChordRecorder _recorder = new();
     private string _chordBeforeRecording = "";
@@ -32,13 +32,29 @@ public sealed partial class HotkeyRecorderBox : UserControl
         set => SetValue(LabelProperty, value);
     }
 
+    public static readonly DependencyProperty HintProperty =
+        DependencyProperty.Register(nameof(Hint), typeof(string), typeof(HotkeyRecorderBox),
+            new PropertyMetadata("", (d, e) =>
+            {
+                var box = (HotkeyRecorderBox)d;
+                box.HintBlock.Text = (string)e.NewValue;
+                box.HintBlock.Visibility = string.IsNullOrWhiteSpace((string)e.NewValue)
+                    ? Visibility.Collapsed : Visibility.Visible;
+            }));
+
+    public string Hint
+    {
+        get => (string)GetValue(HintProperty);
+        set => SetValue(HintProperty, value);
+    }
+
     public HotkeyRecorderBox()
     {
         InitializeComponent();
-        _suspend = new RecorderSuspendCoordinator(recording => RecordingStateChanged?.Invoke(recording));
+        _suspend = new RecorderSuspendCoordinator(
+            recording => RecordingStateChanged?.Invoke(recording, OnRawKeyTransition));
         KeyDown += OnKeyDown;
         KeyUp += OnKeyUp;
-        LostFocus += OnLostFocus;
         Unloaded += OnUnloaded;
         IsTabStop = true;
     }
@@ -72,16 +88,6 @@ public sealed partial class HotkeyRecorderBox : UserControl
 
     private void OnCancelClick(object sender, RoutedEventArgs e) => CancelRecording("cancel button");
 
-    // Clicking anywhere else (nav rail, another control) moves focus off this
-    // control; treat that as a cancel instead of leaving the recording armed
-    // (issue #11). LostFocus bubbles from the inner buttons too, so only act
-    // when it is the control itself that lost focus.
-    private void OnLostFocus(object sender, RoutedEventArgs e)
-    {
-        if (!ReferenceEquals(e.OriginalSource, this)) return;
-        CancelRecording("focus lost");
-    }
-
     private void CancelRecording(string reason)
     {
         if (!_recorder.Cancel()) return;
@@ -99,7 +105,10 @@ public sealed partial class HotkeyRecorderBox : UserControl
 
     private void OnKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (!_recorder.IsRecording) return;
+        // Production capture comes from the low-level hook and does not depend
+        // on this control retaining focus. Keep routed keys as a fallback for
+        // isolated control hosts that do not wire a capture provider.
+        if (!_recorder.IsRecording || RecordingStateChanged is not null) return;
 
         if (IsModifierKey(e.Key))
         {
@@ -114,12 +123,19 @@ public sealed partial class HotkeyRecorderBox : UserControl
 
     private void OnKeyUp(object sender, KeyRoutedEventArgs e)
     {
-        if (!_recorder.IsRecording || !IsModifierKey(e.Key)) return;
+        if (!_recorder.IsRecording || RecordingStateChanged is not null || !IsModifierKey(e.Key)) return;
 
         // Modifier-only chords are complete when the user begins releasing
         // them. The recorder retained the largest modifier set observed on
         // key-down, before InputKeyboardSource dropped the released key.
         HandleRecorderResult(_recorder.OnModifierKeyUp(), e);
+    }
+
+    private void OnRawKeyTransition(RawKeyTransition transition)
+    {
+        // The hook callback runs on its dedicated native thread. WinUI controls
+        // may only be touched from the page DispatcherQueue.
+        DispatcherQueue.TryEnqueue(() => HandleRecorderResult(_recorder.OnRawKey(transition)));
     }
 
     private bool TryGetCurrentModifierPrefix(KeyRoutedEventArgs e, out string modifiers)
@@ -167,6 +183,25 @@ public sealed partial class HotkeyRecorderBox : UserControl
         }
     }
 
+    private void HandleRecorderResult(ChordKeyResult result)
+    {
+        switch (result)
+        {
+            case ChordKeyResult.Cancelled:
+                _suspend.SetRecording(false);
+                ChordText.Text = _chordBeforeRecording;
+                ResetButtons();
+                Log?.LogInformation("Hotkey recording cancelled ({Label}): Esc", Label);
+                break;
+            case ChordKeyResult.Committed:
+                CommitRecordedChord();
+                break;
+            case ChordKeyResult.Invalid:
+                SetChord("(invalid)", "Could not parse that combination.");
+                break;
+        }
+    }
+
     private void CommitRecordedChord()
     {
         var chord = _recorder.CommittedChord!;
@@ -203,15 +238,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
         return mods;
     }
 
-    private static string? KeyToName(VirtualKey k) => k switch
-    {
-        VirtualKey.Space  => "Space",
-        VirtualKey.Tab    => "Tab",
-        VirtualKey.Enter  => "Enter",
-        >= VirtualKey.A and <= VirtualKey.Z => k.ToString(),
-        >= VirtualKey.Number0 and <= VirtualKey.Number9 => ((int)k - (int)VirtualKey.Number0).ToString(),
-        >= VirtualKey.F1 and <= VirtualKey.F12 => $"F{(int)k - (int)VirtualKey.F1 + 1}",
-        _ => null,
-    };
+    private static string? KeyToName(VirtualKey key)
+        => VirtualKeyCatalog.TryGetRecordableKeyName((int)key, out var name) ? name : null;
 }
 #endif

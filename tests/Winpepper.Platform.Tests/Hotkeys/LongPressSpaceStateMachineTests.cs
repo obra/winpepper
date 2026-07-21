@@ -119,4 +119,34 @@ public class LongPressSpaceStateMachineTests
         events.ShouldBeEmpty();
         replays.ShouldBeEmpty();
     }
+
+    [Fact]
+    public async Task ThresholdAndReleaseCannotPublishHoldUpBeforeHoldDown()
+    {
+        var timer = new FakeTimer();
+        var events = new List<HotkeyEventKind>();
+        using var downEntered = new ManualResetEventSlim();
+        using var allowDown = new ManualResetEventSlim();
+        var machine = new LongPressSpaceStateMachine(timer, kind =>
+        {
+            if (kind == HotkeyEventKind.HoldDown)
+            {
+                downEntered.Set();
+                allowDown.Wait(TestContext.Current.CancellationToken);
+            }
+            lock (events) events.Add(kind);
+        }, () => { });
+        machine.Process(true, false);
+
+        var threshold = Task.Run(timer.Fire, TestContext.Current.CancellationToken);
+        downEntered.Wait(TestContext.Current.CancellationToken);
+        var release = Task.Run(() => machine.Process(false, false), TestContext.Current.CancellationToken);
+
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        release.IsCompleted.ShouldBeFalse();
+        allowDown.Set();
+        await Task.WhenAll(threshold, release);
+
+        events.ShouldBe(new[] { HotkeyEventKind.HoldDown, HotkeyEventKind.HoldUp });
+    }
 }

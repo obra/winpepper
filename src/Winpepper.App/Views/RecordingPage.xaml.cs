@@ -39,8 +39,8 @@ public sealed partial class RecordingPage : Page
             vm.ToggleHotkey = chord;
             ApplyHotkeysIfValid();
         };
-        HoldBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
-        ToggleBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
+        HoldBox.CaptureRequested = shell.Pipeline.BeginHotkeyCapture;
+        ToggleBox.CaptureRequested = shell.Pipeline.BeginHotkeyCapture;
         vm.PropertyChanged += (_, _) =>
         {
             HoldBox.SetChord(vm.HoldHotkey, vm.HoldHotkeyConflict);
@@ -103,7 +103,8 @@ public sealed partial class RecordingPage : Page
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         _levelRecorder?.Dispose();
-        _shell?.Pipeline.CancelHotkeyCapture();
+        HoldBox.CancelCapture("navigated away");
+        ToggleBox.CancelCapture("navigated away");
     }
 }
 #endif

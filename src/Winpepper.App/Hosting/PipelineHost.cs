@@ -20,7 +20,9 @@ public sealed class PipelineHost : IDisposable
 {
     private readonly ILogger<PipelineHost> _log;
     private readonly HotkeyHook _hook;
-    private IDisposable? _hotkeyCaptureLease;
+    private readonly HotkeyReadinessGate _hotkeyReadiness = new();
+    private readonly object _hotkeyStartupGate = new();
+    private bool _hotkeyLoopStarted;
     private readonly TextInjector _injector;
     private ParakeetSession? _asr;
     private readonly string _modelDir;
@@ -101,22 +103,24 @@ public sealed class PipelineHost : IDisposable
     public void UpdateHotkeys(string hold, string toggle)
         => _hook.UpdateChords(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle));
 
-    public void SetHotkeyCaptureActive(bool active, Action<RawKeyTransition> sink)
+    public IDisposable BeginHotkeyCapture(Action<RawKeyTransition> sink)
     {
-        if (active)
-        {
-            _hotkeyCaptureLease?.Dispose();
-            _hotkeyCaptureLease = _hook.BeginRawCapture(sink);
-        }
-        else
-        {
-            _hotkeyCaptureLease?.Dispose();
-            _hotkeyCaptureLease = null;
-        }
+        EnsureHotkeyLoopStarted();
+        return _hook.BeginRawCapture(sink);
     }
 
-    public void CancelHotkeyCapture()
-        => SetHotkeyCaptureActive(false, _ => { });
+    private void EnsureHotkeyLoopStarted()
+    {
+        lock (_hotkeyStartupGate)
+        {
+            if (_hotkeyLoopStarted) return;
+            _hook.Start();
+            _runCts = new CancellationTokenSource();
+            _runTask = Task.Run(() => RunAsync(_runCts.Token));
+            _hotkeyLoopStarted = true;
+            _log.LogInformation("Hotkey hook/event loop started");
+        }
+    }
 
     /// <summary>
     /// Loads the ASR model and starts the hotkey pipeline. Safe to call again
@@ -126,6 +130,14 @@ public sealed class PipelineHost : IDisposable
     /// Models tab), and the method returns false instead of throwing.
     /// </summary>
     public bool TryStart()
+    {
+        // Raw recorder capture is required during onboarding, before a model is
+        // installed. Keep the event loop draining normal triggers while gated.
+        EnsureHotkeyLoopStarted();
+        lock (_hotkeyStartupGate) return TryStartCore();
+    }
+
+    private bool TryStartCore()
     {
         if (IsRunning) return true;
         if (_asr is null)
@@ -149,9 +161,7 @@ public sealed class PipelineHost : IDisposable
                 return false;
             }
         }
-        _hook.Start();
-        _runCts = new CancellationTokenSource();
-        _runTask = Task.Run(() => RunAsync(_runCts.Token));
+        _hotkeyReadiness.Enable(DateTimeOffset.UtcNow);
         IsRunning = true;
         _log.LogInformation("Pipeline started (model dir {ModelDir})", _modelDir);
         return true;
@@ -163,6 +173,11 @@ public sealed class PipelineHost : IDisposable
         {
             await foreach (var evt in _hook.Events.ReadAllAsync(ct))
             {
+                if (!_hotkeyReadiness.ShouldHandle(evt))
+                {
+                    _log.LogDebug("Ignoring {HotkeyKind} while dictation pipeline is not ready", evt.Kind);
+                    continue;
+                }
                 try { await HandleHotkey(evt, ct); }
                 catch (Exception ex)
                 {
@@ -493,8 +508,7 @@ public sealed class PipelineHost : IDisposable
 
     public void Dispose()
     {
-        _hotkeyCaptureLease?.Dispose();
-        _hotkeyCaptureLease = null;
+        _hotkeyReadiness.Disable();
         _runCts?.Cancel();
         try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
         _hook.Dispose();

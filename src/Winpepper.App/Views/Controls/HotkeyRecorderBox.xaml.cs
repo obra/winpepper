@@ -11,16 +11,14 @@ namespace Winpepper.App.Views.Controls;
 public sealed partial class HotkeyRecorderBox : UserControl
 {
     public event Action<string>? ChordRecorded;
-    public event Action<bool, Action<RawKeyTransition>>? RecordingStateChanged;
+    public Func<Action<RawKeyTransition>, IDisposable>? CaptureRequested { get; set; }
 
     private readonly ChordRecorder _recorder = new();
     private string _chordBeforeRecording = "";
     private ILogger? _logCache;
     private ILogger? Log => _logCache ??= App.Shell?.LogFactory.CreateLogger("HotkeyRecorderBox");
 
-    // Guarantees the global hook is un-suspended if this control is torn down
-    // mid-recording (window close / page unload) without Cancel/Commit/LostFocus.
-    private readonly RecorderSuspendCoordinator _suspend;
+    private RecorderCaptureSession? _captureSession;
 
     public static readonly DependencyProperty LabelProperty =
         DependencyProperty.Register(nameof(Label), typeof(string), typeof(HotkeyRecorderBox), new PropertyMetadata("Hotkey",
@@ -51,21 +49,16 @@ public sealed partial class HotkeyRecorderBox : UserControl
     public HotkeyRecorderBox()
     {
         InitializeComponent();
-        _suspend = new RecorderSuspendCoordinator(
-            recording => RecordingStateChanged?.Invoke(recording, OnRawKeyTransition));
         KeyDown += OnKeyDown;
         KeyUp += OnKeyUp;
         Unloaded += OnUnloaded;
         IsTabStop = true;
     }
 
-    // Torn down (page navigated away, window closed) - release suspend and stop
-    // any in-flight recording so global hotkeys can never be left dead.
+    // Torn down (page navigated away, window closed) - release this control's
+    // capture lease and stop any in-flight recording.
     private void OnUnloaded(object sender, RoutedEventArgs e)
-    {
-        _recorder.Cancel();
-        _suspend.Teardown();
-    }
+        => CancelCapture("control unloaded");
 
     public void SetChord(string chord, string? error)
     {
@@ -78,7 +71,23 @@ public sealed partial class HotkeyRecorderBox : UserControl
     {
         _chordBeforeRecording = ChordText.Text;
         _recorder.Begin();
-        _suspend.SetRecording(true);
+        if (CaptureRequested is not null)
+        {
+            _captureSession = new RecorderCaptureSession(CaptureRequested);
+            if (!_captureSession.TryBegin(OnRawKeyTransition, out var error))
+            {
+                _captureSession.Dispose();
+                _captureSession = null;
+                _recorder.Cancel();
+                SetChord(_chordBeforeRecording,
+                    string.IsNullOrWhiteSpace(error)
+                        ? "Another hotkey recorder is already active."
+                        : error);
+                ResetButtons();
+                Log?.LogWarning("Hotkey recording could not start ({Label}): {Error}", Label, error);
+                return;
+            }
+        }
         ChordText.Text = "(press a chord - Esc cancels)";
         RecordButton.Visibility = Visibility.Collapsed;
         CancelButton.Visibility = Visibility.Visible;
@@ -88,10 +97,13 @@ public sealed partial class HotkeyRecorderBox : UserControl
 
     private void OnCancelClick(object sender, RoutedEventArgs e) => CancelRecording("cancel button");
 
+    public void CancelCapture(string reason = "cancelled") => CancelRecording(reason);
+
     private void CancelRecording(string reason)
     {
-        if (!_recorder.Cancel()) return;
-        _suspend.SetRecording(false);
+        var cancelled = _recorder.Cancel();
+        EndCapture();
+        if (!cancelled) return;
         ChordText.Text = _chordBeforeRecording;
         ResetButtons();
         Log?.LogInformation("Hotkey recording cancelled ({Label}): {Reason}", Label, reason);
@@ -108,7 +120,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
         // Production capture comes from the low-level hook and does not depend
         // on this control retaining focus. Keep routed keys as a fallback for
         // isolated control hosts that do not wire a capture provider.
-        if (!_recorder.IsRecording || RecordingStateChanged is not null) return;
+        if (!_recorder.IsRecording || CaptureRequested is not null) return;
 
         if (IsModifierKey(e.Key))
         {
@@ -123,7 +135,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
 
     private void OnKeyUp(object sender, KeyRoutedEventArgs e)
     {
-        if (!_recorder.IsRecording || RecordingStateChanged is not null || !IsModifierKey(e.Key)) return;
+        if (!_recorder.IsRecording || CaptureRequested is not null || !IsModifierKey(e.Key)) return;
 
         // Modifier-only chords are complete when the user begins releasing
         // them. The recorder retained the largest modifier set observed on
@@ -166,7 +178,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
         switch (result)
         {
             case ChordKeyResult.Cancelled:
-                _suspend.SetRecording(false);
+                EndCapture();
                 ChordText.Text = _chordBeforeRecording;
                 ResetButtons();
                 Log?.LogInformation("Hotkey recording cancelled ({Label}): Esc", Label);
@@ -188,7 +200,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
         switch (result)
         {
             case ChordKeyResult.Cancelled:
-                _suspend.SetRecording(false);
+                EndCapture();
                 ChordText.Text = _chordBeforeRecording;
                 ResetButtons();
                 Log?.LogInformation("Hotkey recording cancelled ({Label}): Esc", Label);
@@ -208,8 +220,14 @@ public sealed partial class HotkeyRecorderBox : UserControl
         SetChord(chord, null);
         ResetButtons();
         ChordRecorded?.Invoke(chord);
-        _suspend.SetRecording(false);
+        EndCapture();
         Log?.LogInformation("Hotkey recording committed ({Label}): {Chord}", Label, chord);
+    }
+
+    private void EndCapture()
+    {
+        _captureSession?.Dispose();
+        _captureSession = null;
     }
 
     private static bool IsModifierKey(VirtualKey key) => key is

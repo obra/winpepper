@@ -61,8 +61,8 @@ public sealed partial class OnboardingPage : Page
             ApplyHotkeysIfValid();
             RefreshButtons();
         };
-        HoldBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
-        ToggleBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
+        HoldBox.CaptureRequested = shell.Pipeline.BeginHotkeyCapture;
+        ToggleBox.CaptureRequested = shell.Pipeline.BeginHotkeyCapture;
         HoldBox.SetChord(_vm.HoldHotkey, _vm.HoldHotkeyError);
         ToggleBox.SetChord(_vm.ToggleHotkey, _vm.ToggleHotkeyError);
 
@@ -77,6 +77,11 @@ public sealed partial class OnboardingPage : Page
     {
         if (_vm is null) return;
         AdvanceButton.IsEnabled = false;
+        if (_vm.Step == OnboardingStep.PickHotkeys)
+        {
+            HoldBox.CancelCapture("leaving hotkey step");
+            ToggleBox.CancelCapture("leaving hotkey step");
+        }
         if (_vm.Step == OnboardingStep.DownloadModels)
         {
             DownloadProgress.Visibility = Visibility.Visible;
@@ -158,7 +163,8 @@ public sealed partial class OnboardingPage : Page
         _lifetimeCts = null;
         _meterRecorder?.Dispose();
         _vm?.Dispose();
-        _shell?.Pipeline.CancelHotkeyCapture();
+        HoldBox.CancelCapture("navigated away");
+        ToggleBox.CancelCapture("navigated away");
     }
 }
 #endif

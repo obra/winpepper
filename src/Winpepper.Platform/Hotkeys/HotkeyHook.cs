@@ -2,7 +2,6 @@ using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 using static Winpepper.Platform.Hotkeys.KeyboardHookNative;
-using static Winpepper.Platform.Injection.SendInputNative;
 
 namespace Winpepper.Platform.Hotkeys;
 
@@ -37,7 +36,7 @@ public sealed class HotkeyHook : IDisposable
     private readonly ILogger<HotkeyHook> _log;
 
     private readonly Channel<HotkeyEvent> _events =
-        Channel.CreateUnbounded<HotkeyEvent>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = true });
+        Channel.CreateUnbounded<HotkeyEvent>(new UnboundedChannelOptions { SingleReader = false, SingleWriter = false });
 
     private Thread? _hookThread;
     private uint _hookThreadId;
@@ -83,8 +82,15 @@ public sealed class HotkeyHook : IDisposable
         evt = null;
         var now = _now();
         var modifiersBeforeEvent = _modifiers;
-        UpdateModifierState(vk, down);
         var bindings = Volatile.Read(ref _bindings);
+
+        // A modifier pressed after a bare Space-down changes the user's intent.
+        // Replay the buffered tap before updating modifier state, then retain
+        // ownership of the physical Space until key-up for down/up symmetry.
+        if (down && IsLongPressSpaceBinding(bindings.Hold) && IsModifierKey(vk))
+            _spaceHold.CancelPendingForModifier();
+
+        UpdateModifierState(vk, down);
 
         // Self-heal: drop tracked entries whose physical key is no longer held,
         // so a lost key-up can never leave a key swallowed or the hook wedged.
@@ -94,6 +100,9 @@ public sealed class HotkeyHook : IDisposable
         var rawCapture = Volatile.Read(ref _rawCapture);
         if (rawCapture is not null)
         {
+            var swallowActiveSpace = vk == VirtualKeyCatalog.Space
+                && _spaceHold.IsActive
+                && _spaceHold.Process(down, extraInfo == SpaceReplayExtraInfo);
             var isRepeat = down && _captureKeysDown.ContainsKey(vk);
             if (down) _captureKeysDown[vk] = now;
             else _captureKeysDown.Remove(vk);
@@ -114,8 +123,13 @@ public sealed class HotkeyHook : IDisposable
                 _holding = false;
                 evt = new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow);
             }
-            return swallowWhileCaptured;
+            return swallowActiveSpace || swallowWhileCaptured;
         }
+
+        // Once a bare Space-down is swallowed, retain ownership of all of its
+        // repeats and key-up even if modifiers, capture, or bindings change.
+        if (vk == VirtualKeyCatalog.Space && _spaceHold.IsActive)
+            return _spaceHold.Process(down, extraInfo == SpaceReplayExtraInfo);
 
         var suspendRequested = Volatile.Read(ref _suspendRequested) != 0;
         if (suspendRequested || _captureKeysDown.Count != 0)
@@ -142,7 +156,10 @@ public sealed class HotkeyHook : IDisposable
             return swallowWhileSuspended;
         }
 
-        if (IsLongPressSpaceBinding(bindings.Hold) && vk == VirtualKeyCatalog.Space)
+        if (IsLongPressSpaceBinding(bindings.Hold)
+            && vk == VirtualKeyCatalog.Space
+            && down
+            && _modifiers == Modifier.None)
             return _spaceHold.Process(down, extraInfo == SpaceReplayExtraInfo);
 
         if (down)
@@ -181,7 +198,9 @@ public sealed class HotkeyHook : IDisposable
                 _swallowedKeys[vk] = now;
                 return true;
             }
-            if (ActivatesOnKeyDown(bindings.Hold, vk, modifiersBeforeEvent, _modifiers) && !_holding)
+            if (!IsLongPressSpaceBinding(bindings.Hold)
+                && ActivatesOnKeyDown(bindings.Hold, vk, modifiersBeforeEvent, _modifiers)
+                && !_holding)
             {
                 _holding = true;
                 evt = new HotkeyEvent(HotkeyEventKind.HoldDown, DateTimeOffset.UtcNow);
@@ -217,17 +236,27 @@ public sealed class HotkeyHook : IDisposable
         Func<DateTimeOffset>? timeProvider = null,
         Func<int, bool>? keyPhysicallyDown = null,
         ILongPressTimerScheduler? spaceTimerScheduler = null,
-        Action? replaySpace = null)
+        Func<SpaceReplayResult>? replaySpace = null)
     {
         _bindings = new HotkeyBindings(hold, toggle, cancel);
         _log = log;
         _cancelEnabled = cancelEnabled ?? (() => true);
         _now = timeProvider ?? (() => DateTimeOffset.UtcNow);
         _keyPhysicallyDown = keyPhysicallyDown ?? DefaultKeyPhysicallyDown;
+        var replay = replaySpace ?? SpaceReplaySender.SendToWindows;
         _spaceHold = new LongPressSpaceStateMachine(
             spaceTimerScheduler ?? new SystemLongPressTimerScheduler(),
             kind => _events.Writer.TryWrite(new HotkeyEvent(kind, _now())),
-            replaySpace ?? ReplaySpace);
+            () =>
+            {
+                var result = replay();
+                if (!result.Success)
+                {
+                    _log.LogWarning(
+                        "Synthetic Space replay failed: initialSent={InitialSent}, repairAttempted={RepairAttempted}, repairSucceeded={RepairSucceeded}. SendInput may be blocked by UIPI.",
+                        result.InitialInputsSent, result.RepairAttempted, result.RepairSucceeded);
+                }
+            });
     }
 
     // Real physical key-state probe. Guarded so it is only P/Invoked on Windows;
@@ -386,39 +415,16 @@ public sealed class HotkeyHook : IDisposable
     }
 
     private bool HoldEndedOnKeyUp(HotkeyChord hold, int releasedVirtualKey)
-        => (hold.VirtualKey != 0 && hold.VirtualKey == releasedVirtualKey)
-           || !hold.Matches(releasedVirtualKey, _modifiers);
+    {
+        if (hold.VirtualKey != 0 && hold.VirtualKey == releasedVirtualKey) return true;
+        var releasedModifier = ModifierForVirtualKey(releasedVirtualKey);
+        return releasedModifier != Modifier.None
+            && (hold.Modifiers & releasedModifier) != 0
+            && !hold.Matches(hold.VirtualKey, _modifiers);
+    }
 
     private static bool IsLongPressSpaceBinding(HotkeyChord chord)
         => chord.Modifiers == Modifier.None && chord.VirtualKey == VirtualKeyCatalog.Space;
-
-    private static void ReplaySpace()
-    {
-        if (!OperatingSystem.IsWindows()) return;
-        var inputs = new[]
-        {
-            new INPUT
-            {
-                Type = INPUT_KEYBOARD,
-                Keyboard = new KEYBDINPUT
-                {
-                    Vk = VirtualKeyCatalog.Space,
-                    ExtraInfo = SpaceReplayExtraInfo,
-                },
-            },
-            new INPUT
-            {
-                Type = INPUT_KEYBOARD,
-                Keyboard = new KEYBDINPUT
-                {
-                    Vk = VirtualKeyCatalog.Space,
-                    Flags = KEYEVENTF_KEYUP,
-                    ExtraInfo = SpaceReplayExtraInfo,
-                },
-            },
-        };
-        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
-    }
 
     /// <summary>
     /// A tracked key entry is "live" while the physical key is still held.

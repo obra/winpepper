@@ -6,18 +6,43 @@ public sealed class ModelDownloadException : Exception
     public ModelDownloadException(string message, Exception inner) : base(message, inner) { }
 }
 
+public sealed class ModelDownloaderOptions
+{
+    public TimeSpan IdleTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Delay hook used for the fixed one- and two-second retry backoffs.</summary>
+    public Func<TimeSpan, CancellationToken, Task> RetryDelayAsync { get; init; } =
+        static (delay, ct) => Task.Delay(delay, ct);
+}
+
 /// <summary>
 /// Downloads every file in a <see cref="ModelDescriptor"/> to its install
-/// directory. Resumes from <c>.partial</c> temp files; verifies SHA-256
-/// before renaming into place; reports progress per chunk and per phase.
+/// directory. Resumes from <c>.partial</c> temp files; verifies size and
+/// SHA-256 before atomically renaming into place; reports progress per chunk
+/// and per phase.
 /// </summary>
 public sealed class ModelDownloader
 {
-    private readonly IHttpRangeClient _http;
+    private const int CopyBufferSize = 64 * 1024;
+    private const int MaxAttempts = 3;
 
-    public ModelDownloader(IHttpRangeClient http)
+    private readonly IHttpRangeClient _http;
+    private readonly ModelDownloaderOptions _options;
+
+    public ModelDownloader(IHttpRangeClient http) : this(http, new ModelDownloaderOptions()) { }
+
+    public ModelDownloader(IHttpRangeClient http, ModelDownloaderOptions options)
     {
+        ArgumentNullException.ThrowIfNull(http);
+        ArgumentNullException.ThrowIfNull(options);
+        if (options.IdleTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(options), "Idle timeout must be positive.");
+        }
+        ArgumentNullException.ThrowIfNull(options.RetryDelayAsync);
+
         _http = http;
+        _options = options;
     }
 
     public async Task DownloadAsync(ModelDescriptor descriptor, string installRoot,
@@ -38,138 +63,204 @@ public sealed class ModelDownloader
         var finalPath = Path.Combine(modelDir, file.RelativePath);
         var partialPath = finalPath + ".partial";
 
-        // 1) If the final file already exists and verifies, skip.
         if (File.Exists(finalPath))
         {
-            progress.Report(new DownloadProgress
+            var finalSize = new FileInfo(finalPath).Length;
+            Report(progress, descriptor, file, finalSize, DownloadPhase.Verifying);
+            if (finalSize == file.SizeBytes &&
+                await ChecksumVerifier.VerifyAsync(finalPath, file.Sha256, ct).ConfigureAwait(false))
             {
-                DescriptorName = descriptor.Name,
-                FileRelativePath = file.RelativePath,
-                BytesDownloaded = new FileInfo(finalPath).Length,
-                TotalBytes = file.SizeBytes,
-                Phase = DownloadPhase.Verifying,
-            });
-            if (await ChecksumVerifier.VerifyAsync(finalPath, file.Sha256, ct).ConfigureAwait(false))
-            {
-                progress.Report(new DownloadProgress
-                {
-                    DescriptorName = descriptor.Name,
-                    FileRelativePath = file.RelativePath,
-                    BytesDownloaded = new FileInfo(finalPath).Length,
-                    TotalBytes = file.SizeBytes,
-                    Phase = DownloadPhase.Complete,
-                });
+                Report(progress, descriptor, file, finalSize, DownloadPhase.Complete);
                 return;
             }
-            // Stale/corrupt — start over.
+
             File.Delete(finalPath);
         }
 
-        // 2) Determine resume offset.
-        long startByte = 0;
-        if (File.Exists(partialPath))
+        Directory.CreateDirectory(Path.GetDirectoryName(partialPath)!);
+        if (File.Exists(partialPath) && new FileInfo(partialPath).Length > file.SizeBytes)
         {
-            startByte = new FileInfo(partialPath).Length;
-        }
-        else
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(partialPath)!);
+            TryDelete(partialPath);
         }
 
-        progress.Report(new DownloadProgress
-        {
-            DescriptorName = descriptor.Name,
-            FileRelativePath = file.RelativePath,
-            BytesDownloaded = startByte,
-            TotalBytes = file.SizeBytes,
-            Phase = DownloadPhase.Downloading,
-        });
+        var totalBytes = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
+        Report(progress, descriptor, file, totalBytes, DownloadPhase.Downloading);
 
-        // 3) Stream bytes.
-        var totalBytes = startByte;
-        try
+        Exception? downloadError = null;
+        if (totalBytes < file.SizeBytes)
         {
-            await using (var fs = new FileStream(partialPath, FileMode.Append, FileAccess.Write, FileShare.None,
-                                                 bufferSize: 64 * 1024, useAsync: true))
+            for (var attempt = 1; attempt <= MaxAttempts; attempt++)
             {
-                await foreach (var chunk in _http.GetRangeAsync(file.Url, startByte, ct).ConfigureAwait(false))
+                var requestedStartByte = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
+                try
                 {
-                    ct.ThrowIfCancellationRequested();
-                    await fs.WriteAsync(chunk, ct).ConfigureAwait(false);
-                    totalBytes += chunk.Length;
-                    progress.Report(new DownloadProgress
+                    totalBytes = await DownloadAttemptAsync(
+                        descriptor, file, partialPath, requestedStartByte, progress, ct).ConfigureAwait(false);
+
+                    if (totalBytes < file.SizeBytes)
                     {
-                        DescriptorName = descriptor.Name,
-                        FileRelativePath = file.RelativePath,
-                        BytesDownloaded = totalBytes,
-                        TotalBytes = file.SizeBytes,
-                        Phase = DownloadPhase.Downloading,
-                    });
+                        throw new IOException(
+                            $"Download ended after {totalBytes} of {file.SizeBytes} bytes.");
+                    }
+
+                    downloadError = null;
+                    break;
                 }
-                await fs.FlushAsync(ct).ConfigureAwait(false);
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    var failure = ex is OperationCanceledException
+                        ? new TimeoutException(
+                            $"Download made no progress for {_options.IdleTimeout.TotalSeconds:0.###} seconds.", ex)
+                        : ex;
+
+                    if (failure is InvalidDownloadSizeException)
+                    {
+                        TryDelete(partialPath);
+                    }
+
+                    totalBytes = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
+                    if (IsTransient(failure) && attempt < MaxAttempts)
+                    {
+                        downloadError = failure;
+                        await _options.RetryDelayAsync(TimeSpan.FromSeconds(attempt), ct).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    downloadError = failure;
+                    break;
+                }
             }
         }
-        catch (OperationCanceledException)
+
+        if (downloadError is not null)
         {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            progress.Report(new DownloadProgress
+            Report(progress, descriptor, file, totalBytes, DownloadPhase.Failed, downloadError.Message);
+            if (downloadError is ModelDownloadException modelDownloadException)
             {
-                DescriptorName = descriptor.Name,
-                FileRelativePath = file.RelativePath,
-                BytesDownloaded = totalBytes,
-                TotalBytes = file.SizeBytes,
-                Phase = DownloadPhase.Failed,
-                ErrorMessage = ex.Message,
-            });
-            throw new ModelDownloadException($"Download of {file.Url} failed: {ex.Message}", ex);
+                throw modelDownloadException;
+            }
+            throw new ModelDownloadException(
+                $"Download of {file.Url} failed: {downloadError.Message}", downloadError);
         }
 
-        // 4) Verify checksum on the partial.
-        progress.Report(new DownloadProgress
-        {
-            DescriptorName = descriptor.Name,
-            FileRelativePath = file.RelativePath,
-            BytesDownloaded = totalBytes,
-            TotalBytes = file.SizeBytes,
-            Phase = DownloadPhase.Verifying,
-        });
+        Report(progress, descriptor, file, totalBytes, DownloadPhase.Verifying);
 
-        var ok = await ChecksumVerifier.VerifyAsync(partialPath, file.Sha256, ct).ConfigureAwait(false);
-        if (!ok)
+        var actualSize = new FileInfo(partialPath).Length;
+        var sizeMatches = actualSize == file.SizeBytes;
+        var hashMatches = sizeMatches &&
+            await ChecksumVerifier.VerifyAsync(partialPath, file.Sha256, ct).ConfigureAwait(false);
+        if (!sizeMatches || !hashMatches)
         {
             TryDelete(partialPath);
             TryDelete(finalPath);
-            progress.Report(new DownloadProgress
-            {
-                DescriptorName = descriptor.Name,
-                FileRelativePath = file.RelativePath,
-                BytesDownloaded = totalBytes,
-                TotalBytes = file.SizeBytes,
-                Phase = DownloadPhase.Failed,
-                ErrorMessage = "SHA-256 mismatch",
-            });
-            throw new ModelDownloadException($"SHA-256 mismatch on {file.RelativePath}");
+            var errorMessage = sizeMatches
+                ? "SHA-256 mismatch"
+                : $"Size mismatch (expected {file.SizeBytes} bytes, received {actualSize})";
+            Report(progress, descriptor, file, totalBytes, DownloadPhase.Failed, errorMessage);
+            throw new ModelDownloadException($"{errorMessage} on {file.RelativePath}");
         }
 
-        // 5) Promote .partial to final.
-        if (File.Exists(finalPath)) File.Delete(finalPath);
-        File.Move(partialPath, finalPath);
+        File.Move(partialPath, finalPath, overwrite: true);
+        Report(progress, descriptor, file, actualSize, DownloadPhase.Complete);
+    }
 
+    private async Task<long> DownloadAttemptAsync(
+        ModelDescriptor descriptor,
+        ModelFile file,
+        string partialPath,
+        long requestedStartByte,
+        IProgress<DownloadProgress> progress,
+        CancellationToken ct)
+    {
+        using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        idleCts.CancelAfter(_options.IdleTimeout);
+        var response = await _http.GetRangeAsync(file.Url, requestedStartByte, idleCts.Token)
+            .ConfigureAwait(false);
+        await using (response.ConfigureAwait(false))
+        {
+            if (response.ContentStartByte != requestedStartByte &&
+                !(requestedStartByte > 0 && response.ContentStartByte == 0))
+            {
+                throw new ModelDownloadException(
+                    $"Server returned content starting at byte {response.ContentStartByte} for byte range {requestedStartByte}-.");
+            }
+
+            var fileMode = response.ContentStartByte == 0 ? FileMode.Create : FileMode.Append;
+            var totalBytes = response.ContentStartByte;
+            await using var fs = new FileStream(
+                partialPath, fileMode, FileAccess.Write, FileShare.None,
+                bufferSize: CopyBufferSize, useAsync: true);
+            var buffer = new byte[CopyBufferSize];
+
+            while (true)
+            {
+                var bytesRead = await response.Content.ReadAsync(buffer.AsMemory(), idleCts.Token)
+                    .ConfigureAwait(false);
+
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+                idleCts.CancelAfter(_options.IdleTimeout);
+                if (totalBytes + bytesRead > file.SizeBytes)
+                {
+                    throw new InvalidDownloadSizeException(
+                        $"Download exceeded the declared size of {file.SizeBytes} bytes.");
+                }
+
+                await fs.WriteAsync(buffer.AsMemory(0, bytesRead), ct).ConfigureAwait(false);
+                totalBytes += bytesRead;
+                Report(progress, descriptor, file, totalBytes, DownloadPhase.Downloading);
+            }
+
+            await fs.FlushAsync(ct).ConfigureAwait(false);
+            return totalBytes;
+        }
+    }
+
+    private static bool IsTransient(Exception ex)
+    {
+        if (ex is IOException or TimeoutException)
+        {
+            return true;
+        }
+        if (ex is not HttpRequestException httpRequestException)
+        {
+            return false;
+        }
+
+        var status = httpRequestException.StatusCode;
+        return status is null ||
+               status == System.Net.HttpStatusCode.RequestTimeout ||
+               status == System.Net.HttpStatusCode.TooManyRequests ||
+               (int)status >= 500;
+    }
+
+    private static void Report(
+        IProgress<DownloadProgress> progress,
+        ModelDescriptor descriptor,
+        ModelFile file,
+        long bytesDownloaded,
+        DownloadPhase phase,
+        string? errorMessage = null) =>
         progress.Report(new DownloadProgress
         {
             DescriptorName = descriptor.Name,
             FileRelativePath = file.RelativePath,
-            BytesDownloaded = totalBytes,
+            BytesDownloaded = bytesDownloaded,
             TotalBytes = file.SizeBytes,
-            Phase = DownloadPhase.Complete,
+            Phase = phase,
+            ErrorMessage = errorMessage,
         });
-    }
 
     private static void TryDelete(string path)
     {
         try { if (File.Exists(path)) File.Delete(path); } catch { /* best-effort */ }
     }
+
+    private sealed class InvalidDownloadSizeException(string message) : Exception(message);
 }

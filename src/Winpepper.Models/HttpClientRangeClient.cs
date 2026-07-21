@@ -8,8 +8,6 @@ namespace Winpepper.Models;
 /// </summary>
 public sealed class HttpClientRangeClient : IHttpRangeClient, IDisposable
 {
-    private const int CopyBufferSize = 64 * 1024;
-
     private readonly HttpClient _http;
 
     public HttpClientRangeClient() : this(new HttpClient { Timeout = Timeout.InfiniteTimeSpan }) { }
@@ -20,24 +18,25 @@ public sealed class HttpClientRangeClient : IHttpRangeClient, IDisposable
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("Winpepper/1.0");
     }
 
-    public async IAsyncEnumerable<ReadOnlyMemory<byte>> GetRangeAsync(
-        string url, long startByte,
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    public async Task<HttpRangeResponse> GetRangeAsync(
+        string url, long startByte, CancellationToken ct)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         if (startByte > 0)
         {
             req.Headers.Range = new RangeHeaderValue(startByte, null);
         }
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
-        resp.EnsureSuccessStatusCode();
-
-        await using var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        var buf = new byte[CopyBufferSize];
-        int read;
-        while ((read = await stream.ReadAsync(buf.AsMemory(0, buf.Length), ct).ConfigureAwait(false)) > 0)
+        var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+        try
         {
-            yield return new ReadOnlyMemory<byte>(buf, 0, read);
+            var contentStartByte = ValidateResponse(resp, startByte);
+            var stream = await resp.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+            return new HttpRangeResponse(stream, contentStartByte, resp);
+        }
+        catch
+        {
+            resp.Dispose();
+            throw;
         }
     }
 
@@ -50,4 +49,44 @@ public sealed class HttpClientRangeClient : IHttpRangeClient, IDisposable
     }
 
     public void Dispose() => _http.Dispose();
+
+    private static long ValidateResponse(HttpResponseMessage response, long requestedStartByte)
+    {
+        if (requestedStartByte > 0 && response.StatusCode == System.Net.HttpStatusCode.OK)
+        {
+            return 0;
+        }
+
+        if (response.StatusCode != System.Net.HttpStatusCode.PartialContent)
+        {
+            response.EnsureSuccessStatusCode();
+            if (requestedStartByte == 0)
+            {
+                return 0;
+            }
+
+            throw new ModelDownloadException(
+                $"Server returned {(int)response.StatusCode} instead of 206 Partial Content for byte range {requestedStartByte}-.");
+        }
+
+        var range = response.Content.Headers.ContentRange;
+        var validRange = range is not null &&
+                         string.Equals(range.Unit, "bytes", StringComparison.OrdinalIgnoreCase) &&
+                         range.From == requestedStartByte &&
+                         range.To is not null &&
+                         range.To >= range.From &&
+                         (range.Length is null || range.Length > range.To);
+        if (validRange && response.Content.Headers.ContentLength is long contentLength)
+        {
+            validRange = contentLength == range!.To!.Value - range.From!.Value + 1;
+        }
+
+        if (!validRange)
+        {
+            throw new ModelDownloadException(
+                $"Server returned an incompatible Content-Range for byte range {requestedStartByte}-.");
+        }
+
+        return requestedStartByte;
+    }
 }

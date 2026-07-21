@@ -3,13 +3,25 @@
     x:Class="Winpepper.App.Views.StatusPillWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Grid Background="Transparent" Padding="12,6">
-        <Border Background="#CC202020" CornerRadius="14" Padding="14,6">
-            <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                <Ellipse x:Name="Dot" Width="10" Height="10" Fill="#FFEF4444" />
-                <TextBlock x:Name="StatusText" Foreground="White" FontSize="13" Text="Recording..." />
-                <TextBlock x:Name="ElapsedText" Foreground="#AAFFFFFF" FontSize="12" Text="0 ms" />
-            </StackPanel>
-        </Border>
-    </Grid>
+    <Border Background="#FF202020" CornerRadius="24" Padding="16,8">
+        <Grid ColumnSpacing="10" VerticalAlignment="Center">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Ellipse x:Name="Dot" Width="10" Height="10" Fill="#FFEF4444" />
+            <TextBlock x:Name="StatusText"
+                       Grid.Column="1"
+                       Foreground="White"
+                       FontSize="13"
+                       Text="Recording..."
+                       TextTrimming="CharacterEllipsis" />
+            <TextBlock x:Name="ElapsedText"
+                       Grid.Column="2"
+                       Foreground="#AAFFFFFF"
+                       FontSize="12"
+                       Text="0 ms" />
+        </Grid>
+    </Border>
 </Window>

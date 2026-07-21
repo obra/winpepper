@@ -13,8 +13,7 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
     {
         ModelsRoot = modelsRoot;
         Registry = new ModelRegistry();
-        AsrDescriptor = Registry.Find(asrModelName ?? ModelRegistry.DefaultAsrName)
-            ?? throw new InvalidOperationException($"Unknown ASR model '{asrModelName}'.");
+        AsrDescriptor = Registry.ResolveOrDefault(asrModelName, ModelKind.Asr);
         _http = new HttpClientRangeClient();
         _downloader = new ModelDownloader(_http);
         _coordinator = new ModelProvisioningCoordinator(modelsRoot, _downloader.DownloadAsync);
@@ -81,7 +80,7 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
             ModelProvisioningStatus.Failed => AsrProvisioningStatus.Failed,
             _ => AsrProvisioningStatus.Failed,
         },
-        state.Progress?.PercentComplete ?? 0,
+        state.ProgressPercent,
         state.ErrorMessage);
 
     public void Dispose()

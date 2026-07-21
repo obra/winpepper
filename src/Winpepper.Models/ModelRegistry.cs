@@ -72,4 +72,19 @@ public sealed class ModelRegistry
     public IEnumerable<ModelDescriptor> ByKind(ModelKind kind) => _all.Where(d => d.Kind == kind);
 
     public ModelDescriptor? Find(string name) => _all.FirstOrDefault(d => d.Name == name);
+
+    public ModelDescriptor ResolveOrDefault(string? requestedName, ModelKind kind)
+    {
+        var requested = requestedName is null ? null : Find(requestedName);
+        if (requested?.Kind == kind) return requested;
+
+        var defaultName = kind switch
+        {
+            ModelKind.Asr => DefaultAsrName,
+            ModelKind.Cleanup => DefaultCleanupName,
+            _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
+        };
+        return Find(defaultName)
+            ?? throw new InvalidOperationException($"Default {kind} model '{defaultName}' is absent from the registry.");
+    }
 }

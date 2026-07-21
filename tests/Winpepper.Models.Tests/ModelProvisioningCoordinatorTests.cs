@@ -71,6 +71,7 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
         var descriptor = Descriptor("hello");
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var states = new List<ModelProvisioningStatus>();
         var coordinator = new ModelProvisioningCoordinator(_root, async (model, installRoot, _, ct) =>
         {
             entered.TrySetResult();
@@ -79,6 +80,7 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
             Directory.CreateDirectory(modelDir);
             await File.WriteAllTextAsync(Path.Combine(modelDir, "model.bin"), "hello", ct);
         });
+        coordinator.StateChanged += (_, state) => states.Add(state.Status);
 
         var provisioning = coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
         await entered.Task;
@@ -89,6 +91,101 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
         await provisioning;
         (await verification).ShouldBeTrue();
         coordinator.State.Status.ShouldBe(ModelProvisioningStatus.Ready);
+        states.TakeLast(2).ShouldBe([ModelProvisioningStatus.Verifying, ModelProvisioningStatus.Ready]);
+    }
+
+    [Fact]
+    public async Task EnsureReadyAsync_WaitsForEarlierVerification_AndPublishesOrderedStates()
+    {
+        var descriptor = Descriptor("hello");
+        var modelDir = Path.Combine(_root, descriptor.InstallDirRelative);
+        Directory.CreateDirectory(modelDir);
+        await File.WriteAllTextAsync(
+            Path.Combine(modelDir, "model.bin"), "hello", TestContext.Current.CancellationToken);
+        var verificationEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseVerification = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var downloadCount = 0;
+        var states = new List<ModelProvisioningStatus>();
+        var coordinator = new ModelProvisioningCoordinator(
+            _root,
+            (_, _, _, _) => { Interlocked.Increment(ref downloadCount); return Task.CompletedTask; },
+            verifyFile: async (_, _, ct) =>
+            {
+                verificationEntered.TrySetResult();
+                await releaseVerification.Task.WaitAsync(ct);
+                return true;
+            });
+        coordinator.StateChanged += (_, state) => states.Add(state.Status);
+
+        var verification = coordinator.VerifyReadyAsync(descriptor, CancellationToken.None);
+        await verificationEntered.Task;
+        var provisioning = coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
+
+        provisioning.IsCompleted.ShouldBeFalse();
+        releaseVerification.TrySetResult();
+        (await verification).ShouldBeTrue();
+        await provisioning;
+
+        downloadCount.ShouldBe(0);
+        states.ShouldBe([
+            ModelProvisioningStatus.Verifying,
+            ModelProvisioningStatus.Ready,
+            ModelProvisioningStatus.Verifying,
+            ModelProvisioningStatus.Ready,
+        ]);
+    }
+
+    [Fact]
+    public async Task VerifyReadyAsync_CancellationRestoresPreviousStableState()
+    {
+        var descriptor = Descriptor("hello");
+        var modelDir = Path.Combine(_root, descriptor.InstallDirRelative);
+        Directory.CreateDirectory(modelDir);
+        await File.WriteAllTextAsync(
+            Path.Combine(modelDir, "model.bin"), "hello", TestContext.Current.CancellationToken);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = new ModelProvisioningCoordinator(
+            _root,
+            (_, _, _, _) => Task.CompletedTask,
+            verifyFile: async (_, _, ct) =>
+            {
+                entered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                return true;
+            });
+        using var cts = new CancellationTokenSource();
+
+        var verification = coordinator.VerifyReadyAsync(descriptor, cts.Token);
+        await entered.Task;
+        cts.Cancel();
+
+        await Should.ThrowAsync<OperationCanceledException>(() => verification);
+        coordinator.State.Status.ShouldBe(ModelProvisioningStatus.Missing);
+    }
+
+    [Fact]
+    public async Task EnsureReadyAsync_ReportsMonotonicAggregateProgressAcrossFiles()
+    {
+        var descriptor = TwoFileDescriptor();
+        var progressValues = new List<double>();
+        var coordinator = new ModelProvisioningCoordinator(_root, async (model, installRoot, progress, ct) =>
+        {
+            var modelDir = Path.Combine(installRoot, model.InstallDirRelative);
+            Directory.CreateDirectory(modelDir);
+            progress.Report(Progress(model, model.Files[0], 5));
+            await File.WriteAllTextAsync(Path.Combine(modelDir, model.Files[0].RelativePath), "hello", ct);
+            progress.Report(Progress(model, model.Files[1], 0));
+            progress.Report(Progress(model, model.Files[1], 5));
+            await File.WriteAllTextAsync(Path.Combine(modelDir, model.Files[1].RelativePath), "world", ct);
+        });
+        coordinator.StateChanged += (_, state) =>
+            progressValues.Add(state.ProgressPercent);
+
+        await coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
+
+        progressValues.ShouldBe(progressValues.OrderBy(value => value));
+        progressValues.ShouldContain(50);
+        progressValues[^1].ShouldBe(100);
     }
 
     [Fact]
@@ -132,5 +229,35 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
                 Sha256 = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(contents))).ToLowerInvariant(),
             },
         ],
+    };
+
+    private static ModelDescriptor TwoFileDescriptor() => new()
+    {
+        Name = "asr-two-file",
+        Kind = ModelKind.Asr,
+        DisplayName = "ASR",
+        InstallDirRelative = "asr-two-file",
+        Files =
+        [
+            ModelFileFor("a.bin", "hello"),
+            ModelFileFor("b.bin", "world"),
+        ],
+    };
+
+    private static ModelFile ModelFileFor(string path, string contents) => new()
+    {
+        RelativePath = path,
+        Url = $"https://example.test/{path}",
+        SizeBytes = contents.Length,
+        Sha256 = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(contents))).ToLowerInvariant(),
+    };
+
+    private static DownloadProgress Progress(ModelDescriptor descriptor, ModelFile file, long bytes) => new()
+    {
+        DescriptorName = descriptor.Name,
+        FileRelativePath = file.RelativePath,
+        BytesDownloaded = bytes,
+        TotalBytes = file.SizeBytes,
+        Phase = DownloadPhase.Downloading,
     };
 }

@@ -29,6 +29,25 @@ public class ModelRegistryTests
     }
 
     [Fact]
+    public void ResolveOrDefault_UnknownAsrName_UsesCatalogDefault()
+    {
+        var resolved = new ModelRegistry().ResolveOrDefault("removed-asr-model", ModelKind.Asr);
+
+        resolved.Name.ShouldBe(ModelRegistry.DefaultAsrName);
+        resolved.Kind.ShouldBe(ModelKind.Asr);
+    }
+
+    [Fact]
+    public void ResolveOrDefault_KnownName_PreservesSelection()
+    {
+        var resolved = new ModelRegistry().ResolveOrDefault(
+            ModelRegistry.DefaultCleanupName, ModelKind.Cleanup);
+
+        resolved.Name.ShouldBe(ModelRegistry.DefaultCleanupName);
+        resolved.Kind.ShouldBe(ModelKind.Cleanup);
+    }
+
+    [Fact]
     public void DefaultAsrName_And_DefaultCleanupName_ResolveInRegistry()
     {
         var r = new ModelRegistry();

@@ -53,6 +53,16 @@ public sealed class AppShell : IDisposable
             buffer: logTail);
         var store = new SettingsStore(AppPaths.SettingsJson);
         var settings = store.Load();
+        var modelsServices = new Winpepper.App.Services.ModelsServices(
+            Path.Combine(AppPaths.Root, "models"), settings.AsrModelName);
+        if (!string.Equals(settings.AsrModelName, modelsServices.AsrDescriptor.Name, StringComparison.Ordinal))
+        {
+            factory.CreateLogger("Winpepper.App").LogWarning(
+                "Unknown ASR model {ConfiguredModel}; restored default {DefaultModel}",
+                settings.AsrModelName, modelsServices.AsrDescriptor.Name);
+            settings = settings with { AsrModelName = modelsServices.AsrDescriptor.Name };
+            store.Save(settings);
+        }
         var writer = new DebouncedSettingsWriter(store);
 
         var uiThread = new DispatcherQueueUiThread(DispatcherQueue.GetForCurrentThread());
@@ -180,8 +190,6 @@ public sealed class AppShell : IDisposable
         };
 
         var historyServices = new Winpepper.App.Services.HistoryServices(AppPaths.HistoryRoot);
-        var modelsServices = new Winpepper.App.Services.ModelsServices(
-            Path.Combine(AppPaths.Root, "models"), settings.AsrModelName);
         var cleanupModelName = settings.CleanupModelName;
 
         var cancel = HotkeyChord.Parse("Esc");
@@ -283,12 +291,20 @@ public sealed class AppShell : IDisposable
         else if (!startHidden) ShowMain(navigateToOnboarding: false);
         // else: stay tray-only (autostart with --tray).
 
-        // Start the pipeline only after the window is up so a missing or
-        // corrupt model can never block first paint (issue #6). TryStart
-        // reports a missing model on the error bus and leaves the pipeline
-        // disabled; the Models tab re-attempts after a download completes.
-        Pipeline.TryStart();
-        await Task.CompletedTask;
+        // Start only after first paint and authoritative size/hash verification.
+        // A merely loadable stale model must not enter PipelineHost and later
+        // satisfy onboarding through PipelineHost.IsRunning.
+        try
+        {
+            var startupGate = new AsrPipelineStartupGate(ModelsServices, Pipeline.TryStart);
+            await startupGate.TryStartAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            LogFactory.CreateLogger<AppShell>()
+                .LogError(ex, "ASR verification failed during pipeline startup");
+            ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
+        }
     }
 
     public void ShowMain() => ShowMain(navigateToOnboarding: false);

@@ -13,7 +13,8 @@ public enum ModelProvisioningStatus
 public sealed record ModelProvisioningState(
     ModelProvisioningStatus Status,
     DownloadProgress? Progress = null,
-    string? ErrorMessage = null);
+    string? ErrorMessage = null,
+    double ProgressPercent = 0);
 
 /// <summary>
 /// Provides one authoritative, verified model-provisioning operation for all
@@ -28,16 +29,26 @@ public sealed class ModelProvisioningCoordinator
         IProgress<DownloadProgress> progress,
         CancellationToken cancellationToken);
 
+    public delegate Task<bool> VerifyModelFile(
+        string path,
+        ModelFile file,
+        CancellationToken cancellationToken);
+
     private readonly object _gate = new();
     private readonly string _installRoot;
     private readonly DownloadModel _download;
-    private readonly Dictionary<string, Task> _operations = new(StringComparer.Ordinal);
+    private readonly VerifyModelFile _verifyFile;
+    private readonly Dictionary<string, DescriptorQueue> _queues = new(StringComparer.Ordinal);
     private ModelProvisioningState _state = new(ModelProvisioningStatus.Missing);
 
-    public ModelProvisioningCoordinator(string installRoot, DownloadModel download)
+    public ModelProvisioningCoordinator(
+        string installRoot,
+        DownloadModel download,
+        VerifyModelFile? verifyFile = null)
     {
         _installRoot = installRoot ?? throw new ArgumentNullException(nameof(installRoot));
         _download = download ?? throw new ArgumentNullException(nameof(download));
+        _verifyFile = verifyFile ?? VerifyFileAsync;
     }
 
     public ModelProvisioningState State
@@ -49,43 +60,44 @@ public sealed class ModelProvisioningCoordinator
 
     public event EventHandler<ModelProvisioningState>? StateChanged;
 
-    public async Task<bool> VerifyReadyAsync(ModelDescriptor descriptor, CancellationToken ct)
+    public Task<bool> VerifyReadyAsync(ModelDescriptor descriptor, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
-        Task? activeOperation;
+        TaskCompletionSource start;
+        Task<bool> operation;
         lock (_gate)
         {
-            _operations.TryGetValue(descriptor.Name, out activeOperation);
-            if (activeOperation?.IsCompleted == true) activeOperation = null;
+            var queue = GetQueue(descriptor.Name);
+            start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            operation = VerifyReadyQueuedAsync(start.Task, queue.Tail, descriptor, ct);
+            queue.Tail = operation;
         }
 
-        if (activeOperation is not null)
-        {
-            try
-            {
-                await activeOperation.WaitAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch
-            {
-                // The verification below remains authoritative even when the
-                // active provisioning operation failed.
-            }
-        }
+        start.TrySetResult();
+        return operation;
+    }
 
+    private async Task<bool> VerifyReadyQueuedAsync(
+        Task start, Task predecessor, ModelDescriptor descriptor, CancellationToken ct)
+    {
+        await start.ConfigureAwait(false);
+        await IgnoreFailureAsync(predecessor).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        var previousState = State;
         try
         {
             SetState(new ModelProvisioningState(ModelProvisioningStatus.Verifying));
             var ready = await VerifyFilesAsync(descriptor, ct).ConfigureAwait(false);
             SetState(new ModelProvisioningState(
-                ready ? ModelProvisioningStatus.Ready : ModelProvisioningStatus.Missing));
+                ready ? ModelProvisioningStatus.Ready : ModelProvisioningStatus.Missing,
+                ProgressPercent: ready ? 100 : 0));
             return ready;
         }
         catch (OperationCanceledException)
         {
+            SetState(previousState.Status == ModelProvisioningStatus.Verifying
+                ? new ModelProvisioningState(ModelProvisioningStatus.Missing)
+                : previousState);
             throw;
         }
         catch (Exception ex)
@@ -100,45 +112,36 @@ public sealed class ModelProvisioningCoordinator
         ArgumentNullException.ThrowIfNull(descriptor);
         Task operation;
         TaskCompletionSource? start = null;
-        ModelProvisioningState? retryState = null;
         lock (_gate)
         {
-            if (!_operations.TryGetValue(descriptor.Name, out operation!) || operation.IsCompleted)
+            var queue = GetQueue(descriptor.Name);
+            if (queue.EnsureOperation is null || queue.EnsureOperation.IsCompleted)
             {
-                if (_state.Status == ModelProvisioningStatus.Failed)
-                {
-                    retryState = new ModelProvisioningState(ModelProvisioningStatus.Retrying);
-                    _state = retryState;
-                }
                 start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                operation = EnsureReadyAfterStartAsync(start.Task, descriptor);
-                _operations[descriptor.Name] = operation;
+                operation = EnsureReadyQueuedAsync(start.Task, queue.Tail, descriptor);
+                queue.EnsureOperation = operation;
+                queue.Tail = operation;
             }
+            else operation = queue.EnsureOperation;
         }
 
-        if (retryState is not null)
-        {
-            try { StateChanged?.Invoke(this, retryState); }
-            finally { start!.TrySetResult(); }
-        }
-        else
-        {
-            start?.TrySetResult();
-        }
-
+        start?.TrySetResult();
         return operation.WaitAsync(ct);
     }
 
     public async Task RetryAsync(ModelDescriptor descriptor, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
-        SetState(new ModelProvisioningState(ModelProvisioningStatus.Retrying));
         await EnsureReadyAsync(descriptor, ct).ConfigureAwait(false);
     }
 
-    private async Task EnsureReadyAfterStartAsync(Task start, ModelDescriptor descriptor)
+    private async Task EnsureReadyQueuedAsync(
+        Task start, Task predecessor, ModelDescriptor descriptor)
     {
         await start.ConfigureAwait(false);
+        await IgnoreFailureAsync(predecessor).ConfigureAwait(false);
+        if (State.Status == ModelProvisioningStatus.Failed)
+            SetState(new ModelProvisioningState(ModelProvisioningStatus.Retrying));
         await EnsureReadyCoreAsync(descriptor, CancellationToken.None).ConfigureAwait(false);
     }
 
@@ -149,21 +152,37 @@ public sealed class ModelProvisioningCoordinator
             SetState(new ModelProvisioningState(ModelProvisioningStatus.Verifying));
             if (await VerifyFilesAsync(descriptor, ct).ConfigureAwait(false))
             {
-                SetState(new ModelProvisioningState(ModelProvisioningStatus.Ready));
+                SetState(new ModelProvisioningState(
+                    ModelProvisioningStatus.Ready, ProgressPercent: 100));
                 return;
             }
 
             SetState(new ModelProvisioningState(ModelProvisioningStatus.Missing));
+            var bytesByFile = descriptor.Files.ToDictionary(
+                file => file.RelativePath, _ => 0L, StringComparer.Ordinal);
             var progress = new DirectProgress<DownloadProgress>(report =>
-                SetState(new ModelProvisioningState(ModelProvisioningStatus.Downloading, report)));
+            {
+                if (bytesByFile.ContainsKey(report.FileRelativePath))
+                    bytesByFile[report.FileRelativePath] = Math.Clamp(
+                        report.BytesDownloaded, 0, Math.Max(0, report.TotalBytes));
+                var aggregate = descriptor.TotalSizeBytes <= 0
+                    ? 0
+                    : 100.0 * bytesByFile.Values.Sum() / descriptor.TotalSizeBytes;
+                SetState(new ModelProvisioningState(
+                    ModelProvisioningStatus.Downloading,
+                    report,
+                    ProgressPercent: Math.Clamp(aggregate, 0, 100)));
+            });
             SetState(new ModelProvisioningState(ModelProvisioningStatus.Downloading));
             await _download(descriptor, _installRoot, progress, ct).ConfigureAwait(false);
 
-            SetState(new ModelProvisioningState(ModelProvisioningStatus.Verifying));
+            SetState(new ModelProvisioningState(
+                ModelProvisioningStatus.Verifying, ProgressPercent: 100));
             if (!await VerifyFilesAsync(descriptor, ct).ConfigureAwait(false))
                 throw new ModelDownloadException($"Downloaded model '{descriptor.Name}' failed size or SHA-256 verification.");
 
-            SetState(new ModelProvisioningState(ModelProvisioningStatus.Ready));
+            SetState(new ModelProvisioningState(
+                ModelProvisioningStatus.Ready, ProgressPercent: 100));
         }
         catch (OperationCanceledException)
         {
@@ -185,7 +204,7 @@ public sealed class ModelProvisioningCoordinator
             var path = Path.Combine(_installRoot, descriptor.InstallDirRelative, file.RelativePath);
             if (!File.Exists(path) || new FileInfo(path).Length != file.SizeBytes)
                 return false;
-            if (!await ChecksumVerifier.VerifyAsync(path, file.Sha256, ct).ConfigureAwait(false))
+            if (!await _verifyFile(path, file, ct).ConfigureAwait(false))
                 return false;
         }
 
@@ -196,6 +215,31 @@ public sealed class ModelProvisioningCoordinator
     {
         lock (_gate) _state = state;
         StateChanged?.Invoke(this, state);
+    }
+
+    private DescriptorQueue GetQueue(string descriptorName)
+    {
+        if (!_queues.TryGetValue(descriptorName, out var queue))
+        {
+            queue = new DescriptorQueue();
+            _queues.Add(descriptorName, queue);
+        }
+        return queue;
+    }
+
+    private static async Task IgnoreFailureAsync(Task task)
+    {
+        try { await task.ConfigureAwait(false); }
+        catch { /* the queued successor must still run */ }
+    }
+
+    private static Task<bool> VerifyFileAsync(string path, ModelFile file, CancellationToken ct)
+        => ChecksumVerifier.VerifyAsync(path, file.Sha256, ct);
+
+    private sealed class DescriptorQueue
+    {
+        public Task Tail { get; set; } = Task.CompletedTask;
+        public Task? EnsureOperation { get; set; }
     }
 
     private sealed class DirectProgress<T>(Action<T> report) : IProgress<T>

@@ -13,6 +13,7 @@ public sealed partial class OnboardingPage : Page
     private AppShell? _shell;
     private OnboardingViewModel? _vm;
     private WasapiRecorder? _meterRecorder;
+    private CancellationTokenSource? _lifetimeCts;
 
     public OnboardingPage() { InitializeComponent(); }
 
@@ -20,9 +21,12 @@ public sealed partial class OnboardingPage : Page
     {
         var shell = (AppShell)e.Parameter;
         _shell = shell;
-        // The stub returns immediately for Plan 3. Plan 4 swaps in the real downloader.
-        _vm = new OnboardingViewModel(shell.SettingsWriter, () => Task.CompletedTask,
-                                       new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator());
+        _lifetimeCts = new CancellationTokenSource();
+        _vm = new OnboardingViewModel(
+            shell.SettingsWriter,
+            shell.ModelsServices,
+            shell.Pipeline.TryStart,
+            new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator());
 
         var devices = DeviceEnumerator.List();
         MicCombo.ItemsSource = devices;
@@ -77,15 +81,13 @@ public sealed partial class OnboardingPage : Page
         {
             DownloadProgress.Visibility = Visibility.Visible;
         }
-        try { await _vm.AdvanceAsync(); }
-        finally { AdvanceButton.IsEnabled = true; DownloadProgress.Visibility = Visibility.Collapsed; }
+        try { await _vm.AdvanceAsync(_lifetimeCts?.Token ?? CancellationToken.None); }
+        finally { RefreshButtons(); }
         if (_vm.Step == OnboardingStep.Done)
         {
             // Onboarding complete; the user can stay on the page or switch tabs.
         }
     }
-
-    private void OnSkip(object sender, RoutedEventArgs e) { _vm?.Skip(); }
 
     private void RenderStep()
     {
@@ -121,11 +123,19 @@ public sealed partial class OnboardingPage : Page
         AdvanceButton.Content = _vm.Step switch
         {
             OnboardingStep.TestDictation => "Finish",
-            OnboardingStep.DownloadModels => "Download",
+            OnboardingStep.DownloadModels when _vm.CanRetry => "Retry",
+            OnboardingStep.DownloadModels => "Download speech model",
             _ => "Next",
         };
         AdvanceButton.IsEnabled = _vm.CanAdvance;
-        SkipButton.Visibility = _vm.CanSkip ? Visibility.Visible : Visibility.Collapsed;
+        DownloadProgress.Value = _vm.DownloadProgressPercent;
+        DownloadProgress.IsIndeterminate = _vm.IsBusy && _vm.DownloadProgressPercent <= 0;
+        DownloadProgress.Visibility = _vm.Step == OnboardingStep.DownloadModels && _vm.IsBusy
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        DownloadStatusText.Text = _vm.DownloadStatus;
+        DownloadErrorText.Text = _vm.DownloadError ?? "";
+        DownloadErrorText.Visibility = _vm.DownloadError is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void RestartLevelMeter(string deviceId)
@@ -143,7 +153,11 @@ public sealed partial class OnboardingPage : Page
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
+        _lifetimeCts?.Cancel();
+        _lifetimeCts?.Dispose();
+        _lifetimeCts = null;
         _meterRecorder?.Dispose();
+        _vm?.Dispose();
         _shell?.Pipeline.SetHotkeyCaptureActive(false);
     }
 }

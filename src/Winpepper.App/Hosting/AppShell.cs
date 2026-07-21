@@ -180,7 +180,8 @@ public sealed class AppShell : IDisposable
         };
 
         var historyServices = new Winpepper.App.Services.HistoryServices(AppPaths.HistoryRoot);
-        var modelsServices = new Winpepper.App.Services.ModelsServices(Path.Combine(AppPaths.Root, "models"));
+        var modelsServices = new Winpepper.App.Services.ModelsServices(
+            Path.Combine(AppPaths.Root, "models"), settings.AsrModelName);
         var cleanupModelName = settings.CleanupModelName;
 
         var cancel = HotkeyChord.Parse("Esc");

@@ -15,13 +15,16 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
         if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true);
     }
 
-    [Fact]
-    public async Task VerifyReadyAsync_RequiresDeclaredSizeAndSha256()
+    [Theory]
+    [InlineData("wrong")]
+    [InlineData("too long")]
+    public async Task VerifyReadyAsync_RequiresDeclaredSizeAndSha256(string actualContents)
     {
         var descriptor = Descriptor("ready");
         var modelDir = Path.Combine(_root, descriptor.InstallDirRelative);
         Directory.CreateDirectory(modelDir);
-        await File.WriteAllTextAsync(Path.Combine(modelDir, "model.bin"), "wrong");
+        await File.WriteAllTextAsync(
+            Path.Combine(modelDir, "model.bin"), actualContents, TestContext.Current.CancellationToken);
         var coordinator = new ModelProvisioningCoordinator(_root, (_, _, _, _) => Task.CompletedTask);
 
         var ready = await coordinator.VerifyReadyAsync(descriptor, CancellationToken.None);
@@ -31,7 +34,7 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task EnsureReadyAsync_CoalescesConcurrentRequests_AndEndsVerifiedReady()
+    public async Task EnsureReadyAsync_CoalescesConcurrentOnboardingAndModelsRequests_AndEndsVerifiedReady()
     {
         var descriptor = Descriptor("hello");
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -49,11 +52,11 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
         });
         coordinator.StateChanged += (_, state) => states.Add(state.Status);
 
-        var first = coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
+        var onboardingRequest = coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
         await entered.Task;
-        var second = coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
+        var modelsPageRequest = coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
         release.TrySetResult();
-        await Task.WhenAll(first, second);
+        await Task.WhenAll(onboardingRequest, modelsPageRequest);
 
         downloadCount.ShouldBe(1);
         coordinator.State.Status.ShouldBe(ModelProvisioningStatus.Ready);
@@ -63,7 +66,33 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
     }
 
     [Fact]
-    public async Task RetryAsync_TransitionsThroughRetrying_AfterFailure()
+    public async Task VerifyReadyAsync_WaitsForAnActiveProvisioningOperation()
+    {
+        var descriptor = Descriptor("hello");
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = new ModelProvisioningCoordinator(_root, async (model, installRoot, _, ct) =>
+        {
+            entered.TrySetResult();
+            await release.Task.WaitAsync(ct);
+            var modelDir = Path.Combine(installRoot, model.InstallDirRelative);
+            Directory.CreateDirectory(modelDir);
+            await File.WriteAllTextAsync(Path.Combine(modelDir, "model.bin"), "hello", ct);
+        });
+
+        var provisioning = coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
+        await entered.Task;
+        var verification = coordinator.VerifyReadyAsync(descriptor, CancellationToken.None);
+
+        verification.IsCompleted.ShouldBeFalse();
+        release.TrySetResult();
+        await provisioning;
+        (await verification).ShouldBeTrue();
+        coordinator.State.Status.ShouldBe(ModelProvisioningStatus.Ready);
+    }
+
+    [Fact]
+    public async Task EnsureReadyAsync_TransitionsThroughRetrying_AfterFailure()
     {
         var descriptor = Descriptor("hello");
         var attempts = 0;
@@ -80,7 +109,7 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
         await Should.ThrowAsync<IOException>(() => coordinator.EnsureReadyAsync(descriptor, CancellationToken.None));
         coordinator.State.Status.ShouldBe(ModelProvisioningStatus.Failed);
 
-        await coordinator.RetryAsync(descriptor, CancellationToken.None);
+        await coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
 
         states.ShouldContain(ModelProvisioningStatus.Retrying);
         coordinator.State.Status.ShouldBe(ModelProvisioningStatus.Ready);

@@ -11,6 +11,7 @@ namespace Winpepper.App.Views;
 public sealed partial class ModelsPage : Page
 {
     private bool _downloadInProgress;
+    private CancellationTokenSource? _lifetimeCts;
 
     public ModelsTabViewModel ViewModel { get; private set; } = null!;
 
@@ -19,11 +20,12 @@ public sealed partial class ModelsPage : Page
         this.InitializeComponent();
     }
 
-    protected override void OnNavigatedTo(NavigationEventArgs e)
+    protected override async void OnNavigatedTo(NavigationEventArgs e)
     {
         var models = App.Shell!.ModelsServices;
         var settings = App.Shell!.SettingsStore;
         var s = settings.Load();
+        _lifetimeCts = new CancellationTokenSource();
 
         ViewModel = new ModelsTabViewModel(
             models.Registry, models.ModelsRoot, models,
@@ -51,6 +53,22 @@ public sealed partial class ModelsPage : Page
         AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
         UpdateInstalledLabels();
+        try
+        {
+            await models.VerifyReadyAsync(_lifetimeCts.Token);
+            UpdateInstalledLabels();
+        }
+        catch (OperationCanceledException)
+        {
+            // Navigation canceled the authoritative readiness refresh.
+        }
+        catch (Exception ex)
+        {
+            App.Shell!.LogFactory.CreateLogger<ModelsPage>()
+                .LogError(ex, "ASR readiness verification failed");
+            App.Shell!.ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
+            UpdateInstalledLabels();
+        }
     }
 
     private void OnAsrChanged(object sender, SelectionChangedEventArgs e)
@@ -82,7 +100,7 @@ public sealed partial class ModelsPage : Page
 
         try
         {
-            await ViewModel.DownloadMissingAsync(CancellationToken.None);
+            await ViewModel.DownloadMissingAsync(_lifetimeCts?.Token ?? CancellationToken.None);
             UpdateInstalledLabels();
 
             // If the pipeline was left disabled at boot because models were
@@ -110,7 +128,8 @@ public sealed partial class ModelsPage : Page
 
     private void UpdateInstalledLabels()
     {
-        var asrInstalled = ViewModel.AsrCard.IsSelectedInstalled;
+        var asrInstalled = App.Shell!.ModelsServices.State.Status ==
+            Winpepper.Core.ViewModels.AsrProvisioningStatus.Ready;
         AsrInstalledText.Text = asrInstalled ? "Installed" : "Not downloaded";
         AsrInstalledIcon.Visibility = asrInstalled ? Visibility.Visible : Visibility.Collapsed;
         AsrNotInstalledIcon.Visibility = asrInstalled ? Visibility.Collapsed : Visibility.Visible;
@@ -119,6 +138,14 @@ public sealed partial class ModelsPage : Page
         CleanupInstalledText.Text = cleanupInstalled ? "Installed" : "Not downloaded";
         CleanupInstalledIcon.Visibility = cleanupInstalled ? Visibility.Visible : Visibility.Collapsed;
         CleanupNotInstalledIcon.Visibility = cleanupInstalled ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    protected override void OnNavigatedFrom(NavigationEventArgs e)
+    {
+        _lifetimeCts?.Cancel();
+        _lifetimeCts?.Dispose();
+        _lifetimeCts = null;
+        base.OnNavigatedFrom(e);
     }
 }
 #endif

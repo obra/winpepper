@@ -91,11 +91,20 @@
                                 <FontIcon Glyph="&#xE896;" FontSize="20" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
                                 <TextBlock Text="Download models" Style="{ThemeResource SubtitleTextBlockStyle}" VerticalAlignment="Center" />
                             </StackPanel>
-                            <TextBlock Text="Winpepper needs the speech model (~600 MB) and the cleanup model. You can skip this and download later from the Models tab."
+                            <TextBlock Text="Winpepper needs the speech model (~670 MB) before you can test dictation. The optional cleanup model can be downloaded later from Models."
                                        Style="{ThemeResource BodyTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        TextWrapping="Wrap" />
-                            <ProgressBar x:Name="DownloadProgress" AutomationProperties.AutomationId="OnboardingDownloadProgressBar" IsIndeterminate="True" Visibility="Collapsed" />
+                            <TextBlock x:Name="DownloadStatusText"
+                                       AutomationProperties.AutomationId="OnboardingDownloadStatusText"
+                                       Style="{ThemeResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <ProgressBar x:Name="DownloadProgress" AutomationProperties.AutomationId="OnboardingDownloadProgressBar" Minimum="0" Maximum="100" Visibility="Collapsed" />
+                            <TextBlock x:Name="DownloadErrorText"
+                                       AutomationProperties.AutomationId="OnboardingDownloadErrorText"
+                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                       TextWrapping="Wrap"
+                                       Visibility="Collapsed" />
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -141,7 +150,6 @@
             </Grid>
 
             <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
-                <Button x:Name="SkipButton" AutomationProperties.AutomationId="OnboardingSkipButton" Content="Skip" Click="OnSkip" Visibility="Collapsed" MinWidth="80" />
                 <Button x:Name="AdvanceButton" AutomationProperties.AutomationId="OnboardingNextButton" Content="Next" Click="OnAdvance" Style="{StaticResource AccentButtonStyle}" MinWidth="120" />
             </StackPanel>
         </StackPanel>

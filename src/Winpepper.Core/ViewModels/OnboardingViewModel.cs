@@ -4,10 +4,11 @@ using Winpepper.Core.Settings;
 
 namespace Winpepper.Core.ViewModels;
 
-public sealed class OnboardingViewModel : INotifyPropertyChanged
+public sealed class OnboardingViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly ISettingsWriter _writer;
-    private readonly Func<Task> _runDownloader;
+    private readonly IAsrProvisioningService _provisioner;
+    private readonly Func<bool> _tryStartPipeline;
     private readonly IHotkeyValidator _validator;
 
     private OnboardingStep _step = OnboardingStep.PickMic;
@@ -15,6 +16,10 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     private string _holdHotkey = "RightCtrl+RightShift";
     private string _toggleHotkey = "Ctrl+Shift+Space";
     private bool _testDictationDone;
+    private bool _isBusy;
+    private double _downloadProgressPercent;
+    private string _downloadStatus = "Speech model required";
+    private string? _downloadError;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -25,11 +30,18 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     /// permissive default: a permissive default would mask conflicts on the
     /// onboarding step.
     /// </summary>
-    public OnboardingViewModel(ISettingsWriter writer, Func<Task> runDownloader, IHotkeyValidator validator)
+    public OnboardingViewModel(
+        ISettingsWriter writer,
+        IAsrProvisioningService provisioner,
+        Func<bool> tryStartPipeline,
+        IHotkeyValidator validator)
     {
         _writer = writer;
-        _runDownloader = runDownloader;
+        _provisioner = provisioner ?? throw new ArgumentNullException(nameof(provisioner));
+        _tryStartPipeline = tryStartPipeline ?? throw new ArgumentNullException(nameof(tryStartPipeline));
         _validator = validator ?? throw new ArgumentNullException(nameof(validator));
+        _provisioner.StateChanged += OnProvisioningStateChanged;
+        ApplyProvisioningState(_provisioner.State);
     }
 
     public OnboardingStep Step
@@ -62,6 +74,43 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
         set { if (_testDictationDone == value) return; _testDictationDone = value; Raise(); Raise(nameof(CanAdvance)); }
     }
 
+    public bool IsBusy
+    {
+        get => _isBusy;
+        private set
+        {
+            if (_isBusy == value) return;
+            _isBusy = value;
+            Raise();
+            Raise(nameof(CanAdvance));
+            Raise(nameof(CanRetry));
+        }
+    }
+
+    public double DownloadProgressPercent
+    {
+        get => _downloadProgressPercent;
+        private set { if (_downloadProgressPercent == value) return; _downloadProgressPercent = value; Raise(); }
+    }
+
+    public string DownloadStatus
+    {
+        get => _downloadStatus;
+        private set { if (_downloadStatus == value) return; _downloadStatus = value; Raise(); }
+    }
+
+    public string? DownloadError
+    {
+        get => _downloadError;
+        private set
+        {
+            if (_downloadError == value) return;
+            _downloadError = value;
+            Raise();
+            Raise(nameof(CanRetry));
+        }
+    }
+
     public string? HoldHotkeyError => Validate(_holdHotkey, _toggleHotkey, isToggle: false);
     public string? ToggleHotkeyError => Validate(_toggleHotkey, _holdHotkey, isToggle: true);
 
@@ -69,14 +118,17 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     {
         OnboardingStep.PickMic        => !string.IsNullOrEmpty(_micId),
         OnboardingStep.PickHotkeys    => HoldHotkeyError is null && ToggleHotkeyError is null,
-        OnboardingStep.DownloadModels => true,
+        OnboardingStep.DownloadModels => !_isBusy,
         OnboardingStep.TestDictation  => _testDictationDone,
         _ => false,
     };
 
-    public bool CanSkip => _step == OnboardingStep.DownloadModels;
+    public bool CanSkip => false;
+    public bool CanRetry => _step == OnboardingStep.DownloadModels && !_isBusy && _downloadError is not null;
 
-    public async Task AdvanceAsync()
+    public Task AdvanceAsync() => AdvanceAsync(CancellationToken.None);
+
+    public async Task AdvanceAsync(CancellationToken ct)
     {
         if (!CanAdvance) return;
         switch (_step)
@@ -90,8 +142,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
                 Step = OnboardingStep.DownloadModels;
                 break;
             case OnboardingStep.DownloadModels:
-                await _runDownloader();
-                Step = OnboardingStep.TestDictation;
+                await ProvisionAndStartPipelineAsync(ct);
                 break;
             case OnboardingStep.TestDictation:
                 _writer.Queue(s => s with { OnboardingCompleted = true });
@@ -103,8 +154,62 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 
     public void Skip()
     {
-        if (!CanSkip) return;
-        Step = OnboardingStep.TestDictation;
+        // Model skipping is deliberately unavailable: Test Dictation requires
+        // verified ASR files and a pipeline that has successfully started.
+    }
+
+    private async Task ProvisionAndStartPipelineAsync(CancellationToken ct)
+    {
+        IsBusy = true;
+        DownloadError = null;
+        try
+        {
+            await _provisioner.EnsureReadyAsync(ct);
+            if (!await _provisioner.VerifyReadyAsync(ct))
+            {
+                DownloadError = "The speech model could not be verified. Retry the download.";
+                return;
+            }
+
+            if (!_tryStartPipeline())
+            {
+                DownloadError = "The dictation pipeline could not start. Retry after checking the speech model.";
+                return;
+            }
+
+            Step = OnboardingStep.TestDictation;
+        }
+        catch (OperationCanceledException)
+        {
+            DownloadError = "Speech model download was canceled. Retry to resume.";
+        }
+        catch (Exception ex)
+        {
+            DownloadError = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void OnProvisioningStateChanged(object? sender, AsrProvisioningState state)
+        => ApplyProvisioningState(state);
+
+    private void ApplyProvisioningState(AsrProvisioningState state)
+    {
+        DownloadProgressPercent = Math.Clamp(state.ProgressPercent, 0, 100);
+        DownloadStatus = state.Status switch
+        {
+            AsrProvisioningStatus.Missing => "Speech model required",
+            AsrProvisioningStatus.Downloading => "Downloading speech model",
+            AsrProvisioningStatus.Verifying => "Verifying speech model",
+            AsrProvisioningStatus.Retrying => "Retrying speech model download",
+            AsrProvisioningStatus.Ready => "Speech model ready",
+            AsrProvisioningStatus.Failed => "Speech model download failed",
+            _ => "Preparing speech model",
+        };
+        if (state.ErrorMessage is not null) DownloadError = state.ErrorMessage;
     }
 
     private string? Validate(string chord, string other, bool isToggle)
@@ -118,4 +223,6 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 
     private void Raise([CallerMemberName] string? name = null)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+    public void Dispose() => _provisioner.StateChanged -= OnProvisioningStateChanged;
 }

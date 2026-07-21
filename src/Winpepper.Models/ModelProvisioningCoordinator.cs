@@ -52,24 +52,78 @@ public sealed class ModelProvisioningCoordinator
     public async Task<bool> VerifyReadyAsync(ModelDescriptor descriptor, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
-        SetState(new ModelProvisioningState(ModelProvisioningStatus.Verifying));
-        var ready = await VerifyFilesAsync(descriptor, ct).ConfigureAwait(false);
-        SetState(new ModelProvisioningState(
-            ready ? ModelProvisioningStatus.Ready : ModelProvisioningStatus.Missing));
-        return ready;
+        Task? activeOperation;
+        lock (_gate)
+        {
+            _operations.TryGetValue(descriptor.Name, out activeOperation);
+            if (activeOperation?.IsCompleted == true) activeOperation = null;
+        }
+
+        if (activeOperation is not null)
+        {
+            try
+            {
+                await activeOperation.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch
+            {
+                // The verification below remains authoritative even when the
+                // active provisioning operation failed.
+            }
+        }
+
+        try
+        {
+            SetState(new ModelProvisioningState(ModelProvisioningStatus.Verifying));
+            var ready = await VerifyFilesAsync(descriptor, ct).ConfigureAwait(false);
+            SetState(new ModelProvisioningState(
+                ready ? ModelProvisioningStatus.Ready : ModelProvisioningStatus.Missing));
+            return ready;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            SetState(new ModelProvisioningState(ModelProvisioningStatus.Failed, ErrorMessage: ex.Message));
+            throw;
+        }
     }
 
     public Task EnsureReadyAsync(ModelDescriptor descriptor, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
         Task operation;
+        TaskCompletionSource? start = null;
+        ModelProvisioningState? retryState = null;
         lock (_gate)
         {
             if (!_operations.TryGetValue(descriptor.Name, out operation!) || operation.IsCompleted)
             {
-                operation = EnsureReadyCoreAsync(descriptor, CancellationToken.None);
+                if (_state.Status == ModelProvisioningStatus.Failed)
+                {
+                    retryState = new ModelProvisioningState(ModelProvisioningStatus.Retrying);
+                    _state = retryState;
+                }
+                start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                operation = EnsureReadyAfterStartAsync(start.Task, descriptor);
                 _operations[descriptor.Name] = operation;
             }
+        }
+
+        if (retryState is not null)
+        {
+            try { StateChanged?.Invoke(this, retryState); }
+            finally { start!.TrySetResult(); }
+        }
+        else
+        {
+            start?.TrySetResult();
         }
 
         return operation.WaitAsync(ct);
@@ -80,6 +134,12 @@ public sealed class ModelProvisioningCoordinator
         ArgumentNullException.ThrowIfNull(descriptor);
         SetState(new ModelProvisioningState(ModelProvisioningStatus.Retrying));
         await EnsureReadyAsync(descriptor, ct).ConfigureAwait(false);
+    }
+
+    private async Task EnsureReadyAfterStartAsync(Task start, ModelDescriptor descriptor)
+    {
+        await start.ConfigureAwait(false);
+        await EnsureReadyCoreAsync(descriptor, CancellationToken.None).ConfigureAwait(false);
     }
 
     private async Task EnsureReadyCoreAsync(ModelDescriptor descriptor, CancellationToken ct)

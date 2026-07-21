@@ -28,6 +28,13 @@ for tests, NAudio (existing, untouched), Win32 interop via P/Invoke.
 - **Test runner:** the VSTest host (`dotnet test`) **crashes on this machine**.
   Pure-managed tests MUST run via the xUnit v3 **in-process runner**:
   `dotnet exec <TestAssembly>.dll`. Never use `dotnet test`.
+- **Runner output shape (verified on this box):** the in-process runner does NOT
+  print a `Passed:` line. It prints a summary of the form:
+  `=== TEST EXECUTION SUMMARY === <Assembly>  Total: N, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: ...`.
+  The **canonical green predicate** for every test step below is:
+  **exit code 0 AND `Errors: 0` AND `Failed: 0`**. `Errors` (discovery/collection
+  failures) is reported separately from `Failed` (assertion failures) — both must
+  be zero. Do NOT grep for `Passed:` (no such token exists); parse `Total:/Errors:/Failed:`.
 - **.NET SDK:** `.NET 9` may need local provisioning into the worktree at
   `./.dotnet` (which is gitignored). Task 0 provisions it; every later test
   step re-exports `DOTNET_ROOT`/`PATH`.
@@ -1420,10 +1427,17 @@ The following require a real Windows run (WinUI z-order, layered-window
 rendering, live mic, animation) and CANNOT be validated on Linux. They verify
 the thin WinUI layers over the Core logic tested above. Run manually on Windows:
 
-1. **Strict always-on-top (Task 1/6):** start dictation; open a fullscreen /
-   always-on-top app (e.g. a video player, another topmost tool). The pill
-   remains visible above it, and stays on top for the whole session (topmost is
-   re-asserted every 100 ms).
+1. **Strict always-on-top (Task 1/6):** start dictation; open another topmost
+   tool or a **borderless/windowed-fullscreen** app (e.g. a video player, a
+   maximized browser video). The pill remains visible above it, and stays on top
+   for the whole session (topmost is re-asserted every 100 ms).
+   **Scope / known limitation (verified against Win32 docs):** the documented
+   `HWND_TOPMOST` contract only guarantees coverage over *non-topmost* and other
+   *topmost* windows — it does **not** cover **exclusive-fullscreen (FSE)**
+   surfaces (some games / exclusive-mode video), which bypass DWM composition and
+   which *no* topmost approach can overlay. FSE coverage is an **explicit
+   non-goal** of this task; do not treat the pill being hidden by a true FSE app
+   as a failure of Task 1.
 2. **Never steals focus (Task 1/6):** while the pill shows, keep typing in the
    foreground app — focus never moves to the pill; clicks pass through
    (click-through intact).

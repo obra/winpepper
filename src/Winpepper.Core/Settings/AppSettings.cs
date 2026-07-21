@@ -14,6 +14,10 @@ public record AppSettings
     // ASR
     public string AsrModelName { get; init; } = "parakeet-tdt-0.6b-v3";
 
+    // ASR provider selection
+    public string AsrProvider { get; init; } = "local"; // "local" | "assemblyai"
+    public string AssemblyAiModel { get; init; } = "universal-2"; // speech_model id sent to AssemblyAI
+
     // Cleanup model selection. Bound to Winpepper.Models.ModelRegistry.DefaultCleanupName.
     public string CleanupModelName { get; init; } = "qwen2.5-0.5b-instruct-q4_k_m";
 

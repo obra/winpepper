@@ -63,17 +63,40 @@ public sealed partial class StatusPillWindow : Window
         };
 
         _vm.PropertyChanged += OnVmChanged;
-
-        // Bug-1: initialize the content island exactly once. A WinUI 3 window
-        // that is only ever Show(activateWindow:false)'d never composes a live
-        // DirectComposition tree, so it presents a frozen first frame. Activate()
-        // once realizes the island; Hide() immediately in the same pump keeps it
-        // off-screen. WS_EX_NOACTIVATE (already set in MakeClickThroughTopmostTool)
-        // is intended to prevent focus theft/flash; the smoke checklist verifies no
-        // flash and no focus steal. Subsequent Show(activateWindow:false) calls then
-        // present live content.
-        this.Activate();
         appWindow.Hide();
+    }
+
+    /// <summary>
+    /// One-time realization of the WinUI content island so later Show() calls
+    /// present LIVE content (animations, elapsed-ms). Without this the pill
+    /// renders its first frame and freezes. MUST run off the bootstrap call
+    /// stack: Activate() starts async island composition, and hiding in the
+    /// same pump tears it down mid-composition -> WinRT stowed E_POINTER
+    /// (0xc000027b) in Microsoft.UI.Xaml and process death (see 2d1a607 crash).
+    /// So: enqueue at Low priority, Activate, then hide only after the content
+    /// has Loaded (island realized).
+    /// </summary>
+    public void RealizeOnce()
+    {
+        this.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(_hwnd));
+            this.Activate();
+            if (this.Content is FrameworkElement root)
+            {
+                void OnLoaded(object s, RoutedEventArgs e)
+                {
+                    root.Loaded -= OnLoaded;
+                    appWindow.Hide();
+                }
+                if (root.IsLoaded) { appWindow.Hide(); }
+                else { root.Loaded += OnLoaded; }
+            }
+            else
+            {
+                this.DispatcherQueue.TryEnqueue(() => appWindow.Hide());
+            }
+        });
     }
 
     private void OnVmChanged(object? sender, PropertyChangedEventArgs e)

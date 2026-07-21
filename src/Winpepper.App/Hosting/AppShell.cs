@@ -305,6 +305,9 @@ public sealed class AppShell : IDisposable
         else if (!startHidden) ShowMain(navigateToOnboarding: false);
         // else: stay tray-only (autostart with --tray).
 
+        // One-time content-island realization, off the bootstrap call stack (see RealizeOnce doc).
+        Pill.RealizeOnce();
+
         // Start the pipeline only after the window is up so a missing or
         // corrupt model can never block first paint (issue #6). TryStart
         // reports a missing model on the error bus and leaves the pipeline

@@ -38,9 +38,9 @@ All under `%LOCALAPPDATA%\winpepper`:
 | `models\` | model download |
 | `crashes\` | only on crash (should stay empty) |
 
-Plus machine state written by the MSI: payload under
-`C:\Program Files\Winpepper`, the ARP uninstall entry, the
-`HKLM\Software\Winpepper` version stamp, and the per-user autostart value
+Plus per-user state written by the MSI: payload under
+`%LOCALAPPDATA%\Programs\Winpepper`, the (per-user, HKCU) ARP uninstall entry, the
+`HKCU\Software\Winpepper` version stamp, and the autostart value
 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\Winpepper`
 (`"...\Winpepper.exe" --tray`, written on fresh installs only so upgrades
 never resurrect a toggled-off autostart).
@@ -86,9 +86,9 @@ pwsh -File scripts\smoke-windows.ps1 -SkipLaunch
 Checks performed (PASS/FAIL/WARN, exit code 1 on any FAIL):
 
 - `InstallPayload` / `InstallAssets` — `Winpepper.exe` and `Assets\AppIcon.ico`
-  under `C:\Program Files\Winpepper`.
-- `ArpEntry` — Add/Remove Programs entry named `Winpepper`.
-- `HklmVersionStamp` — `HKLM\Software\Winpepper` `InstallVersion`/`InstallDir`.
+  under `%LOCALAPPDATA%\Programs\Winpepper`.
+- `ArpEntry` — Add/Remove Programs entry named `Winpepper` (per-user, under HKCU).
+- `HkcuVersionStamp` — `HKCU\Software\Winpepper` `InstallVersion`/`InstallDir`.
 - `AutostartRunKey` — HKCU Run value pointing at `Winpepper.exe --tray`.
 - `Selftest` (with `-RunSelftest`) — `Winpepper.exe --selftest` emits
   `WINPEPPER_SELFTEST_OK` (same contract as the nightly CI job).

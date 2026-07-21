@@ -68,14 +68,14 @@ public sealed partial class RecordingPage : Page
         {
             if (AutostartToggle.IsOn)
             {
-                // Spec §7.7 mandates the literal value
-                //   "C:\Program Files\Winpepper\winpepper.exe" --tray
-                // because the MSI installs to Program Files. AppContext.BaseDirectory
-                // is correct only when running from the install location; in dev / on
-                // the VM you can override via the WINPEPPER_AUTOSTART_EXE env var.
+                // Spec §7.7: the Run-key value points at the installed exe. The
+                // MSI is a per-user install under %LOCALAPPDATA%\Programs\Winpepper,
+                // so build that path from LocalApplicationData. In dev / on the VM
+                // you can override via the WINPEPPER_AUTOSTART_EXE env var.
                 var exe = Environment.GetEnvironmentVariable("WINPEPPER_AUTOSTART_EXE");
                 if (string.IsNullOrEmpty(exe))
-                    exe = @"C:\Program Files\Winpepper\winpepper.exe";
+                    exe = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)
+                          + @"\Programs\Winpepper\winpepper.exe";
                 _shell.Autostart.Enable(exe, "--tray");
             }
             else _shell.Autostart.Disable();

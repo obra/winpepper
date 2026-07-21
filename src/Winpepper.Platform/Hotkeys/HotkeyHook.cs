@@ -26,11 +26,19 @@ public sealed class HotkeyHook : IDisposable
     private LowLevelKeyboardProc? _callback;
     private Modifier _modifiers;
     private bool _holding;
-    private readonly HashSet<int> _swallowedKeys = new();
+    // vk -> timestamp the swallow was last observed. Entries self-heal (drop)
+    // when the physical key is no longer held, so a lost key-up can never
+    // swallow a key forever.
+    private readonly Dictionary<int, DateTimeOffset> _swallowedKeys = new();
     private readonly HashSet<int> _observedCancelKeys = new();
-    private readonly HashSet<int> _captureKeysDown = new();
+    // vk -> timestamp last observed during capture. Same physical-state
+    // self-heal as _swallowedKeys: a lost key-up must not wedge drain mode.
+    private readonly Dictionary<int, DateTimeOffset> _captureKeysDown = new();
     private int _suspendRequested;
     private readonly ManualResetEventSlim _ready = new(initialState: false);
+
+    private readonly Func<DateTimeOffset> _now;
+    private readonly Func<int, bool> _keyPhysicallyDown;
 
     public ChannelReader<HotkeyEvent> Events => _events.Reader;
 
@@ -40,13 +48,25 @@ public sealed class HotkeyHook : IDisposable
     /// foreground app); <paramref name="evt"/> is set when a hotkey event fired.
     /// The two are independent: a key-up can emit HoldUp yet still pass through
     /// when its key-down was visible to the system.
+    ///
+    /// Invariant: modifier keys (Ctrl/Shift/Alt/Win, left or right) are NEVER
+    /// swallowed. A modifier used in a hotkey still fires the event but always
+    /// passes through to Windows so it keeps working system-wide. Only a
+    /// non-modifier trigger key (e.g. the Space in Ctrl+Shift+Space) is
+    /// swallowed.
     /// </summary>
     public bool TryProcessKey(int vk, bool down, out HotkeyEvent? evt)
     {
         evt = null;
+        var now = _now();
         var modifiersBeforeEvent = _modifiers;
         UpdateModifierState(vk, down);
         var bindings = Volatile.Read(ref _bindings);
+
+        // Self-heal: drop tracked entries whose physical key is no longer held,
+        // so a lost key-up can never leave a key swallowed or the hook wedged.
+        // The current key is handled below.
+        PruneStaleKeys(now, exceptVk: vk);
 
         var suspendRequested = Volatile.Read(ref _suspendRequested) != 0;
         if (suspendRequested || _captureKeysDown.Count != 0)
@@ -56,7 +76,7 @@ public sealed class HotkeyHook : IDisposable
             // from firing a just-recorded chord after the UI requests resume.
             if (down)
             {
-                _captureKeysDown.Add(vk);
+                _captureKeysDown[vk] = now;
                 return false;
             }
             _captureKeysDown.Remove(vk);
@@ -79,7 +99,18 @@ public sealed class HotkeyHook : IDisposable
             // but do not emit a duplicate event. Without this, repeats of the
             // chord-completing modifier leak to the foreground app, and a held
             // toggle chord fires Toggle once per repeat.
-            if (_swallowedKeys.Contains(vk)) return true;
+            // Autorepeat of a key we own: keep swallowing while it is live, and
+            // refresh its liveness timestamp. If the entry is stale (lost
+            // key-up), drop it and treat this as a fresh press below.
+            if (_swallowedKeys.TryGetValue(vk, out var swallowedSince))
+            {
+                if (IsKeyEntryLive(vk, swallowedSince, now))
+                {
+                    _swallowedKeys[vk] = now;
+                    return true;
+                }
+                _swallowedKeys.Remove(vk);
+            }
 
             if (CancelEnabled()
                 && ActivatesOnKeyDown(bindings.Cancel, vk, modifiersBeforeEvent, _modifiers))
@@ -91,14 +122,21 @@ public sealed class HotkeyHook : IDisposable
             if (ActivatesOnKeyDown(bindings.Toggle, vk, modifiersBeforeEvent, _modifiers))
             {
                 evt = new HotkeyEvent(HotkeyEventKind.Toggle, DateTimeOffset.UtcNow);
-                _swallowedKeys.Add(vk);
+                // Modifier keys always pass through to Windows so they keep
+                // working system-wide (e.g. Shift still shifts). Only a
+                // non-modifier trigger key is hidden from the foreground app.
+                if (IsModifierKey(vk)) return false;
+                _swallowedKeys[vk] = now;
                 return true;
             }
             if (ActivatesOnKeyDown(bindings.Hold, vk, modifiersBeforeEvent, _modifiers) && !_holding)
             {
                 _holding = true;
                 evt = new HotkeyEvent(HotkeyEventKind.HoldDown, DateTimeOffset.UtcNow);
-                _swallowedKeys.Add(vk);
+                // Modifier keys always pass through (see the Toggle branch
+                // above); only a non-modifier trigger key is swallowed.
+                if (IsModifierKey(vk)) return false;
+                _swallowedKeys[vk] = now;
                 return true;
             }
             return false;
@@ -123,12 +161,22 @@ public sealed class HotkeyHook : IDisposable
         HotkeyChord toggle,
         HotkeyChord cancel,
         ILogger<HotkeyHook> log,
-        Func<bool>? cancelEnabled = null)
+        Func<bool>? cancelEnabled = null,
+        Func<DateTimeOffset>? timeProvider = null,
+        Func<int, bool>? keyPhysicallyDown = null)
     {
         _bindings = new HotkeyBindings(hold, toggle, cancel);
         _log = log;
         _cancelEnabled = cancelEnabled ?? (() => true);
+        _now = timeProvider ?? (() => DateTimeOffset.UtcNow);
+        _keyPhysicallyDown = keyPhysicallyDown ?? DefaultKeyPhysicallyDown;
     }
+
+    // Real physical key-state probe. Guarded so it is only P/Invoked on Windows;
+    // on other platforms (Linux test host) production never installs the hook,
+    // and unit tests inject their own probe, so returning true here is inert.
+    private static bool DefaultKeyPhysicallyDown(int vk)
+        => !OperatingSystem.IsWindows() || (GetAsyncKeyState(vk) & 0x8000) != 0;
 
     private bool CancelEnabled()
     {
@@ -244,6 +292,51 @@ public sealed class HotkeyHook : IDisposable
             && !chord.Matches(0, modifiersBeforeEvent)
             && chord.Matches(0, currentModifiers);
     }
+
+    /// <summary>
+    /// A tracked key entry is "live" while the physical key is still held.
+    /// Age alone cannot make a held key stale: accessibility and typematic
+    /// settings may delay autorepeat for an arbitrary amount of time.
+    /// </summary>
+    private bool IsKeyEntryLive(int vk, DateTimeOffset _, DateTimeOffset __)
+        => _keyPhysicallyDown(vk);
+
+    /// <summary>
+    /// Drops stale entries from the tracked key dictionaries, healing keys whose
+    /// key-up was lost. <paramref name="exceptVk"/> is the key of the current
+    /// event, which the normal down/up logic handles explicitly (so happy-path
+    /// swallow/up symmetry is preserved). Excluding the current key is also
+    /// correctness-critical on Windows: per the LowLevelKeyboardProc contract the
+    /// callback runs BEFORE the current key's async state is updated, so a
+    /// GetAsyncKeyState probe of that key would read a stale value; every OTHER
+    /// tracked key's async state is already settled and safe to probe.
+    /// </summary>
+    private void PruneStaleKeys(DateTimeOffset now, int exceptVk)
+    {
+        PruneStale(_swallowedKeys, now, exceptVk);
+        PruneStale(_captureKeysDown, now, exceptVk);
+    }
+
+    private void PruneStale(Dictionary<int, DateTimeOffset> keys, DateTimeOffset now, int exceptVk)
+    {
+        if (keys.Count == 0) return;
+        List<int>? stale = null;
+        foreach (var (vk, since) in keys)
+        {
+            if (vk == exceptVk) continue;
+            if (!IsKeyEntryLive(vk, since, now)) (stale ??= new()).Add(vk);
+        }
+        if (stale is null) return;
+        foreach (var vk in stale) keys.Remove(vk);
+    }
+
+    /// <summary>
+    /// True when <paramref name="vk"/> is one of the eight modifier keys
+    /// (Ctrl/Shift/Alt/Win, left or right). Modifier keys are always passed
+    /// through to Windows so they keep functioning system-wide, even while the
+    /// app uses them in a hotkey.
+    /// </summary>
+    private static bool IsModifierKey(int vk) => ModifierForVirtualKey(vk) != Modifier.None;
 
     private static Modifier ModifierForVirtualKey(int vk)
         => vk switch

@@ -20,6 +20,53 @@ public class CleanupRunnerTests
         WindowContextWait = TimeSpan.FromMilliseconds(50),
     };
 
+    // Regression tests for prompt-scaffold echo / runaway generation being
+    // injected as dictation (raw "Hello, my name is Crispy" came out as
+    // "<OUTPUT>I think we should just ship it tomorrow.</OUTPUT>Human: ...").
+
+    [Fact]
+    public async Task Run_LlmEchoesPromptScaffold_FallsBackToRawTranscript()
+    {
+        var garbage = "<OUTPUT>\nI think we should just ship it tomorrow.\n</OUTPUT>Human: I think we should just ship it tomorrow.\n\nOutput: I think we should just ship it tomorrow.";
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Output = garbage });
+        var result = await runner.RunAsync("Hello, my name is Crispy. How do you do?",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.FallbackImplausible);
+        result.CleanedText.ShouldBe("Hello, my name is Crispy. How do you do?");
+    }
+
+    [Fact]
+    public async Task Run_LlmOutputImplausiblyLong_FallsBackToRawTranscript()
+    {
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Output = new string('x', 500) });
+        var result = await runner.RunAsync("short utterance",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.FallbackImplausible);
+        result.CleanedText.ShouldBe("short utterance");
+    }
+
+    [Fact]
+    public async Task Run_MarkerSpokenByUser_IsNotRejected()
+    {
+        // A user who actually dictated "Output:" must not trip the echo guard.
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "Output: forty-two." });
+        var result = await runner.RunAsync("output colon forty two",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.Llm);
+        result.CleanedText.ShouldBe("Output: forty-two.");
+    }
+
+    [Fact]
+    public void LooksLikePromptEcho_ChatTemplateMarkers_Detected()
+    {
+        CleanupRunner.LooksLikePromptEcho("<|im_start|>assistant hi", "anything").ShouldBeTrue();
+        CleanupRunner.LooksLikePromptEcho("### Response: hi", "anything").ShouldBeTrue();
+        CleanupRunner.LooksLikePromptEcho("Plain cleaned sentence.", "anything").ShouldBeFalse();
+    }
+
     [Fact]
     public async Task Run_LlmReturnsCleanText_UsesLlmPath()
     {
@@ -178,5 +225,36 @@ public class CleanupRunnerTests
         backend.LastPrompt.ShouldNotBeNull();
         backend.LastPrompt!.ShouldNotContain("ignored");
         backend.LastPrompt!.ShouldNotContain("<WINDOW-OCR-CONTENT>");
+    }
+
+    [Fact]
+    public async Task Run_LlmPath_AppNameMishearingCorrected()
+    {
+        // LLM returns plausible text that still contains the ASR mishearing.
+        var runner = NewRunner(new FakeLlamaCleanupBackend
+        {
+            Output = "Testing wheat pepper. How's it going?",
+        });
+        var result = await runner.RunAsync("testing wheat pepper how's it going",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.Llm);
+        result.CleanedText.ShouldBe("Testing Winpepper. How's it going?");
+    }
+
+    [Fact]
+    public async Task Run_FallbackPath_AppNameMishearingCorrected()
+    {
+        // Backend throws -> FallbackBackendError -> raw transcript is what gets
+        // injected. The app-name correction must still be applied there.
+        var runner = NewRunner(new FakeLlamaCleanupBackend
+        {
+            Throw = new InvalidOperationException("boom"),
+        });
+        var result = await runner.RunAsync("Testing wheat pepper.",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.FallbackBackendError);
+        result.CleanedText.ShouldBe("Testing Winpepper.");
     }
 }

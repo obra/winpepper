@@ -18,6 +18,10 @@ public sealed partial class HotkeyRecorderBox : UserControl
     private ILogger? _logCache;
     private ILogger? Log => _logCache ??= App.Shell?.LogFactory.CreateLogger("HotkeyRecorderBox");
 
+    // Guarantees the global hook is un-suspended if this control is torn down
+    // mid-recording (window close / page unload) without Cancel/Commit/LostFocus.
+    private readonly RecorderSuspendCoordinator _suspend;
+
     public static readonly DependencyProperty LabelProperty =
         DependencyProperty.Register(nameof(Label), typeof(string), typeof(HotkeyRecorderBox), new PropertyMetadata("Hotkey",
             (d, e) => ((HotkeyRecorderBox)d).LabelBlock.Text = (string)e.NewValue));
@@ -31,10 +35,20 @@ public sealed partial class HotkeyRecorderBox : UserControl
     public HotkeyRecorderBox()
     {
         InitializeComponent();
+        _suspend = new RecorderSuspendCoordinator(recording => RecordingStateChanged?.Invoke(recording));
         KeyDown += OnKeyDown;
         KeyUp += OnKeyUp;
         LostFocus += OnLostFocus;
+        Unloaded += OnUnloaded;
         IsTabStop = true;
+    }
+
+    // Torn down (page navigated away, window closed) - release suspend and stop
+    // any in-flight recording so global hotkeys can never be left dead.
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _recorder.Cancel();
+        _suspend.Teardown();
     }
 
     public void SetChord(string chord, string? error)
@@ -48,7 +62,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
     {
         _chordBeforeRecording = ChordText.Text;
         _recorder.Begin();
-        RecordingStateChanged?.Invoke(true);
+        _suspend.SetRecording(true);
         ChordText.Text = "(press a chord - Esc cancels)";
         RecordButton.Visibility = Visibility.Collapsed;
         CancelButton.Visibility = Visibility.Visible;
@@ -71,7 +85,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
     private void CancelRecording(string reason)
     {
         if (!_recorder.Cancel()) return;
-        RecordingStateChanged?.Invoke(false);
+        _suspend.SetRecording(false);
         ChordText.Text = _chordBeforeRecording;
         ResetButtons();
         Log?.LogInformation("Hotkey recording cancelled ({Label}): {Reason}", Label, reason);
@@ -136,7 +150,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
         switch (result)
         {
             case ChordKeyResult.Cancelled:
-                RecordingStateChanged?.Invoke(false);
+                _suspend.SetRecording(false);
                 ChordText.Text = _chordBeforeRecording;
                 ResetButtons();
                 Log?.LogInformation("Hotkey recording cancelled ({Label}): Esc", Label);
@@ -159,7 +173,7 @@ public sealed partial class HotkeyRecorderBox : UserControl
         SetChord(chord, null);
         ResetButtons();
         ChordRecorded?.Invoke(chord);
-        RecordingStateChanged?.Invoke(false);
+        _suspend.SetRecording(false);
         Log?.LogInformation("Hotkey recording committed ({Label}): {Chord}", Label, chord);
     }
 

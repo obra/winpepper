@@ -41,7 +41,7 @@ upload it to the GitHub release via `gh release upload v0.6.0 artifacts/winpeppe
 ## Verifying the signature
 
 ```powershell
-signtool verify /pa /v "C:\Program Files\Winpepper\Winpepper.exe"
+signtool verify /pa /v "$env:LOCALAPPDATA\Programs\Winpepper\Winpepper.exe"
 signtool verify /pa /v "winpepper-0.6.0-x64.msi"
 ```
 

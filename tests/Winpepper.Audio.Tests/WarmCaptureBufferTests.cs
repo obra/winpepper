@@ -109,4 +109,33 @@ public class WarmCaptureBufferTests
         buf.Ingest(new float[] { 8 });
         buf.StopSession().ShouldBe(new float[] { 7, 8 });
     }
+
+    [Fact]
+    public void SessionWasSilent_TrueWhenAllSamplesEssentiallyZero()
+    {
+        var buf = new WarmCaptureBuffer(ringCapacitySamples: 100);
+        buf.StartSession(0);
+        buf.Ingest(new float[64]); // zero-filled
+        buf.StopSession();
+        buf.SessionWasSilent.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void SessionWasSilent_FalseWhenSpeechPresent()
+    {
+        var buf = new WarmCaptureBuffer(ringCapacitySamples: 100);
+        buf.StartSession(0);
+        buf.Ingest(new float[] { 0.3f, -0.3f, 0.3f, -0.3f });
+        buf.StopSession();
+        buf.SessionWasSilent.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void SessionWasSilent_FalseWhenNothingCaptured()
+    {
+        var buf = new WarmCaptureBuffer(ringCapacitySamples: 100);
+        buf.StartSession(0);
+        buf.StopSession();
+        buf.SessionWasSilent.ShouldBeFalse(); // empty != silent capture
+    }
 }

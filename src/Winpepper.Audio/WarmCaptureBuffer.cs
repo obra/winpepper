@@ -15,6 +15,7 @@ public sealed class WarmCaptureBuffer
     private readonly List<float> _ring;
     private readonly List<float> _session = new();
     private bool _active;
+    private bool _sessionWasSilent;
     private readonly object _lock = new();
 
     public WarmCaptureBuffer(int ringCapacitySamples)
@@ -27,6 +28,15 @@ public sealed class WarmCaptureBuffer
     public bool IsSessionActive
     {
         get { lock (_lock) { return _active; } }
+    }
+
+    /// <summary>
+    /// True when the most recently ended session captured essentially zero
+    /// energy (Bug 2, warm-level health flag). Valid after <see cref="StopSession"/>.
+    /// </summary>
+    public bool SessionWasSilent
+    {
+        get { lock (_lock) { return _sessionWasSilent; } }
     }
 
     public void Ingest(ReadOnlySpan<float> frame)
@@ -61,6 +71,7 @@ public sealed class WarmCaptureBuffer
         {
             _active = false;
             var result = _session.ToArray();
+            _sessionWasSilent = AudioEnergy.IsSessionSilent(result);
             _session.Clear();
             return result;
         }

@@ -25,6 +25,7 @@
     <PackageReference Include="H.NotifyIcon.WinUI" />
     <PackageReference Include="CommunityToolkit.Mvvm" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Winpepper.Core\Winpepper.Core.csproj" />

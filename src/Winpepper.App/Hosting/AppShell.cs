@@ -40,6 +40,9 @@ public sealed class AppShell : IDisposable
     public Winpepper.Core.Logging.LogRingBuffer LogTail { get; }
     public Winpepper.Core.Threading.IUiThread Ui { get; }
     public Winpepper.App.Hosting.DiagnosticsHost DiagnosticsHost { get; }
+    public Winpepper.Asr.Transcription.IAssemblyAiKeyStore AssemblyAiKeyStore { get; private set; } = null!;
+    public Winpepper.Asr.Transcription.AssemblyAiClient AssemblyAiClient { get; private set; } = null!;
+    public Winpepper.Asr.Transcription.AssemblyAiOptions AssemblyAiOptions { get; private set; } = null!;
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
@@ -227,10 +230,24 @@ public sealed class AppShell : IDisposable
             factory.CreateLogger<Winpepper.Core.Crash.CrashHandler>());
         App.CrashHandler = crashHandler;
 
+        // --- AssemblyAI cloud ASR provider stack (optional; key may be absent) ---
+        var aaiKeyStore = new Winpepper.Asr.Transcription.AssemblyAiKeyStore(
+            AppPaths.AssemblyAiKeyFile, new Winpepper.App.Asr.DpapiApiKeyProtector());
+        var aaiHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        var aaiOptions = new Winpepper.Asr.Transcription.AssemblyAiOptions { Model = settings.AssemblyAiModel };
+        var aaiClient = new Winpepper.Asr.Transcription.AssemblyAiClient(
+            aaiHttp,
+            () => aaiKeyStore.Load(),
+            aaiOptions,
+            factory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiClient>());
+
         var pipeline = new PipelineHost(factory, errorBus, engine, sessionVm, sounds,
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
                                          historyServices.Archiver, settings.AsrModelName, cleanupModelName,
                                          clipboardFallback, toasts,
+                                         () => store.Load(),
+                                         (local, s, onFallback) => AppShell.BuildTranscriber(
+                                             local, s, onFallback, aaiClient, aaiKeyStore, factory),
                                          cleanup, correctionStore, windowContext, cleanupOptions,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
                                          postPasteLearningEnabled: settings.PostPasteLearningEnabled,
@@ -241,6 +258,9 @@ public sealed class AppShell : IDisposable
                                   autostart, pipeline, sounds, historyServices, modelsServices,
                                   toasts, clipboardFallback, crashHandler,
                                   logTail, uiThread, diagHost);
+        shell.AssemblyAiKeyStore = aaiKeyStore;
+        shell.AssemblyAiClient = aaiClient;
+        shell.AssemblyAiOptions = aaiOptions;
         await shell.StartAsync();
         return shell;
     }
@@ -315,6 +335,42 @@ public sealed class AppShell : IDisposable
         "Custom"   => Winpepper.Cleanup.CleanupProfile.Custom,
         _          => Winpepper.Cleanup.CleanupProfile.Ordinary,
     };
+
+    /// <summary>
+    /// Builds the transcriber for a dictation. When AssemblyAI is selected the
+    /// cloud provider is wrapped in a FallbackTranscriber so any failure lands
+    /// on the local Parakeet session. Otherwise the local transcriber is used.
+    /// Static, taking its dependencies explicitly, so the pipeline can invoke it
+    /// through an injected delegate without holding an AppShell instance — see
+    /// the Task 10 Step 1 wiring note for why no AppShell reference is available
+    /// when PipelineHost is constructed.
+    /// </summary>
+    public static Winpepper.Asr.Transcription.ITranscriber BuildTranscriber(
+        Winpepper.Asr.ParakeetSession local,
+        AppSettings settings,
+        Action<string> onFallback,
+        Winpepper.Asr.Transcription.IAssemblyAiClient client,
+        Winpepper.Asr.Transcription.IAssemblyAiKeyStore keyStore,
+        ILoggerFactory loggerFactory)
+    {
+        var localTranscriber = new Winpepper.Asr.Transcription.ParakeetTranscriber(
+            local, Winpepper.Models.ModelRegistry.DefaultAsrName);
+
+        if (!string.Equals(settings.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase))
+            return localTranscriber;
+
+        var options = new Winpepper.Asr.Transcription.AssemblyAiOptions { Model = settings.AssemblyAiModel };
+        var cloud = new Winpepper.Asr.Transcription.AssemblyAiTranscriber(
+            client,
+            keyStore,
+            options,
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiTranscriber>());
+
+        return new Winpepper.Asr.Transcription.FallbackTranscriber(
+            cloud, localTranscriber,
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.FallbackTranscriber>(),
+            onFallback);
+    }
 
     public void Dispose()
     {

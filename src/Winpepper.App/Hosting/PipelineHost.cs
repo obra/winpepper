@@ -4,6 +4,7 @@ using Winpepper.Asr;
 using Winpepper.Audio;
 using Winpepper.Core.Audio;
 using Winpepper.Core.Sessions;
+using Winpepper.Core.Settings;
 using Winpepper.Core.ViewModels;
 using Winpepper.Platform.Hotkeys;
 using Winpepper.Platform.Injection;
@@ -45,6 +46,8 @@ public sealed class PipelineHost : IDisposable
     private Guid _currentSessionId = Guid.Empty;
     private readonly Winpepper.Platform.Injection.ClipboardFallback _clipboardFallback;
     private readonly Winpepper.Core.Notifications.IToastService _toasts;
+    private readonly Func<AppSettings> _settingsProvider;
+    private readonly Func<Winpepper.Asr.ParakeetSession, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> _buildTranscriber;
     private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
     private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
     private readonly bool _postPasteLearningEnabled;
@@ -63,6 +66,8 @@ public sealed class PipelineHost : IDisposable
         string cleanupModelName,
         Winpepper.Platform.Injection.ClipboardFallback clipboardFallback,
         Winpepper.Core.Notifications.IToastService toasts,
+        Func<AppSettings> settingsProvider,
+        Func<Winpepper.Asr.ParakeetSession, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> transcriberFactory,
         Winpepper.Cleanup.CleanupRunner? cleanup = null,                       // PLAN2-TYPE
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
@@ -94,6 +99,8 @@ public sealed class PipelineHost : IDisposable
         _cleanupOptions = cleanupOptions ?? new Winpepper.Cleanup.CleanupOptions();
         _clipboardFallback = clipboardFallback;
         _toasts = toasts;
+        _settingsProvider = settingsProvider;
+        _buildTranscriber = transcriberFactory;
         _postPaste = postPaste;
         _focusedCapturer = focusedCapturer;
         _postPasteLearningEnabled = postPasteLearningEnabled;
@@ -203,11 +210,19 @@ public sealed class PipelineHost : IDisposable
                 _sounds.PlayStop();
 
                 var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
-                var transcript = await Task.Run(() => _asr!.Transcribe(samples), ct);
+                var settingsNow = _settingsProvider();
+                var transcriber = _buildTranscriber(_asr!, settingsNow, notice =>
+                    _ = _toasts.ShowAsync(
+                        "Winpepper",
+                        "Cloud transcription unavailable — used local speech recognition instead.",
+                        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                        TimeSpan.FromSeconds(6)));
+                var transcription = await transcriber.TranscribeAsync(samples, ct);
                 transcribeSw.Stop();
                 _engine.Apply(SessionEvent.TranscriptReady);
 
-                string final = transcript.Text;
+                string final = transcription.Text;
+                var producedModelName = transcription.ProviderModelName;
                 var cleanupSw = new System.Diagnostics.Stopwatch();
                 var cleanupUsedModel = "";
                 var windowContextUsed = false;
@@ -310,9 +325,9 @@ public sealed class PipelineHost : IDisposable
                 _archiver.Archive(new Winpepper.History.HistoryArchiveInput
                 {
                     Samples16k = samples,
-                    RawTranscript = transcript.Text,
+                    RawTranscript = transcription.Text,
                     CleanedText = final,
-                    AsrModelName = _asrModelName,
+                    AsrModelName = producedModelName,
                     CleanupModelName = cleanupUsedModel,
                     WindowContextUsed = windowContextUsed,
                     WindowTitleAtStart = "",
@@ -360,11 +375,19 @@ public sealed class PipelineHost : IDisposable
                     _sounds.PlayStop();
 
                     var transcribeSw2 = System.Diagnostics.Stopwatch.StartNew();
-                    var transcript2 = await Task.Run(() => _asr!.Transcribe(samples2), ct);
+                    var settingsNow2 = _settingsProvider();
+                    var transcriber2 = _buildTranscriber(_asr!, settingsNow2, notice =>
+                        _ = _toasts.ShowAsync(
+                            "Winpepper",
+                            "Cloud transcription unavailable — used local speech recognition instead.",
+                            Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                            TimeSpan.FromSeconds(6)));
+                    var transcription2 = await transcriber2.TranscribeAsync(samples2, ct);
                     transcribeSw2.Stop();
                     _engine.Apply(SessionEvent.TranscriptReady);
 
-                    string final2 = transcript2.Text;
+                    string final2 = transcription2.Text;
+                    var producedModelName2 = transcription2.ProviderModelName;
                     var cleanupSw2 = new System.Diagnostics.Stopwatch();
                     var cleanupUsedModel2 = "";
                     var windowContextUsed2 = false;
@@ -467,9 +490,9 @@ public sealed class PipelineHost : IDisposable
                     _archiver.Archive(new Winpepper.History.HistoryArchiveInput
                     {
                         Samples16k = samples2,
-                        RawTranscript = transcript2.Text,
+                        RawTranscript = transcription2.Text,
                         CleanedText = final2,
-                        AsrModelName = _asrModelName,
+                        AsrModelName = producedModelName2,
                         CleanupModelName = cleanupUsedModel2,
                         WindowContextUsed = windowContextUsed2,
                         WindowTitleAtStart = "",

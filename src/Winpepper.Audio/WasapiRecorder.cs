@@ -130,6 +130,15 @@ public sealed class WasapiRecorder : IAudioRecorder
             {
                 DiscardOnBufferOverflow = true,
                 BufferDuration = TimeSpan.FromSeconds(2),
+                // Bug 1 (critical): must be false. When true (the NAudio default),
+                // Read() zero-pads to the requested count and never returns 0, so
+                // MediaFoundationResampler always has input and the drain loop below
+                // (`while (_resampler.Read(...) > 0)`) never terminates -> infinite
+                // loop + unbounded allocation for any capture rate != 16 kHz (the
+                // normal case for real WASAPI mics at 44.1/48 kHz). Setting false
+                // makes Read() return only buffered data (down to 0), so the resampler
+                // drains and the loop exits, matching the old finite-source behavior.
+                ReadFully = false,
             };
             _resampler = new MediaFoundationResampler(
                 _resamplerInput, WaveFormat.CreateIeeeFloatWaveFormat(SampleRate16k, 1))

@@ -1483,6 +1483,10 @@ public sealed class WasapiCaptureSource : ICaptureSource
             {
                 DiscardOnBufferOverflow = true,
                 BufferDuration = TimeSpan.FromSeconds(2),
+                // Bug 1 (critical): MUST be false. Default true makes Read() zero-pad
+                // and never return 0, so the resampler drain loop below never
+                // terminates for any capture rate != 16 kHz -> infinite loop + OOM.
+                ReadFully = false,
             };
             _resampler = new MediaFoundationResampler(
                 _resamplerInput, WaveFormat.CreateIeeeFloatWaveFormat(SampleRate16k, 1))
@@ -1864,6 +1868,10 @@ public sealed class WasapiRecorder : IAudioRecorder
             {
                 DiscardOnBufferOverflow = true,
                 BufferDuration = TimeSpan.FromSeconds(2),
+                // Bug 1 (critical): MUST be false. Default true makes Read() zero-pad
+                // and never return 0, so the resampler drain loop below never
+                // terminates for any capture rate != 16 kHz -> infinite loop + OOM.
+                ReadFully = false,
             };
             _resampler = new MediaFoundationResampler(
                 _resamplerInput, WaveFormat.CreateIeeeFloatWaveFormat(SampleRate16k, 1))

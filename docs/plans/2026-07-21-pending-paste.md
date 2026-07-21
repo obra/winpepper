@@ -54,12 +54,17 @@ build/test the `net9.0` target on Linux), xUnit v3, Shouldly assertions.
   existing history archiving feature (`Winpepper.History.HistoryArchiver`) is
   separate and unchanged — this plan does not add the pending text to any
   archived `HistoryEntry`, settings file, or log payload.
-- **WinUI code is Linux-unbuildable and Linux-untestable.** Every file under
-  `src/Winpepper.App` is wrapped in `#if WINDOWS` and is NOT compiled on Linux
-  (`Directory.Build.props` skips `Winpepper.App`'s project references on
-  non-Windows unless forced). Changes there are kept thin, call the tested
-  pure-managed logic, and are verified in the **Windows Smoke Test Checklist**
-  at the end — they are NOT deferred or stubbed.
+- **WinUI code is Linux-untestable.** Winpepper.App (Tasks 6–9) is not unit-tested
+  on Linux because (a) its code is wrapped in `#if WINDOWS` (the `WINDOWS` constant
+  is undefined off Windows, so the bodies compile to near-empty) and (b) the test
+  project `tests/Winpepper.Core.Tests` references only `Winpepper.Core` +
+  `Winpepper.Corrections`, **not** `Winpepper.App`. Note: the `Directory.Build.props`
+  non-Windows skip guard (its `'$(EnableWindowsTargeting)' != 'true'` condition) is
+  **inert** — `EnableWindowsTargeting` is set `true` globally earlier in the same
+  file — so do NOT rely on it; a full-solution `dotnet build` on Linux will *attempt*
+  Winpepper.App (it compiles via the Windows TFM). Changes there are kept thin, call
+  the tested pure-managed logic, and are verified in the **Windows Smoke Test
+  Checklist** at the end — they are NOT deferred or stubbed.
 - **Docs:** `README.md` is the only end-user markdown doc; this plan under
   `docs/plans/` is a working/agent doc and is fine. Do not add other end-user
   docs.
@@ -1431,17 +1436,22 @@ Add these two methods to the class (place them near the injection logic):
 
 - [ ] **Step 3: Capture the target at BOTH dictation-start sites**
 
-In the HoldDown branch (recording start, around the `StartRequested` /
-recording-begin logic near `PipelineHost.cs:211-260`) add, right after recording
-actually starts:
+In the HoldDown branch (`case HotkeyEventKind.HoldDown:` at `PipelineHost.cs:211`;
+`_engine.Apply(SessionEvent.StartRequested)` at ~`:213`, `_warmRecorder!.StartSession(...)`
+at ~`:216`, case ends ~`:226`) add, right after recording actually starts (before the
+case's `break`):
 
 ```csharp
         _targetAtStart = CaptureTarget();
 ```
 
-Do the **same** in the Toggle-start branch (around `PipelineHost.cs:379-430`) at
-the equivalent recording-start point. Both branches must set `_targetAtStart`
-each time a new dictation begins.
+Do the **same** in the Toggle-start branch (`case HotkeyEventKind.Toggle:` at
+`PipelineHost.cs:379`; the `if (_engine.State == SessionState.Idle)` start branch is
+~`:380-395`, with `StartRequested` at ~`:382` and `StartSession` at ~`:385`; the
+Toggle-STOP branch begins at ~`:396`) at the equivalent recording-start point inside the
+Idle/start branch. Both branches must set `_targetAtStart` each time a new dictation
+begins. (Line numbers are approximate — anchor on the `StartRequested`/`StartSession`
+calls, not the raw numbers.)
 
 - [ ] **Step 4: Apply the decision at BOTH injection sites**
 
@@ -1483,8 +1493,16 @@ with a decision-gated version:
         injectSw.Stop();
 ```
 
-Apply the **identical** transformation to the Toggle-stop branch injection block
-(`PipelineHost.cs:~491-514`). Both sites must gate on `PendingPasteDecider.Decide`.
+Apply the **identical** transformation to the Toggle-stop branch injection block,
+which is at **`PipelineHost.cs:471-490`** (the `if (!string.IsNullOrWhiteSpace(final2)) { injected2 = _injector.TryInject(final2); ... }` block, with `injectSw2`/`final2`/`injected2` locals). Both sites must gate on `PendingPasteDecider.Decide`.
+
+> **DO NOT** wrap the block at `~491-514` — that is the `PostPasteGate.ShouldWatch`
+> post-paste-learning block, **not** the injection block. The Toggle-stop injection
+> block is immediately above it (471-490). (Anchor on the `_injector.TryInject(final2)`
+> call, not the raw line numbers.) The matching `_engine.Apply(SessionEvent.InjectionCompleted)`
+> call sits after the PostPasteGate block (~`:515` for Toggle-stop, ~`:346` for HoldUp),
+> so the inserted `EnterPendingPaste` runs before the engine's Idle transition — which is
+> what keeps the PENDING pill visible.
 
 > Note: leave the existing `_focusedCapturer.Capture()` post-paste-learning
 > gate and the `_engine.Apply(SessionEvent.InjectionCompleted)` call unchanged
@@ -1548,18 +1566,22 @@ by the user.
 
 - [ ] **Step 1: Locate the pill + host construction**
 
-In `src/Winpepper.App/Hosting/AppShell.cs`, find where the `StatusPillWindow`
-and `PipelineHost` are created (both are already constructed here — the pill is
-built with the `SessionViewModel`, and `PipelineHost` receives the same VM).
-Confirm the local variable names, e.g. `pill` (`StatusPillWindow`) and
-`pipelineHost` (`PipelineHost`):
+In `src/Winpepper.App/Hosting/AppShell.cs`, note the actual shape (verified): the
+pill and host are **not** two adjacent locals — they are exposed as **properties**:
+- `PipelineHost` is built as a local `pipeline` in `BootstrapAsync` (~`:253`) and
+  stored as the **`Pipeline`** property (declared ~`:30`, assigned ~`:298`).
+- `StatusPillWindow` is built as the **`Pill`** property inside the **private
+  constructor** (`Pill = new StatusPillWindow(sessionVm);` ~`:310`).
+
+Confirm with:
 
 ```bash
-grep -n "new StatusPillWindow\|new PipelineHost\|StatusPillWindow \|PipelineHost " \
+grep -n "new StatusPillWindow\|new PipelineHost\|Pill = \|Pipeline = \|public StatusPillWindow Pill\|public PipelineHost Pipeline" \
     src/Winpepper.App/Hosting/AppShell.cs
 ```
-Expected: shows the two construction sites and their variable names. Use those
-exact names in Step 2 (substitute if they differ from `pill`/`pipelineHost`).
+Expected: shows the `Pipeline`/`Pill` property declarations and their assignments.
+Both are reachable together as `Pipeline` / `Pill` inside the private constructor
+(after `:310`) and also in `StartAsync` (both used ~`:325`/`:331`).
 
 - [ ] **Step 2: Wire the click handler**
 

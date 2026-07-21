@@ -25,6 +25,14 @@ recorder teardown, and a new `HotkeyChord` validation policy rejects unsafe
 modifier-less trigger bindings both in the settings UI and when loading a
 hand-edited settings file.
 
+> **Post-implementation correction:** The timestamp-expiry rule below is
+> superseded. Windows accessibility and typematic settings can delay a genuine
+> autorepeat beyond any short fixed timeout, so physical key state is
+> authoritative: a tracked entry remains live while `GetAsyncKeyState` reports
+> the key down and self-heals as soon as the key is reported up. The clock seam
+> remains only to regression-test that elapsed time cannot reclassify a
+> physically held repeat as a fresh press.
+
 **Tech Stack:** C# / .NET 9 (`net9.0` + `net9.0-windows10.0.19041.0`
 multi-target), xUnit v3 (Microsoft Testing Platform), Shouldly assertions.
 All hardened logic lives in `Winpepper.Platform` / `Winpepper.Core`

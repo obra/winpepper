@@ -12,8 +12,10 @@ public class HotkeyHookLogicTests
                                        string toggle = "Ctrl+Shift+Space",
                                        string cancel = "Esc",
                                        Func<bool>? cancelEnabled = null)
+        // These tests synthesize key events; never consult the host keyboard.
         => new(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle), HotkeyChord.Parse(cancel),
-               new NullLogger<HotkeyHook>(), cancelEnabled);
+               new NullLogger<HotkeyHook>(), cancelEnabled,
+               keyPhysicallyDown: _ => true);
 
     [Fact]
     public void HoldChord_PressAndRelease_EmitsHoldDownThenHoldUp()

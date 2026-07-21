@@ -27,21 +27,15 @@ public sealed class HotkeyHook : IDisposable
     private Modifier _modifiers;
     private bool _holding;
     // vk -> timestamp the swallow was last observed. Entries self-heal (drop)
-    // when the physical key is no longer held or the entry outlives
-    // StaleKeyTimeout, so a lost key-up can never swallow a key forever.
+    // when the physical key is no longer held, so a lost key-up can never
+    // swallow a key forever.
     private readonly Dictionary<int, DateTimeOffset> _swallowedKeys = new();
     private readonly HashSet<int> _observedCancelKeys = new();
-    // vk -> timestamp last observed during capture. Same self-heal as
-    // _swallowedKeys: a lost key-up must not wedge drain mode forever.
+    // vk -> timestamp last observed during capture. Same physical-state
+    // self-heal as _swallowedKeys: a lost key-up must not wedge drain mode.
     private readonly Dictionary<int, DateTimeOffset> _captureKeysDown = new();
     private int _suspendRequested;
     private readonly ManualResetEventSlim _ready = new(initialState: false);
-
-    // Longer than Windows' max autorepeat initial delay (~1s) and far longer
-    // than LowLevelHooksTimeout (~300ms), so a genuinely held key (refreshed by
-    // autorepeat) is never falsely healed, but a lost key-up cannot strand an
-    // entry for more than this bounded window.
-    private static readonly TimeSpan StaleKeyTimeout = TimeSpan.FromMilliseconds(1500);
 
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<int, bool> _keyPhysicallyDown;
@@ -69,9 +63,9 @@ public sealed class HotkeyHook : IDisposable
         UpdateModifierState(vk, down);
         var bindings = Volatile.Read(ref _bindings);
 
-        // Self-heal: drop any tracked entry whose physical key is no longer held
-        // or that outlived StaleKeyTimeout, so a lost key-up can never leave a
-        // key swallowed or the hook wedged. The current key is handled below.
+        // Self-heal: drop tracked entries whose physical key is no longer held,
+        // so a lost key-up can never leave a key swallowed or the hook wedged.
+        // The current key is handled below.
         PruneStaleKeys(now, exceptVk: vk);
 
         var suspendRequested = Volatile.Read(ref _suspendRequested) != 0;
@@ -300,12 +294,12 @@ public sealed class HotkeyHook : IDisposable
     }
 
     /// <summary>
-    /// A tracked key entry is "live" only while the physical key is still held
-    /// AND the entry has not outlived <see cref="StaleKeyTimeout"/>. Anything
-    /// else is stale and must be dropped so a lost key-up can never strand it.
+    /// A tracked key entry is "live" while the physical key is still held.
+    /// Age alone cannot make a held key stale: accessibility and typematic
+    /// settings may delay autorepeat for an arbitrary amount of time.
     /// </summary>
-    private bool IsKeyEntryLive(int vk, DateTimeOffset since, DateTimeOffset now)
-        => _keyPhysicallyDown(vk) && (now - since) <= StaleKeyTimeout;
+    private bool IsKeyEntryLive(int vk, DateTimeOffset _, DateTimeOffset __)
+        => _keyPhysicallyDown(vk);
 
     /// <summary>
     /// Drops stale entries from the tracked key dictionaries, healing keys whose

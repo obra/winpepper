@@ -1271,8 +1271,10 @@ git commit -m "feat(asr): map corrections vocabulary to AssemblyAI custom_spelli
 - Produces:
   - `AssemblyAiModels.Known` — ordered list of `(string Id, string Label)`: `("universal-2","universal-2 (fast)")`, `("universal-3-pro","universal-3-pro (premium)")`.
   - `AssemblyAiModels.DefaultId => "universal-2"`.
-  - `bool AssemblyAiModels.IsKnown(string id)` (ordinal, case-insensitive).
+  - `bool AssemblyAiModels.IsKnown(string id)` (ordinal, case-insensitive) — recognizes the displayed ids PLUS the alias `universal-3-5-pro` (see model-id note below).
   Consumed by Task 18 (model ComboBox).
+
+> **Model-id note (verified against AssemblyAI docs 2026-07):** `universal-2` is confirmed valid. The premium id is **ambiguous across official sources** — the API-reference `speech_models` enum spells it `universal-3-5-pro`, while the pricing page and Python SDK use `universal-3-pro`. This could not be resolved without a live authed call. We keep `universal-3-pro` as the displayed premium id but ALSO treat `universal-3-5-pro` as *known* so neither spelling is mis-flagged as "custom". A wrong premium id degrades gracefully: the request 400s → `AssemblyAiErrors.IsInvalidModel` surfaces a config error → `FallbackTranscriber` falls back to local, so the user still gets text. The request payload already sends the id in the **plural `speech_models` array** (Task 7), matching the current (non-deprecated) API field.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1296,8 +1298,9 @@ public sealed class AssemblyAiModelsTests
 
     [Theory]
     [InlineData("universal-2", true)]
-    [InlineData("UNIVERSAL-3-PRO", true)]  // case-insensitive
-    [InlineData("universal-9000", false)]  // typo -> not known
+    [InlineData("UNIVERSAL-3-PRO", true)]     // case-insensitive
+    [InlineData("universal-3-5-pro", true)]   // API-reference spelling accepted as alias
+    [InlineData("universal-9000", false)]     // typo -> not known
     [InlineData("", false)]
     public void IsKnown_RecognizesGoodIds(string id, bool expected)
         => AssemblyAiModels.IsKnown(id).ShouldBe(expected);
@@ -1336,9 +1339,15 @@ public static class AssemblyAiModels
 
     public static string DefaultId => "universal-2";
 
+    // Accepted alias: the AssemblyAI API-reference enum spells the premium model
+    // "universal-3-5-pro" while pricing/Python-SDK use "universal-3-pro". Recognize
+    // both so neither official spelling is wrongly flagged as a "custom" model.
+    private static readonly string[] KnownAliases = { "universal-3-5-pro" };
+
     public static bool IsKnown(string id)
         => !string.IsNullOrWhiteSpace(id)
-           && Known.Any(m => string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase));
+           && (Known.Any(m => string.Equals(m.Id, id, StringComparison.OrdinalIgnoreCase))
+               || KnownAliases.Any(a => string.Equals(a, id, StringComparison.OrdinalIgnoreCase)));
 }
 ```
 
@@ -2128,9 +2137,14 @@ In `src/Winpepper.Cleanup/CleanupRunner.cs`, change the `RunAsync` signature (li
 Then, as the FIRST statement inside the method (before the existing word-count `BypassShort` short-circuit at ~line 37), insert:
 ```csharp
         if (skipLlm)
-            return Finalize(rawTranscript, CleanupPath.BypassProvider, rawModelOutput: "", assembledPrompt: "");
+        {
+            // Cloud text is already server-side punctuated/formatted; run only the
+            // deterministic correction post-pass (no LLM). Mirror the BypassShort call.
+            var swBypass = System.Diagnostics.Stopwatch.StartNew();
+            return Finalize(rawTranscript, "", corrections, assembledPrompt: "", CleanupPath.BypassProvider, swBypass);
+        }
 ```
-> Match `Finalize`'s real parameter list (seen at `CleanupRunner.cs:244`). If `Finalize`'s signature differs (e.g. it computes `Elapsed` internally or takes fewer args), call it exactly as the existing `BypassShort` call at `CleanupRunner.cs:37-41` does, substituting `CleanupPath.BypassProvider`. The `Finalize` helper already runs `ApplyDeterministicPostPass` (→ `CaseAwareReplacer.Apply(rawTranscript, corrections.Replacements)`), so corrections are applied and no LLM runs.
+> **VERIFIED signature (`CleanupRunner.cs:244`):** `private static CleanupResult Finalize(string rawTranscript, string rawModelOutput, CorrectionsData corrections, string assembledPrompt, CleanupPath path, Stopwatch sw)` — 6 positional args, `CleanupPath` is the **5th**, and a `Stopwatch` is required. The exemplar `BypassShort` call at `CleanupRunner.cs:40` is `return Finalize(rawTranscript, "", corrections, assembledPrompt: "", CleanupPath.BypassShort, sw);` — the snippet above mirrors it exactly (substituting `BypassProvider`). If a method-level `sw` is already in scope at the insertion point, reuse it instead of `swBypass`. `Finalize` runs `ApplyDeterministicPostPass` (→ `CaseAwareReplacer.Apply(rawTranscript, corrections.Replacements)`), so corrections are applied and no LLM runs.
 
 - [ ] **Step 5: Run the test and verify it passes**
 
@@ -2233,11 +2247,13 @@ In `src/Winpepper.App/Hosting/AppShell.cs`, replace `BuildTranscriber` (lines 35
             onFallback: onFallback,
             cloudDeadline: options.CloudDeadline,
             onConfigError: msg => errorBus.Report(
-                Winpepper.Core.Errors.ErrorStage.Transcription,
-                $"AssemblyAI model rejected ({settings.AssemblyAiModel}). Check the model setting. {msg}"));
+                Winpepper.Core.Errors.ErrorStage.Asr,
+                new InvalidOperationException(
+                    $"AssemblyAI model rejected ({settings.AssemblyAiModel}). Check the model setting. {msg}"),
+                Guid.Empty)); // config-level error, not tied to a capture session
     }
 ```
-> Verify `ErrorBus.Report(...)` and `ErrorStage` member names against `src/Winpepper.Core/Errors/` before finalizing (the exact method/enum-member may be `errorBus.Report(new ErrorRecord(...))` or similar — match the real API used elsewhere, e.g. how `CrashHandler`/`SessionViewModel` report). Keep it a single call; if the ErrorBus API differs, adapt without adding new abstractions.
+> **VERIFIED API (`src/Winpepper.Core/Errors/`):** `ErrorBus.Report(ErrorStage stage, Exception ex, Guid sessionId)` — it takes an **`Exception` and a `Guid`**, NOT a string. There is **no `ErrorStage.Transcription` member**; the members are `Audio, Asr, Cleanup, OcrUia, Injection, Learning, History, Models, Settings, Hotkey, Crash, Unknown` — use **`ErrorStage.Asr`** for transcription/cloud-model errors. The exemplar call is `PipelineHost.cs:295`: `_errorBus.Report(ErrorStage.Cleanup, ex, _currentSessionId)`. Since `BuildTranscriber` runs at composition time with no session in scope, pass `Guid.Empty` (a config-level error). If you prefer per-session attribution, thread the active session id from `PipelineHost` into the `onConfigError` callback instead — but `Guid.Empty` is acceptable for a configuration fault. **This task is `#if WINDOWS`-only and is NOT covered by any Linux test — get this call exactly right, because the compiler won't catch it until the Windows build.**
 
 - [ ] **Step 4: Skip LLM cleanup for cloud transcripts in PipelineHost**
 
@@ -2305,7 +2321,7 @@ In `src/Winpepper.App/Views/RecordingPage.xaml`, within the "Speech recognition"
 ```xml
                 <TextBlock
                     x:Name="AsrPrivacyText"
-                    Text="Cloud transcription sends your recorded audio to AssemblyAI. Audio and text are deleted from AssemblyAI after transcription (unless you turn deletion off below)."
+                    Text="Cloud transcription sends your recorded audio to AssemblyAI. Winpepper asks AssemblyAI to delete your audio and transcript after transcription (deletion happens on AssemblyAI's servers and may not be immediate). Turn deletion off below to keep them per AssemblyAI's retention policy."
                     TextWrapping="Wrap"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Style="{StaticResource CaptionTextBlockStyle}" />
@@ -2658,7 +2674,7 @@ The `#if WINDOWS` wiring (Tasks 17–18) and end-to-end cloud behavior cannot ru
 - **S-ASR-4 — Deadline fallback timing:** Simulate a slow/blocked cloud (e.g. bad network); dictation falls back to local within ~the configured `AssemblyAiCloudDeadlineSeconds` (default 10s), NOT 30–45s. The mic-to-text round trip does not hang for the old 45s worst case.
 - **S-ASR-5 — Invalid model surfaced:** Set a bogus custom model id, dictate → local text still appears AND a persistent config-error status shows on the settings page + a toast fires (via ErrorBus), pointing at the model setting. It does NOT silently fall back forever with no signal.
 - **S-ASR-6 — Cloud skips LLM cleanup:** With AssemblyAI producing the transcript, the history entry's cleanup/model field records the corrections-only path (`none (cloud, corrections-only)`), and a `corrections.json` Replacement is applied (custom_spelling) while the local LLM cleanup step is skipped (faster).
-- **S-ASR-7 — Privacy disclosure:** The Speech-recognition card states audio is sent to AssemblyAI and deleted after transcription (or retained if deletion is disabled). Onboarding/settings copy matches.
+- **S-ASR-7 — Privacy disclosure:** The Speech-recognition card states audio is sent to AssemblyAI and that Winpepper *requests deletion* after transcription (deletion is performed on AssemblyAI's servers and may not be immediate; retained if deletion is disabled). Copy must NOT over-promise instant/guaranteed erasure — DELETE initiates removal subject to AssemblyAI's retention/lag. Onboarding/settings copy matches.
 - **S5 (warm-mic, from `2026-07-21-harden-warm-mic-capture.md`):** Re-run the repeated start/rebuild/unplug stress loop with the hang watchdog, including the capture-thread self-join sub-case (fault-driven `RecordingStopped` on the capture thread during teardown). No deadlock; the watchdog does not trip.
 
 ---

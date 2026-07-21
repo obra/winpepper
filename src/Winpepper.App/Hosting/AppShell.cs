@@ -241,10 +241,6 @@ public sealed class AppShell : IDisposable
             aaiOptions,
             factory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiClient>());
 
-        AssemblyAiKeyStore = aaiKeyStore;
-        AssemblyAiClient = aaiClient;
-        AssemblyAiOptions = aaiOptions;
-
         var pipeline = new PipelineHost(factory, errorBus, engine, sessionVm, sounds,
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
                                          historyServices.Archiver, settings.AsrModelName, cleanupModelName,
@@ -259,6 +255,9 @@ public sealed class AppShell : IDisposable
                                   autostart, pipeline, sounds, historyServices, modelsServices,
                                   toasts, clipboardFallback, crashHandler,
                                   logTail, uiThread, diagHost);
+        shell.AssemblyAiKeyStore = aaiKeyStore;
+        shell.AssemblyAiClient = aaiClient;
+        shell.AssemblyAiOptions = aaiOptions;
         await shell.StartAsync();
         return shell;
     }

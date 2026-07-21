@@ -131,6 +131,33 @@ public sealed class CleanupRunner
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw);
         }
 
+        // 6.5b) Content-similarity floor (spec fix-(i)/(ii)). A legitimate
+        // cleanup only drops fillers and adds punctuation, so it retains most of
+        // the raw transcript's content words. Reject wholesale replacement
+        // (near-zero overlap) and severe truncation, and reject any output that
+        // matches a known few-shot example verbatim while sharing little with
+        // what the user actually said.
+        var retention = TranscriptSimilarity.RetentionRatio(rawTranscript, sanitized);
+        var rawContentCount = TranscriptSimilarity.ContentWords(rawTranscript).Count;
+        var rawWordCount = TranscriptSimilarity.WordCount(rawTranscript);
+
+        if (rawContentCount >= 1 && retention <= 0.0)
+        {
+            _log.LogWarning("Cleanup output shares no content words with the transcript (wholesale replacement); falling back");
+            return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw);
+        }
+        if (rawWordCount > 6 && retention < 0.40)
+        {
+            _log.LogWarning("Cleanup output retains only {Retention:P0} of a {Words}-word transcript (severe truncation); falling back",
+                retention, rawWordCount);
+            return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw);
+        }
+        if (retention < 0.40 && MatchesKnownExample(sanitized))
+        {
+            _log.LogWarning("Cleanup output matches a known few-shot example with low transcript overlap; falling back");
+            return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw);
+        }
+
         // 7) Apply deterministic correction post-pass (user corrections, then
         //    the built-in app-name mishearing correction).
         var withCorrections = ApplyDeterministicPostPass(sanitized, corrections);
@@ -187,6 +214,20 @@ public sealed class CleanupRunner
                 return true;
             }
         }
+        return false;
+    }
+
+    // Normalize to letters/digits only so punctuation/whitespace/case differences
+    // between the model output and a stored example don't hide an echo.
+    private static string Normalize(string s) =>
+        new string(s.ToLowerInvariant().Where(char.IsLetterOrDigit).ToArray());
+
+    private static bool MatchesKnownExample(string cleaned)
+    {
+        var norm = Normalize(cleaned);
+        if (norm.Length == 0) return false;
+        foreach (var example in BasePrompts.DefaultExampleOutputs)
+            if (Normalize(example) == norm) return true;
         return false;
     }
 

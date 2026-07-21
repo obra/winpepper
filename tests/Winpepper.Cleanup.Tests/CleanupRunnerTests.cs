@@ -255,4 +255,67 @@ public class CleanupRunnerTests
         result.Path.ShouldBe(CleanupPath.Llm);
         backend.CallCount.ShouldBe(1);
     }
+
+    [Fact]
+    public async Task Run_WholesaleTruncation_RejectedToFallback()
+    {
+        // Live case: long question wholesale-replaced by "Me".
+        var raw = "Who should be fixing this? Me or the person configuring RunPod?";
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "Me" });
+        var result = await runner.RunAsync(raw, CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.FallbackImplausible);
+        result.CleanedText.ShouldBe(raw);
+    }
+
+    [Fact]
+    public async Task Run_LegitimateFillerRemoval_IsAccepted()
+    {
+        // High overlap -> a real cleanup, even though the output equals a
+        // former example. Similarity beats blacklisting.
+        var raw = "um so like I think we should basically just ship it tomorrow you know";
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "I think we should just ship it tomorrow." });
+        var result = await runner.RunAsync(raw, CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.Llm);
+        result.CleanedText.ShouldBe("I think we should just ship it tomorrow.");
+    }
+
+    [Fact]
+    public async Task Run_LegitimateSelfCorrection_IsAccepted()
+    {
+        // Output matches the retained example, but overlap with raw is high.
+        var raw = "write me a function called add_numbers no wait scratch that call it sum";
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "Write me a function called sum." });
+        var result = await runner.RunAsync(raw, CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.Llm);
+        result.CleanedText.ShouldBe("Write me a function called sum.");
+    }
+
+    [Fact]
+    public async Task Run_KnownExampleEcho_WithLowOverlap_IsRejected()
+    {
+        // Bare few-shot echo, no scaffold markers. 5 words (not >6, so the
+        // truncation rule does not apply) with a single shared content word
+        // ("sum") so retention is 0.2 (>0, not wholesale) — this must be caught
+        // specifically by the known-example guard.
+        var raw = "call sum here now please";
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "Write me a function called sum." });
+        var result = await runner.RunAsync(raw, CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.FallbackImplausible);
+        result.CleanedText.ShouldBe(raw);
+    }
+
+    [Fact]
+    public async Task Run_HeavyFillerInput_IsNotFalselyRejected()
+    {
+        var raw = "um uh like you know basically I really think this is good";
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "I really think this is good." });
+        var result = await runner.RunAsync(raw, CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.Llm);
+        result.CleanedText.ShouldBe("I really think this is good.");
+    }
 }

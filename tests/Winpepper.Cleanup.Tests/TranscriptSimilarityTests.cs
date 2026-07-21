@@ -55,4 +55,13 @@ public class TranscriptSimilarityTests
         TranscriptSimilarity.WordCount("output colon forty two").ShouldBe(4);
         TranscriptSimilarity.WordCount("").ShouldBe(0);
     }
+
+    [Fact]
+    public void ContentWords_StripsNestedSelfCorrectionPhrase_LongestFirst()
+    {
+        // Locks the longest-phrase-first ordering: "no let me start over" must be
+        // removed as a whole, not leave orphaned tokens from "start over".
+        var words = TranscriptSimilarity.ContentWords("no let me start over ship it");
+        words.ShouldBe(new[] { "ship", "it" });
+    }
 }

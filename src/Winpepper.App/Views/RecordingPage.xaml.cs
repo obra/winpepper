@@ -102,13 +102,52 @@ public sealed partial class RecordingPage : Page
             _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AsrProvider = tag });
         };
 
-        // Model id
-        AssemblyAiModelBox.Text = current.AssemblyAiModel;
+        // Model picker: known ids + an "Advanced/custom" escape hatch.
+        const string CustomTag = "__custom__";
+        AssemblyAiModelCombo.Items.Clear();
+        foreach (var m in Winpepper.Asr.Transcription.AssemblyAiModels.Known)
+            AssemblyAiModelCombo.Items.Add(new ComboBoxItem { Content = m.Label, Tag = m.Id });
+        AssemblyAiModelCombo.Items.Add(new ComboBoxItem { Content = "Advanced / custom…", Tag = CustomTag });
+
+        void SelectModelInCombo(string modelId)
+        {
+            var known = Winpepper.Asr.Transcription.AssemblyAiModels.IsKnown(modelId);
+            AssemblyAiModelCombo.SelectedIndex = known
+                ? Enumerable.Range(0, AssemblyAiModelCombo.Items.Count)
+                    .First(i => (string?)((ComboBoxItem)AssemblyAiModelCombo.Items[i]).Tag == modelId
+                             || string.Equals((string?)((ComboBoxItem)AssemblyAiModelCombo.Items[i]).Tag, modelId, StringComparison.OrdinalIgnoreCase))
+                : AssemblyAiModelCombo.Items.Count - 1; // the custom item
+            var isCustom = !known;
+            AssemblyAiModelBox.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+            AssemblyAiModelWarning.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+            AssemblyAiModelBox.Text = isCustom ? modelId : "";
+        }
+        SelectModelInCombo(current.AssemblyAiModel);
+
+        AssemblyAiModelCombo.SelectionChanged += (_, _) =>
+        {
+            var tag = (AssemblyAiModelCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? Winpepper.Asr.Transcription.AssemblyAiModels.DefaultId;
+            var isCustom = tag == CustomTag;
+            AssemblyAiModelBox.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+            AssemblyAiModelWarning.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+            if (!isCustom)
+                _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiModel = tag });
+        };
         AssemblyAiModelBox.LostFocus += (_, _) =>
         {
-            var model = string.IsNullOrWhiteSpace(AssemblyAiModelBox.Text) ? "universal-2" : AssemblyAiModelBox.Text.Trim();
+            var model = string.IsNullOrWhiteSpace(AssemblyAiModelBox.Text)
+                ? Winpepper.Asr.Transcription.AssemblyAiModels.DefaultId
+                : AssemblyAiModelBox.Text.Trim();
             _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiModel = model });
         };
+
+        // Retention + keyterms toggles.
+        AssemblyAiDeleteToggle.IsOn = current.AssemblyAiDeleteAfterTranscribe;
+        AssemblyAiDeleteToggle.Toggled += (_, _) =>
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiDeleteAfterTranscribe = AssemblyAiDeleteToggle.IsOn });
+        AssemblyAiKeytermsToggle.IsOn = current.AssemblyAiKeytermsEnabled;
+        AssemblyAiKeytermsToggle.Toggled += (_, _) =>
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiKeytermsEnabled = AssemblyAiKeytermsToggle.IsOn });
 
         // Key status
         AsrStatusText.Text = keyStore.HasKey ? "A key is saved on this PC." : "No key saved.";
@@ -131,13 +170,37 @@ public sealed partial class RecordingPage : Page
 
         TestKeyButton.Click += async (_, _) =>
         {
-            if (!keyStore.HasKey) { AsrStatusText.Text = "Save a key before testing."; return; }
-            AsrStatusText.Text = "Testing key...";
+            var typed = AssemblyAiKeyBox.Password;
+            var hasTyped = !string.IsNullOrWhiteSpace(typed);
+            if (!hasTyped && !keyStore.HasKey) { AsrStatusText.Text = "Enter or save a key before testing."; return; }
+
+            AsrStatusText.Text = hasTyped ? "Testing the key you typed…" : "Testing the saved key…";
             try
             {
+                Winpepper.Asr.Transcription.IAssemblyAiClient clientToTest = shell.AssemblyAiClient;
+                if (hasTyped)
+                {
+                    // Validate exactly what the user typed, not a previously saved key.
+                    var typedKey = typed.Trim();
+                    var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+                    clientToTest = new Winpepper.Asr.Transcription.AssemblyAiClient(
+                        http, () => typedKey, shell.AssemblyAiOptions,
+                        shell.LogFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiClient>());
+                }
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-                var ok = await shell.AssemblyAiClient.ValidateKeyAsync(cts.Token);
-                AsrStatusText.Text = ok ? "Key is valid." : "Key rejected (401). Check the key.";
+                var ok = await clientToTest.ValidateKeyAsync(cts.Token);
+                if (ok && hasTyped)
+                {
+                    keyStore.Save(typed.Trim());          // typed key is valid -> save it
+                    AssemblyAiKeyBox.Password = "";
+                    AsrStatusText.Text = "Typed key is valid and was saved on this PC.";
+                }
+                else
+                {
+                    AsrStatusText.Text = ok
+                        ? "Saved key is valid."
+                        : (hasTyped ? "Typed key rejected (401). Check the key." : "Saved key rejected (401). Check the key.");
+                }
             }
             catch (Exception ex)
             {

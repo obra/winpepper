@@ -89,11 +89,12 @@
 
                 <ComboBox x:Name="AsrProviderCombo" Header="Provider" MinWidth="280">
                     <ComboBoxItem Content="Local processing (on this PC)" Tag="local" />
-                    <ComboBoxItem Content="AssemblyAI premium (cloud)" Tag="assemblyai" />
+                    <ComboBoxItem Content="AssemblyAI (cloud)" Tag="assemblyai" />
                 </ComboBox>
 
                 <TextBlock
-                    Text="Cloud transcription sends your recorded audio to AssemblyAI for processing."
+                    x:Name="AsrPrivacyText"
+                    Text="Cloud transcription sends your recorded audio to AssemblyAI. Winpepper asks AssemblyAI to delete your audio and transcript after transcription (deletion happens on AssemblyAI's servers and may not be immediate). Turn deletion off below to keep them per AssemblyAI's retention policy."
                     TextWrapping="Wrap"
                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                     Style="{StaticResource CaptionTextBlockStyle}" />
@@ -106,8 +107,22 @@
                         <Button x:Name="ClearKeyButton" Content="Clear key" />
                         <Button x:Name="TestKeyButton" Content="Test" />
                     </StackPanel>
-                    <TextBox x:Name="AssemblyAiModelBox" Header="Model id" MinWidth="280"
-                             PlaceholderText="universal-2 (fast) or universal-3-pro (premium)" />
+                    <ComboBox x:Name="AssemblyAiModelCombo" Header="Model" MinWidth="280" />
+                    <TextBox x:Name="AssemblyAiModelBox" Header="Custom model id" MinWidth="280"
+                             Visibility="Collapsed"
+                             PlaceholderText="Advanced: exact AssemblyAI speech_model id" />
+                    <TextBlock x:Name="AssemblyAiModelWarning"
+                               Visibility="Collapsed"
+                               Text="Custom model ids are not validated and will fail at dictation time if wrong."
+                               TextWrapping="Wrap"
+                               Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                    <ToggleSwitch x:Name="AssemblyAiDeleteToggle" Header="Delete audio from AssemblyAI after transcription" />
+                    <ToggleSwitch x:Name="AssemblyAiKeytermsToggle" Header="Send preferred terms as keyterms" />
+                    <TextBlock Text="Preferred terms may incur extra AssemblyAI cost on some plans. Off by default. Your corrections list is always applied via custom spelling at no extra cost."
+                               TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
                     <TextBlock x:Name="AsrStatusText"
                                TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"

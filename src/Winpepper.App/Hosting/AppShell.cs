@@ -43,7 +43,7 @@ public sealed class AppShell : IDisposable
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
-    public static async Task<AppShell> BootstrapAsync(Application app)
+    public static AppShell Create()
     {
         Directory.CreateDirectory(AppPaths.Root);
         var logTail = new Winpepper.Core.Logging.LogRingBuffer(capacity: 2000);
@@ -242,13 +242,11 @@ public sealed class AppShell : IDisposable
                                          cleanup, correctionStore, windowContext, cleanupOptions,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer);
 
-        var shell = new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
-                                  recordingVm, cleanupVm, correctionsVm,
-                                  autostart, pipeline, sounds, historyServices, modelsServices,
-                                  toasts, clipboardFallback, crashHandler,
-                                  logTail, uiThread, diagHost);
-        await shell.StartAsync();
-        return shell;
+        return new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
+                            recordingVm, cleanupVm, correctionsVm,
+                            autostart, pipeline, sounds, historyServices, modelsServices,
+                            toasts, clipboardFallback, crashHandler,
+                            logTail, uiThread, diagHost);
     }
 
     private AppShell(ILoggerFactory factory, SettingsStore store, AppSettings settings,
@@ -284,7 +282,7 @@ public sealed class AppShell : IDisposable
         Main = new MainWindow(this);
     }
 
-    private async Task StartAsync()
+    internal async Task StartAsync()
     {
         var startHidden = Environment.GetEnvironmentVariable("WINPEPPER_START_HIDDEN") == "1";
         if (!Settings.OnboardingCompleted) ShowMain(navigateToOnboarding: true);

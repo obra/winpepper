@@ -1,5 +1,6 @@
 using Microsoft.UI.Xaml;
 using Winpepper.App.Hosting;
+using Winpepper.Core.Hosting;
 
 namespace Winpepper.App;
 
@@ -12,6 +13,10 @@ public partial class App : Application
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
-        Shell = await AppShell.BootstrapAsync(this);
+        var shell = AppShell.Create();
+        await PublishedStartup.RunAsync(
+            shell,
+            value => Shell = value,
+            value => value.StartAsync());
     }
 }

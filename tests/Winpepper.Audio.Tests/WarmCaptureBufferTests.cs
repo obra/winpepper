@@ -138,4 +138,22 @@ public class WarmCaptureBufferTests
         buf.StopSession();
         buf.SessionWasSilent.ShouldBeFalse(); // empty != silent capture
     }
+
+    [Fact]
+    public void SessionWasSilent_DoesNotLeakFromPriorSessionOnSameBuffer()
+    {
+        var buf = new WarmCaptureBuffer(ringCapacitySamples: 100);
+
+        // Session A: silent capture.
+        buf.StartSession(0);
+        buf.Ingest(new float[64]); // zero-filled
+        buf.StopSession();
+        buf.SessionWasSilent.ShouldBeTrue();
+
+        // Session B on the SAME buffer instance: real audio present.
+        buf.StartSession(0);
+        buf.Ingest(new float[] { 0.2f, -0.2f, 0.2f, -0.2f });
+        buf.StopSession();
+        buf.SessionWasSilent.ShouldBeFalse();
+    }
 }

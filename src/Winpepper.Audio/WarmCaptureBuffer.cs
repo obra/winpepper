@@ -62,6 +62,7 @@ public sealed class WarmCaptureBuffer
             if (take > 0)
                 _session.AddRange(_ring.GetRange(_ring.Count - take, take));
             _active = true;
+            _sessionWasSilent = false;
         }
     }
 

@@ -30,4 +30,9 @@ public record AppSettings
     public bool OnboardingCompleted { get; init; } = false;
     public bool SpeakerFilterEnabled { get; init; } = false;
     public string LastVersionSeen { get; init; } = "";
+
+    // Main-window size in physical pixels; null until the user resizes or the
+    // first-run default is applied (spec Task 4). No position persistence.
+    public int? WindowWidth { get; init; }
+    public int? WindowHeight { get; init; }
 }

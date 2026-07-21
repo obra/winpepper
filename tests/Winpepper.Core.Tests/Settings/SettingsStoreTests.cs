@@ -110,6 +110,25 @@ public class SettingsStoreTests : IDisposable
         // The caller was told.
         logged.ShouldNotBeNull();
     }
+
+    [Fact]
+    public void Save_RoundTrips_WindowSize()
+    {
+        var store = new SettingsStore(_path);
+        var s = store.Load() with { WindowWidth = 640, WindowHeight = 520 };
+        store.Save(s);
+        var loaded = new SettingsStore(_path).Load();
+        loaded.WindowWidth.ShouldBe(640);
+        loaded.WindowHeight.ShouldBe(520);
+    }
+
+    [Fact]
+    public void Defaults_Have_No_Persisted_WindowSize()
+    {
+        var s = new SettingsStore(_path).Load();
+        s.WindowWidth.ShouldBeNull();
+        s.WindowHeight.ShouldBeNull();
+    }
 }
 
 internal static class PipeExtensions

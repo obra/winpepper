@@ -2,6 +2,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Winpepper.App.Hosting;
+using Windows.Graphics;
 
 namespace Winpepper.App.Views;
 
@@ -22,6 +23,34 @@ public sealed partial class MainWindow : Window
 
         Nav.SelectionChanged += OnNavSelectionChanged;
         Nav.SelectedItem = Nav.MenuItems[0];
+
+        // Size (spec Task 4): restore a remembered size, else default to a
+        // third of the platform width and half its height (clamped). Only
+        // applied when no persisted size exists.
+        var appWindow = AppWindow;
+        var persisted = _shell.Settings;
+        if (persisted.WindowWidth is int savedW && persisted.WindowHeight is int savedH)
+        {
+            appWindow.Resize(new SizeInt32(savedW, savedH));
+        }
+        else
+        {
+            var (w, h) = Winpepper.Core.WindowSizePolicy.ComputeDefault(
+                appWindow.Size.Width, appWindow.Size.Height);
+            appWindow.Resize(new SizeInt32(w, h));
+        }
+
+        // Remember user resizes durably (physical px). No position persistence.
+        appWindow.Changed += (sender, args) =>
+        {
+            if (args.DidSizeChange)
+            {
+                var size = sender.Size;
+                _ = _shell.SettingsWriter.QueueAndFlushAsync(
+                    st => st with { WindowWidth = size.Width, WindowHeight = size.Height });
+            }
+        };
+
         AppWindow.Closing += OnAppWindowClosing;
     }
 

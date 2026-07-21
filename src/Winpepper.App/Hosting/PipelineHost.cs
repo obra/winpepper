@@ -27,6 +27,7 @@ public sealed class PipelineHost : IDisposable
     private readonly SessionViewModel _vm;
     private readonly ISoundEffectPlayer _sounds;
     private IAudioRecorder? _recorder;
+    private Action<ReadOnlyMemory<float>>? _meterHandler;
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
 
@@ -175,6 +176,7 @@ public sealed class PipelineHost : IDisposable
                 _sounds.PlayStart();
                 _recorder = new WasapiRecorder();
                 _recorder.Start();
+                AttachMeter(_recorder);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
@@ -190,6 +192,7 @@ public sealed class PipelineHost : IDisposable
                 _engine.Apply(SessionEvent.StopRequested);
                 _recordStopwatch?.Stop();
 
+                DetachMeter(_recorder!);
                 var samples = _recorder!.Stop();
                 _recorder.Dispose(); _recorder = null;
                 _sounds.PlayStop();
@@ -324,6 +327,7 @@ public sealed class PipelineHost : IDisposable
                 break;
             case HotkeyEventKind.Cancel:
                 _engine.Apply(SessionEvent.CancelRequested);
+                if (_recorder is not null) DetachMeter(_recorder);
                 _recorder?.Dispose(); _recorder = null;
                 break;
             case HotkeyEventKind.Toggle:
@@ -334,6 +338,7 @@ public sealed class PipelineHost : IDisposable
                     _sounds.PlayStart();
                     _recorder = new WasapiRecorder();
                     _recorder.Start();
+                    AttachMeter(_recorder);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                     // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
@@ -349,6 +354,7 @@ public sealed class PipelineHost : IDisposable
                     _engine.Apply(SessionEvent.StopRequested);
                     _recordStopwatch?.Stop();
 
+                    DetachMeter(_recorder!);
                     var samples2 = _recorder!.Stop();
                     _recorder.Dispose(); _recorder = null;
                     _sounds.PlayStop();
@@ -482,6 +488,21 @@ public sealed class PipelineHost : IDisposable
                     _recordStopwatch = null;
                 }
                 break;
+        }
+    }
+
+    private void AttachMeter(IAudioRecorder recorder)
+    {
+        _meterHandler = frame => _vm.ReportAudioFrame(frame);
+        recorder.FramesAvailable += _meterHandler;
+    }
+
+    private void DetachMeter(IAudioRecorder recorder)
+    {
+        if (_meterHandler is not null)
+        {
+            recorder.FramesAvailable -= _meterHandler;
+            _meterHandler = null;
         }
     }
 

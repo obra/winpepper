@@ -274,10 +274,10 @@ public sealed class PipelineHost : IDisposable
                         _postPaste is not null, _focusedCapturer is not null,
                         !string.IsNullOrWhiteSpace(final)))
                 {
-                    var snap = _focusedCapturer.Capture();
+                    var snap = _focusedCapturer!.Capture();
                     if (snap.IsValid)
                     {
-                        var watchTask = _postPaste.BeginAsync(new Winpepper.Core.Learning.PostPasteContext
+                        var watchTask = _postPaste!.BeginAsync(new Winpepper.Core.Learning.PostPasteContext
                         {
                             ElementId = snap.ElementId,
                             InjectedText = final,
@@ -433,10 +433,10 @@ public sealed class PipelineHost : IDisposable
                             _postPaste is not null, _focusedCapturer is not null,
                             !string.IsNullOrWhiteSpace(final2)))
                     {
-                        var snap = _focusedCapturer.Capture();
+                        var snap = _focusedCapturer!.Capture();
                         if (snap.IsValid)
                         {
-                            var watchTask = _postPaste.BeginAsync(new Winpepper.Core.Learning.PostPasteContext
+                            var watchTask = _postPaste!.BeginAsync(new Winpepper.Core.Learning.PostPasteContext
                             {
                                 ElementId = snap.ElementId,
                                 InjectedText = final2,

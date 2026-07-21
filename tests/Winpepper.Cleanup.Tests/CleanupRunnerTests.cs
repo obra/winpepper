@@ -318,4 +318,28 @@ public class CleanupRunnerTests
         result.Path.ShouldBe(CleanupPath.Llm);
         result.CleanedText.ShouldBe("I really think this is good.");
     }
+
+    [Fact]
+    public async Task SkipLlm_RunsDeterministicOnly_NoBackendCall()
+    {
+        // A backend whose call count we assert stays zero -- proves the LLM path is skipped.
+        var backend = new FakeLlamaCleanupBackend { Output = "I think we should just ship it tomorrow." };
+        var runner = NewRunner(backend);
+        var corrections = CorrectionsData.Empty with
+        {
+            Replacements = new Dictionary<string, string> { ["kubernettes"] = "Kubernetes" },
+        };
+
+        var result = await runner.RunAsync(
+            rawTranscript: "deploy to kubernettes now",
+            corrections: corrections,
+            windowContextTask: null,
+            options: DefaultOptions(),
+            ct: CancellationToken.None,
+            skipLlm: true);
+
+        result.Path.ShouldBe(CleanupPath.BypassProvider);
+        result.CleanedText.ShouldBe("deploy to Kubernetes now"); // correction applied deterministically
+        backend.CallCount.ShouldBe(0); // LLM never called
+    }
 }

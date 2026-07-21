@@ -26,9 +26,17 @@ public sealed class CleanupRunner
         CorrectionsData corrections,
         Task<string?>? windowContextTask,
         CleanupOptions options,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool skipLlm = false)
     {
         var sw = Stopwatch.StartNew();
+
+        if (skipLlm)
+        {
+            // Cloud text is already server-side punctuated/formatted; run only the
+            // deterministic correction post-pass (no LLM). Mirrors the BypassShort call.
+            return Finalize(rawTranscript, "", corrections, assembledPrompt: "", CleanupPath.BypassProvider, sw);
+        }
 
         // 0) Short-transcript bypass (spec fix-(iii)). A 0.5B model has nothing
         //    useful to do with a 1-3 word utterance and is where it most often

@@ -20,14 +20,15 @@ public class CleanupRunnerTests
         WindowContextWait = TimeSpan.FromMilliseconds(50),
     };
 
-    // Regression tests for prompt-scaffold echo / runaway generation being
-    // injected as dictation (raw "Hello, my name is Crispy" came out as
-    // "<OUTPUT>I think we should just ship it tomorrow.</OUTPUT>Human: ...").
+    // NOTE: every raw transcript here is >= 4 words so the short-transcript
+    // bypass (Task 4) does not fire, and outputs share content with the raw so
+    // the similarity floor (Task 5) does not fire — these tests isolate the
+    // pre-existing LLM/fallback behavior.
 
     [Fact]
     public async Task Run_LlmEchoesPromptScaffold_FallsBackToRawTranscript()
     {
-        var garbage = "<OUTPUT>\nI think we should just ship it tomorrow.\n</OUTPUT>Human: I think we should just ship it tomorrow.\n\nOutput: I think we should just ship it tomorrow.";
+        var garbage = "<OUTPUT>\nI think we should just ship it tomorrow.\n</OUTPUT>Human: I think we should just ship it tomorrow.";
         var runner = NewRunner(new FakeLlamaCleanupBackend { Output = garbage });
         var result = await runner.RunAsync("Hello, my name is Crispy. How do you do?",
             CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
@@ -40,11 +41,11 @@ public class CleanupRunnerTests
     public async Task Run_LlmOutputImplausiblyLong_FallsBackToRawTranscript()
     {
         var runner = NewRunner(new FakeLlamaCleanupBackend { Output = new string('x', 500) });
-        var result = await runner.RunAsync("short utterance",
+        var result = await runner.RunAsync("short utterance here now please",
             CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
 
         result.Path.ShouldBe(CleanupPath.FallbackImplausible);
-        result.CleanedText.ShouldBe("short utterance");
+        result.CleanedText.ShouldBe("short utterance here now please");
     }
 
     [Fact]
@@ -71,12 +72,8 @@ public class CleanupRunnerTests
     public async Task Run_LlmReturnsCleanText_UsesLlmPath()
     {
         var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "Hello world." });
-        var result = await runner.RunAsync(
-            rawTranscript: "um hello world",
-            corrections: CorrectionsData.Empty,
-            windowContextTask: null,
-            options: DefaultOptions(),
-            ct: CancellationToken.None);
+        var result = await runner.RunAsync("um hello there world",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
         result.CleanedText.ShouldBe("Hello world.");
         result.Path.ShouldBe(CleanupPath.Llm);
     }
@@ -88,7 +85,8 @@ public class CleanupRunnerTests
         {
             Output = "<think>reasoning</think>Hello world.",
         });
-        var result = await runner.RunAsync("hello", CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+        var result = await runner.RunAsync("hello world okay then",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
         result.CleanedText.ShouldBe("Hello world.");
         result.Path.ShouldBe(CleanupPath.Llm);
     }
@@ -99,10 +97,7 @@ public class CleanupRunnerTests
         var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "" });
         var corrections = new CorrectionsData
         {
-            Replacements = new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["chat gbt"] = "ChatGPT",
-            },
+            Replacements = new Dictionary<string, string>(StringComparer.Ordinal) { ["chat gbt"] = "ChatGPT" },
         };
         var result = await runner.RunAsync("we tested chat gbt", corrections, null, DefaultOptions(), CancellationToken.None);
         result.CleanedText.ShouldBe("we tested ChatGPT");
@@ -113,8 +108,8 @@ public class CleanupRunnerTests
     public async Task Run_LlmReturnsEllipsis_FallsBackToCorrectionOnlyPath()
     {
         var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "..." });
-        var result = await runner.RunAsync("hello", CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
-        result.CleanedText.ShouldBe("hello");
+        var result = await runner.RunAsync("hello world okay then", CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+        result.CleanedText.ShouldBe("hello world okay then");
         result.Path.ShouldBe(CleanupPath.FallbackEllipsis);
     }
 
@@ -127,21 +122,18 @@ public class CleanupRunnerTests
             Output = "unused",
         });
         var opts = DefaultOptions() with { Timeout = TimeSpan.FromMilliseconds(50) };
-        var result = await runner.RunAsync("hello world", CorrectionsData.Empty, null, opts, CancellationToken.None);
+        var result = await runner.RunAsync("hello world okay then", CorrectionsData.Empty, null, opts, CancellationToken.None);
         result.Path.ShouldBe(CleanupPath.FallbackTimeout);
-        result.CleanedText.ShouldBe("hello world");
+        result.CleanedText.ShouldBe("hello world okay then");
     }
 
     [Fact]
     public async Task Run_BackendThrows_FallsBackToCorrectionOnlyPath()
     {
-        var runner = NewRunner(new FakeLlamaCleanupBackend
-        {
-            Throw = new InvalidOperationException("kaboom"),
-        });
-        var result = await runner.RunAsync("hello", CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Throw = new InvalidOperationException("kaboom") });
+        var result = await runner.RunAsync("hello world okay then", CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
         result.Path.ShouldBe(CleanupPath.FallbackBackendError);
-        result.CleanedText.ShouldBe("hello");
+        result.CleanedText.ShouldBe("hello world okay then");
     }
 
     [Fact]
@@ -150,12 +142,9 @@ public class CleanupRunnerTests
         var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "we tested chat gbt." });
         var corrections = new CorrectionsData
         {
-            Replacements = new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["chat gbt"] = "ChatGPT",
-            },
+            Replacements = new Dictionary<string, string>(StringComparer.Ordinal) { ["chat gbt"] = "ChatGPT" },
         };
-        var result = await runner.RunAsync("raw", corrections, null, DefaultOptions(), CancellationToken.None);
+        var result = await runner.RunAsync("we tested chat gbt today", corrections, null, DefaultOptions(), CancellationToken.None);
         result.CleanedText.ShouldBe("we tested ChatGPT.");
         result.Path.ShouldBe(CleanupPath.Llm);
     }
@@ -163,22 +152,22 @@ public class CleanupRunnerTests
     [Fact]
     public async Task Run_MaxNewTokens_FollowsSpecFormula()
     {
-        // Spec §5.5: max_new_tokens = min(2048, ceil(transcript_chars * 2.0))
-        // For a 100-char transcript that's min(2048, 200) = 200.
+        // Spec §5.5: max_new_tokens = min(2048, ceil(transcript_chars * 2.0)).
         var backend = new FakeLlamaCleanupBackend { Output = "x" };
         var runner = NewRunner(backend);
-        await runner.RunAsync(new string('a', 100), CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
-        backend.LastMaxNewTokens.ShouldBe(200);
 
-        // For 5000-char transcript = min(2048, 10000) = 2048.
-        await runner.RunAsync(new string('a', 5000), CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+        var raw124 = string.Join(" ", Enumerable.Repeat("word", 25)); // 25*4 + 24 spaces = 124 chars
+        await runner.RunAsync(raw124, CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+        backend.LastMaxNewTokens.ShouldBe((int)System.Math.Ceiling(raw124.Length * 2.0)); // 248
+
+        var rawLong = string.Join(" ", Enumerable.Repeat("word", 1250)); // > 2048 tokens by formula
+        await runner.RunAsync(rawLong, CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
         backend.LastMaxNewTokens.ShouldBe(2048);
     }
 
     [Fact]
-    public async Task Run_AwaitsWindowContext_UpTo500msThenProceeds()
+    public async Task Run_AwaitsWindowContext_UpTo50msThenProceeds()
     {
-        // The window-context task hangs for 5s; the runner should give up at 50ms.
         var tcs = new TaskCompletionSource<string?>();
         var backend = new FakeLlamaCleanupBackend { Output = "cleaned" };
         var runner = NewRunner(backend);
@@ -189,11 +178,11 @@ public class CleanupRunnerTests
         };
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var result = await runner.RunAsync("raw", CorrectionsData.Empty, tcs.Task, opts, CancellationToken.None);
+        var result = await runner.RunAsync("cleaned up this sentence", CorrectionsData.Empty, tcs.Task, opts, CancellationToken.None);
         sw.Stop();
 
         result.CleanedText.ShouldBe("cleaned");
-        sw.ElapsedMilliseconds.ShouldBeLessThan(500); // bailed out at ~50ms
+        sw.ElapsedMilliseconds.ShouldBeLessThan(500);
     }
 
     [Fact]
@@ -207,10 +196,10 @@ public class CleanupRunnerTests
             WindowContextEnabled = true,
             WindowContextWait = TimeSpan.FromMilliseconds(500),
         };
-        await runner.RunAsync("raw", CorrectionsData.Empty, ready, opts, CancellationToken.None);
+        await runner.RunAsync("cleaned up this sentence", CorrectionsData.Empty, ready, opts, CancellationToken.None);
 
-        backend.LastPrompt.ShouldNotBeNull();
-        backend.LastPrompt!.ShouldContain("the foreground window says hello");
+        backend.LastSystemPrompt.ShouldNotBeNull();
+        backend.LastSystemPrompt!.ShouldContain("the foreground window says hello");
     }
 
     [Fact]
@@ -220,11 +209,10 @@ public class CleanupRunnerTests
         var backend = new FakeLlamaCleanupBackend { Output = "cleaned" };
         var runner = NewRunner(backend);
         var opts = DefaultOptions() with { WindowContextEnabled = false };
-        await runner.RunAsync("raw", CorrectionsData.Empty, ready, opts, CancellationToken.None);
+        await runner.RunAsync("cleaned up this sentence", CorrectionsData.Empty, ready, opts, CancellationToken.None);
 
-        backend.LastPrompt.ShouldNotBeNull();
-        backend.LastPrompt!.ShouldNotContain("ignored");
-        backend.LastPrompt!.ShouldNotContain("<WINDOW-OCR-CONTENT>");
+        backend.LastSystemPrompt.ShouldNotBeNull();
+        backend.LastSystemPrompt!.ShouldNotContain("ignored");
+        backend.LastSystemPrompt!.ShouldNotContain("<WINDOW-OCR-CONTENT>");
     }
-
 }

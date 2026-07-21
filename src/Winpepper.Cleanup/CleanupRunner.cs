@@ -55,13 +55,13 @@ public sealed class CleanupRunner
             }
         }
 
-        // 2) Build the assembled prompt.
+        // 2) Build the system (instructions/hints/OCR) and user (transcript)
+        //    messages separately. Bug-3 fix-(iv): a proper system role stops the
+        //    0.5B model pattern-completing the examples.
         var basePrompt = BasePrompts.ForProfile(options.Profile, options.CustomBasePrompt);
-        var assembled = PromptBuilder.Build(
-            basePrompt: basePrompt,
-            corrections: corrections,
-            windowContext: windowContext,
-            userInput: rawTranscript);
+        var systemPrompt = PromptBuilder.BuildSystem(basePrompt, corrections, windowContext);
+        var userPrompt = PromptBuilder.BuildUser(rawTranscript);
+        var assembled = systemPrompt + "\n\n" + userPrompt;
 
         // 3) Compute the max-new-tokens budget per spec §5.5.
         var maxTokens = Math.Min(options.MaxNewTokensCap, (int)Math.Ceiling(rawTranscript.Length * 2.0));
@@ -74,7 +74,7 @@ public sealed class CleanupRunner
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(options.Timeout);
-            raw = await _backend.GenerateAsync(assembled, maxTokens, options.Temperature, timeoutCts.Token)
+            raw = await _backend.GenerateAsync(systemPrompt, userPrompt, maxTokens, options.Temperature, timeoutCts.Token)
                                 .ConfigureAwait(false);
             chosenPath = CleanupPath.Llm;
         }

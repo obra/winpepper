@@ -23,7 +23,8 @@ public class LlamaCleanupBackendIntegrationTests
 
         using var backend = new LlamaCleanupBackend(ModelPath, new NullLogger<LlamaCleanupBackend>());
         var result = await backend.GenerateAsync(
-            prompt: "Repeat the following sentence: Hello, world.",
+            systemPrompt: "You repeat the user's sentence back exactly.",
+            userPrompt: "Hello, world.",
             maxNewTokens: 32,
             temperature: 0.1f,
             ct: CancellationToken.None);

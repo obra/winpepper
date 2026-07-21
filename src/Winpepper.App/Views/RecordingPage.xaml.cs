@@ -86,6 +86,65 @@ public sealed partial class RecordingPage : Page
             _ = _shell.SettingsWriter.QueueAndFlushAsync(s => s with { AutostartEnabled = AutostartToggle.IsOn });
         };
 
+        // Speech recognition (AssemblyAI)
+        var settingsStore = shell.SettingsStore;
+        var keyStore = shell.AssemblyAiKeyStore;
+
+        var current = settingsStore.Load();
+
+        // Provider picker
+        AsrProviderCombo.SelectedIndex = string.Equals(current.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        AssemblyAiPanel.Visibility = AsrProviderCombo.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+        AsrProviderCombo.SelectionChanged += (_, _) =>
+        {
+            var tag = (AsrProviderCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "local";
+            AssemblyAiPanel.Visibility = tag == "assemblyai" ? Visibility.Visible : Visibility.Collapsed;
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AsrProvider = tag });
+        };
+
+        // Model id
+        AssemblyAiModelBox.Text = current.AssemblyAiModel;
+        AssemblyAiModelBox.LostFocus += (_, _) =>
+        {
+            var model = string.IsNullOrWhiteSpace(AssemblyAiModelBox.Text) ? "universal-2" : AssemblyAiModelBox.Text.Trim();
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiModel = model });
+        };
+
+        // Key status
+        AsrStatusText.Text = keyStore.HasKey ? "A key is saved on this PC." : "No key saved.";
+
+        SaveKeyButton.Click += (_, _) =>
+        {
+            var key = AssemblyAiKeyBox.Password;
+            if (string.IsNullOrWhiteSpace(key)) { AsrStatusText.Text = "Enter a key first."; return; }
+            keyStore.Save(key.Trim());
+            AssemblyAiKeyBox.Password = "";
+            AsrStatusText.Text = "Key saved on this PC.";
+        };
+
+        ClearKeyButton.Click += (_, _) =>
+        {
+            keyStore.Clear();
+            AssemblyAiKeyBox.Password = "";
+            AsrStatusText.Text = "Key cleared.";
+        };
+
+        TestKeyButton.Click += async (_, _) =>
+        {
+            if (!keyStore.HasKey) { AsrStatusText.Text = "Save a key before testing."; return; }
+            AsrStatusText.Text = "Testing key...";
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                var ok = await shell.AssemblyAiClient.ValidateKeyAsync(cts.Token);
+                AsrStatusText.Text = ok ? "Key is valid." : "Key rejected (401). Check the key.";
+            }
+            catch (Exception ex)
+            {
+                AsrStatusText.Text = $"Test failed: {ex.Message}";
+            }
+        };
+
         RestartLevelMeter(vm.MicDeviceId);
     }
 

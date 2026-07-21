@@ -111,13 +111,26 @@ public sealed partial class RecordingPage : Page
 
         void SelectModelInCombo(string modelId)
         {
-            var known = Winpepper.Asr.Transcription.AssemblyAiModels.IsKnown(modelId);
-            AssemblyAiModelCombo.SelectedIndex = known
-                ? Enumerable.Range(0, AssemblyAiModelCombo.Items.Count)
-                    .First(i => (string?)((ComboBoxItem)AssemblyAiModelCombo.Items[i]).Tag == modelId
-                             || string.Equals((string?)((ComboBoxItem)AssemblyAiModelCombo.Items[i]).Tag, modelId, StringComparison.OrdinalIgnoreCase))
-                : AssemblyAiModelCombo.Items.Count - 1; // the custom item
-            var isCustom = !known;
+            // A model can be "known" via an accepted alias (e.g. "universal-3-5-pro")
+            // that has no dedicated combo item; canonicalize first so either official
+            // spelling resolves to the listed id, then look the item up safely. If no
+            // listed item matches (truly custom id, or an alias with no listed target)
+            // we fall back to the custom item rather than throwing.
+            var canonical = Winpepper.Asr.Transcription.AssemblyAiModels.CanonicalId(modelId);
+            var matchIndex = -1;
+            for (var i = 0; i < AssemblyAiModelCombo.Items.Count; i++)
+            {
+                var tag = (string?)((ComboBoxItem)AssemblyAiModelCombo.Items[i]).Tag;
+                if (tag != CustomTag && string.Equals(tag, canonical, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchIndex = i;
+                    break;
+                }
+            }
+
+            var hasItem = matchIndex >= 0;
+            AssemblyAiModelCombo.SelectedIndex = hasItem ? matchIndex : AssemblyAiModelCombo.Items.Count - 1; // the custom item
+            var isCustom = !hasItem;
             AssemblyAiModelBox.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
             AssemblyAiModelWarning.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
             AssemblyAiModelBox.Text = isCustom ? modelId : "";

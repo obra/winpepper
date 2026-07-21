@@ -2453,10 +2453,10 @@ Run:
 grep -n "AssemblyAiModels" src/Winpepper.App/Views/RecordingPage.xaml.cs
 grep -n "hasTyped" src/Winpepper.App/Views/RecordingPage.xaml.cs
 grep -n "AssemblyAI (cloud)" src/Winpepper.App/Views/RecordingPage.xaml
-grep -n "deleted from AssemblyAI after transcription" src/Winpepper.App/Views/RecordingPage.xaml
+grep -n "Delete audio from AssemblyAI after transcription" src/Winpepper.App/Views/RecordingPage.xaml
 grep -n "AssemblyAiKeytermsToggle" src/Winpepper.App/Views/RecordingPage.xaml src/Winpepper.App/Views/RecordingPage.xaml.cs
 ```
-Expected: each pattern is found (proves the six UI fixes are present in source). Functional proof is the Windows smoke checklist.
+Expected: each pattern is found (proves the six UI fixes are present in source). The deletion-disclosure grep matches the `AssemblyAiDeleteToggle` header added in Step 1d (`Header="Delete audio from AssemblyAI after transcription"`); it is a case-sensitive, verbatim substring of that line. Functional proof is the Windows smoke checklist.
 
 - [ ] **Step 4: Commit**
 

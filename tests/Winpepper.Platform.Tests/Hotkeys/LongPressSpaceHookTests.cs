@@ -7,6 +7,30 @@ namespace Winpepper.Platform.Tests.Hotkeys;
 
 public class LongPressSpaceHookTests
 {
+    private sealed class OneShotBarrier(CancellationToken cancellationToken) : IDisposable
+    {
+        private readonly ManualResetEventSlim _entered = new();
+        private readonly ManualResetEventSlim _release = new();
+        private int _armed = 1;
+
+        public void Block()
+        {
+            if (Interlocked.Exchange(ref _armed, 0) == 0) return;
+            _entered.Set();
+            _release.Wait(cancellationToken);
+        }
+
+        public void WaitUntilEntered() => _entered.Wait(cancellationToken);
+        public void Release() => _release.Set();
+
+        public void Dispose()
+        {
+            _release.Set();
+            _entered.Dispose();
+            _release.Dispose();
+        }
+    }
+
     private sealed class FakeTimer : ILongPressTimerScheduler
     {
         private Action? _callback;
@@ -24,10 +48,69 @@ public class LongPressSpaceHookTests
 
     private static HotkeyHook NewHook(FakeTimer timer,
         Func<int, bool>? keyPhysicallyDown = null,
-        Func<bool>? normalTriggersEnabled = null)
+        Func<bool>? normalTriggersEnabled = null,
+        Action? beforeLongPressSpaceAdmission = null)
         => new(HotkeyChord.Parse("Space"), HotkeyChord.Parse("F24"), HotkeyChord.Parse("Esc"),
             new NullLogger<HotkeyHook>(), keyPhysicallyDown: keyPhysicallyDown ?? (_ => true),
-            spaceTimerScheduler: timer, normalTriggersEnabled: normalTriggersEnabled);
+            spaceTimerScheduler: timer, normalTriggersEnabled: normalTriggersEnabled,
+            beforeLongPressSpaceAdmission: beforeLongPressSpaceAdmission);
+
+    [Fact]
+    public async Task StaleSpaceCallbackCannotStartAfterReconfigurationCompletes()
+    {
+        var timer = new FakeTimer();
+        using var barrier = new OneShotBarrier(TestContext.Current.CancellationToken);
+        var hook = NewHook(timer, beforeLongPressSpaceAdmission: barrier.Block);
+        var callback = Task.Run(
+            () => hook.TryProcessKey(0x20, true, out _),
+            TestContext.Current.CancellationToken);
+        barrier.WaitUntilEntered();
+
+        hook.UpdateChords(HotkeyChord.Parse("F23"), HotkeyChord.Parse("F24"));
+        barrier.Release();
+        (await callback).ShouldBeFalse();
+        timer.Fire();
+
+        hook.Events.TryRead(out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task StaleSpaceCallbackCannotStartAfterSuspensionCompletes()
+    {
+        var timer = new FakeTimer();
+        using var barrier = new OneShotBarrier(TestContext.Current.CancellationToken);
+        var hook = NewHook(timer, beforeLongPressSpaceAdmission: barrier.Block);
+        var callback = Task.Run(
+            () => hook.TryProcessKey(0x20, true, out _),
+            TestContext.Current.CancellationToken);
+        barrier.WaitUntilEntered();
+
+        hook.SetSuspended(true);
+        barrier.Release();
+        (await callback).ShouldBeFalse();
+        timer.Fire();
+
+        hook.Events.TryRead(out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task StaleSpaceCallbackCannotStartAfterRawCaptureBegins()
+    {
+        var timer = new FakeTimer();
+        using var barrier = new OneShotBarrier(TestContext.Current.CancellationToken);
+        var hook = NewHook(timer, beforeLongPressSpaceAdmission: barrier.Block);
+        var callback = Task.Run(
+            () => hook.TryProcessKey(0x20, true, out _),
+            TestContext.Current.CancellationToken);
+        barrier.WaitUntilEntered();
+
+        using var capture = hook.BeginRawCapture(_ => { });
+        barrier.Release();
+        (await callback).ShouldBeFalse();
+        timer.Fire();
+
+        hook.Events.TryRead(out _).ShouldBeFalse();
+    }
 
     [Fact]
     public void ReadinessEnabledDuringHeldSpaceDefersObservationUntilNextPress()

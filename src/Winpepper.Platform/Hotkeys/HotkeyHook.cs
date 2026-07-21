@@ -63,6 +63,7 @@ public sealed class HotkeyHook : IDisposable
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<int, bool> _keyPhysicallyDown;
     private readonly Func<bool> _normalTriggersEnabled;
+    private readonly Action _beforeLongPressSpaceAdmission;
     private readonly LongPressSpaceStateMachine _spaceHold;
 
     public ChannelReader<HotkeyEvent> Events => _events.Reader;
@@ -229,7 +230,10 @@ public sealed class HotkeyHook : IDisposable
             && vk == VirtualKeyCatalog.Space
             && down
             && _modifiers == Modifier.None)
+        {
+            _beforeLongPressSpaceAdmission();
             return _spaceHold.Process(down);
+        }
 
         if (down)
         {
@@ -305,7 +309,8 @@ public sealed class HotkeyHook : IDisposable
         Func<DateTimeOffset>? timeProvider = null,
         Func<int, bool>? keyPhysicallyDown = null,
         ILongPressTimerScheduler? spaceTimerScheduler = null,
-        Func<bool>? normalTriggersEnabled = null)
+        Func<bool>? normalTriggersEnabled = null,
+        Action? beforeLongPressSpaceAdmission = null)
     {
         _bindings = new HotkeyBindings(hold, toggle, cancel);
         _log = log;
@@ -313,11 +318,12 @@ public sealed class HotkeyHook : IDisposable
         _now = timeProvider ?? (() => DateTimeOffset.UtcNow);
         _keyPhysicallyDown = keyPhysicallyDown ?? DefaultKeyPhysicallyDown;
         _normalTriggersEnabled = normalTriggersEnabled ?? (() => true);
+        _beforeLongPressSpaceAdmission = beforeLongPressSpaceAdmission ?? (() => { });
         _spaceHold = new LongPressSpaceStateMachine(
             spaceTimerScheduler ?? new SystemLongPressTimerScheduler(),
             kind => _events.Writer.TryWrite(new HotkeyEvent(kind, _now())),
             isSpacePhysicallyDown: () => _keyPhysicallyDown(VirtualKeyCatalog.Space),
-            canStartHold: NormalTriggersEnabled);
+            canStartHold: CanStartLongPressSpace);
     }
 
     // Real physical key-state probe. Guarded so it is only P/Invoked on Windows;
@@ -352,6 +358,18 @@ public sealed class HotkeyHook : IDisposable
         }
     }
 
+    /// <summary>
+    /// Re-reads every global admission condition from its published state.
+    /// Lifecycle transitions publish first and cancel second, so a callback
+    /// that observed stale local state either fails this check or is cancelled
+    /// before the transition returns.
+    /// </summary>
+    private bool CanStartLongPressSpace()
+        => NormalTriggersEnabled()
+            && IsLongPressSpaceBinding(Volatile.Read(ref _bindings).Hold)
+            && Volatile.Read(ref _suspendRequested) == 0
+            && Volatile.Read(ref _rawCapture) is null;
+
     /// <summary>Atomically replaces the active hold and toggle chords.</summary>
     public void UpdateChords(HotkeyChord hold, HotkeyChord toggle)
     {
@@ -359,9 +377,9 @@ public sealed class HotkeyHook : IDisposable
         ArgumentNullException.ThrowIfNull(toggle);
 
         var current = Volatile.Read(ref _bindings);
+        Volatile.Write(ref _bindings, new HotkeyBindings(hold, toggle, current.Cancel));
         if (IsLongPressSpaceBinding(current.Hold) && !IsLongPressSpaceBinding(hold))
             _spaceHold.Cancel();
-        Volatile.Write(ref _bindings, new HotkeyBindings(hold, toggle, current.Cancel));
         _log.LogInformation("Hotkeys updated: hold={Hold}, toggle={Toggle}", hold, toggle);
     }
 
@@ -371,8 +389,8 @@ public sealed class HotkeyHook : IDisposable
     /// </summary>
     public void SetSuspended(bool suspended)
     {
-        if (suspended) _spaceHold.Cancel();
         Volatile.Write(ref _suspendRequested, suspended ? 1 : 0);
+        if (suspended) _spaceHold.Cancel();
         _log.LogDebug("Hotkey hook {State} for chord capture", suspended ? "suspended" : "resumed");
     }
 
@@ -383,16 +401,22 @@ public sealed class HotkeyHook : IDisposable
     public IDisposable BeginRawCapture(Action<RawKeyTransition> sink)
     {
         ArgumentNullException.ThrowIfNull(sink);
-        _spaceHold.Cancel();
+        RawCaptureRegistration registration;
         lock (_captureGate)
         {
             if (_rawCapture is not null)
                 throw new InvalidOperationException("A raw hotkey capture lease is already active.");
-            var registration = new RawCaptureRegistration(sink);
+            registration = new RawCaptureRegistration(sink);
             Volatile.Write(ref _rawCapture, registration);
-            _log.LogDebug("Raw hotkey capture acquired");
-            return new RawCaptureLease(this, registration);
         }
+
+        // Do not hold _captureGate while taking the Space state-machine lock.
+        // The registration cannot be unpublished before the lease is returned,
+        // so admission sees raw capture enabled throughout cancellation without
+        // introducing a capture-lock -> Space-lock ordering requirement.
+        _spaceHold.Cancel();
+        _log.LogDebug("Raw hotkey capture acquired");
+        return new RawCaptureLease(this, registration);
     }
 
     private void EndRawCapture(RawCaptureRegistration registration)

@@ -71,6 +71,7 @@ public sealed class LongPressSpaceStateMachine : IDisposable
             {
                 if (_state == State.Idle)
                 {
+                    if (!_canStartHold()) return false;
                     _state = State.Pending;
                     _thresholdTimer = _timerScheduler.Schedule(_threshold, OnThresholdElapsed);
                     return false;

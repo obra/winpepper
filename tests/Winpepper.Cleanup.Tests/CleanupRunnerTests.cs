@@ -227,34 +227,4 @@ public class CleanupRunnerTests
         backend.LastPrompt!.ShouldNotContain("<WINDOW-OCR-CONTENT>");
     }
 
-    [Fact]
-    public async Task Run_LlmPath_AppNameMishearingCorrected()
-    {
-        // LLM returns plausible text that still contains the ASR mishearing.
-        var runner = NewRunner(new FakeLlamaCleanupBackend
-        {
-            Output = "Testing wheat pepper. How's it going?",
-        });
-        var result = await runner.RunAsync("testing wheat pepper how's it going",
-            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
-
-        result.Path.ShouldBe(CleanupPath.Llm);
-        result.CleanedText.ShouldBe("Testing Winpepper. How's it going?");
-    }
-
-    [Fact]
-    public async Task Run_FallbackPath_AppNameMishearingCorrected()
-    {
-        // Backend throws -> FallbackBackendError -> raw transcript is what gets
-        // injected. The app-name correction must still be applied there.
-        var runner = NewRunner(new FakeLlamaCleanupBackend
-        {
-            Throw = new InvalidOperationException("boom"),
-        });
-        var result = await runner.RunAsync("Testing wheat pepper.",
-            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
-
-        result.Path.ShouldBe(CleanupPath.FallbackBackendError);
-        result.CleanedText.ShouldBe("Testing Winpepper.");
-    }
 }

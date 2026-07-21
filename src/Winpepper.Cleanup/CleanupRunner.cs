@@ -181,12 +181,13 @@ public sealed class CleanupRunner
     }
 
     // Deterministic post-pass shared by the LLM-success and fallback paths:
-    // user-configured corrections first, then the built-in app-name mishearing
-    // correction. Applied on every path so injected text always benefits.
+    // apply the user-configured corrections (corrections.json Replacements).
+    // Applied on every path so injected text always benefits. There is no
+    // built-in app-name correction: users add their own via the Corrections
+    // page if they want it.
     private static string ApplyDeterministicPostPass(string text, CorrectionsData corrections)
     {
-        var withCorrections = CaseAwareReplacer.Apply(text, corrections.Replacements);
-        return AppNameCorrector.Apply(withCorrections);
+        return CaseAwareReplacer.Apply(text, corrections.Replacements);
     }
 
     private static CleanupResult Finalize(

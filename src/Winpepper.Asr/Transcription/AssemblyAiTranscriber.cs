@@ -46,7 +46,7 @@ public sealed class AssemblyAiTranscriber : ITranscriber
         {
             var wav = PcmWavEncoder.EncodeMono16k(mono16k.Span);
             var uploadUrl = await _client.UploadAsync(wav, token);
-            var id = await _client.CreateTranscriptAsync(uploadUrl, _opts.Model, token);
+            var id = await _client.CreateTranscriptAsync(uploadUrl, _opts.Model, AssemblyAiRequestExtras.Empty, token);
             _log.LogInformation("AssemblyAI transcript {Id} created ({Bytes} bytes uploaded)", id, wav.Length);
 
             var maxPolls = Math.Max(1, (int)Math.Ceiling(_opts.TotalTimeout / _opts.PollInterval));

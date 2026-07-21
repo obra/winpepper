@@ -100,23 +100,60 @@ public sealed class AssemblyAiClientTests
     }
 
     [Fact]
-    public async Task CreateTranscript_SendsSpeechModelPayload_ReturnsId()
+    public async Task CreateTranscript_SendsSpeechModelPayload_NoVocab_NoWordBoost()
     {
         var handler = new FakeHttpMessageHandler()
             .Enqueue(HttpStatusCode.OK, "{\"id\":\"t-123\",\"status\":\"queued\"}");
         var delays = new List<TimeSpan>();
         var client = Make(handler, delays);
 
-        var id = await client.CreateTranscriptAsync("https://cdn/aai/ok", "universal-2", CancellationToken.None);
+        var id = await client.CreateTranscriptAsync("https://cdn/aai/ok", "universal-2",
+            AssemblyAiRequestExtras.Empty, CancellationToken.None);
 
         id.ShouldBe("t-123");
         var json = Encoding.UTF8.GetString(handler.RequestBodies[0]);
-        json.ShouldContain("\"speech_models\":[\"universal-2\"]"); // plural array (singular is deprecated)
+        json.ShouldContain("\"speech_models\":[\"universal-2\"]");
         json.ShouldContain("\"audio_url\":\"https://cdn/aai/ok\"");
         json.ShouldContain("\"format_text\":true");
         json.ShouldContain("\"punctuate\":true");
         json.ShouldContain("\"disfluencies\":false");
         json.ShouldContain("\"language_code\":\"en_us\"");
+        json.ShouldNotContain("word_boost");        // never
+        json.ShouldNotContain("custom_spelling");   // empty extras -> omitted
+        json.ShouldNotContain("keyterms_prompt");   // empty extras -> omitted
+    }
+
+    [Fact]
+    public async Task CreateTranscript_MapsCustomSpelling_AndKeyterms()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"id\":\"t-9\",\"status\":\"queued\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var extras = new AssemblyAiRequestExtras(
+            new[] { new AssemblyAiCustomSpelling(new[] { "kubernetes", "kubernettes" }, "Kubernetes") },
+            new[] { "Winpepper" });
+
+        await client.CreateTranscriptAsync("https://cdn/aai/ok", "universal-3-pro", extras, CancellationToken.None);
+
+        var json = Encoding.UTF8.GetString(handler.RequestBodies[0]);
+        json.ShouldContain("\"custom_spelling\":[{\"from\":[\"kubernetes\",\"kubernettes\"],\"to\":\"Kubernetes\"}]");
+        json.ShouldContain("\"keyterms_prompt\":[\"Winpepper\"]");
+        json.ShouldNotContain("word_boost");
+    }
+
+    [Fact]
+    public async Task CreateTranscript_401_ThrowsAuthError()
+    {
+        var handler = new FakeHttpMessageHandler().Enqueue(HttpStatusCode.Unauthorized, "{\"error\":\"bad key\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var ex = await Should.ThrowAsync<AssemblyAiException>(
+            () => client.CreateTranscriptAsync("https://cdn/aai/ok", "universal-2", AssemblyAiRequestExtras.Empty, CancellationToken.None));
+        ex.IsAuthError.ShouldBeTrue();
+        ex.StatusCode.ShouldBe(401);
     }
 
     [Fact]

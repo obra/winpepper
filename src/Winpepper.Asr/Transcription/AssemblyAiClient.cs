@@ -11,7 +11,7 @@ public sealed record AssemblyAiTranscript(string Status, string? Text, double? C
 public interface IAssemblyAiClient
 {
     Task<string> UploadAsync(byte[] audio, CancellationToken ct);
-    Task<string> CreateTranscriptAsync(string audioUrl, string model, CancellationToken ct);
+    Task<string> CreateTranscriptAsync(string audioUrl, string model, AssemblyAiRequestExtras extras, CancellationToken ct);
     Task<AssemblyAiTranscript> GetTranscriptAsync(string id, CancellationToken ct);
     Task<bool> ValidateKeyAsync(CancellationToken ct);
 }
@@ -59,17 +59,26 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
         return ReadString(json, "upload_url");
     }
 
-    public async Task<string> CreateTranscriptAsync(string audioUrl, string model, CancellationToken ct)
+    public async Task<string> CreateTranscriptAsync(string audioUrl, string model, AssemblyAiRequestExtras extras, CancellationToken ct)
     {
-        var payload = new
+        // Build the payload as a mutable dictionary so custom_spelling / keyterms_prompt
+        // are only present when non-empty. NEVER add word_boost (downgrades universal-3).
+        var payload = new Dictionary<string, object?>
         {
-            audio_url = audioUrl,
-            speech_models = new[] { model }, // plural array — singular `speech_model` is deprecated
-            format_text = true,
-            punctuate = true,
-            disfluencies = false,
-            language_code = _opts.LanguageCode,
+            ["audio_url"] = audioUrl,
+            ["speech_models"] = new[] { model }, // plural array — singular `speech_model` is deprecated
+            ["format_text"] = true,
+            ["punctuate"] = true,
+            ["disfluencies"] = false,
+            ["language_code"] = _opts.LanguageCode,
         };
+        if (extras.CustomSpelling.Count > 0)
+            payload["custom_spelling"] = extras.CustomSpelling
+                .Select(cs => new { from = cs.From, to = cs.To })
+                .ToArray();
+        if (extras.Keyterms.Count > 0)
+            payload["keyterms_prompt"] = extras.Keyterms.ToArray();
+
         var body = JsonSerializer.Serialize(payload);
 
         using var resp = await SendWithRetryAsync(() =>

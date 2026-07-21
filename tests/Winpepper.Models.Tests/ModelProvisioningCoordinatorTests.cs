@@ -95,6 +95,37 @@ public sealed class ModelProvisioningCoordinatorTests : IDisposable
     }
 
     [Fact]
+    public async Task VerifyReadyAsync_CancellationDoesNotWaitForOrCancelBlockedProvisioning()
+    {
+        var descriptor = Descriptor("hello");
+        var provisioningEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseProvisioning = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = new ModelProvisioningCoordinator(_root, async (model, installRoot, _, ct) =>
+        {
+            provisioningEntered.TrySetResult();
+            await releaseProvisioning.Task.WaitAsync(ct);
+            var modelDir = Path.Combine(installRoot, model.InstallDirRelative);
+            Directory.CreateDirectory(modelDir);
+            await File.WriteAllTextAsync(Path.Combine(modelDir, "model.bin"), "hello", ct);
+        });
+
+        var provisioning = coordinator.EnsureReadyAsync(descriptor, CancellationToken.None);
+        await provisioningEntered.Task;
+        using var verifyCts = new CancellationTokenSource();
+        var verification = coordinator.VerifyReadyAsync(descriptor, verifyCts.Token);
+        verifyCts.Cancel();
+
+        await Should.ThrowAsync<OperationCanceledException>(async () =>
+            await verification.WaitAsync(
+                TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken));
+        provisioning.IsCompleted.ShouldBeFalse();
+
+        releaseProvisioning.TrySetResult();
+        await provisioning;
+        coordinator.State.Status.ShouldBe(ModelProvisioningStatus.Ready);
+    }
+
+    [Fact]
     public async Task EnsureReadyAsync_WaitsForEarlierVerification_AndPublishesOrderedStates()
     {
         var descriptor = Descriptor("hello");

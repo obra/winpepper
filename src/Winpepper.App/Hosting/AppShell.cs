@@ -296,7 +296,14 @@ public sealed class AppShell : IDisposable
         // satisfy onboarding through PipelineHost.IsRunning.
         try
         {
-            var startupGate = new AsrPipelineStartupGate(ModelsServices, Pipeline.TryStart);
+            var startupGate = new AsrPipelineStartupGate(
+                ModelsServices,
+                Pipeline.TryStart,
+                onNotReady: () => ErrorBus.Report(
+                    Winpepper.Core.Errors.ErrorStage.Asr,
+                    new FileNotFoundException(
+                        "Speech model is missing or failed verification. Open Models to download or repair it."),
+                    Guid.Empty));
             await startupGate.TryStartAsync(CancellationToken.None);
         }
         catch (Exception ex)

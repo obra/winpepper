@@ -81,7 +81,7 @@ public sealed class ModelProvisioningCoordinator
         Task start, Task predecessor, ModelDescriptor descriptor, CancellationToken ct)
     {
         await start.ConfigureAwait(false);
-        await IgnoreFailureAsync(predecessor).ConfigureAwait(false);
+        await IgnoreFailureAsync(predecessor).WaitAsync(ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
         var previousState = State;
         try

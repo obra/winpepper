@@ -10,6 +10,10 @@ public interface IWarmAudioRecorder : IDisposable
     /// <summary>Raised (mono 16 kHz frames) only while a session is active.</summary>
     event Action<ReadOnlyMemory<float>>? FramesAvailable;
 
+    /// <summary>Raised when the capture stream faults or fails to (re)start, so
+    /// the host can log it and surface a user-facing signal (Bug 3).</summary>
+    event Action<Exception>? CaptureFaulted;
+
     /// <summary>Begin a session, seeding up to <paramref name="includePrerollMs"/>
     /// milliseconds of already-captured audio.</summary>
     void StartSession(int includePrerollMs);

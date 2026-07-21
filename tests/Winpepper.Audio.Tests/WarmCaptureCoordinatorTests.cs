@@ -171,4 +171,70 @@ public class WarmCaptureCoordinatorTests
         currentSource.RaiseFrame(new float[] { 7 });  // current-device audio: must land
         buffer.StopSession().ShouldBe(new float[] { 7 });
     }
+
+    [Fact]
+    public void Fault_RaisesCaptureFaulted_AndAutoRebuildsWhenPastBackoff()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var made = new List<FakeCaptureSource>();
+        var buffer = new WarmCaptureBuffer(1000);
+        var c = new WarmCaptureCoordinator(
+            buffer,
+            () => { var s = new FakeCaptureSource(); made.Add(s); return s; },
+            clock: () => now,
+            faultBackoff: TimeSpan.FromSeconds(2));
+
+        var faults = new List<Exception>();
+        c.CaptureFaulted += faults.Add;
+        c.EnsureStarted();
+
+        made[0].RaiseStopped(new InvalidOperationException("device removed"));
+
+        faults.Count.ShouldBe(1);
+        made.Count.ShouldBe(2);          // auto-rebuilt (first fault, no prior)
+        made[0].Disposed.ShouldBeTrue();
+        c.IsRunning.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void StormingFaults_WithinBackoff_DoNotAutoRebuild()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var made = new List<FakeCaptureSource>();
+        var buffer = new WarmCaptureBuffer(1000);
+        var c = new WarmCaptureCoordinator(
+            buffer,
+            () => { var s = new FakeCaptureSource(); made.Add(s); return s; },
+            clock: () => now,
+            faultBackoff: TimeSpan.FromSeconds(2));
+        c.EnsureStarted();                       // made[0]
+
+        made[0].RaiseStopped(new Exception("f1")); // past-backoff (no prior) -> rebuild made[1]
+        made[1].RaiseStopped(new Exception("f2")); // same clock -> within backoff -> no rebuild
+
+        made.Count.ShouldBe(2);
+        c.IsRunning.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void EnsureStarted_Force_RestartsAFaultedStreamIgnoringBackoff()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var made = new List<FakeCaptureSource>();
+        var buffer = new WarmCaptureBuffer(1000);
+        var c = new WarmCaptureCoordinator(
+            buffer,
+            () => { var s = new FakeCaptureSource(); made.Add(s); return s; },
+            clock: () => now,
+            faultBackoff: TimeSpan.FromSeconds(2));
+        c.EnsureStarted();
+        made[0].RaiseStopped(new Exception("f1")); // rebuild made[1]
+        made[1].RaiseStopped(new Exception("f2")); // within backoff -> stays down
+
+        c.IsRunning.ShouldBeFalse();
+        c.EnsureStarted(force: true);              // user starts a session on a faulted stream (Bug 7)
+
+        c.IsRunning.ShouldBeTrue();
+        made.Count.ShouldBe(3);
+    }
 }

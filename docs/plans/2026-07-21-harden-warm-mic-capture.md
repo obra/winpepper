@@ -2303,6 +2303,17 @@ Windows build, then:
   `ObjectDisposedException` in the log; a capture-fault toast appears on unplug;
   and a subsequent dictation on the built-in mic works (ring cleared, no stale
   pre-roll audio bleeds in). **[real-hardware proof scenario]**
+  **Additional required sub-case — capture-thread self-join:** the stress loop
+  MUST also include cycles where the faulted source was started **from the
+  background pipeline thread with no SynchronizationContext**, not only the
+  prewarm/UI-thread source — specifically: (a) a cold-mode session (capture
+  started off the UI thread), and (b) a fault raised immediately after an
+  `EnsureStarted(force:true)` restart of a previously-faulted stream (also
+  driven from the background pipeline thread). NAudio can raise
+  `RecordingStopped` on the capture thread itself in these cases, which is the
+  only situation in which the source's own teardown thread joins itself; a
+  fault confined to the prewarm/UI-thread source cannot exercise this path.
+  Apply the same hang/deadlock watchdog to these cycles as to the rest of S5.
 - **S7 — Change default device between sessions:** dictate on mic A, switch the
   Windows default input to mic B in Sound settings, dictate again. Confirm the
   second session records from mic B (per-session default recheck + rebuild) with

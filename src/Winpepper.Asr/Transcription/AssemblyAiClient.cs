@@ -94,11 +94,30 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         return new AssemblyAiTranscript(
-            Status: root.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String ? s.GetString()! : "",
+            Status: ReadStatus(root),
             Text: root.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null,
             Confidence: root.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetDouble() : null,
             AudioDuration: root.TryGetProperty("audio_duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : null,
             Error: root.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null);
+    }
+
+    /// <summary>
+    /// Read `status` tolerant of JSON kind. AssemblyAI sends a string, but a
+    /// non-string value must never silently drop a completed transcript: coerce
+    /// numbers/bools to their raw text and let the transcriber's poll loop treat
+    /// an unrecognized status explicitly.
+    /// </summary>
+    private static string ReadStatus(JsonElement root)
+    {
+        if (!root.TryGetProperty("status", out var s)) return "";
+        return s.ValueKind switch
+        {
+            JsonValueKind.String => s.GetString() ?? "",
+            JsonValueKind.Null => "",
+            JsonValueKind.Number => s.GetRawText(),
+            JsonValueKind.True or JsonValueKind.False => s.GetRawText(),
+            _ => s.GetRawText(),
+        };
     }
 
     public async Task<bool> ValidateKeyAsync(CancellationToken ct)

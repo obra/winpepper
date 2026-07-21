@@ -222,4 +222,32 @@ public sealed class AssemblyAiClientTests
         delays.Count.ShouldBe(0);       // never retried
         handler.Requests.Count.ShouldBeLessThanOrEqualTo(1);
     }
+
+    [Fact]
+    public async Task GetTranscript_NonStringStatus_IsCoercedNotDropped()
+    {
+        // Defensive: even if status arrives as a JSON number, we must surface it
+        // (as "123") rather than silently returning empty and burning the budget.
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"status\":123,\"text\":\"hi\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var tr = await client.GetTranscriptAsync("t-1", CancellationToken.None);
+        tr.Status.ShouldBe("123");
+        tr.Text.ShouldBe("hi");
+    }
+
+    [Theory]
+    [InlineData(400)]
+    [InlineData(404)]
+    public async Task GetTranscript_ClientError_Throws(int code)
+    {
+        var handler = new FakeHttpMessageHandler().Enqueue((HttpStatusCode)code, "{\"error\":\"nope\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var ex = await Should.ThrowAsync<AssemblyAiException>(() => client.GetTranscriptAsync("t-1", CancellationToken.None));
+        ex.StatusCode.ShouldBe(code);
+    }
 }

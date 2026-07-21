@@ -40,9 +40,9 @@ public sealed class AppShell : IDisposable
     public Winpepper.Core.Logging.LogRingBuffer LogTail { get; }
     public Winpepper.Core.Threading.IUiThread Ui { get; }
     public Winpepper.App.Hosting.DiagnosticsHost DiagnosticsHost { get; }
-    public Winpepper.Asr.Transcription.IAssemblyAiKeyStore AssemblyAiKeyStore { get; private set; } = null!;
-    public Winpepper.Asr.Transcription.AssemblyAiClient AssemblyAiClient { get; private set; } = null!;
-    public Winpepper.Asr.Transcription.AssemblyAiOptions AssemblyAiOptions { get; private set; } = null!;
+    public Winpepper.Asr.Transcription.IAssemblyAiKeyStore AssemblyAiKeyStore { get; }
+    public Winpepper.Asr.Transcription.AssemblyAiClient AssemblyAiClient { get; }
+    public Winpepper.Asr.Transcription.AssemblyAiOptions AssemblyAiOptions { get; }
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
@@ -257,10 +257,8 @@ public sealed class AppShell : IDisposable
                                   recordingVm, cleanupVm, correctionsVm,
                                   autostart, pipeline, sounds, historyServices, modelsServices,
                                   toasts, clipboardFallback, crashHandler,
-                                  logTail, uiThread, diagHost);
-        shell.AssemblyAiKeyStore = aaiKeyStore;
-        shell.AssemblyAiClient = aaiClient;
-        shell.AssemblyAiOptions = aaiOptions;
+                                  logTail, uiThread, diagHost,
+                                  aaiKeyStore, aaiClient, aaiOptions);
         await shell.StartAsync();
         return shell;
     }
@@ -279,7 +277,10 @@ public sealed class AppShell : IDisposable
                      Winpepper.Core.Crash.CrashHandler crashHandler,
                      Winpepper.Core.Logging.LogRingBuffer logTail,
                      Winpepper.Core.Threading.IUiThread ui,
-                     Winpepper.App.Hosting.DiagnosticsHost diagnosticsHost)
+                     Winpepper.App.Hosting.DiagnosticsHost diagnosticsHost,
+                     Winpepper.Asr.Transcription.IAssemblyAiKeyStore assemblyAiKeyStore,
+                     Winpepper.Asr.Transcription.AssemblyAiClient assemblyAiClient,
+                     Winpepper.Asr.Transcription.AssemblyAiOptions assemblyAiOptions)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;

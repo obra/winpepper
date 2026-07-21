@@ -233,8 +233,17 @@ public sealed class AppShell : IDisposable
         // --- AssemblyAI cloud ASR provider stack (optional; key may be absent) ---
         var aaiKeyStore = new Winpepper.Asr.Transcription.AssemblyAiKeyStore(
             AppPaths.AssemblyAiKeyFile, new Winpepper.App.Asr.DpapiApiKeyProtector());
-        var aaiHttp = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-        var aaiOptions = new Winpepper.Asr.Transcription.AssemblyAiOptions { Model = settings.AssemblyAiModel };
+        // No global HttpClient.Timeout: per-request timeouts are enforced inside
+        // AssemblyAiClient via a linked CTS, and the total cloud budget is owned by
+        // FallbackTranscriber. A single large safety cap guards against a truly wedged socket.
+        var aaiHttp = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+        var aaiOptions = new Winpepper.Asr.Transcription.AssemblyAiOptions
+        {
+            Model = settings.AssemblyAiModel,
+            CloudDeadline = Winpepper.Asr.Transcription.AssemblyAiOptions.ClampDeadline(settings.AssemblyAiCloudDeadlineSeconds),
+            DeleteAfterTranscribe = settings.AssemblyAiDeleteAfterTranscribe,
+            KeytermsEnabled = settings.AssemblyAiKeytermsEnabled,
+        };
         var aaiClient = new Winpepper.Asr.Transcription.AssemblyAiClient(
             aaiHttp,
             () => aaiKeyStore.Load(),
@@ -247,7 +256,8 @@ public sealed class AppShell : IDisposable
                                          clipboardFallback, toasts,
                                          () => store.Load(),
                                          (local, s, onFallback) => AppShell.BuildTranscriber(
-                                             local, s, onFallback, aaiClient, aaiKeyStore, factory),
+                                             local, s, onFallback, aaiClient, aaiKeyStore, aaiOptions,
+                                             correctionStore, errorBus, factory),
                                          cleanup, correctionStore, windowContext, cleanupOptions,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
                                          postPasteLearningEnabled: settings.PostPasteLearningEnabled,
@@ -360,6 +370,9 @@ public sealed class AppShell : IDisposable
         Action<string> onFallback,
         Winpepper.Asr.Transcription.IAssemblyAiClient client,
         Winpepper.Asr.Transcription.IAssemblyAiKeyStore keyStore,
+        Winpepper.Asr.Transcription.AssemblyAiOptions options,
+        Winpepper.Corrections.CorrectionStore? correctionStore,
+        Winpepper.Core.Errors.ErrorBus errorBus,
         ILoggerFactory loggerFactory)
     {
         var localTranscriber = new Winpepper.Asr.Transcription.ParakeetTranscriber(
@@ -368,17 +381,28 @@ public sealed class AppShell : IDisposable
         if (!string.Equals(settings.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase))
             return localTranscriber;
 
-        var options = new Winpepper.Asr.Transcription.AssemblyAiOptions { Model = settings.AssemblyAiModel };
+        // Snapshot corrections into request extras at build time; keyterms only when opted in.
+        Winpepper.Asr.Transcription.AssemblyAiRequestExtras Extras()
+        {
+            var data = correctionStore?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
+            return Winpepper.Asr.Transcription.CorrectionSpellingMapper.ToExtras(data, options.KeytermsEnabled);
+        }
+
         var cloud = new Winpepper.Asr.Transcription.AssemblyAiTranscriber(
-            client,
-            keyStore,
-            options,
-            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiTranscriber>());
+            client, keyStore, options,
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiTranscriber>(),
+            extrasProvider: Extras);
 
         return new Winpepper.Asr.Transcription.FallbackTranscriber(
             cloud, localTranscriber,
             loggerFactory.CreateLogger<Winpepper.Asr.Transcription.FallbackTranscriber>(),
-            onFallback);
+            onFallback: onFallback,
+            cloudDeadline: options.CloudDeadline,
+            onConfigError: msg => errorBus.Report(
+                Winpepper.Core.Errors.ErrorStage.Asr,
+                new InvalidOperationException(
+                    $"AssemblyAI model rejected ({settings.AssemblyAiModel}). Check the model setting. {msg}"),
+                Guid.Empty)); // config-level error, not tied to a capture session
     }
 
     public void Dispose()

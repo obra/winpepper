@@ -279,12 +279,15 @@ public sealed class PipelineHost : IDisposable
                             corrections: correctionsData,
                             windowContextTask: ctxTextTask,
                             options: _cleanupOptions,
-                            ct: ct);
+                            ct: ct,
+                            skipLlm: Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName));
                         cleanupSw.Stop();
                         _log.LogInformation("Cleanup path={Path}, {ElapsedMs}ms",
                             result.Path, (int)result.Elapsed.TotalMilliseconds);
                         final = result.CleanedText;
-                        cleanupUsedModel = _cleanupModelName;
+                        cleanupUsedModel = result.Path == Winpepper.Cleanup.CleanupPath.BypassProvider
+                            ? "none (cloud, corrections-only)"
+                            : _cleanupModelName;
                         windowContextUsed = ctxTextTask is not null
                                             && result.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
                     }
@@ -445,12 +448,15 @@ public sealed class PipelineHost : IDisposable
                                 corrections: correctionsData2,
                                 windowContextTask: ctxTextTask2,
                                 options: _cleanupOptions,
-                                ct: ct);
+                                ct: ct,
+                                skipLlm: Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName2));
                             cleanupSw2.Stop();
                             _log.LogInformation("Cleanup path={Path}, {ElapsedMs}ms",
                                 result2.Path, (int)result2.Elapsed.TotalMilliseconds);
                             final2 = result2.CleanedText;
-                            cleanupUsedModel2 = _cleanupModelName;
+                            cleanupUsedModel2 = result2.Path == Winpepper.Cleanup.CleanupPath.BypassProvider
+                                ? "none (cloud, corrections-only)"
+                                : _cleanupModelName;
                             windowContextUsed2 = ctxTextTask2 is not null
                                                 && result2.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
                         }

@@ -15,6 +15,7 @@ public static class PillAnimationMap
         SessionStage.Transcribing => PillAnimationMode.Thinking,
         SessionStage.CleaningUp   => PillAnimationMode.Thinking,
         SessionStage.Injecting    => PillAnimationMode.Thinking,
+        SessionStage.PendingPaste => PillAnimationMode.None, // steady; no pulse while waiting for click
         _                         => PillAnimationMode.None, // Idle, Error
     };
 }

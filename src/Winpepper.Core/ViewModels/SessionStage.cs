@@ -7,5 +7,6 @@ public enum SessionStage
     Transcribing,
     CleaningUp,
     Injecting,
+    PendingPaste,
     Error,
 }

@@ -185,9 +185,9 @@ task.
 - Modify: `tests/Winpepper.Cleanup.Tests/CleanupRunnerTests.cs:230-259`
 
 **Interfaces:**
-- Consumes: `CaseAwareReplacer.Apply(string text, IReadOnlyList<...> replacements)`
+- Consumes: `CaseAwareReplacer.Apply(string text, IReadOnlyDictionary<string, string> replacements)`
   (existing; already the first half of the post-pass) and
-  `CorrectionsData.Replacements` (existing).
+  `CorrectionsData.Replacements` (existing; typed `IReadOnlyDictionary<string, string>`).
 - Produces: `CleanupRunner.ApplyDeterministicPostPass` now runs ONLY the
   user-configured `CaseAwareReplacer` pass; the `AppNameCorrector` type no
   longer exists anywhere in the tree.
@@ -1267,7 +1267,8 @@ EOF
 
 **Interfaces:**
 - Consumes: `MissingModelsResolver.FindMissing(registry, installRoot, selectedNames)`
-  and `ModelDescriptor.IsFullyInstalled` (both existing, spec 3(iii));
+  and `ModelDescriptor.IsFullyInstalled(installRoot)` (a method taking the install
+  root, not a property; both existing, spec 3(iii));
   `ModelsServices.DownloadAsync(descriptor, installRoot, progress, ct)`,
   `ModelsServices.Registry.All`, `ModelsServices.ModelsRoot` (existing);
   `ModelRegistry.DefaultAsrName`, `ModelRegistry.DefaultCleanupName`.

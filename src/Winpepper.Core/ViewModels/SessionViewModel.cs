@@ -17,6 +17,8 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private ErrorStage? _lastErrorStage;
     private string _lastErrorMessage = "";
     private IDisposable? _busSub;
+    private readonly Winpepper.Core.Audio.LevelMeterModel _levelMeter = new();
+    private double _inputLevel;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -30,7 +32,18 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public SessionStage Stage
     {
         get => _stage;
-        private set { if (_stage == value) return; _stage = value; Raise(nameof(Stage)); Raise(nameof(StatusText)); }
+        private set
+        {
+            if (_stage == value) return;
+            _stage = value;
+            if (value != SessionStage.Recording)
+            {
+                _levelMeter.Reset();
+                InputLevel = 0;
+            }
+            Raise(nameof(Stage));
+            Raise(nameof(StatusText));
+        }
     }
 
     public string StatusText
@@ -43,6 +56,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         get => _elapsedMs;
         private set { if (_elapsedMs == value) return; _elapsedMs = value; Raise(nameof(ElapsedMs)); }
+    }
+
+    /// <summary>
+    /// Smoothed microphone level (0..1) while recording, for the pill's voice
+    /// meter. Zero when not recording. Fed via <see cref="ReportAudioFrame"/>.
+    /// </summary>
+    public double InputLevel
+    {
+        get => _inputLevel;
+        private set
+        {
+            if (Math.Abs(_inputLevel - value) < 0.0001) return;
+            _inputLevel = value;
+            Raise(nameof(InputLevel));
+        }
     }
 
     public ErrorStage? LastErrorStage
@@ -88,6 +116,19 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public void Tick() => _ui.Post(() =>
     {
         if (_stopwatch.IsRunning) ElapsedMs = _stopwatch.ElapsedMilliseconds;
+    });
+
+    /// <summary>
+    /// Feed a raw mono float frame from the live dictation recorder. Updates
+    /// the smoothed <see cref="InputLevel"/> on the UI thread. Frames received
+    /// while not recording are ignored so the meter reads zero between sessions.
+    /// The live recorder already emits at ~20 Hz (50 ms buffers), which is
+    /// within the target throttle — no extra rate limiting is needed here.
+    /// </summary>
+    public void ReportAudioFrame(ReadOnlyMemory<float> frame) => _ui.Post(() =>
+    {
+        if (_stage != SessionStage.Recording) return;
+        InputLevel = _levelMeter.Push(frame.Span);
     });
 
     private void OnEngineStateChanged(SessionState from, SessionState to)

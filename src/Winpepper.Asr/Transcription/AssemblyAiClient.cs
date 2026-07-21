@@ -29,7 +29,6 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
     private readonly AssemblyAiOptions _opts;
     private readonly ILogger<AssemblyAiClient> _log;
     private readonly Func<TimeSpan, CancellationToken, Task> _delay;
-    private readonly Random _rng = new();
 
     public AssemblyAiClient(
         HttpClient http,
@@ -177,8 +176,9 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
         }
     }
 
-    private TimeSpan Backoff(int attempt)
-        => TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 250 + _rng.Next(0, 250)); // exponential + jitter
+    private static TimeSpan Backoff(int attempt)
+        // exponential + jitter; Random.Shared is thread-safe (no shared unlocked field)
+        => TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 250 + Random.Shared.Next(0, 250));
 
     private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromSeconds(30);
 

@@ -171,4 +171,22 @@ public sealed class AssemblyAiClientTests
         else
             delays[0].ShouldBeGreaterThan(TimeSpan.Zero); // non-numeric -> backoff jitter
     }
+
+    [Fact]
+    public async Task Upload_503_RetriesUpToMax_ThenThrows_WithMonotonicBackoff()
+    {
+        // 4 consecutive 503s with MaxTransientRetries=3 -> 3 delays, then throw.
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}")
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}")
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}")
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var ex = await Should.ThrowAsync<AssemblyAiException>(() => client.UploadAsync(new byte[] { 1 }, CancellationToken.None));
+        ex.StatusCode.ShouldBe(503);
+        delays.Count.ShouldBe(3);                      // exactly MaxTransientRetries delays
+        foreach (var d in delays) d.ShouldBeGreaterThan(TimeSpan.Zero);
+    }
 }

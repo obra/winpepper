@@ -13,3 +13,6 @@ TestResults/
 node_modules/
 *.log
 .worktrees/
+
+# Locally provisioned .NET SDK (see docs/plans/2026-07-20-dictation-cleanup-fixes.md)
+/.dotnet/

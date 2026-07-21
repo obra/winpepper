@@ -6,7 +6,12 @@
     <Grid Background="Transparent" Padding="12,6">
         <Border Background="#CC202020" CornerRadius="14" Padding="14,6">
             <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
-                <Ellipse x:Name="Dot" Width="10" Height="10" Fill="#FFEF4444" />
+                <Ellipse x:Name="Dot" Width="10" Height="10" Fill="#FFEF4444"
+                         RenderTransformOrigin="0.5,0.5">
+                    <Ellipse.RenderTransform>
+                        <ScaleTransform x:Name="DotScale" ScaleX="1.0" ScaleY="1.0" />
+                    </Ellipse.RenderTransform>
+                </Ellipse>
                 <TextBlock x:Name="StatusText" Foreground="White" FontSize="13" Text="Recording..." />
                 <TextBlock x:Name="ElapsedText" Foreground="#AAFFFFFF" FontSize="12" Text="0 ms" />
             </StackPanel>

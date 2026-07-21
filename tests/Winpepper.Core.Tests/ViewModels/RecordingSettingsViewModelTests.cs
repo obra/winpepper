@@ -106,4 +106,18 @@ public class RecordingSettingsViewModelTests
         w.WriteCount.ShouldBe(1);
         w.FlushCount.ShouldBe(1);
     }
+
+    [Fact]
+    public void PrewarmMic_Defaults_On_And_Commits_Durably()
+    {
+        var w = new FakeWriter();
+        var vm = new RecordingSettingsViewModel(new AppSettings(), w);
+        vm.PrewarmMicEnabled.ShouldBeTrue(); // default on
+
+        vm.PrewarmMicEnabled = false;
+
+        w.Current.PrewarmMicEnabled.ShouldBeFalse();
+        w.WriteCount.ShouldBe(1);
+        w.FlushCount.ShouldBe(1);
+    }
 }

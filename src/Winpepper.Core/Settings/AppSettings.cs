@@ -33,6 +33,12 @@ public record AppSettings
     // Post-paste "offer to learn corrections" prompt. Off by default: this is
     // opt-in behavior (spec Task 5).
     public bool PostPasteLearningEnabled { get; init; } = false;
+
+    // Warm-mic pre-roll: keep one capture stream running so the first ~500 ms
+    // of speech is not clipped (Bug 2). On by default; turning it off restores
+    // cold-start capture (the mic-in-use indicator then only lights while
+    // dictating — a privacy trade-off).
+    public bool PrewarmMicEnabled { get; init; } = true;
     public string LastVersionSeen { get; init; } = "";
 
     // Main-window size in physical pixels; null until the user resizes or the

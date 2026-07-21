@@ -22,6 +22,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
     private bool _playSounds;
     private bool _speakerFilterEnabled;
     private bool _postPasteLearningEnabled;
+    private bool _prewarmMicEnabled;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -35,6 +36,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         _playSounds = initial.PlaySounds;
         _speakerFilterEnabled = initial.SpeakerFilterEnabled;
         _postPasteLearningEnabled = initial.PostPasteLearningEnabled;
+        _prewarmMicEnabled = initial.PrewarmMicEnabled;
     }
 
     private sealed class NullHotkeyValidator : IHotkeyValidator
@@ -122,6 +124,18 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
             _postPasteLearningEnabled = value;
             CommitDurable(s => s with { PostPasteLearningEnabled = value });
             Raise(nameof(PostPasteLearningEnabled));
+        }
+    }
+
+    public bool PrewarmMicEnabled
+    {
+        get => _prewarmMicEnabled;
+        set
+        {
+            if (_prewarmMicEnabled == value) return;
+            _prewarmMicEnabled = value;
+            CommitDurable(s => s with { PrewarmMicEnabled = value });
+            Raise(nameof(PrewarmMicEnabled));
         }
     }
 

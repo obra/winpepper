@@ -32,14 +32,24 @@ public class BasePromptsTests
     }
 
     [Fact]
-    public void Default_HasThreeExamples()
+    public void Default_HasExactlyOneExample()
     {
         var p = BasePrompts.Default;
-        // Examples are blocks starting with "Input:" / "Output:".
+        // A single worked example keeps a 0.5B model from pattern-completing a
+        // few-shot block (spec fix-(iv)). Examples are "Input:"/"Output:" lines.
         var inputs = System.Text.RegularExpressions.Regex.Matches(p, @"^Input:", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
         var outputs = System.Text.RegularExpressions.Regex.Matches(p, @"^Output:", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
-        inputs.ShouldBe(3);
-        outputs.ShouldBe(3);
+        inputs.ShouldBe(1);
+        outputs.ShouldBe(1);
+    }
+
+    [Fact]
+    public void DefaultExampleOutputs_MatchesTheEmbeddedExampleOutput()
+    {
+        // Anti-drift: the denylist the runner checks must be exactly the
+        // output text shown in the prompt.
+        BasePrompts.DefaultExampleOutputs.Count.ShouldBe(1);
+        BasePrompts.Default.ShouldContain("Output: " + BasePrompts.DefaultExampleOutputs[0]);
     }
 
     [Fact]

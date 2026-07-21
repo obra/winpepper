@@ -20,8 +20,25 @@ public sealed partial class OnboardingPage : Page
     {
         var shell = (AppShell)e.Parameter;
         _shell = shell;
-        // The stub returns immediately for Plan 3. Plan 4 swaps in the real downloader.
-        _vm = new OnboardingViewModel(shell.SettingsWriter, () => Task.CompletedTask,
+        // Real downloader: fetch ONLY the selected models that are missing,
+        // using the same resolver + downloader as the Models tab (spec 3(iv)).
+        // If nothing is missing this returns immediately and the step
+        // auto-resolves.
+        async Task RunOnboardingDownloadAsync()
+        {
+            var s = shell.Settings;
+            var names = new[] { s.AsrModelName, s.CleanupModelName };
+            var missing = new Winpepper.Models.MissingModelsResolver().FindMissing(
+                shell.ModelsServices.Registry.All, shell.ModelsServices.ModelsRoot, names);
+            foreach (var descriptor in missing)
+            {
+                var progress = new Progress<Winpepper.Models.DownloadProgress>();
+                await shell.ModelsServices.DownloadAsync(
+                    descriptor, shell.ModelsServices.ModelsRoot, progress, CancellationToken.None);
+            }
+        }
+
+        _vm = new OnboardingViewModel(shell.SettingsWriter, RunOnboardingDownloadAsync,
                                        new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator());
 
         var devices = DeviceEnumerator.List();

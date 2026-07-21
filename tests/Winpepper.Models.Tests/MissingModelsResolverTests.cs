@@ -54,4 +54,31 @@ public class MissingModelsResolverTests : IDisposable
         var missing = resolver.FindMissing(registry, _root, new[] { "a" });
         missing.Select(m => m.Name).ShouldBe(new[] { "a" });
     }
+
+    [Fact]
+    public void FindMissing_OnboardingScope_ReturnsOnlyUninstalled_Then_Empty()
+    {
+        var registry = new ModelRegistry();
+        var names = new[] { ModelRegistry.DefaultAsrName, ModelRegistry.DefaultCleanupName };
+        var resolver = new MissingModelsResolver();
+
+        // Nothing installed yet: both selected models are missing.
+        var before = resolver.FindMissing(registry.All, _root, names);
+        before.Select(d => d.Name).OrderBy(n => n)
+              .ShouldBe(new[] { ModelRegistry.DefaultAsrName, ModelRegistry.DefaultCleanupName }.OrderBy(n => n));
+
+        // Install every file of both descriptors (non-empty content).
+        foreach (var d in registry.All.Where(d => names.Contains(d.Name)))
+        {
+            foreach (var f in d.Files)
+            {
+                var p = Path.Combine(_root, d.InstallDirRelative, f.RelativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(p)!);
+                File.WriteAllText(p, "x");
+            }
+        }
+
+        // Now nothing is missing -> the onboarding step auto-resolves.
+        resolver.FindMissing(registry.All, _root, names).ShouldBeEmpty();
+    }
 }

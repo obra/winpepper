@@ -52,10 +52,23 @@ public class WarmCaptureCoordinatorTests
     public void Rebuild_DisposesOldSource_ClearsRing_AndStartsNew()
     {
         var made = new List<FakeCaptureSource>();
-        var c = NewCoordinator(() => { var s = new FakeCaptureSource(); made.Add(s); return s; }, out var buffer);
+        // Distinguish the "caller" thread (driving EnsureStarted/Rebuild, e.g. the
+        // pipeline/UI thread) from the simulated capture-callback thread below --
+        // in real life these are different OS threads, which is exactly what lets
+        // Rebuild's teardown dispose the old source inline instead of deferring
+        // (deferral is only for the self-join case, covered by the
+        // Dispose_FromCaptureThread_* tests further down).
+        var currentId = 1;
+        var buffer = new WarmCaptureBuffer(ringCapacitySamples: 16000);
+        var c = new WarmCaptureCoordinator(
+            buffer,
+            () => { var s = new FakeCaptureSource(); made.Add(s); return s; },
+            currentThreadId: () => currentId);
 
         c.EnsureStarted();
+        currentId = 2; // simulate the frame arriving on the real capture thread
         made[0].RaiseFrame(new float[] { 9, 9, 9 }); // stale-device audio into the ring
+        currentId = 1; // back on the caller thread for Rebuild
         c.Rebuild();
 
         made.Count.ShouldBe(2);
@@ -236,5 +249,55 @@ public class WarmCaptureCoordinatorTests
 
         c.IsRunning.ShouldBeTrue();
         made.Count.ShouldBe(3);
+    }
+
+    [Fact]
+    public void Dispose_FromCaptureThread_SchedulesOffThread_NoInlineSelfJoin()
+    {
+        var source = new FakeCaptureSource();
+        var scheduled = new List<Action>();
+        // currentThreadId returns the SAME id the coordinator recorded from callbacks (7).
+        var coord = new WarmCaptureCoordinator(
+            new WarmCaptureBuffer(16000),
+            sourceFactory: () => source,
+            currentThreadId: () => 7,
+            disposeScheduler: a => scheduled.Add(a));
+        coord.EnsureStarted(force: true);
+
+        // Simulate a capture-thread callback so the coordinator records thread id 7.
+        source.RaiseFrame(new float[] { 0f });
+
+        coord.Dispose();
+
+        // Because we are "on" the capture thread (id 7), dispose must be deferred, not inline.
+        scheduled.Count.ShouldBe(1);
+        source.DisposedOnThreadId.ShouldBeNull(); // not yet disposed inline
+        scheduled[0]();                            // run the scheduled dispose
+        source.Disposed.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Dispose_FromOtherThread_DisposesInline()
+    {
+        var source = new FakeCaptureSource();
+        var scheduled = new List<Action>();
+        var recordedCallbackId = 7;
+        var currentId = 99; // a DIFFERENT thread from the capture callbacks
+        var coord = new WarmCaptureCoordinator(
+            new WarmCaptureBuffer(16000),
+            sourceFactory: () => source,
+            currentThreadId: () => currentId,
+            disposeScheduler: a => scheduled.Add(a));
+        coord.EnsureStarted(force: true);
+
+        // Record callback thread id 7 by overriding currentId during the callback.
+        currentId = recordedCallbackId;
+        source.RaiseFrame(new float[] { 0f });
+        currentId = 99; // now we're on a normal (non-capture) thread
+
+        coord.Dispose();
+
+        scheduled.Count.ShouldBe(0);      // no deferral needed
+        source.Disposed.ShouldBeTrue();    // disposed inline
     }
 }

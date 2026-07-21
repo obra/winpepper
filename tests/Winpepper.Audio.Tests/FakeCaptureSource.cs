@@ -23,6 +23,12 @@ public sealed class FakeCaptureSource : ICaptureSource
     public bool Started { get; private set; }
     public bool ThrowOnStart { get; set; }
 
+    /// <summary>Simulated capture-callback thread id (set by tests that model self-join scenarios).</summary>
+    public int? CallbackThreadId { get; set; }
+
+    /// <summary>Managed thread id observed by <see cref="Dispose"/>.</summary>
+    public int? DisposedOnThreadId { get; private set; }
+
     public event Action<ReadOnlyMemory<float>>? FramesAvailable;
     public event Action<Exception?>? Stopped;
 
@@ -35,8 +41,15 @@ public sealed class FakeCaptureSource : ICaptureSource
     /// <summary>Simulate a capture-thread frame callback (may arrive after Dispose).</summary>
     public void RaiseFrame(float[] frame) => FramesAvailable?.Invoke(frame);
 
+    /// <summary>Simulate a frame callback as if raised from the capture thread (functionally identical to <see cref="RaiseFrame"/>; named for intent in the test).</summary>
+    public void RaiseFrameFromCaptureThread(float[] frame) => FramesAvailable?.Invoke(frame);
+
     /// <summary>Simulate the source stopping (fault when <paramref name="ex"/> is non-null).</summary>
     public void RaiseStopped(Exception? ex) => Stopped?.Invoke(ex);
 
-    public void Dispose() => _disposed = true;
+    public void Dispose()
+    {
+        DisposedOnThreadId = Environment.CurrentManagedThreadId;
+        _disposed = true;
+    }
 }

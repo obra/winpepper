@@ -26,22 +26,29 @@ public sealed class WarmCaptureCoordinator : IDisposable
     private readonly Func<DateTime> _clock;
     private readonly TimeSpan _faultBackoff;
     private readonly object _lock = new();
+    private readonly Func<int> _currentThreadId;
+    private readonly Action<Action> _disposeScheduler;
 
     private ICaptureSource? _current;   // read lock-free in OnSourceFrame via Volatile
     private string? _activeDeviceId;
     private DateTime? _lastFaultUtc;
     private bool _disposed;
+    private int? _captureThreadId; // managed thread id observed from source callbacks
 
     public WarmCaptureCoordinator(
         WarmCaptureBuffer buffer,
         Func<ICaptureSource> sourceFactory,
         Func<DateTime>? clock = null,
-        TimeSpan? faultBackoff = null)
+        TimeSpan? faultBackoff = null,
+        Func<int>? currentThreadId = null,
+        Action<Action>? disposeScheduler = null)
     {
         _buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
         _sourceFactory = sourceFactory ?? throw new ArgumentNullException(nameof(sourceFactory));
         _clock = clock ?? (() => DateTime.UtcNow);
         _faultBackoff = faultBackoff ?? TimeSpan.FromSeconds(2);
+        _currentThreadId = currentThreadId ?? (() => Environment.CurrentManagedThreadId);
+        _disposeScheduler = disposeScheduler ?? (a => ThreadPool.QueueUserWorkItem(_ => a()));
     }
 
     /// <summary>Re-raised (mono 16 kHz) only while a session is active.</summary>
@@ -123,11 +130,26 @@ public sealed class WarmCaptureCoordinator : IDisposable
         var old = _current;
         Volatile.Write(ref _current, null);
         _activeDeviceId = null;
-        if (old is not null) { try { old.Dispose(); } catch { /* best-effort */ } }
+        if (old is not null) { try { DisposeSourceSafely(old); } catch { /* best-effort */ } }
+    }
+
+    /// <summary>
+    /// Dispose a capture source without self-joining. If we are running on the
+    /// same thread the source raises its callbacks from (its capture thread),
+    /// ICaptureSource.Dispose()'s internal Thread.Join() would deadlock -- so
+    /// schedule the dispose off-thread instead of joining inline.
+    /// </summary>
+    private void DisposeSourceSafely(ICaptureSource source)
+    {
+        if (_captureThreadId is int id && id == _currentThreadId())
+            _disposeScheduler(source.Dispose);
+        else
+            source.Dispose();
     }
 
     private void OnSourceFrame(ICaptureSource source, ReadOnlyMemory<float> frame)
     {
+        _captureThreadId = _currentThreadId();
         // Epoch guard: read the live reference once. If this callback belongs to
         // a source that has since been swapped out, drop it — we never touch the
         // (possibly disposed) source object here, only the frame payload.
@@ -138,6 +160,7 @@ public sealed class WarmCaptureCoordinator : IDisposable
 
     private void OnSourceStopped(ICaptureSource source, Exception? ex)
     {
+        _captureThreadId = _currentThreadId();
         if (ex is null) return; // clean stop, nothing to recover
         bool retry;
         Exception? startFault = null;

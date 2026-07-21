@@ -82,11 +82,11 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
         switch (_step)
         {
             case OnboardingStep.PickMic:
-                _writer.Queue(s => s with { MicDeviceId = _micId });
+                await _writer.QueueAndFlushAsync(s => s with { MicDeviceId = _micId });
                 Step = OnboardingStep.PickHotkeys;
                 break;
             case OnboardingStep.PickHotkeys:
-                _writer.Queue(s => s with { HoldHotkey = _holdHotkey, ToggleHotkey = _toggleHotkey });
+                await _writer.QueueAndFlushAsync(s => s with { HoldHotkey = _holdHotkey, ToggleHotkey = _toggleHotkey });
                 Step = OnboardingStep.DownloadModels;
                 break;
             case OnboardingStep.DownloadModels:
@@ -94,16 +94,22 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
                 Step = OnboardingStep.TestDictation;
                 break;
             case OnboardingStep.TestDictation:
-                _writer.Queue(s => s with { OnboardingCompleted = true });
-                await _writer.FlushAsync();
+                await _writer.QueueAndFlushAsync(s => s with { OnboardingCompleted = true });
                 Step = OnboardingStep.Done;
                 break;
         }
     }
 
-    public void Skip()
+    /// <summary>
+    /// Skipping the (optional) model download still completes setup: the user
+    /// chose to skip, so persist OnboardingCompleted durably and move on to the
+    /// test-dictation step. This prevents onboarding from reappearing forever
+    /// (spec 2(iii)).
+    /// </summary>
+    public async Task SkipAsync()
     {
         if (!CanSkip) return;
+        await _writer.QueueAndFlushAsync(s => s with { OnboardingCompleted = true });
         Step = OnboardingStep.TestDictation;
     }
 

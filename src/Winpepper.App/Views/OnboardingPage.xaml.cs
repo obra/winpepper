@@ -85,7 +85,10 @@ public sealed partial class OnboardingPage : Page
         }
     }
 
-    private void OnSkip(object sender, RoutedEventArgs e) { _vm?.Skip(); }
+    private async void OnSkip(object sender, RoutedEventArgs e)
+    {
+        if (_vm is not null) await _vm.SkipAsync();
+    }
 
     private void RenderStep()
     {

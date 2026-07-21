@@ -11,8 +11,9 @@ public class OnboardingViewModelTests
     private sealed class FakeWriter : ISettingsWriter
     {
         public AppSettings Current = new();
+        public int Flushes;
         public void Queue(Func<AppSettings, AppSettings> m) => Current = m(Current);
-        public Task FlushAsync() => Task.CompletedTask;
+        public Task FlushAsync() { Flushes++; return Task.CompletedTask; }
     }
 
     private sealed class PermissiveValidator : IHotkeyValidator
@@ -108,7 +109,7 @@ public class OnboardingViewModelTests
             new PermissiveValidator());
         vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync();
         await vm.AdvanceAsync();
-        vm.Skip();
+        await vm.SkipAsync();
         downloaded.ShouldBeFalse();
         vm.Step.ShouldBe(OnboardingStep.TestDictation);
     }
@@ -119,10 +120,39 @@ public class OnboardingViewModelTests
         var w = new FakeWriter();
         var vm = new OnboardingViewModel(w, () => Task.CompletedTask, new PermissiveValidator());
         vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync();
-        await vm.AdvanceAsync(); vm.Skip();
+        await vm.AdvanceAsync(); await vm.SkipAsync();
         vm.TestDictationDone = true;
         await vm.AdvanceAsync();
         vm.Step.ShouldBe(OnboardingStep.Done);
         w.Current.OnboardingCompleted.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task SkipAsync_Sets_OnboardingCompleted_And_Flushes()
+    {
+        var w = new FakeWriter();
+        var vm = new OnboardingViewModel(w, () => Task.CompletedTask, new PermissiveValidator());
+        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync();  // -> PickHotkeys
+        await vm.AdvanceAsync();                                 // -> DownloadModels
+        var flushesBefore = w.Flushes;
+
+        await vm.SkipAsync();
+
+        w.Current.OnboardingCompleted.ShouldBeTrue();
+        w.Flushes.ShouldBeGreaterThan(flushesBefore);           // Skip flushed
+        vm.Step.ShouldBe(OnboardingStep.TestDictation);
+    }
+
+    [Fact]
+    public async Task Advance_From_PickMic_Flushes_The_Checkpoint()
+    {
+        var w = new FakeWriter();
+        var vm = new OnboardingViewModel(w, () => Task.CompletedTask, new PermissiveValidator());
+        vm.SelectedMicDeviceId = "{mic-1}";
+
+        await vm.AdvanceAsync();
+
+        w.Current.MicDeviceId.ShouldBe("{mic-1}");
+        w.Flushes.ShouldBeGreaterThan(0);                       // checkpoint flushed
     }
 }

@@ -163,6 +163,27 @@ public class ModelDownloaderTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadAsync_CompletedPartialAfterIdleTimeout_VerifiesWithoutAnotherRangeRequest()
+    {
+        var fake = new FakeRangeClient();
+        fake.EnqueueResponse("https://x/a", startByte =>
+            new HttpRangeResponse(new DataThenBlockingStream("hello"u8.ToArray()), startByte));
+        var options = new ModelDownloaderOptions
+        {
+            IdleTimeout = TimeSpan.FromMilliseconds(25),
+            RetryDelayAsync = (_, _) => Task.CompletedTask,
+        };
+
+        var dl = new ModelDownloader(fake, options);
+        await dl.DownloadAsync(OneFileDescriptor(), _root,
+            new SyncProgress<DownloadProgress>(_ => { }), CancellationToken.None);
+
+        fake.RequestsFor("https://x/a").Single().RangeStart.ShouldBe(0);
+        File.ReadAllText(Path.Combine(_root, "test", "a.bin")).ShouldBe("hello");
+        File.Exists(Path.Combine(_root, "test", "a.bin.partial")).ShouldBeFalse();
+    }
+
+    [Fact]
     public async Task DownloadAsync_ThreeTransientAttempts_UsesBoundedBackoffAndPreservesPartial()
     {
         var fake = new FakeRangeClient();

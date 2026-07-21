@@ -123,7 +123,13 @@ public sealed class ModelDownloader
                     }
 
                     totalBytes = File.Exists(partialPath) ? new FileInfo(partialPath).Length : 0;
-                    if (IsTransient(failure) && attempt < MaxAttempts)
+                    var isTransient = IsTransient(failure);
+                    if (isTransient && totalBytes == file.SizeBytes)
+                    {
+                        downloadError = null;
+                        break;
+                    }
+                    if (isTransient && attempt < MaxAttempts)
                     {
                         downloadError = failure;
                         await _options.RetryDelayAsync(TimeSpan.FromSeconds(attempt), ct).ConfigureAwait(false);

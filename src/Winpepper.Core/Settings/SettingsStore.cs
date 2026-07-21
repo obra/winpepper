@@ -44,19 +44,21 @@ public sealed class SettingsStore
 
     private void BackupCorruptFile(Exception ex)
     {
+        var backup = $"{_path}.bad-{DateTime.UtcNow:yyyyMMddHHmmssfff}";
         try
         {
-            var backup = $"{_path}.bad-{DateTime.UtcNow:yyyyMMddHHmmssfff}";
             File.Move(_path, backup);
-            _onError?.Invoke(
-                $"settings.json was corrupt ({ex.Message}); backed up to " +
-                $"{Path.GetFileName(backup)} and reset to defaults.");
         }
         catch (Exception moveEx)
         {
             _onError?.Invoke(
                 $"settings.json was corrupt and could not be backed up: {moveEx.Message}");
+            return;
         }
+
+        _onError?.Invoke(
+            $"settings.json was corrupt ({ex.Message}); backed up to " +
+            $"{Path.GetFileName(backup)} and reset to defaults.");
     }
 
     public void Save(AppSettings settings)

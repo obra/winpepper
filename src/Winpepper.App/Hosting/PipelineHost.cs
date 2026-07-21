@@ -30,6 +30,9 @@ public sealed class PipelineHost : IDisposable
     private IWarmAudioRecorder? _warmRecorder;
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
+    private readonly object _startGate = new();
+    private Action<Exception>? _captureFaultHandler;
+    private Action<ReadOnlyMemory<float>>? _frameHandler;
 
     private readonly Winpepper.Cleanup.CleanupRunner? _cleanup;        // PLAN2-TYPE
     private readonly Winpepper.Cleanup.CleanupOptions _cleanupOptions; // PLAN2-TYPE
@@ -125,41 +128,61 @@ public sealed class PipelineHost : IDisposable
     /// </summary>
     public bool TryStart()
     {
-        if (IsRunning) return true;
-        if (_asr is null)
+        lock (_startGate)
         {
-            if (!ParakeetSession.ModelFilesPresent(_modelDir))
+            if (IsRunning) return true;
+            if (_asr is null)
             {
-                _log.LogWarning("ASR model files missing in {ModelDir}; pipeline disabled until models are downloaded", _modelDir);
-                _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                    new FileNotFoundException("Speech model not installed. Open the Models tab to download it."),
-                    Guid.Empty);
-                return false;
+                if (!ParakeetSession.ModelFilesPresent(_modelDir))
+                {
+                    _log.LogWarning("ASR model files missing in {ModelDir}; pipeline disabled until models are downloaded", _modelDir);
+                    _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                        new FileNotFoundException("Speech model not installed. Open the Models tab to download it."),
+                        Guid.Empty);
+                    return false;
+                }
+                try
+                {
+                    _asr = new ParakeetSession(_modelDir);
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Failed to load ASR model from {ModelDir}; pipeline disabled", _modelDir);
+                    _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
+                    return false;
+                }
             }
-            try
+            // Bug-2: one warm recorder for the app lifetime. Frames flow (and the
+            // meter animates) only while a session is active, so subscribe once.
+            if (_warmRecorder is null)
             {
-                _asr = new ParakeetSession(_modelDir);
+                var recorder = new Winpepper.Audio.WarmWasapiRecorder(
+                    prewarm: _prewarmMicEnabled,
+                    deviceId: null,
+                    log: _log);
+                _frameHandler = frame => _vm.ReportAudioFrame(frame);
+                _captureFaultHandler = ex =>
+                {
+                    // Bug 3: capture faults are no longer silent — log and tell the user.
+                    _log.LogError(ex, "microphone capture faulted");
+                    _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Audio, ex, _currentSessionId);
+                    _ = _toasts.ShowAsync(
+                        "Winpepper",
+                        "Microphone capture stopped unexpectedly — attempting to recover. Check your microphone if this repeats.",
+                        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                        TimeSpan.FromSeconds(6));
+                };
+                recorder.FramesAvailable += _frameHandler;
+                recorder.CaptureFaulted += _captureFaultHandler;
+                _warmRecorder = recorder;
             }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "Failed to load ASR model from {ModelDir}; pipeline disabled", _modelDir);
-                _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
-                return false;
-            }
+            _hook.Start();
+            _runCts = new CancellationTokenSource();
+            _runTask = Task.Run(() => RunAsync(_runCts.Token));
+            IsRunning = true;
+            _log.LogInformation("Pipeline started (model dir {ModelDir})", _modelDir);
+            return true;
         }
-        // Bug-2: one warm recorder for the app lifetime. Frames flow (and the
-        // meter animates) only while a session is active, so subscribe once.
-        if (_warmRecorder is null)
-        {
-            _warmRecorder = new Winpepper.Audio.WarmWasapiRecorder(prewarm: _prewarmMicEnabled);
-            _warmRecorder.FramesAvailable += frame => _vm.ReportAudioFrame(frame);
-        }
-        _hook.Start();
-        _runCts = new CancellationTokenSource();
-        _runTask = Task.Run(() => RunAsync(_runCts.Token));
-        IsRunning = true;
-        _log.LogInformation("Pipeline started (model dir {ModelDir})", _modelDir);
-        return true;
     }
 
     private async Task RunAsync(CancellationToken ct)
@@ -207,6 +230,7 @@ public sealed class PipelineHost : IDisposable
                 _recordStopwatch?.Stop();
 
                 var samples = _warmRecorder!.StopSession();
+                WarnIfSessionSilent(samples, _currentSessionId);
                 _sounds.PlayStop();
 
                 var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
@@ -372,6 +396,7 @@ public sealed class PipelineHost : IDisposable
                     _recordStopwatch?.Stop();
 
                     var samples2 = _warmRecorder!.StopSession();
+                    WarnIfSessionSilent(samples2, _currentSessionId);
                     _sounds.PlayStop();
 
                     var transcribeSw2 = System.Diagnostics.Stopwatch.StartNew();
@@ -514,13 +539,42 @@ public sealed class PipelineHost : IDisposable
         }
     }
 
+    /// <summary>
+    /// Bug 2: if a whole session captured essentially zero energy (OS mic mute,
+    /// privacy toggle, Bluetooth hiccup), the transcript will be empty for a
+    /// reason the user cannot see. Surface it via the ErrorBus + a toast. Never
+    /// called mid-session — only after StopSession — so genuine mid-session
+    /// silence is not misreported.
+    /// </summary>
+    private void WarnIfSessionSilent(float[] samples, Guid sessionId)
+    {
+        if (samples.Length == 0) return; // nothing captured is a distinct (cancel) case
+        if (!Winpepper.Audio.AudioEnergy.IsSessionSilent(samples)) return;
+
+        _log.LogWarning("Session {SessionId} captured near-zero energy (RMS below the zero-energy threshold — mic likely muted / privacy-off / disconnected)", sessionId);
+        _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Audio,
+            new InvalidOperationException("No audio detected — check your microphone / privacy settings."),
+            sessionId);
+        _ = _toasts.ShowAsync(
+            "Winpepper",
+            "No audio detected — check your microphone / privacy settings.",
+            Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+            TimeSpan.FromSeconds(6));
+    }
+
     public void Dispose()
     {
         _runCts?.Cancel();
         try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
         _hook.Dispose();
         _asr?.Dispose();
-        _warmRecorder?.Dispose();
+        if (_warmRecorder is not null)
+        {
+            // Bug 8 (hygiene): unhook the meter + fault handlers before teardown.
+            if (_frameHandler is not null) _warmRecorder.FramesAvailable -= _frameHandler;
+            if (_captureFaultHandler is not null) _warmRecorder.CaptureFaulted -= _captureFaultHandler;
+            _warmRecorder.Dispose();
+        }
     }
 }
 #endif

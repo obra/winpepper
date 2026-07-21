@@ -29,6 +29,10 @@ public record AppSettings
     public bool AutostartEnabled { get; init; } = false;
     public bool OnboardingCompleted { get; init; } = false;
     public bool SpeakerFilterEnabled { get; init; } = false;
+
+    // Post-paste "offer to learn corrections" prompt. Off by default: this is
+    // opt-in behavior (spec Task 5).
+    public bool PostPasteLearningEnabled { get; init; } = false;
     public string LastVersionSeen { get; init; } = "";
 
     // Main-window size in physical pixels; null until the user resizes or the

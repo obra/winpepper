@@ -92,4 +92,18 @@ public class RecordingSettingsViewModelTests
         w.WriteCount.ShouldBe(1);   // exactly one write per real change
         w.FlushCount.ShouldBe(1);   // and it was flushed durably
     }
+
+    [Fact]
+    public void PostPasteLearning_Defaults_Off_And_Commits_Durably()
+    {
+        var w = new FakeWriter();
+        var vm = new RecordingSettingsViewModel(new AppSettings(), w);
+        vm.PostPasteLearningEnabled.ShouldBeFalse();
+
+        vm.PostPasteLearningEnabled = true;
+
+        w.Current.PostPasteLearningEnabled.ShouldBeTrue();
+        w.WriteCount.ShouldBe(1);
+        w.FlushCount.ShouldBe(1);
+    }
 }

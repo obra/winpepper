@@ -62,6 +62,8 @@ public sealed partial class RecordingPage : Page
         SoundsToggle.Toggled += (_, _) => vm.PlaySounds = SoundsToggle.IsOn;
         SpeakerFilterToggle.IsOn = vm.SpeakerFilterEnabled;
         SpeakerFilterToggle.Toggled += (_, _) => vm.SpeakerFilterEnabled = SpeakerFilterToggle.IsOn;
+        PostPasteLearningToggle.IsOn = vm.PostPasteLearningEnabled;
+        PostPasteLearningToggle.Toggled += (_, _) => vm.PostPasteLearningEnabled = PostPasteLearningToggle.IsOn;
 
         AutostartToggle.IsOn = _shell.Autostart.IsEnabled();
         AutostartToggle.Toggled += (_, _) =>

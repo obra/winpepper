@@ -50,6 +50,10 @@
                     <TextBlock Text="Options" Style="{ThemeResource BodyStrongTextBlockStyle}" />
                     <ToggleSwitch x:Name="SoundsToggle" AutomationProperties.AutomationId="RecordingSoundsToggle" Header="Play start/stop sounds" />
                     <ToggleSwitch x:Name="SpeakerFilterToggle" AutomationProperties.AutomationId="RecordingSpeakerFilterToggle" Header="Speaker filter (experimental)" />
+                    <ToggleSwitch x:Name="PostPasteLearningToggle" AutomationProperties.AutomationId="RecordingPostPasteLearningToggle" Header="Offer to learn corrections after typing" />
+                    <TextBlock Text="After Winpepper types, watch for an edit you make and offer to remember it as a correction. Off by default."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <ToggleSwitch x:Name="AutostartToggle" AutomationProperties.AutomationId="RecordingAutostartToggle" Header="Start with Windows" />
                 </StackPanel>
             </Border>

@@ -21,6 +21,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
     private string _micDeviceId;
     private bool _playSounds;
     private bool _speakerFilterEnabled;
+    private bool _postPasteLearningEnabled;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -33,6 +34,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         _micDeviceId = initial.MicDeviceId;
         _playSounds = initial.PlaySounds;
         _speakerFilterEnabled = initial.SpeakerFilterEnabled;
+        _postPasteLearningEnabled = initial.PostPasteLearningEnabled;
     }
 
     private sealed class NullHotkeyValidator : IHotkeyValidator
@@ -108,6 +110,18 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
             _speakerFilterEnabled = value;
             CommitDurable(s => s with { SpeakerFilterEnabled = value });
             Raise(nameof(SpeakerFilterEnabled));
+        }
+    }
+
+    public bool PostPasteLearningEnabled
+    {
+        get => _postPasteLearningEnabled;
+        set
+        {
+            if (_postPasteLearningEnabled == value) return;
+            _postPasteLearningEnabled = value;
+            CommitDurable(s => s with { PostPasteLearningEnabled = value });
+            Raise(nameof(PostPasteLearningEnabled));
         }
     }
 

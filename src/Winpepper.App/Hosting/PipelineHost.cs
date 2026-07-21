@@ -47,6 +47,7 @@ public sealed class PipelineHost : IDisposable
     private readonly Winpepper.Core.Notifications.IToastService _toasts;
     private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
     private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
+    private readonly bool _postPasteLearningEnabled;
 
     public PipelineHost(
         ILoggerFactory factory,
@@ -66,7 +67,8 @@ public sealed class PipelineHost : IDisposable
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
         Winpepper.Cleanup.CleanupOptions? cleanupOptions = null,               // PLAN2-TYPE
         Winpepper.Core.Learning.PostPasteWatcher? postPaste = null,
-        Winpepper.Platform.Learning.FocusedElementCapturer? focusedCapturer = null)
+        Winpepper.Platform.Learning.FocusedElementCapturer? focusedCapturer = null,
+        bool postPasteLearningEnabled = false)
     {
         _log = factory.CreateLogger<PipelineHost>();
         _errorBus = errorBus;
@@ -92,6 +94,7 @@ public sealed class PipelineHost : IDisposable
         _toasts = toasts;
         _postPaste = postPaste;
         _focusedCapturer = focusedCapturer;
+        _postPasteLearningEnabled = postPasteLearningEnabled;
     }
 
     /// <summary>True once the ASR model is loaded and the hotkey pipeline is running.</summary>
@@ -266,7 +269,10 @@ public sealed class PipelineHost : IDisposable
                     }
                 }
                 injectSw.Stop();
-                if (injected && _postPaste is not null && _focusedCapturer is not null && !string.IsNullOrWhiteSpace(final))
+                if (Winpepper.Core.Learning.PostPasteGate.ShouldWatch(
+                        _postPasteLearningEnabled, injected,
+                        _postPaste is not null, _focusedCapturer is not null,
+                        !string.IsNullOrWhiteSpace(final)))
                 {
                     var snap = _focusedCapturer.Capture();
                     if (snap.IsValid)
@@ -422,7 +428,10 @@ public sealed class PipelineHost : IDisposable
                         }
                     }
                     injectSw2.Stop();
-                    if (injected2 && _postPaste is not null && _focusedCapturer is not null && !string.IsNullOrWhiteSpace(final2))
+                    if (Winpepper.Core.Learning.PostPasteGate.ShouldWatch(
+                            _postPasteLearningEnabled, injected2,
+                            _postPaste is not null, _focusedCapturer is not null,
+                            !string.IsNullOrWhiteSpace(final2)))
                     {
                         var snap = _focusedCapturer.Capture();
                         if (snap.IsValid)

@@ -129,6 +129,16 @@ public class SettingsStoreTests : IDisposable
         s.WindowWidth.ShouldBeNull();
         s.WindowHeight.ShouldBeNull();
     }
+
+    [Fact]
+    public void PostPasteLearning_Defaults_Off_And_RoundTrips()
+    {
+        new SettingsStore(_path).Load().PostPasteLearningEnabled.ShouldBeFalse();
+
+        var store = new SettingsStore(_path);
+        store.Save(store.Load() with { PostPasteLearningEnabled = true });
+        new SettingsStore(_path).Load().PostPasteLearningEnabled.ShouldBeTrue();
+    }
 }
 
 internal static class PipeExtensions

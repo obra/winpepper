@@ -232,7 +232,8 @@ public sealed class AppShell : IDisposable
                                          historyServices.Archiver, settings.AsrModelName, cleanupModelName,
                                          clipboardFallback, toasts,
                                          cleanup, correctionStore, windowContext, cleanupOptions,
-                                         postPaste: postPaste, focusedCapturer: focusedCapturer);
+                                         postPaste: postPaste, focusedCapturer: focusedCapturer,
+                                         postPasteLearningEnabled: settings.PostPasteLearningEnabled);
 
         var shell = new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
                                   recordingVm, cleanupVm, correctionsVm,

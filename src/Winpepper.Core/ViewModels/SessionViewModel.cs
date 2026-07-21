@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using Winpepper.Core.Errors;
+using Winpepper.Core.Pending;
 using Winpepper.Core.Sessions;
 using Winpepper.Core.Threading;
 
@@ -19,6 +20,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private IDisposable? _busSub;
     private readonly Winpepper.Core.Audio.LevelMeterModel _levelMeter = new();
     private double _inputLevel;
+    private readonly PendingPasteState _pending = new();
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -85,6 +87,41 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set { if (_lastErrorMessage == value) return; _lastErrorMessage = value; Raise(nameof(LastErrorMessage)); }
     }
 
+    /// <summary>True while a pending paste is held in memory awaiting a pill click.</summary>
+    public bool HasPendingPaste => _pending.HasPending;
+
+    /// <summary>The deferred text held in the pending slot (memory only, never persisted).</summary>
+    public string PendingPasteText => _pending.PendingText;
+
+    /// <summary>
+    /// Enter the pending-paste state: hold the final text in memory (never
+    /// persisted) and show the pill's PENDING visual. Because Stage becomes
+    /// PendingPaste (not Idle), the pill's Idle auto-hide does not fire.
+    /// </summary>
+    public void EnterPendingPaste(string text, InjectionTarget target) => _ui.Post(() =>
+    {
+        _pending.SetPending(text, target);
+        Stage = SessionStage.PendingPaste;
+        StatusText = "Click to paste";
+    });
+
+    /// <summary>
+    /// Report the outcome of a pill-click paste attempt (called on the UI
+    /// thread by the pill click handler). On success the slot is consumed and
+    /// the VM returns to Idle; on failure the slot is kept so the user can
+    /// click again. Returns true when the slot was consumed.
+    /// </summary>
+    public bool NotifyPasteAttempted(bool injected)
+    {
+        var consumed = _pending.OnPasteAttempted(injected);
+        if (consumed)
+        {
+            Stage = SessionStage.Idle;
+            StatusText = "Ready";
+        }
+        return consumed;
+    }
+
     public void AttachErrorBus(ErrorBus bus)
     {
         ArgumentNullException.ThrowIfNull(bus);
@@ -96,6 +133,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         LastErrorStage = rec.Stage;
         LastErrorMessage = rec.Message;
+        // While a pending paste is held (e.g. a failed pill-click retry), keep
+        // the pill in its clickable PENDING state instead of flipping to Error
+        // so the user can click again. The error is still recorded above and is
+        // surfaced to the user via the toast raised by the caller.
+        if (_pending.HasPending) return;
         Stage = SessionStage.Error;
         StatusText = $"Error ({rec.Stage}): {rec.Message}";
     });
@@ -138,6 +180,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             switch (to)
             {
                 case SessionState.Recording:
+                    _pending.Discard(); // Rule 5: a new dictation discards any pending paste.
                     _stopwatch.Restart();
                     Stage = SessionStage.Recording;
                     StatusText = "Recording...";
@@ -152,6 +195,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     break;
                 case SessionState.Idle:
                     _stopwatch.Stop();
+                    // If a pending paste is held, keep the PENDING pill visible
+                    // instead of returning to Idle (which would auto-hide it).
+                    if (_pending.HasPending) break;
                     Stage = SessionStage.Idle;
                     StatusText = "Ready";
                     break;

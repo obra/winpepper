@@ -170,6 +170,17 @@ public sealed partial class StatusPillWindow : Window
         }
     }
 
+    private void OnRootPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        // Only actionable in the PENDING state; other states are click-through.
+        if (_vm.Stage != SessionStage.PendingPaste) return;
+        e.Handled = true;
+        // The handler injects into whatever field is focused NOW (the user's
+        // explicit choice) and reports the outcome to the VM. On success the VM
+        // returns to Idle, which hides the pill via OnVmChanged's Idle arm.
+        PastePendingHandler?.Invoke();
+    }
+
     private void ResetPillVisual()
     {
         Dot.Opacity = 1.0;

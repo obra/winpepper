@@ -36,5 +36,12 @@ public sealed class FakeAssemblyAiClient : IAssemblyAiClient
 
     public Task<bool> ValidateKeyAsync(CancellationToken ct) => Task.FromResult(true);
 
+    public List<string> Deleted { get; } = new();
+    public Task DeleteTranscriptAsync(string id, CancellationToken ct)
+    {
+        Deleted.Add(id);
+        return Task.CompletedTask;
+    }
+
     public string RiffMagic() => UploadedBytes is null ? "" : Encoding.ASCII.GetString(UploadedBytes, 0, 4);
 }

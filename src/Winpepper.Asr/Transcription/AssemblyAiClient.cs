@@ -14,6 +14,7 @@ public interface IAssemblyAiClient
     Task<string> CreateTranscriptAsync(string audioUrl, string model, AssemblyAiRequestExtras extras, CancellationToken ct);
     Task<AssemblyAiTranscript> GetTranscriptAsync(string id, CancellationToken ct);
     Task<bool> ValidateKeyAsync(CancellationToken ct);
+    Task DeleteTranscriptAsync(string id, CancellationToken ct);
 }
 
 /// <summary>
@@ -108,6 +109,14 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
             Confidence: root.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetDouble() : null,
             AudioDuration: root.TryGetProperty("audio_duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : null,
             Error: root.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null);
+    }
+
+    public async Task DeleteTranscriptAsync(string id, CancellationToken ct)
+    {
+        using var resp = await SendWithRetryAsync(
+            () => new HttpRequestMessage(HttpMethod.Delete, $"{_opts.BaseUrl}/v2/transcript/{id}"), ct);
+        // Body is irrelevant; a 2xx means the remote transcript is gone. Log id, never the key.
+        _log.LogInformation("AssemblyAI transcript {Id} deleted", id);
     }
 
     /// <summary>

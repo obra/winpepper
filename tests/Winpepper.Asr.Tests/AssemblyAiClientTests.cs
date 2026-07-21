@@ -287,4 +287,19 @@ public sealed class AssemblyAiClientTests
         var ex = await Should.ThrowAsync<AssemblyAiException>(() => client.GetTranscriptAsync("t-1", CancellationToken.None));
         ex.StatusCode.ShouldBe(code);
     }
+
+    [Fact]
+    public async Task DeleteTranscript_IssuesDeleteWithAuth()
+    {
+        var handler = new FakeHttpMessageHandler().Enqueue(HttpStatusCode.OK, "{\"status\":\"deleted\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        await client.DeleteTranscriptAsync("t-42", CancellationToken.None);
+
+        var req = handler.Requests[0];
+        req.Method.ShouldBe(HttpMethod.Delete);
+        req.RequestUri!.ToString().ShouldEndWith("/v2/transcript/t-42");
+        req.Headers.GetValues("authorization").ShouldContain("KEY");
+    }
 }

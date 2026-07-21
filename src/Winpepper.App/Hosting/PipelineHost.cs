@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Winpepper.Asr;
 using Winpepper.Audio;
 using Winpepper.Core.Audio;
+using Winpepper.Core.Pending;
 using Winpepper.Core.Sessions;
 using Winpepper.Core.Settings;
 using Winpepper.Core.ViewModels;
@@ -53,6 +54,7 @@ public sealed class PipelineHost : IDisposable
     private readonly Func<Winpepper.Asr.ParakeetSession, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> _buildTranscriber;
     private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
     private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
+    private InjectionTarget _targetAtStart = InjectionTarget.Empty;
     private readonly bool _postPasteLearningEnabled;
     private readonly bool _prewarmMicEnabled;
 
@@ -204,6 +206,54 @@ public sealed class PipelineHost : IDisposable
         catch (OperationCanceledException) { }
     }
 
+    /// <summary>
+    /// Capture the current focused-field identity as a pure InjectionTarget.
+    /// Maps the Windows-only FocusedElementSnapshot into the platform-agnostic
+    /// identity the pure decider compares. Returns Empty when capture is
+    /// unavailable (no capturer) or fails (invalid snapshot) — the decider then
+    /// defaults to InjectNow, preserving today's behavior.
+    /// </summary>
+    private InjectionTarget CaptureTarget()
+    {
+        if (_focusedCapturer is null) return InjectionTarget.Empty;
+        var snap = _focusedCapturer.Capture();
+        if (!snap.IsValid) return InjectionTarget.Empty;
+        return new InjectionTarget
+        {
+            WindowHandle = snap.ForegroundHwnd.ToInt64(),
+            ElementId = snap.ElementId,
+        };
+    }
+
+    /// <summary>
+    /// Paste the held pending text into whatever field is focused NOW (the
+    /// user's explicit choice via the pill click). Uses the normal injection
+    /// path. On success the VM consumes the slot and hides the pill; on failure
+    /// the error is surfaced via the ErrorBus/clipboard/toast pattern and the
+    /// pending slot is kept (NotifyPasteAttempted(false)) so the user can retry.
+    /// Returns true when the paste succeeded. Runs on the UI thread.
+    /// </summary>
+    public bool TryPastePending()
+    {
+        if (!_vm.HasPendingPaste) return false;
+        var text = _vm.PendingPasteText;
+        var injected = !string.IsNullOrWhiteSpace(text) && _injector.TryInject(text);
+        if (!injected)
+        {
+            _errorBus.Report(
+                Winpepper.Core.Errors.ErrorStage.Injection,
+                new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
+                _currentSessionId);
+            _clipboardFallback.Copy(text);
+            _ = _toasts.ShowAsync(
+                "Winpepper",
+                "Couldn't type into the active window. The text is on your clipboard.",
+                Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                TimeSpan.FromSeconds(6));
+        }
+        return _vm.NotifyPasteAttempted(injected);
+    }
+
     private async Task HandleHotkey(HotkeyEvent evt, CancellationToken ct)
     {
         switch (evt.Kind)
@@ -215,6 +265,7 @@ public sealed class PipelineHost : IDisposable
                 _sounds.PlayStart();
                 _warmRecorder!.StartSession(includePrerollMs: 500);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                _targetAtStart = CaptureTarget();
 
                 // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
                 _ctxPrefetchTask = null;
@@ -301,21 +352,36 @@ public sealed class PipelineHost : IDisposable
 
                 var injectSw = System.Diagnostics.Stopwatch.StartNew();
                 var injected = false;
+                var heldPending = false;
                 if (!string.IsNullOrWhiteSpace(final))
                 {
-                    injected = _injector.TryInject(final);
-                    if (!injected)
+                    var targetAtInject = CaptureTarget();
+                    var decision = PendingPasteDecider.Decide(_targetAtStart, targetAtInject);
+                    if (decision == InjectionDecision.HoldPending)
                     {
-                        _errorBus.Report(
-                            Winpepper.Core.Errors.ErrorStage.Injection,
-                            new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
-                            _currentSessionId);
-                        _clipboardFallback.Copy(final);
-                        _ = _toasts.ShowAsync(
-                            "Winpepper",
-                            "Couldn't type into the active window. The cleaned text is on your clipboard.",
-                            Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                            TimeSpan.FromSeconds(6));
+                        // Focus moved to a different known field: do NOT inject anywhere.
+                        // Hold the text as an in-memory pending paste (never persisted).
+                        // heldPending gates OUT the archive block below so the held text
+                        // and its audio are never written to the on-disk history store.
+                        _vm.EnterPendingPaste(final, _targetAtStart);
+                        heldPending = true;
+                    }
+                    else
+                    {
+                        injected = _injector.TryInject(final);
+                        if (!injected)
+                        {
+                            _errorBus.Report(
+                                Winpepper.Core.Errors.ErrorStage.Injection,
+                                new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
+                                _currentSessionId);
+                            _clipboardFallback.Copy(final);
+                            _ = _toasts.ShowAsync(
+                                "Winpepper",
+                                "Couldn't type into the active window. The cleaned text is on your clipboard.",
+                                Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                TimeSpan.FromSeconds(6));
+                        }
                     }
                 }
                 injectSw.Stop();
@@ -349,25 +415,28 @@ public sealed class PipelineHost : IDisposable
                                      + transcribeSw.ElapsedMilliseconds
                                      + cleanupSw.ElapsedMilliseconds
                                      + injectSw.ElapsedMilliseconds);
-                _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                if (!heldPending)
                 {
-                    Samples16k = samples,
-                    RawTranscript = transcription.Text,
-                    CleanedText = final,
-                    AsrModelName = producedModelName,
-                    CleanupModelName = cleanupUsedModel,
-                    WindowContextUsed = windowContextUsed,
-                    WindowTitleAtStart = "",
-                    WindowTitleAtInject = "",
-                    Timings = new Winpepper.History.HistoryTimings
+                    _archiver.Archive(new Winpepper.History.HistoryArchiveInput
                     {
-                        RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
-                        TranscribeMs = (int)transcribeSw.ElapsedMilliseconds,
-                        CleanupMs = (int)cleanupSw.ElapsedMilliseconds,
-                        InjectMs = (int)injectSw.ElapsedMilliseconds,
-                        TotalMs = totalMs,
-                    },
-                });
+                        Samples16k = samples,
+                        RawTranscript = transcription.Text,
+                        CleanedText = final,
+                        AsrModelName = producedModelName,
+                        CleanupModelName = cleanupUsedModel,
+                        WindowContextUsed = windowContextUsed,
+                        WindowTitleAtStart = "",
+                        WindowTitleAtInject = "",
+                        Timings = new Winpepper.History.HistoryTimings
+                        {
+                            RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                            TranscribeMs = (int)transcribeSw.ElapsedMilliseconds,
+                            CleanupMs = (int)cleanupSw.ElapsedMilliseconds,
+                            InjectMs = (int)injectSw.ElapsedMilliseconds,
+                            TotalMs = totalMs,
+                        },
+                    });
+                }
 
                 _ctxPrefetchTask = null;
                 _recordStopwatch = null;
@@ -384,6 +453,7 @@ public sealed class PipelineHost : IDisposable
                     _sounds.PlayStart();
                     _warmRecorder!.StartSession(includePrerollMs: 500);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                    _targetAtStart = CaptureTarget();
 
                     // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
                     _ctxPrefetchTask = null;
@@ -470,21 +540,36 @@ public sealed class PipelineHost : IDisposable
 
                     var injectSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var injected2 = false;
+                    var heldPending2 = false;
                     if (!string.IsNullOrWhiteSpace(final2))
                     {
-                        injected2 = _injector.TryInject(final2);
-                        if (!injected2)
+                        var targetAtInject2 = CaptureTarget();
+                        var decision2 = PendingPasteDecider.Decide(_targetAtStart, targetAtInject2);
+                        if (decision2 == InjectionDecision.HoldPending)
                         {
-                            _errorBus.Report(
-                                Winpepper.Core.Errors.ErrorStage.Injection,
-                                new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
-                                _currentSessionId);
-                            _clipboardFallback.Copy(final2);
-                            _ = _toasts.ShowAsync(
-                                "Winpepper",
-                                "Couldn't type into the active window. The cleaned text is on your clipboard.",
-                                Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                                TimeSpan.FromSeconds(6));
+                            // Focus moved to a different known field: do NOT inject anywhere.
+                            // Hold the text as an in-memory pending paste (never persisted).
+                            // heldPending2 gates OUT the archive block below so the held text
+                            // and its audio are never written to the on-disk history store.
+                            _vm.EnterPendingPaste(final2, _targetAtStart);
+                            heldPending2 = true;
+                        }
+                        else
+                        {
+                            injected2 = _injector.TryInject(final2);
+                            if (!injected2)
+                            {
+                                _errorBus.Report(
+                                    Winpepper.Core.Errors.ErrorStage.Injection,
+                                    new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
+                                    _currentSessionId);
+                                _clipboardFallback.Copy(final2);
+                                _ = _toasts.ShowAsync(
+                                    "Winpepper",
+                                    "Couldn't type into the active window. The cleaned text is on your clipboard.",
+                                    Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                    TimeSpan.FromSeconds(6));
+                            }
                         }
                     }
                     injectSw2.Stop();
@@ -518,25 +603,28 @@ public sealed class PipelineHost : IDisposable
                                          + transcribeSw2.ElapsedMilliseconds
                                          + cleanupSw2.ElapsedMilliseconds
                                          + injectSw2.ElapsedMilliseconds);
-                    _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                    if (!heldPending2)
                     {
-                        Samples16k = samples2,
-                        RawTranscript = transcription2.Text,
-                        CleanedText = final2,
-                        AsrModelName = producedModelName2,
-                        CleanupModelName = cleanupUsedModel2,
-                        WindowContextUsed = windowContextUsed2,
-                        WindowTitleAtStart = "",
-                        WindowTitleAtInject = "",
-                        Timings = new Winpepper.History.HistoryTimings
+                        _archiver.Archive(new Winpepper.History.HistoryArchiveInput
                         {
-                            RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
-                            TranscribeMs = (int)transcribeSw2.ElapsedMilliseconds,
-                            CleanupMs = (int)cleanupSw2.ElapsedMilliseconds,
-                            InjectMs = (int)injectSw2.ElapsedMilliseconds,
-                            TotalMs = totalMs2,
-                        },
-                    });
+                            Samples16k = samples2,
+                            RawTranscript = transcription2.Text,
+                            CleanedText = final2,
+                            AsrModelName = producedModelName2,
+                            CleanupModelName = cleanupUsedModel2,
+                            WindowContextUsed = windowContextUsed2,
+                            WindowTitleAtStart = "",
+                            WindowTitleAtInject = "",
+                            Timings = new Winpepper.History.HistoryTimings
+                            {
+                                RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                                TranscribeMs = (int)transcribeSw2.ElapsedMilliseconds,
+                                CleanupMs = (int)cleanupSw2.ElapsedMilliseconds,
+                                InjectMs = (int)injectSw2.ElapsedMilliseconds,
+                                TotalMs = totalMs2,
+                            },
+                        });
+                    }
 
                     _ctxPrefetchTask = null;
                     _recordStopwatch = null;

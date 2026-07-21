@@ -54,5 +54,25 @@ internal static class ExtendedWindowStyle
         if (hwnd == IntPtr.Zero) return;
         SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
+
+    /// <summary>
+    /// Toggle ONLY the WS_EX_TRANSPARENT bit at runtime. When clickThrough is
+    /// false the pill receives mouse input (needed for the PENDING "click to
+    /// paste" state); when true, clicks pass through as normal. WS_EX_NOACTIVATE
+    /// is left untouched in BOTH states so clicking the pill never activates it
+    /// or steals focus from the target field. Re-asserts topmost afterward
+    /// because changing the ex-style can drop us out of the topmost band.
+    /// </summary>
+    public static void SetClickThrough(IntPtr hwnd, bool clickThrough)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        var existing = (long)GetWindowLongPtr64(hwnd, GWL_EXSTYLE);
+        var updated = clickThrough
+            ? existing | WS_EX_TRANSPARENT
+            : existing & ~(long)WS_EX_TRANSPARENT;
+        if (updated == existing) return;
+        SetWindowLongPtr64(hwnd, GWL_EXSTYLE, new IntPtr(updated));
+        AssertTopmost(hwnd);
+    }
 }
 #endif

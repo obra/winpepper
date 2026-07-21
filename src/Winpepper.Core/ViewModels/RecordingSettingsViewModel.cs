@@ -41,6 +41,12 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
     }
 
+    // Commit a settings change durably: apply it and flush past the debounce so
+    // a subsequent force-kill (MSI upgrade) can't lose it. Fire-and-forget is
+    // acceptable here (spec 2(ii)); the writer swallows write errors.
+    private void CommitDurable(Func<AppSettings, AppSettings> mutator)
+        => _ = _writer.QueueAndFlushAsync(mutator);
+
     public string HoldHotkey
     {
         get => _holdHotkey;
@@ -48,7 +54,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_holdHotkey == value) return;
             _holdHotkey = value;
-            _writer.Queue(s => s with { HoldHotkey = value });
+            CommitDurable(s => s with { HoldHotkey = value });
             Raise(nameof(HoldHotkey));
             Raise(nameof(HoldHotkeyConflict));
             Raise(nameof(ToggleHotkeyConflict));
@@ -62,7 +68,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_toggleHotkey == value) return;
             _toggleHotkey = value;
-            _writer.Queue(s => s with { ToggleHotkey = value });
+            CommitDurable(s => s with { ToggleHotkey = value });
             Raise(nameof(ToggleHotkey));
             Raise(nameof(HoldHotkeyConflict));
             Raise(nameof(ToggleHotkeyConflict));
@@ -76,7 +82,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_micDeviceId == value) return;
             _micDeviceId = value;
-            _writer.Queue(s => s with { MicDeviceId = value });
+            CommitDurable(s => s with { MicDeviceId = value });
             Raise(nameof(MicDeviceId));
         }
     }
@@ -88,7 +94,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_playSounds == value) return;
             _playSounds = value;
-            _writer.Queue(s => s with { PlaySounds = value });
+            CommitDurable(s => s with { PlaySounds = value });
             Raise(nameof(PlaySounds));
         }
     }
@@ -100,7 +106,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_speakerFilterEnabled == value) return;
             _speakerFilterEnabled = value;
-            _writer.Queue(s => s with { SpeakerFilterEnabled = value });
+            CommitDurable(s => s with { SpeakerFilterEnabled = value });
             Raise(nameof(SpeakerFilterEnabled));
         }
     }

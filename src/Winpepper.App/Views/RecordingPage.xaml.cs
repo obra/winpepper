@@ -79,7 +79,7 @@ public sealed partial class RecordingPage : Page
                 _shell.Autostart.Enable(exe, "--tray");
             }
             else _shell.Autostart.Disable();
-            _shell.SettingsWriter.Queue(s => s with { AutostartEnabled = AutostartToggle.IsOn });
+            _ = _shell.SettingsWriter.QueueAndFlushAsync(s => s with { AutostartEnabled = AutostartToggle.IsOn });
         };
 
         RestartLevelMeter(vm.MicDeviceId);

@@ -12,8 +12,9 @@ public class RecordingSettingsViewModelTests
     {
         public AppSettings Current { get; private set; } = new();
         public int WriteCount { get; private set; }
+        public int FlushCount { get; private set; }
         public void Queue(Func<AppSettings, AppSettings> m) { Current = m(Current); WriteCount++; }
-        public Task FlushAsync() => Task.CompletedTask;
+        public Task FlushAsync() { FlushCount++; return Task.CompletedTask; }
     }
 
     private sealed class FakeValidator : IHotkeyValidator
@@ -77,5 +78,18 @@ public class RecordingSettingsViewModelTests
         vm.PropertyChanged += (_, e) => changes.Add(e.PropertyName ?? "");
         vm.PlaySounds = false;
         changes.ShouldContain(nameof(RecordingSettingsViewModel.PlaySounds));
+    }
+
+    [Fact]
+    public void Setting_SpeakerFilter_Queues_And_Flushes_Durably()
+    {
+        var w = new FakeWriter();
+        var vm = new RecordingSettingsViewModel(new AppSettings(), w);
+
+        vm.SpeakerFilterEnabled = true;
+
+        w.Current.SpeakerFilterEnabled.ShouldBeTrue();
+        w.WriteCount.ShouldBe(1);   // exactly one write per real change
+        w.FlushCount.ShouldBe(1);   // and it was flushed durably
     }
 }

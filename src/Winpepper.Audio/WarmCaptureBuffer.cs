@@ -65,4 +65,17 @@ public sealed class WarmCaptureBuffer
             return result;
         }
     }
+
+    /// <summary>
+    /// Drop all buffered ring history (Bug 6). Called on a device rebuild so the
+    /// next session's pre-roll cannot be seeded with audio captured on the old
+    /// device. Leaves an in-flight session's already-collected audio intact.
+    /// </summary>
+    public void Clear()
+    {
+        lock (_lock)
+        {
+            _ring.Clear();
+        }
+    }
 }

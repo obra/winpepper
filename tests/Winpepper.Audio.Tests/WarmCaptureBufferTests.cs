@@ -85,4 +85,28 @@ public class WarmCaptureBufferTests
         buf.StopSession();
         buf.IsSessionActive.ShouldBeFalse();
     }
+
+    [Fact]
+    public void Clear_DropsRing_SoNextSessionHasNoStalePreroll()
+    {
+        var buf = new WarmCaptureBuffer(ringCapacitySamples: 100);
+        buf.Ingest(new float[] { 1, 2, 3 }); // stale-device audio
+
+        buf.Clear();                          // device rebuilt -> ring invalid
+
+        buf.StartSession(prerollSamples: 100);
+        buf.Ingest(new float[] { 4, 5 });     // only new-device audio
+        buf.StopSession().ShouldBe(new float[] { 4, 5 });
+    }
+
+    [Fact]
+    public void Clear_WhileSessionActive_DropsRingButKeepsSessionUsable()
+    {
+        var buf = new WarmCaptureBuffer(ringCapacitySamples: 100);
+        buf.StartSession(prerollSamples: 0);
+        buf.Ingest(new float[] { 7 });
+        buf.Clear();                          // must not throw or wedge the session
+        buf.Ingest(new float[] { 8 });
+        buf.StopSession().ShouldBe(new float[] { 7, 8 });
+    }
 }

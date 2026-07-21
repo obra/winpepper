@@ -27,6 +27,22 @@ public sealed partial class OnboardingPage : Page
         var devices = DeviceEnumerator.List();
         MicCombo.ItemsSource = devices;
         MicCombo.DisplayMemberPath = nameof(CaptureDevice.FriendlyName);
+
+        // Hydrate from persisted settings and start at the first unresolved
+        // step (spec 3). persistedMicPresent: the saved device still exists in
+        // the current enumeration. modelsResolved: no selected model missing.
+        var settings = shell.Settings;
+        var persistedMicPresent = !string.IsNullOrEmpty(settings.MicDeviceId)
+                                   && devices.Any(d => d.Id == settings.MicDeviceId);
+        var missing = new Winpepper.Models.MissingModelsResolver().FindMissing(
+            shell.ModelsServices.Registry.All,
+            shell.ModelsServices.ModelsRoot,
+            new[] { settings.AsrModelName, settings.CleanupModelName });
+        var modelsResolved = missing.Count == 0;
+        _vm.InitializeFrom(settings, persistedMicPresent, modelsResolved);
+
+        // Reflect the hydrated device selection in the combo.
+        MicCombo.SelectedItem = devices.FirstOrDefault(d => d.Id == settings.MicDeviceId);
         MicCombo.SelectionChanged += (_, _) =>
         {
             if (MicCombo.SelectedItem is CaptureDevice d)

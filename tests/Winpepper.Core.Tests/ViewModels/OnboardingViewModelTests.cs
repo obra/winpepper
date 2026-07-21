@@ -155,4 +155,66 @@ public class OnboardingViewModelTests
         w.Current.MicDeviceId.ShouldBe("{mic-1}");
         w.Flushes.ShouldBeGreaterThan(0);                       // checkpoint flushed
     }
+
+    [Fact]
+    public void InitializeFrom_NoMic_StartsAtPickMic()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask, new PermissiveValidator());
+        vm.InitializeFrom(new AppSettings { MicDeviceId = "" },
+            persistedMicPresent: false, modelsResolved: false);
+        vm.Step.ShouldBe(OnboardingStep.PickMic);
+    }
+
+    [Fact]
+    public void InitializeFrom_MicSetButMissingDevice_StartsAtPickMic()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask, new PermissiveValidator());
+        vm.InitializeFrom(new AppSettings { MicDeviceId = "{gone}" },
+            persistedMicPresent: false, modelsResolved: true);
+        vm.Step.ShouldBe(OnboardingStep.PickMic);
+    }
+
+    [Fact]
+    public void InitializeFrom_MicPresent_HotkeysValid_ModelsMissing_StartsAtDownloadModels()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask, new PermissiveValidator());
+        vm.InitializeFrom(
+            new AppSettings { MicDeviceId = "{mic}", HoldHotkey = "RightCtrl+RightShift", ToggleHotkey = "Ctrl+Shift+Space" },
+            persistedMicPresent: true, modelsResolved: false);
+        vm.Step.ShouldBe(OnboardingStep.DownloadModels);
+    }
+
+    [Fact]
+    public void InitializeFrom_AllResolved_StartsAtTestDictation()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask, new PermissiveValidator());
+        vm.InitializeFrom(
+            new AppSettings { MicDeviceId = "{mic}", HoldHotkey = "RightCtrl+RightShift", ToggleHotkey = "Ctrl+Shift+Space" },
+            persistedMicPresent: true, modelsResolved: true);
+        vm.Step.ShouldBe(OnboardingStep.TestDictation);
+    }
+
+    [Fact]
+    public void InitializeFrom_InvalidHotkey_StartsAtPickHotkeys()
+    {
+        // Validator flags the persisted toggle chord as conflicting.
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask,
+            new FakeValidator("Ctrl+Shift+Space"));
+        vm.InitializeFrom(
+            new AppSettings { MicDeviceId = "{mic}", HoldHotkey = "RightCtrl+RightShift", ToggleHotkey = "Ctrl+Shift+Space" },
+            persistedMicPresent: true, modelsResolved: true);
+        vm.Step.ShouldBe(OnboardingStep.PickHotkeys);
+    }
+
+    [Fact]
+    public void InitializeFrom_Prefills_Mic_And_Hotkeys()
+    {
+        var vm = new OnboardingViewModel(new FakeWriter(), () => Task.CompletedTask, new PermissiveValidator());
+        vm.InitializeFrom(
+            new AppSettings { MicDeviceId = "{mic}", HoldHotkey = "LeftAlt+F9", ToggleHotkey = "LeftCtrl+LeftShift" },
+            persistedMicPresent: true, modelsResolved: true);
+        vm.SelectedMicDeviceId.ShouldBe("{mic}");
+        vm.HoldHotkey.ShouldBe("LeftAlt+F9");
+        vm.ToggleHotkey.ShouldBe("LeftCtrl+LeftShift");
+    }
 }

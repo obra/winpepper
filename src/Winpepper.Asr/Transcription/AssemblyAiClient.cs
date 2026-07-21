@@ -140,11 +140,20 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
 
     public async Task<bool> ValidateKeyAsync(CancellationToken ct)
     {
-        // GET a bogus id: 401 => bad key; anything else (typically 404) => key accepted.
-        using var req = new HttpRequestMessage(HttpMethod.Get, $"{_opts.BaseUrl}/v2/transcript/winpepper-key-check-000000000000");
-        AddAuth(req);
-        using var resp = await _http.SendAsync(req, ct);
-        return (int)resp.StatusCode != 401;
+        // GET a bogus id through the retry helper: 401 => bad key; anything the
+        // helper accepts (or a terminal 404) => key is accepted. Transient 5xx /
+        // request-timeouts are retried before we decide.
+        try
+        {
+            using var resp = await SendWithRetryAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, $"{_opts.BaseUrl}/v2/transcript/winpepper-key-check-000000000000"), ct);
+            return true; // 2xx accepted
+        }
+        catch (AssemblyAiException ex)
+        {
+            // 401 => invalid; 404 (bogus id) and other non-auth terminals => key was accepted.
+            return ex.StatusCode != 401;
+        }
     }
 
     private void AddAuth(HttpRequestMessage req)

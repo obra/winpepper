@@ -185,6 +185,20 @@ public sealed class AssemblyAiClientTests
         (await Make(badHandler, delays).ValidateKeyAsync(CancellationToken.None)).ShouldBeFalse();
     }
 
+    [Fact]
+    public async Task ValidateKey_RetriesTransient_ThenReturnsTrueOn404()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}")            // transient, retried
+            .Enqueue(HttpStatusCode.NotFound, "{\"error\":\"not found\"}"); // 404 => valid key
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        (await client.ValidateKeyAsync(CancellationToken.None)).ShouldBeTrue();
+        handler.Requests.Count.ShouldBe(2);
+        delays.Count.ShouldBe(1);
+    }
+
     [Theory]
     [InlineData("-5", 0)]        // negative -> clamped to 0
     [InlineData("99999", 30)]    // huge -> clamped to 30

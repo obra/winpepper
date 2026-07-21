@@ -30,6 +30,16 @@ public sealed class CleanupRunner
     {
         var sw = Stopwatch.StartNew();
 
+        // 0) Short-transcript bypass (spec fix-(iii)). A 0.5B model has nothing
+        //    useful to do with a 1-3 word utterance and is where it most often
+        //    hallucinates a whole sentence; skip it and take the deterministic
+        //    correction-only path.
+        if (TranscriptSimilarity.WordCount(rawTranscript) < 4)
+        {
+            _log.LogDebug("Transcript has fewer than 4 words; bypassing LLM cleanup");
+            return Finalize(rawTranscript, "", corrections, assembledPrompt: "", CleanupPath.BypassShort, sw);
+        }
+
         // 1) Resolve window context with a bounded wait.
         string? windowContext = null;
         if (options.WindowContextEnabled && windowContextTask is not null)

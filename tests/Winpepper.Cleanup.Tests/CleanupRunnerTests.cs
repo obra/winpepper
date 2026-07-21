@@ -215,4 +215,44 @@ public class CleanupRunnerTests
         backend.LastSystemPrompt!.ShouldNotContain("ignored");
         backend.LastSystemPrompt!.ShouldNotContain("<WINDOW-OCR-CONTENT>");
     }
+
+    [Fact]
+    public async Task Run_ShortTranscript_BypassesLlm_AndKeepsRaw()
+    {
+        // Bug-3(c): "Right." must never become the model's ship-it example.
+        var backend = new FakeLlamaCleanupBackend { Output = "I think we should just ship it tomorrow." };
+        var runner = NewRunner(backend);
+        var result = await runner.RunAsync("Right.", CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.BypassShort);
+        result.CleanedText.ShouldBe("Right.");
+        backend.CallCount.ShouldBe(0); // LLM never called
+    }
+
+    [Fact]
+    public async Task Run_ShortTranscript_StillAppliesCorrectionPostPass()
+    {
+        var backend = new FakeLlamaCleanupBackend { Output = "ignored" };
+        var runner = NewRunner(backend);
+        var corrections = new CorrectionsData
+        {
+            Replacements = new Dictionary<string, string>(StringComparer.Ordinal) { ["chat gbt"] = "ChatGPT" },
+        };
+        var result = await runner.RunAsync("chat gbt", corrections, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.BypassShort);
+        result.CleanedText.ShouldBe("ChatGPT");
+        backend.CallCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Run_FourWords_IsNotBypassed()
+    {
+        var backend = new FakeLlamaCleanupBackend { Output = "Clean up this sentence." };
+        var runner = NewRunner(backend);
+        var result = await runner.RunAsync("clean up this sentence", CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.Llm);
+        backend.CallCount.ShouldBe(1);
+    }
 }

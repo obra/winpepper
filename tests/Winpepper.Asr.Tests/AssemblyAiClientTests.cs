@@ -52,6 +52,20 @@ public sealed class AssemblyAiClientTests
     }
 
     [Fact]
+    public async Task Upload_400_ThrowsWithoutRetry()
+    {
+        var handler = new FakeHttpMessageHandler().Enqueue(HttpStatusCode.BadRequest, "{\"error\":\"bad request\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var ex = await Should.ThrowAsync<AssemblyAiException>(() => client.UploadAsync(new byte[] { 1 }, CancellationToken.None));
+        ex.StatusCode.ShouldBe(400);
+        ex.IsAuthError.ShouldBeFalse();
+        handler.Requests.Count.ShouldBe(1);
+        delays.Count.ShouldBe(0);
+    }
+
+    [Fact]
     public async Task Upload_429_HonorsRetryAfterThenSucceeds()
     {
         var handler = new FakeHttpMessageHandler()

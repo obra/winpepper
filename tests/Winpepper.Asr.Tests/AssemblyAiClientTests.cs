@@ -189,4 +189,37 @@ public sealed class AssemblyAiClientTests
         delays.Count.ShouldBe(3);                      // exactly MaxTransientRetries delays
         foreach (var d in delays) d.ShouldBeGreaterThan(TimeSpan.Zero);
     }
+
+    [Fact]
+    public async Task Upload_RequestTimeout_IsRetriedThenSucceeds()
+    {
+        // First send throws TaskCanceledException NOT tied to the caller token
+        // (models a per-request timeout); second send succeeds.
+        var handler = new FakeHttpMessageHandler()
+            .EnqueueThrow(new TaskCanceledException("per-request timeout"))
+            .Enqueue(HttpStatusCode.OK, "{\"upload_url\":\"https://cdn/aai/ok\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var url = await client.UploadAsync(new byte[] { 1 }, CancellationToken.None);
+
+        url.ShouldBe("https://cdn/aai/ok");
+        handler.Requests.Count.ShouldBe(2);
+        delays.Count.ShouldBe(1); // one backoff before the retry
+    }
+
+    [Fact]
+    public async Task Upload_CallerCancellation_IsNotRetried()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var handler = new FakeHttpMessageHandler(); // no scripted responses needed
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        await Should.ThrowAsync<OperationCanceledException>(
+            () => client.UploadAsync(new byte[] { 1 }, cts.Token));
+        delays.Count.ShouldBe(0);       // never retried
+        handler.Requests.Count.ShouldBeLessThanOrEqualTo(1);
+    }
 }

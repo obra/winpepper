@@ -127,16 +127,26 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
             using var req = requestFactory();
             AddAuth(req);
 
+            // Cap each HTTP round-trip independently of the global HttpClient.Timeout.
+            using var reqCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            reqCts.CancelAfter(_opts.PerRequestTimeout);
+
             HttpResponseMessage resp;
             try
             {
-                resp = await _http.SendAsync(req, ct);
+                resp = await _http.SendAsync(req, reqCts.Token);
             }
-            catch (HttpRequestException) when (attempt <= _opts.MaxTransientRetries)
+            catch (Exception ex) when (
+                (ex is HttpRequestException ||
+                 // A per-request timeout surfaces as (Task)OperationCanceledException whose
+                 // cause is reqCts, NOT the caller's ct. Treat that as a retryable transient.
+                 (ex is OperationCanceledException && !ct.IsCancellationRequested))
+                && attempt <= _opts.MaxTransientRetries)
             {
                 await _delay(Backoff(attempt), ct);
                 continue;
             }
+            // Caller aborted (ct cancelled): let the OperationCanceledException propagate.
 
             var code = (int)resp.StatusCode;
             if (resp.IsSuccessStatusCode) return resp;

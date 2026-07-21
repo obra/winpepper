@@ -18,6 +18,9 @@ public sealed partial class StatusPillWindow : Window
     private readonly DispatcherTimer _hideTimer;
     private readonly DispatcherTimer _tickTimer;
     private IntPtr _hwnd;
+    private bool _visible;
+    private double _pulsePhase;
+    private PillAnimationMode _animMode = PillAnimationMode.None;
 
     public StatusPillWindow(SessionViewModel vm)
     {
@@ -44,10 +47,20 @@ public sealed partial class StatusPillWindow : Window
         appWindow.Resize(new SizeInt32(260, 44));
 
         _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
-        _hideTimer.Tick += (_, _) => { _hideTimer.Stop(); appWindow.Hide(); };
+        _hideTimer.Tick += (_, _) => { _hideTimer.Stop(); _visible = false; appWindow.Hide(); };
 
         _tickTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
-        _tickTimer.Tick += (_, _) => { _vm.Tick(); ElapsedText.Text = $"{_vm.ElapsedMs} ms"; };
+        _tickTimer.Tick += (_, _) =>
+        {
+            _vm.Tick();
+            ElapsedText.Text = $"{_vm.ElapsedMs} ms";
+
+            // Cheap: keep us pinned to the top even if another topmost window
+            // was created after our last show. Only while visible.
+            if (_visible) ExtendedWindowStyle.AssertTopmost(_hwnd);
+
+            ApplyAnimationFrame();
+        };
 
         _vm.PropertyChanged += OnVmChanged;
         appWindow.Hide();
@@ -59,18 +72,24 @@ public sealed partial class StatusPillWindow : Window
 
         var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(_hwnd));
         StatusText.Text = _vm.StatusText;
+        _animMode = PillAnimationMap.ForStage(_vm.Stage);
 
         if (_vm.Stage == SessionStage.Idle)
         {
             _tickTimer.Stop();
+            _visible = false;
+            ResetPillVisual();
             _hideTimer.Stop(); _hideTimer.Start();
         }
         else if (_vm.Stage == SessionStage.Error)
         {
             _tickTimer.Stop();
+            _visible = true;
+            ResetPillVisual(); // steady dot; Error keeps its Goldenrod colour below
             Dot.Fill = new SolidColorBrush(Microsoft.UI.Colors.Goldenrod);
             PositionBottomCenter(appWindow);
             appWindow.Show(activateWindow: false);
+            ExtendedWindowStyle.AssertTopmost(_hwnd);
             _hideTimer.Stop();
         }
         else
@@ -83,10 +102,53 @@ public sealed partial class StatusPillWindow : Window
                 SessionStage.Injecting   => Microsoft.UI.Colors.LimeGreen,
                 _ => Microsoft.UI.Colors.Gray,
             });
+            _pulsePhase = 0;
             PositionBottomCenter(appWindow);
             appWindow.Show(activateWindow: false);
+            _visible = true;
+            ExtendedWindowStyle.AssertTopmost(_hwnd);
             _tickTimer.Start();
             _hideTimer.Stop();
+        }
+    }
+
+    private void ResetPillVisual()
+    {
+        Dot.Opacity = 1.0;
+        DotScale.ScaleX = 1.0;
+        DotScale.ScaleY = 1.0;
+    }
+
+    /// <summary>
+    /// Per-tick (100 ms) visual update. VoiceLevel scales the dot from the
+    /// smoothed input level; Thinking oscillates the dot opacity ~0.4..1.0 on a
+    /// ~1 s loop; None leaves the dot static (scale 1, opacity 1).
+    /// </summary>
+    private void ApplyAnimationFrame()
+    {
+        switch (_animMode)
+        {
+            case PillAnimationMode.VoiceLevel:
+                var scale = 1.0 + (_vm.InputLevel * 0.8); // 1.0 .. 1.8
+                DotScale.ScaleX = scale;
+                DotScale.ScaleY = scale;
+                Dot.Opacity = 1.0;
+                break;
+
+            case PillAnimationMode.Thinking:
+                // 100 ms tick, 10 ticks per ~1 s cycle.
+                _pulsePhase += 2 * Math.PI / 10.0;
+                var osc = (Math.Sin(_pulsePhase) + 1.0) / 2.0; // 0..1
+                Dot.Opacity = 0.4 + (0.6 * osc);               // 0.4 .. 1.0
+                DotScale.ScaleX = 1.0;
+                DotScale.ScaleY = 1.0;
+                break;
+
+            default: // None
+                Dot.Opacity = 1.0;
+                DotScale.ScaleX = 1.0;
+                DotScale.ScaleY = 1.0;
+                break;
         }
     }
 

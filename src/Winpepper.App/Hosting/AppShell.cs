@@ -245,6 +245,9 @@ public sealed class AppShell : IDisposable
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
                                          historyServices.Archiver, settings.AsrModelName, cleanupModelName,
                                          clipboardFallback, toasts,
+                                         () => store.Load(),
+                                         (local, s, onFallback) => AppShell.BuildTranscriber(
+                                             local, s, onFallback, aaiClient, aaiKeyStore, factory),
                                          cleanup, correctionStore, windowContext, cleanupOptions,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
                                          postPasteLearningEnabled: settings.PostPasteLearningEnabled,

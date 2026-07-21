@@ -15,6 +15,8 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     private string _holdHotkey = "RightCtrl+RightShift";
     private string _toggleHotkey = "Ctrl+Shift+Space";
     private bool _testDictationDone;
+    private readonly Action<Exception>? _onDownloadError;
+    private string? _downloadError;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -25,11 +27,13 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     /// permissive default: a permissive default would mask conflicts on the
     /// onboarding step.
     /// </summary>
-    public OnboardingViewModel(ISettingsWriter writer, Func<Task> runDownloader, IHotkeyValidator validator)
+    public OnboardingViewModel(ISettingsWriter writer, Func<Task> runDownloader, IHotkeyValidator validator,
+                               Action<Exception>? onDownloadError = null)
     {
         _writer = writer;
         _runDownloader = runDownloader;
         _validator = validator ?? throw new ArgumentNullException(nameof(validator));
+        _onDownloadError = onDownloadError;
     }
 
     /// <summary>
@@ -112,6 +116,25 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 
     public bool CanSkip => _step == OnboardingStep.DownloadModels;
 
+    /// <summary>
+    /// Friendly, inline error message shown on the Download step when the model
+    /// download fails. Null when there is no error. The Download button doubles
+    /// as Retry: a fresh AdvanceAsync clears this before trying again.
+    /// </summary>
+    public string? DownloadError
+    {
+        get => _downloadError;
+        private set
+        {
+            if (_downloadError == value) return;
+            _downloadError = value;
+            Raise();
+            Raise(nameof(HasDownloadError));
+        }
+    }
+
+    public bool HasDownloadError => _downloadError is not null;
+
     public async Task AdvanceAsync()
     {
         if (!CanAdvance) return;
@@ -126,7 +149,20 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
                 Step = OnboardingStep.DownloadModels;
                 break;
             case OnboardingStep.DownloadModels:
-                await _runDownloader();
+                DownloadError = null;
+                try
+                {
+                    await _runDownloader();
+                }
+                catch (Exception ex)
+                {
+                    // Never let a network/download failure crash the wizard.
+                    // Stay on this step so Retry (the Download button) and Skip
+                    // remain usable; surface a friendly inline message.
+                    _onDownloadError?.Invoke(ex);
+                    DownloadError = "Couldn't download the models. Check your connection and try again, or Skip to set them up later.";
+                    return;
+                }
                 Step = OnboardingStep.TestDictation;
                 break;
             case OnboardingStep.TestDictation:

@@ -133,6 +133,9 @@ public sealed partial class OnboardingPage : Page
         Show(TestPanel,      OnboardingStep.TestDictation);
         Show(DonePanel,      OnboardingStep.Done);
 
+        DownloadErrorText.Text = _vm.DownloadError ?? string.Empty;
+        DownloadErrorText.Visibility = _vm.HasDownloadError ? Visibility.Visible : Visibility.Collapsed;
+
         Border Dot(int i) => i switch { 1 => StepDot1, 2 => StepDot2, 3 => StepDot3, _ => StepDot4 };
         // Prefer the theme brushes so the dots track light/dark mode and the
         // user's accent color; fall back to fixed colors if lookup fails.

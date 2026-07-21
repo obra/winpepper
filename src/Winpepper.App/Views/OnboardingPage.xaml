@@ -96,6 +96,12 @@
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        TextWrapping="Wrap" />
                             <ProgressBar x:Name="DownloadProgress" AutomationProperties.AutomationId="OnboardingDownloadProgressBar" IsIndeterminate="True" Visibility="Collapsed" />
+                            <TextBlock x:Name="DownloadErrorText"
+                                       AutomationProperties.AutomationId="OnboardingDownloadErrorText"
+                                       Visibility="Collapsed"
+                                       TextWrapping="Wrap"
+                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                       Style="{ThemeResource BodyTextBlockStyle}" />
                         </StackPanel>
                     </Border>
                 </StackPanel>

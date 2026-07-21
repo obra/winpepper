@@ -1,32 +1,34 @@
 namespace Winpepper.Platform.Hotkeys;
 
 /// <summary>
-/// Lets the hook/event loop stay alive for recorder capture while discarding
-/// normal triggers until ASR is ready. The readiness timestamp prevents an
-/// event queued before enablement from becoming live afterward.
+/// Shares ASR readiness with the hook boundary while the event loop stays alive
+/// for recorder capture. The timestamp also prevents an event queued just before
+/// enablement from becoming live afterward.
 /// </summary>
 public sealed class HotkeyReadinessGate
 {
     private readonly object _gate = new();
-    private bool _enabled;
+    private int _enabled;
     private DateTimeOffset _enabledAt;
+
+    public bool IsEnabled => Volatile.Read(ref _enabled) != 0;
 
     public void Enable(DateTimeOffset enabledAt)
     {
         lock (_gate)
         {
             _enabledAt = enabledAt;
-            _enabled = true;
+            Volatile.Write(ref _enabled, 1);
         }
     }
 
     public void Disable()
     {
-        lock (_gate) _enabled = false;
+        Volatile.Write(ref _enabled, 0);
     }
 
     public bool ShouldHandle(HotkeyEvent evt)
     {
-        lock (_gate) return _enabled && evt.Timestamp >= _enabledAt;
+        lock (_gate) return IsEnabled && evt.Timestamp >= _enabledAt;
     }
 }

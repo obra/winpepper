@@ -34,6 +34,32 @@ public class RawCaptureTests
     }
 
     [Fact]
+    public void CaptureAndDrainRemainAvailableWhileNormalTriggersAreDisabled()
+    {
+        var enabled = false;
+        var hook = new HotkeyHook(
+            HotkeyChord.Parse("F23"), HotkeyChord.Parse("F24"), HotkeyChord.Parse("Esc"),
+            new NullLogger<HotkeyHook>(), keyPhysicallyDown: _ => true,
+            normalTriggersEnabled: () => enabled);
+        var captured = new List<RawKeyTransition>();
+        var lease = hook.BeginRawCapture(captured.Add);
+
+        hook.TryProcessKey(0x87, true, out var capturedEvent).ShouldBeFalse();
+        capturedEvent.ShouldBeNull();
+        captured.Count.ShouldBe(1);
+        lease.Dispose();
+
+        hook.TryProcessKey(0x87, true, out var drainRepeat).ShouldBeFalse();
+        hook.TryProcessKey(0x87, false, out var drainUp).ShouldBeFalse();
+        drainRepeat.ShouldBeNull();
+        drainUp.ShouldBeNull();
+
+        enabled = true;
+        hook.TryProcessKey(0x87, true, out var toggle).ShouldBeTrue();
+        toggle!.Kind.ShouldBe(HotkeyEventKind.Toggle);
+    }
+
+    [Fact]
     public void CaptureLease_IsExclusiveAndDisposeRestoresNormalProcessing()
     {
         var hook = NewHook();

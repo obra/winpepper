@@ -11,11 +11,37 @@ public class HotkeyHookLogicTests
     private static HotkeyHook NewHook(string hold = "RightCtrl+RightShift",
                                        string toggle = "Ctrl+Shift+Space",
                                        string cancel = "Esc",
-                                       Func<bool>? cancelEnabled = null)
+                                       Func<bool>? cancelEnabled = null,
+                                       Func<bool>? normalTriggersEnabled = null)
         // These tests synthesize key events; never consult the host keyboard.
         => new(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle), HotkeyChord.Parse(cancel),
                new NullLogger<HotkeyHook>(), cancelEnabled,
-               keyPhysicallyDown: _ => true);
+               keyPhysicallyDown: _ => true,
+               normalTriggersEnabled: normalTriggersEnabled);
+
+    [Fact]
+    public void DedicatedTriggersPassThroughUntilNormalProcessingIsEnabled()
+    {
+        var enabled = false;
+        var hook = NewHook(hold: "F24", toggle: "F23",
+            normalTriggersEnabled: () => enabled);
+
+        hook.TryProcessKey(0x87, true, out var disabledHold).ShouldBeFalse();
+        hook.TryProcessKey(0x87, false, out var disabledHoldUp).ShouldBeFalse();
+        hook.TryProcessKey(0x86, true, out var disabledToggle).ShouldBeFalse();
+        hook.TryProcessKey(0x86, false, out _).ShouldBeFalse();
+        disabledHold.ShouldBeNull();
+        disabledHoldUp.ShouldBeNull();
+        disabledToggle.ShouldBeNull();
+
+        enabled = true;
+        hook.TryProcessKey(0x87, true, out var holdDown).ShouldBeTrue();
+        holdDown!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+        hook.TryProcessKey(0x87, false, out var holdUp).ShouldBeTrue();
+        holdUp!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+        hook.TryProcessKey(0x86, true, out var toggle).ShouldBeTrue();
+        toggle!.Kind.ShouldBe(HotkeyEventKind.Toggle);
+    }
 
     [Fact]
     public void HoldChord_PressAndRelease_EmitsHoldDownThenHoldUp()

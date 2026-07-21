@@ -34,10 +34,77 @@ public class LongPressSpaceHookTests
     }
 
     private static HotkeyHook NewHook(FakeTimer timer, Func<SpaceReplayResult> replay,
-        Func<int, bool>? keyPhysicallyDown = null)
+        Func<int, bool>? keyPhysicallyDown = null,
+        Func<bool>? normalTriggersEnabled = null,
+        Func<bool>? spaceReplayPermitted = null)
         => new(HotkeyChord.Parse("Space"), HotkeyChord.Parse("F24"), HotkeyChord.Parse("Esc"),
             new NullLogger<HotkeyHook>(), keyPhysicallyDown: keyPhysicallyDown ?? (_ => true),
-            spaceTimerScheduler: timer, replaySpace: replay);
+            spaceTimerScheduler: timer, replaySpace: replay,
+            normalTriggersEnabled: normalTriggersEnabled,
+            spaceReplayPermitted: spaceReplayPermitted ?? (() => true));
+
+    [Fact]
+    public void LongSpacePassesThroughUntilNormalProcessingIsEnabled()
+    {
+        var enabled = false;
+        var timer = new FakeTimer();
+        var replayCount = 0;
+        var hook = NewHook(timer,
+            () => { replayCount++; return SpaceReplayResult.Succeeded; },
+            normalTriggersEnabled: () => enabled);
+
+        hook.TryProcessKey(0x20, true, out var disabledDown).ShouldBeFalse();
+        timer.Fire();
+        hook.TryProcessKey(0x20, false, out var disabledUp).ShouldBeFalse();
+        disabledDown.ShouldBeNull();
+        disabledUp.ShouldBeNull();
+        replayCount.ShouldBe(0);
+        hook.Events.TryRead(out _).ShouldBeFalse();
+
+        enabled = true;
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+        timer.Fire();
+        hook.Events.TryRead(out var holdDown).ShouldBeTrue();
+        holdDown!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+        hook.TryProcessKey(0x20, false, out _).ShouldBeTrue();
+        hook.Events.TryRead(out var holdUp).ShouldBeTrue();
+        holdUp!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+    }
+
+    [Fact]
+    public void BlockedReplayPolicyLeavesPhysicalSpaceUntouchedAndCannotStartHold()
+    {
+        var timer = new FakeTimer();
+        var replayCount = 0;
+        var hook = NewHook(timer,
+            () => { replayCount++; return SpaceReplayResult.Succeeded; },
+            spaceReplayPermitted: () => false);
+
+        hook.TryProcessKey(0x20, true, out var down).ShouldBeFalse();
+        timer.Fire();
+        hook.TryProcessKey(0x20, false, out var up).ShouldBeFalse();
+
+        down.ShouldBeNull();
+        up.ShouldBeNull();
+        replayCount.ShouldBe(0);
+        hook.Events.TryRead(out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void AllowedReplayPolicyOwnsShortTapAndReplaysIt()
+    {
+        var timer = new FakeTimer();
+        var replayCount = 0;
+        var hook = NewHook(timer,
+            () => { replayCount++; return SpaceReplayResult.Succeeded; },
+            spaceReplayPermitted: () => true);
+
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+        hook.TryProcessKey(0x20, false, out _).ShouldBeTrue();
+
+        replayCount.ShouldBe(1);
+        hook.Events.TryRead(out _).ShouldBeFalse();
+    }
 
     [Fact]
     public void SpacePolicy_EmitsHoldEventsThroughHookChannel()
@@ -286,7 +353,8 @@ public class LongPressSpaceHookTests
             HotkeyChord.Parse("Space"), HotkeyChord.Parse("F24"), HotkeyChord.Parse("Esc"),
             logger, keyPhysicallyDown: _ => true,
             spaceTimerScheduler: new FakeTimer(),
-            replaySpace: () => new SpaceReplayResult(false, 0, false, false));
+            replaySpace: () => new SpaceReplayResult(false, 0, false, false),
+            spaceReplayPermitted: () => true);
 
         hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
         hook.TryProcessKey(0x20, false, out _).ShouldBeTrue();

@@ -81,7 +81,8 @@ public sealed class PipelineHost : IDisposable
             toggle,
             cancel,
             factory.CreateLogger<HotkeyHook>(),
-            cancelEnabled: () => _engine.State != SessionState.Idle);
+            cancelEnabled: () => _engine.State != SessionState.Idle,
+            normalTriggersEnabled: () => _hotkeyReadiness.IsEnabled);
         _injector = new TextInjector(factory.CreateLogger<TextInjector>());
         _modelDir = modelDir;
         _archiver = archiver;

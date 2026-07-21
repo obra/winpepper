@@ -59,6 +59,8 @@ public sealed class HotkeyHook : IDisposable
 
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<int, bool> _keyPhysicallyDown;
+    private readonly Func<bool> _normalTriggersEnabled;
+    private readonly Func<bool> _spaceReplayPermitted;
     private readonly LongPressSpaceStateMachine _spaceHold;
 
     public ChannelReader<HotkeyEvent> Events => _events.Reader;
@@ -161,11 +163,44 @@ public sealed class HotkeyHook : IDisposable
             return swallowWhileSuspended;
         }
 
+        // Model-less onboarding still needs the hook for focus-independent raw
+        // capture. Gate normal matching here, before any new trigger can be
+        // emitted or swallowed, while finishing ownership from an earlier
+        // enabled press symmetrically.
+        if (!NormalTriggersEnabled())
+        {
+            _observedCancelKeys.Remove(vk);
+            if (down && _swallowedKeys.TryGetValue(vk, out var swallowedSince))
+            {
+                if (IsKeyEntryLive(vk, swallowedSince, now))
+                {
+                    _swallowedKeys[vk] = now;
+                    return true;
+                }
+                _swallowedKeys.Remove(vk);
+            }
+
+            var swallowOwnedUp = !down && _swallowedKeys.Remove(vk);
+            if (!down && _holding && HoldEndedOnKeyUp(bindings.Hold, vk))
+            {
+                _holding = false;
+                evt = new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow);
+            }
+            return swallowOwnedUp;
+        }
+
         if (IsLongPressSpaceBinding(bindings.Hold)
             && vk == VirtualKeyCatalog.Space
             && down
             && _modifiers == Modifier.None)
+        {
+            if (!SpaceReplayPermitted())
+            {
+                _log.LogDebug("Long-press Space bypassed because replay is not permitted for the foreground target");
+                return false;
+            }
             return _spaceHold.Process(down, extraInfo == SpaceReplayExtraInfo);
+        }
 
         if (down)
         {
@@ -241,13 +276,17 @@ public sealed class HotkeyHook : IDisposable
         Func<DateTimeOffset>? timeProvider = null,
         Func<int, bool>? keyPhysicallyDown = null,
         ILongPressTimerScheduler? spaceTimerScheduler = null,
-        Func<SpaceReplayResult>? replaySpace = null)
+        Func<SpaceReplayResult>? replaySpace = null,
+        Func<bool>? normalTriggersEnabled = null,
+        Func<bool>? spaceReplayPermitted = null)
     {
         _bindings = new HotkeyBindings(hold, toggle, cancel);
         _log = log;
         _cancelEnabled = cancelEnabled ?? (() => true);
         _now = timeProvider ?? (() => DateTimeOffset.UtcNow);
         _keyPhysicallyDown = keyPhysicallyDown ?? DefaultKeyPhysicallyDown;
+        _normalTriggersEnabled = normalTriggersEnabled ?? (() => true);
+        _spaceReplayPermitted = spaceReplayPermitted ?? ForegroundReplayPermission.CanReplayToForeground;
         var replay = replaySpace ?? SpaceReplaySender.SendToWindows;
         _spaceHold = new LongPressSpaceStateMachine(
             spaceTimerScheduler ?? new SystemLongPressTimerScheduler(),
@@ -280,6 +319,32 @@ public sealed class HotkeyHook : IDisposable
         catch (Exception ex)
         {
             _log.LogError(ex, "Cancel hotkey gate threw; ignoring cancel chord");
+            return false;
+        }
+    }
+
+    private bool NormalTriggersEnabled()
+    {
+        try
+        {
+            return _normalTriggersEnabled();
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Normal hotkey readiness gate threw; passing keys through");
+            return false;
+        }
+    }
+
+    private bool SpaceReplayPermitted()
+    {
+        try
+        {
+            return _spaceReplayPermitted();
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Space replay permission check failed; passing physical Space through");
             return false;
         }
     }

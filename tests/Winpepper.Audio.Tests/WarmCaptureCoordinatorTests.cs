@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Threading;
 using Shouldly;
 using Winpepper.Audio;
@@ -140,9 +141,34 @@ public class WarmCaptureCoordinatorTests
 
         frameThread.Start();
         rebuildThread.Start();
-        rebuildThread.Join();
-        frameThread.Join();
+        // Bounded joins: a genuine deadlock inside Rebuild()/OnSourceFrame must
+        // fail this test fast and loudly instead of hanging the whole run.
+        rebuildThread.Join(TimeSpan.FromSeconds(30)).ShouldBeTrue();
+        frameThread.Join(TimeSpan.FromSeconds(30)).ShouldBeTrue();
 
         escaped.ShouldBeNull();
+
+        // Deterministic post-race phase: the assertion above only proves the
+        // race didn't crash — it never inspects buffer contents, so it would
+        // still pass even if the epoch guard in OnSourceFrame were deleted
+        // entirely. Prove the stale-bleed guarantee explicitly, the same way
+        // StaleSourceFrame_AfterRebuild_IsIgnored_NoDisposedAccess does, but
+        // right after the concurrency churn above.
+        //
+        // At any quiescent point (no Rebuild/EnsureStarted in flight) exactly
+        // one FakeCaptureSource in `live` is non-disposed: Rebuild disposes
+        // the prior current source and starts a new one atomically under the
+        // coordinator's lock, and this test never disposes a source any other
+        // way. That makes Single(...) an order-independent way to pick out
+        // "the source that is current right now" even though `live` is a
+        // ConcurrentBag with no defined enumeration order.
+        var staleSource = live.ToArray().Single(s => !s.Disposed);
+        c.Rebuild(); // staleSource becomes stale/disposed; a fresh source becomes current
+        var currentSource = live.ToArray().Single(s => !s.Disposed);
+
+        buffer.StartSession(prerollSamples: 0);
+        staleSource.RaiseFrame(new float[] { 42 });   // stale-device audio: must be dropped
+        currentSource.RaiseFrame(new float[] { 7 });  // current-device audio: must land
+        buffer.StopSession().ShouldBe(new float[] { 7 });
     }
 }

@@ -3,6 +3,7 @@ using System.ComponentModel;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Graphics;
@@ -21,6 +22,13 @@ public sealed partial class StatusPillWindow : Window
     private bool _visible;
     private double _pulsePhase;
     private PillAnimationMode _animMode = PillAnimationMode.None;
+
+    /// <summary>
+    /// Invoked when the user clicks the pill while it is in the PENDING state.
+    /// Wired by AppShell to perform the paste at click time. Returns true when
+    /// the paste succeeded (slot consumed), false when it failed (slot kept).
+    /// </summary>
+    public Func<bool>? PastePendingHandler { get; set; }
 
     public StatusPillWindow(SessionViewModel vm)
     {
@@ -107,8 +115,23 @@ public sealed partial class StatusPillWindow : Window
         StatusText.Text = _vm.StatusText;
         _animMode = PillAnimationMap.ForStage(_vm.Stage);
 
+        if (_vm.Stage == SessionStage.PendingPaste)
+        {
+            _tickTimer.Stop();               // no thinking pulse while waiting
+            _visible = true;
+            ResetPillVisual();               // steady dot, full opacity, scale 1
+            Dot.Fill = new SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
+            PositionBottomCenter(appWindow);
+            appWindow.Show(activateWindow: false);
+            ExtendedWindowStyle.AssertTopmost(_hwnd);
+            ExtendedWindowStyle.SetClickThrough(_hwnd, clickThrough: false); // make pill clickable
+            _hideTimer.Stop();               // never auto-hide while pending
+            return;
+        }
+
         if (_vm.Stage == SessionStage.Idle)
         {
+            ExtendedWindowStyle.SetClickThrough(_hwnd, clickThrough: true);
             _tickTimer.Stop();
             _visible = false;
             ResetPillVisual();
@@ -116,6 +139,7 @@ public sealed partial class StatusPillWindow : Window
         }
         else if (_vm.Stage == SessionStage.Error)
         {
+            ExtendedWindowStyle.SetClickThrough(_hwnd, clickThrough: true);
             _tickTimer.Stop();
             _visible = true;
             ResetPillVisual(); // steady dot; Error keeps its Goldenrod colour below
@@ -127,6 +151,7 @@ public sealed partial class StatusPillWindow : Window
         }
         else
         {
+            ExtendedWindowStyle.SetClickThrough(_hwnd, clickThrough: true);
             Dot.Fill = new SolidColorBrush(_vm.Stage switch
             {
                 SessionStage.Recording   => Microsoft.UI.Colors.Red,

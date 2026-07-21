@@ -14,21 +14,21 @@
 ## Global Constraints
 
 - Target framework for all buildable/testable work: **`net9.0`** only (never a `net9.0-windows*` TFM on Linux). Copy verbatim.
-- **`Winpepper.App` (WinUI) does not build or test on Linux** — every App file is wrapped in `#if WINDOWS`. App-layer work (settings UI, DPAPI concrete impl, `PipelineHost`/`AppShell` wiring) is verified only via the Windows Smoke Test Checklist (Task 14).
+- **`Winpepper.App` (WinUI) does not build or test on Linux** — because it targets a Windows-only TFM (`net9.0-windows10.0.19041.0`) with WinUI/WindowsAppSDK dependencies, **not** because of `#if WINDOWS` guards. **Never build the whole solution on Linux**: a solution-wide `dotnet build winpepper.sln` WILL attempt to build the App and fail. Always scope build/test to the specific class-lib + test projects (as every task below does). Note: the `SKIP_WINUI_LINUX` / `BuildProjectReferences=false` guard in `Directory.Build.props` is currently **inert** (its `'$(EnableWindowsTargeting)' != 'true'` clause can never be true because `EnableWindowsTargeting` is set `true` unconditionally at `Directory.Build.props:15`); project scoping — not that guard, and not `#if WINDOWS` — is what keeps Linux builds green. New App files are still wrapped in `#if WINDOWS` as defense-in-depth. App-layer work (settings UI, DPAPI concrete impl, `PipelineHost`/`AppShell` wiring) is verified only via the Windows Smoke Test Checklist (Task 14).
 - **No network calls in tests.** The real AssemblyAI API needs a key the developer supplies at runtime; all provider tests inject a fake `HttpMessageHandler` or a fake `IAssemblyAiClient`.
 - **Never log the API key.** Log only transcript id + timings + byte counts.
 - **Do NOT touch** the keyboard hook or anything under `packaging/`.
 - **Nullable reference violations are build errors** (`WarningsAsErrors=nullable`). Code must be null-clean.
-- AssemblyAI HTTP contract (do not re-research — copied verbatim from the API research brief):
-  - Auth header is `authorization: <API_KEY>` with **NO `Bearer` prefix**.
+- AssemblyAI HTTP contract (validated 2026-07-21 against official AssemblyAI docs + a live read-only probe; corrections folded in below — do not re-research further):
+  - Auth header is `authorization: <API_KEY>` with **NO `Bearer` prefix**. (Confirmed: official docs + a live bogus-key probe returning 401.)
   - Upload: `POST https://api.assemblyai.com/v2/upload`, body = **RAW audio bytes** (`ByteArrayContent`, `Content-Type: application/octet-stream`) — never JSON/multipart — returns `{ "upload_url": ... }`.
-  - Create: `POST /v2/transcript` json `{"audio_url":...,"speech_model":<model>,"format_text":true,"punctuate":true,"disfluencies":false,"language_code":"en_us"}` returns `{ "id", "status":"queued" }`.
+  - Create: `POST /v2/transcript` json `{"audio_url":...,"speech_models":[<model>],"format_text":true,"punctuate":true,"disfluencies":false,"language_code":"en_us"}` returns `{ "id", "status":"queued" }`. **Use `speech_models` (plural array), NOT the singular `speech_model`** — the singular is documented as **deprecated / replaced by `speech_models`** and may become a no-op that silently ignores the user's model choice. (`language_code:"en_us"` is a valid AssemblyAI code; if a future API change rejects it, `create` fails and the app falls back to local — see Task 13 step 5.)
   - Poll: `GET /v2/transcript/{id}` every ~1s; lifecycle `queued -> processing -> completed | error`; `completed` gives `text`, `words[]`, `confidence`, `audio_duration`.
-  - Model id is a **plain configurable string** sent as `speech_model`; default `"universal-2"` (fast/cheap). If the API rejects it, surface the API's error message — do not hardcode assumptions.
+  - Model id is a **plain configurable string** placed inside the `speech_models` array; default `"universal-2"` (fast/cheap — a valid current enum value). The premium example is **`"universal-3-5-pro"`** (note the `-5-`; the current AssemblyAI `speech_models` enum is `universal-3-5-pro` / `universal-2` — there is **no** `universal-3-pro`). If the API rejects a model id, surface the API's error message — do not hardcode assumptions.
   - Error handling: `401` = bad key (no retry, tell user to check key); `429` = honor `Retry-After` header seconds; `500/502/503/504` = exponential backoff + jitter retry (up to 3 attempts total); `400/404` = no retry.
   - **Never re-POST the transcript-create call after an id is returned** — retry only the GET poll.
   - Cap total transcription wall-clock at **45s default**, then treat as failure.
-- **Local model stays loaded even when AssemblyAI is selected** — fallback needs it. Keep the current `ParakeetSession` lifecycle unchanged (loaded once, owned by `PipelineHost`). Memory tradeoff: the ONNX model remains resident; this is intentional and required for instant fallback.
+- **Local model stays loaded even when AssemblyAI is selected** — fallback needs it. Keep the current `ParakeetSession` lifecycle unchanged (loaded once, owned by `PipelineHost`). Memory tradeoff: the ONNX model remains resident; this is intentional and required for instant fallback. **Concurrency invariant:** a single `ParakeetSession` is safe to reuse as the fallback target *because* dictations are serialized by `PipelineHost`'s single-consumer, awaited event pump (`PipelineHost.cs:162-164`) plus the `_engine.State` gates — `Transcribe` is never invoked on two threads at once. If any future path ever invokes a transcriber (cloud or local) **off** that serialized pump (e.g. a parallel re-run), ONNX reentrancy safety must be re-verified before doing so.
 - **Streaming is out of scope** (spec-sanctioned) — batch flow only; noted as future work.
 - **`custom_spelling` from corrections.json is an OPTIONAL stretch** the spec permits skipping — it is intentionally **not** included to keep the plan focused; noted as future work. (This is an explicit spec-granted scope decision, not a silent deferral of required behavior.)
 
@@ -44,7 +44,7 @@ chmod +x /tmp/dotnet-install.sh
 export DOTNET_ROOT="$PWD/.dotnet"; export PATH="$DOTNET_ROOT:$PATH"
 ```
 
-Re-run the two `export` lines in every new shell. `dotnet test` (VSTest host) crashes here — always build then run the built DLL via `dotnet exec ... -notrait "Platform=Windows"`.
+Re-run the two `export` lines in every new shell. (A pre-existing .NET 9.0.x SDK already on `PATH` also satisfies `global.json`'s `9.0.100` pin via `rollForward: latestFeature`, so a fresh `./.dotnet` provision is not strictly required if `dotnet --version` already resolves 9.0.x inside the repo.) The build-then-`dotnet exec <dll> -notrait "Platform=Windows"` flow below is the proven-portable runner used throughout. Plain `dotnet test <project>` was observed working (15/15) during plan validation and is equivalent, but the `dotnet exec` path is retained as known-good.
 
 ---
 
@@ -72,7 +72,7 @@ Re-run the two `export` lines in every new shell. `dotnet test` (VSTest host) cr
 - `src/Winpepper.App/Hosting/PipelineHost.cs` — select transcriber per dictation, record actual provider, surface fallback notice (Windows-only).
 - `src/Winpepper.App/Views/RecordingPage.xaml` + `.xaml.cs` — new "Speech recognition" section (Windows-only).
 
-**New tests — `tests/Winpepper.Asr.Tests/`:**
+**Tests — `tests/Winpepper.Asr.Tests/`** (⚠️ this project **already exists** in `winpepper.sln` and already references `xunit.v3` + `Shouldly` + a `Winpepper.Asr` ProjectReference — **add these files to it; do NOT scaffold a new project or a new `.csproj`**)**:**
 - `PcmWavEncoderTests.cs`, `FallbackTranscriberTests.cs`, `AssemblyAiKeyStoreTests.cs`,
   `AssemblyAiClientTests.cs`, `AssemblyAiTranscriberTests.cs`,
   and test doubles `FakeHttpMessageHandler.cs`, `FakeApiKeyProtector.cs`, `FakeTranscriber.cs`, `FakeAssemblyAiClient.cs`.
@@ -598,6 +598,25 @@ public sealed class AssemblyAiKeyStoreTests : IDisposable
         store.Load().ShouldBeNull();
     }
 
+    [Fact]
+    public void Load_UndecryptableBlob_ReturnsNullInsteadOfThrowing()
+    {
+        // Simulate a DPAPI blob that cannot be decrypted (different user/machine,
+        // or corruption): Unprotect throws CryptographicException. Load() must
+        // degrade to "no usable key" so the app falls back to local + re-prompts.
+        File.WriteAllBytes(_path, new byte[] { 1, 2, 3, 4 });
+        var store = new AssemblyAiKeyStore(_path, new ThrowingApiKeyProtector());
+
+        store.Load().ShouldBeNull();
+    }
+
+    private sealed class ThrowingApiKeyProtector : IApiKeyProtector
+    {
+        public byte[] Protect(byte[] plaintext) => plaintext;
+        public byte[] Unprotect(byte[] ciphertext)
+            => throw new System.Security.Cryptography.CryptographicException("cannot decrypt");
+    }
+
     public void Dispose()
     {
         if (File.Exists(_path)) File.Delete(_path);
@@ -676,8 +695,19 @@ public sealed class AssemblyAiKeyStore : IAssemblyAiKeyStore
     public string? Load()
     {
         if (!File.Exists(_path)) return null;
-        var plain = _protector.Unprotect(File.ReadAllBytes(_path));
-        return Encoding.UTF8.GetString(plain);
+        try
+        {
+            var plain = _protector.Unprotect(File.ReadAllBytes(_path));
+            return Encoding.UTF8.GetString(plain);
+        }
+        catch (System.Security.Cryptography.CryptographicException)
+        {
+            // DPAPI CurrentUser blobs are non-portable: a key file from a different
+            // user/machine (or a corrupt file) cannot be decrypted. Treat as "no usable
+            // key" so the app degrades to local fallback and can re-prompt, rather than
+            // throwing on every dictation attempt.
+            return null;
+        }
     }
 
     public void Clear()
@@ -866,7 +896,7 @@ public sealed class AssemblyAiClientTests
 
         id.ShouldBe("t-123");
         var json = Encoding.UTF8.GetString(handler.RequestBodies[0]);
-        json.ShouldContain("\"speech_model\":\"universal-2\"");
+        json.ShouldContain("\"speech_models\":[\"universal-2\"]"); // plural array (singular is deprecated)
         json.ShouldContain("\"audio_url\":\"https://cdn/aai/ok\"");
         json.ShouldContain("\"format_text\":true");
         json.ShouldContain("\"punctuate\":true");
@@ -1021,7 +1051,7 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
         var payload = new
         {
             audio_url = audioUrl,
-            speech_model = model,
+            speech_models = new[] { model }, // plural array — singular `speech_model` is deprecated
             format_text = true,
             punctuate = true,
             disfluencies = false,
@@ -1496,8 +1526,26 @@ git commit -m "feat: add ParakeetTranscriber adapter over the local ONNX session
 - Produces: `DpapiApiKeyProtector : IApiKeyProtector` (Windows, `#if WINDOWS`); `AppPaths.AssemblyAiKeyFile` (`string` = `%LOCALAPPDATA%\winpepper\assemblyai.key.dat`). Consumed by `AppShell` wiring (Task 9).
 
 > Windows-only (`ProtectedData` is DPAPI). Not Linux-buildable/testable; verified via Smoke Checklist Task 14. The pure-managed round-trip is already proven with the fake protector in Task 4.
+>
+> **Security model (DPAPI CurrentUser):** the encrypted blob is intentionally **non-portable** — it can be decrypted only by the same Windows user on the same machine, and will not survive a profile reset / OS reinstall. This is correct for a locally-stored key. The `Unprotect` failure path (a blob from another user/machine, or corruption) must degrade gracefully to "no usable key" rather than throw on every dictation — handled in `AssemblyAiKeyStore.Load()` (Task 4, updated to catch `CryptographicException` and return `null`). The app ships **unpackaged** (`WindowsPackageType=None`), so there is no MSIX app-container/roaming caveat.
 
-- [ ] **Step 1: Add the key-file path**
+- [ ] **Step 1: Register the ProtectedData package (Central Package Management)**
+
+This repo uses Central Package Management (`ManagePackageVersionsCentrally=true`) and `System.Security.Cryptography.ProtectedData` is **not currently referenced anywhere**, so it must be added in two places (a versionless `PackageReference` alone will fail to restore under CPM):
+
+In `Directory.Packages.props`, add a stable 9.0.x `PackageVersion` (match the `net9.0-windows` TFM; do **not** use a preview):
+
+```xml
+    <PackageVersion Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+```
+
+In `src/Winpepper.App/Winpepper.App.csproj`, add the versionless reference (the API is package-delivered even on the `net9.0-windows` TFM):
+
+```xml
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+```
+
+- [ ] **Step 2: Add the key-file path**
 
 In `src/Winpepper.App/Hosting/AppPaths.cs`, after the `CorrectionsJson` line (line 11) add:
 
@@ -1505,7 +1553,7 @@ In `src/Winpepper.App/Hosting/AppPaths.cs`, after the `CorrectionsJson` line (li
     public static string AssemblyAiKeyFile => Path.Combine(Root, "assemblyai.key.dat");
 ```
 
-- [ ] **Step 2: Add the DPAPI protector**
+- [ ] **Step 3: Add the DPAPI protector**
 
 Create `src/Winpepper.App/Asr/DpapiApiKeyProtector.cs`:
 
@@ -1532,19 +1580,19 @@ public sealed class DpapiApiKeyProtector : IApiKeyProtector
 #endif
 ```
 
-- [ ] **Step 3: Confirm the Linux solution build is unaffected**
+- [ ] **Step 4: Confirm the Linux solution build is unaffected**
 
 ```bash
 export DOTNET_ROOT="$PWD/.dotnet"; export PATH="$DOTNET_ROOT:$PATH"
 dotnet build src/Winpepper.Asr/Winpepper.Asr.csproj -f net9.0 -p:EnableWindowsTargeting=true
 ```
-Expected: Build succeeded (App code is excluded on Linux; this confirms no cross-project break). Full Windows build is verified in Task 14.
+Expected: Build succeeded (App code is not built on Linux — its Windows-only TFM keeps it out of a project-scoped Linux build; this confirms no cross-project break). Full Windows build is verified in Task 14.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/Winpepper.App/Asr/DpapiApiKeyProtector.cs src/Winpepper.App/Hosting/AppPaths.cs
-git commit -m "feat: add Windows DPAPI key protector and assemblyai key-file path"
+git add Directory.Packages.props src/Winpepper.App/Winpepper.App.csproj src/Winpepper.App/Asr/DpapiApiKeyProtector.cs src/Winpepper.App/Hosting/AppPaths.cs
+git commit -m "feat: add Windows DPAPI key protector, ProtectedData package, and assemblyai key-file path"
 ```
 
 ---
@@ -1759,7 +1807,7 @@ In `src/Winpepper.App/Views/RecordingPage.xaml`, add inside the page's main vert
             <Button x:Name="TestKeyButton" Content="Test" />
         </StackPanel>
         <TextBox x:Name="AssemblyAiModelBox" Header="Model id" MinWidth="280"
-                 PlaceholderText="universal-2 (fast) or universal-3-pro (premium)" />
+                 PlaceholderText="universal-2 (fast) or universal-3-5-pro (premium)" />
         <TextBlock x:Name="AsrStatusText"
                    TextWrapping="Wrap"
                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -1897,7 +1945,7 @@ git commit -m "test: green non-Windows suite for AssemblyAI ASR provider" || ech
 3. **Test button — good key:** Click **Test** with the valid key → status "Key is valid."
 4. **Test button — bad key:** Save a wrong key, click **Test** → status "Key rejected (401). Check the key."
 5. **Cloud dictation:** Select "AssemblyAI premium", set model `universal-2`. Dictate a 2–30s clip via the hotkey. Confirm the text is injected. Open History → the entry's `asrModelName` reads `assemblyai/universal-2`.
-6. **Premium model:** Set model `universal-3-pro`, dictate again → text injected; history `asrModelName` reads `assemblyai/universal-3-pro`. If the API rejects the model id, confirm the fallback toast appears and local text is still delivered (see step 8) and the API's error is logged.
+6. **Premium model:** Set model `universal-3-5-pro`, dictate again → text injected; history `asrModelName` reads `assemblyai/universal-3-5-pro`. If the API rejects the model id, confirm the fallback toast appears and local text is still delivered (see step 8) and the API's error is logged.
 7. **Clear key:** Click **Clear key** → status "Key cleared." Confirm the `.key.dat` file is gone.
 8. **Robust fallback (network cable / airplane mode):** With AssemblyAI selected and a valid key saved, disable networking, then dictate. Confirm: (a) the dictation still lands via **local Parakeet**, (b) the non-intrusive toast "Cloud transcription unavailable — used local speech recognition instead." appears, (c) History `asrModelName` reads `parakeet-tdt-0.6b-v3`.
 9. **Fallback with no key:** Select AssemblyAI, clear the key, dictate → local result delivered + fallback toast; History shows the local model.
@@ -1940,3 +1988,11 @@ git commit -m "docs: add Windows smoke checklist for AssemblyAI ASR provider" ||
 **2. Placeholder scan:** No "TBD"/"handle edge cases"/"similar to Task N"/"add validation" placeholders; every code step shows complete code and every test step shows exact commands + expected output.
 
 **3. Type consistency:** Names are consistent across tasks: `TranscriptionResult(Text, ProviderModelName)`, `ITranscriber.TranscribeAsync(ReadOnlyMemory<float>, CancellationToken)`, `ITranscriber.ModelName`, `IAssemblyAiClient` methods (`UploadAsync`/`CreateTranscriptAsync`/`GetTranscriptAsync`/`ValidateKeyAsync`), `AssemblyAiTranscript(Status, Text, Confidence, AudioDuration, Error)`, `IApiKeyProtector.Protect/Unprotect`, `IAssemblyAiKeyStore.HasKey/Save/Load/Clear`, `AssemblyAiOptions.{Model,TotalTimeout,PollInterval,MaxTransientRetries,LanguageCode,BaseUrl}`, `AssemblyAiException.{StatusCode,IsAuthError}`, `AppShell.BuildTranscriber(ParakeetSession, AppSettings, Action<string>)`. `ModelName` for cloud is `assemblyai/<model>` everywhere (Task 6 impl, Task 3/6 tests, Smoke steps 5–6). Local model string is `parakeet-tdt-0.6b-v3` / `ModelRegistry.DefaultAsrName` consistently (Tasks 9, 10, Smoke). No signature drift found.
+
+**4. Load-bearing validation hardening (2026-07-21):** The plan was stress-tested against 17 load-bearing assumptions (finder → strategist → 5 parallel validators; ledger at `.the-usual-logs/assemblyai-asr-provider/load-bearing-ledger.md`). Five falsifications were fixed in place; the rest verified. No data-loss/irreversible risk found → no halt.
+- **API contract (A9, falsified):** the create payload now sends **`speech_models: [<model>]`** (plural array), not the deprecated singular `speech_model` (Task 5 code + test updated; Global Constraints updated). The premium model string is **`universal-3-5-pro`** (there is no `universal-3-pro`) — fixed in Task 11 placeholder and Task 13 smoke step 6. Default `universal-2` confirmed valid. Verified against official AssemblyAI docs + a live read-only 401 probe.
+- **DPAPI/CPM (A12, gap fixed):** Task 8 now adds `System.Security.Cryptography.ProtectedData` to `Directory.Packages.props` + `Winpepper.App.csproj` (required — repo uses Central Package Management; the package was absent). Security model documented (non-portable CurrentUser blob; app ships unpackaged so no MSIX caveat). `AssemblyAiKeyStore.Load()` (Task 4) now catches `CryptographicException` and returns `null` so an undecryptable blob degrades to local fallback + re-prompt (new test added).
+- **Linux build model (A13, falsified):** corrected Global Constraints — the App is excluded from Linux builds by its Windows-only TFM (not `#if WINDOWS`, and not the now-inert `SKIP_WINUI_LINUX` guard); builds MUST be project-scoped (every task already is).
+- **Existing test project (A15, falsified):** `tests/Winpepper.Asr.Tests` already exists in the solution — File Structure now says "add files to it," not "create it."
+- **Verified positives worth noting:** the 45s cap is comfortably generous for 2–30s clips (A11: AssemblyAI RTF ≈ 0.008x); the fallback-on-timeout guarantee is sound (A16: Task 6's linked-CTS + `when (!ct.IsCancellationRequested)` correctly routes wall-clock timeouts to local fallback rather than misclassifying them as user cancellation); the local `ParakeetSession` is safe as the fallback target because dictations are serialized by PipelineHost's single-consumer pump (A14); `ParakeetTranscriber` already correctly unwraps `ParakeetTranscript.Text` and converts `ReadOnlyMemory<float>` → `.Span` inside `Task.Run` (A5/A6 — repo signatures confirmed, plan already correct).
+- **Residual (acceptable):** the valid-key→404 branch of the key-validation trick (A10) and the exact `language_code:"en_us"` casing are not verifiable without a live key (tests forbid network); both are exercised end-to-end by the Windows Smoke Checklist (steps 3 & 5) and fail safe (create error → local fallback delivers text).

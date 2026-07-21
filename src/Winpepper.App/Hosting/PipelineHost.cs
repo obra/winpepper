@@ -26,8 +26,7 @@ public sealed class PipelineHost : IDisposable
     private readonly SessionEngine _engine;
     private readonly SessionViewModel _vm;
     private readonly ISoundEffectPlayer _sounds;
-    private IAudioRecorder? _recorder;
-    private Action<ReadOnlyMemory<float>>? _meterHandler;
+    private IWarmAudioRecorder? _warmRecorder;
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
 
@@ -49,6 +48,7 @@ public sealed class PipelineHost : IDisposable
     private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
     private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
     private readonly bool _postPasteLearningEnabled;
+    private readonly bool _prewarmMicEnabled;
 
     public PipelineHost(
         ILoggerFactory factory,
@@ -69,7 +69,8 @@ public sealed class PipelineHost : IDisposable
         Winpepper.Cleanup.CleanupOptions? cleanupOptions = null,               // PLAN2-TYPE
         Winpepper.Core.Learning.PostPasteWatcher? postPaste = null,
         Winpepper.Platform.Learning.FocusedElementCapturer? focusedCapturer = null,
-        bool postPasteLearningEnabled = false)
+        bool postPasteLearningEnabled = false,
+        bool prewarmMicEnabled = true)
     {
         _log = factory.CreateLogger<PipelineHost>();
         _errorBus = errorBus;
@@ -96,6 +97,7 @@ public sealed class PipelineHost : IDisposable
         _postPaste = postPaste;
         _focusedCapturer = focusedCapturer;
         _postPasteLearningEnabled = postPasteLearningEnabled;
+        _prewarmMicEnabled = prewarmMicEnabled;
     }
 
     /// <summary>True once the ASR model is loaded and the hotkey pipeline is running.</summary>
@@ -138,6 +140,13 @@ public sealed class PipelineHost : IDisposable
                 return false;
             }
         }
+        // Bug-2: one warm recorder for the app lifetime. Frames flow (and the
+        // meter animates) only while a session is active, so subscribe once.
+        if (_warmRecorder is null)
+        {
+            _warmRecorder = new Winpepper.Audio.WarmWasapiRecorder(prewarm: _prewarmMicEnabled);
+            _warmRecorder.FramesAvailable += frame => _vm.ReportAudioFrame(frame);
+        }
         _hook.Start();
         _runCts = new CancellationTokenSource();
         _runTask = Task.Run(() => RunAsync(_runCts.Token));
@@ -174,9 +183,7 @@ public sealed class PipelineHost : IDisposable
                 _engine.Apply(SessionEvent.StartRequested);
                 _currentSessionId = Guid.NewGuid();
                 _sounds.PlayStart();
-                _recorder = new WasapiRecorder();
-                _recorder.Start();
-                AttachMeter(_recorder);
+                _warmRecorder!.StartSession(includePrerollMs: 500);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                 // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
@@ -192,9 +199,7 @@ public sealed class PipelineHost : IDisposable
                 _engine.Apply(SessionEvent.StopRequested);
                 _recordStopwatch?.Stop();
 
-                DetachMeter(_recorder!);
-                var samples = _recorder!.Stop();
-                _recorder.Dispose(); _recorder = null;
+                var samples = _warmRecorder!.StopSession();
                 _sounds.PlayStop();
 
                 var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
@@ -327,8 +332,7 @@ public sealed class PipelineHost : IDisposable
                 break;
             case HotkeyEventKind.Cancel:
                 _engine.Apply(SessionEvent.CancelRequested);
-                if (_recorder is not null) DetachMeter(_recorder);
-                _recorder?.Dispose(); _recorder = null;
+                _ = _warmRecorder?.StopSession();
                 break;
             case HotkeyEventKind.Toggle:
                 if (_engine.State == SessionState.Idle)
@@ -336,9 +340,7 @@ public sealed class PipelineHost : IDisposable
                     _engine.Apply(SessionEvent.StartRequested);
                     _currentSessionId = Guid.NewGuid();
                     _sounds.PlayStart();
-                    _recorder = new WasapiRecorder();
-                    _recorder.Start();
-                    AttachMeter(_recorder);
+                    _warmRecorder!.StartSession(includePrerollMs: 500);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
                     // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
@@ -354,9 +356,7 @@ public sealed class PipelineHost : IDisposable
                     _engine.Apply(SessionEvent.StopRequested);
                     _recordStopwatch?.Stop();
 
-                    DetachMeter(_recorder!);
-                    var samples2 = _recorder!.Stop();
-                    _recorder.Dispose(); _recorder = null;
+                    var samples2 = _warmRecorder!.StopSession();
                     _sounds.PlayStop();
 
                     var transcribeSw2 = System.Diagnostics.Stopwatch.StartNew();
@@ -491,28 +491,13 @@ public sealed class PipelineHost : IDisposable
         }
     }
 
-    private void AttachMeter(IAudioRecorder recorder)
-    {
-        _meterHandler = frame => _vm.ReportAudioFrame(frame);
-        recorder.FramesAvailable += _meterHandler;
-    }
-
-    private void DetachMeter(IAudioRecorder recorder)
-    {
-        if (_meterHandler is not null)
-        {
-            recorder.FramesAvailable -= _meterHandler;
-            _meterHandler = null;
-        }
-    }
-
     public void Dispose()
     {
         _runCts?.Cancel();
         try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
         _hook.Dispose();
         _asr?.Dispose();
-        _recorder?.Dispose();
+        _warmRecorder?.Dispose();
     }
 }
 #endif

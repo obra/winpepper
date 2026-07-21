@@ -233,7 +233,8 @@ public sealed class AppShell : IDisposable
                                          clipboardFallback, toasts,
                                          cleanup, correctionStore, windowContext, cleanupOptions,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
-                                         postPasteLearningEnabled: settings.PostPasteLearningEnabled);
+                                         postPasteLearningEnabled: settings.PostPasteLearningEnabled,
+                                         prewarmMicEnabled: settings.PrewarmMicEnabled);
 
         var shell = new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
                                   recordingVm, cleanupVm, correctionsVm,

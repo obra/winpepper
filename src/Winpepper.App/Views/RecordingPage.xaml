@@ -51,6 +51,7 @@
                     <ToggleSwitch x:Name="SoundsToggle" AutomationProperties.AutomationId="RecordingSoundsToggle" Header="Play start/stop sounds" />
                     <ToggleSwitch x:Name="SpeakerFilterToggle" AutomationProperties.AutomationId="RecordingSpeakerFilterToggle" Header="Speaker filter (experimental)" />
                     <ToggleSwitch x:Name="PostPasteLearningToggle" AutomationProperties.AutomationId="RecordingPostPasteLearningToggle" Header="Offer to learn corrections after typing" />
+                    <ToggleSwitch x:Name="PrewarmMicToggle" AutomationProperties.AutomationId="RecordingPrewarmMicToggle" Header="Keep the mic warm to capture the start of speech (mic indicator stays on)" />
                     <TextBlock Text="After Winpepper types, watch for an edit you make and offer to remember it as a correction. Off by default."
                                Style="{ThemeResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

@@ -63,6 +63,16 @@ public sealed partial class StatusPillWindow : Window
         };
 
         _vm.PropertyChanged += OnVmChanged;
+
+        // Bug-1: initialize the content island exactly once. A WinUI 3 window
+        // that is only ever Show(activateWindow:false)'d never composes a live
+        // DirectComposition tree, so it presents a frozen first frame. Activate()
+        // once realizes the island; Hide() immediately in the same pump keeps it
+        // off-screen. WS_EX_NOACTIVATE (already set in MakeClickThroughTopmostTool)
+        // is intended to prevent focus theft/flash; the smoke checklist verifies no
+        // flash and no focus steal. Subsequent Show(activateWindow:false) calls then
+        // present live content.
+        this.Activate();
         appWindow.Hide();
     }
 

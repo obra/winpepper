@@ -308,6 +308,9 @@ public sealed class AppShell : IDisposable
         AssemblyAiOptions = assemblyAiOptions;
 
         Pill = new StatusPillWindow(sessionVm);
+        // Clicking the pill in its PENDING state pastes the held text into the
+        // field focused at click time, via the normal injection path.
+        Pill.PastePendingHandler = Pipeline.TryPastePending;
         Tray = new TrayIconHost(sessionVm, AppPaths.AssetsDir, "0.3.0",
                                  openSettings: ShowMain, quit: Quit,
                                  log: factory.CreateLogger<TrayIconHost>());

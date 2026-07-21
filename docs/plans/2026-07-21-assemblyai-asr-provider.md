@@ -1734,7 +1734,9 @@ var producedModelName = transcription.ProviderModelName;
 
 - [ ] **Step 2: Record the actual provider in history (Hold-up path)**
 
-In the same branch, in the `_archiver.Archive(new HistoryArchiveInput { ... })` call (around lines 310–328), change:
+In the same branch, in the `_archiver.Archive(new HistoryArchiveInput { ... })` call (around lines 310–328), make **both** of the following edits. Step 1 removed the old `var transcript = ...` local, so every reference to `transcript` inside this block must now point at the new `transcription` result.
+
+Change:
 
 ```csharp
 AsrModelName = _asrModelName,
@@ -1746,9 +1748,53 @@ to:
 AsrModelName = producedModelName,
 ```
 
-- [ ] **Step 3: Apply the identical change to the Toggle path**
+And in the **same** `Archive(...)` block, change the raw-text reference (PipelineHost.cs:313) from:
 
-In the Toggle branch (around lines 337–489), make the same three edits: replace the direct `_asr!.Transcribe(samples)` call (around line 363) with the `BuildTranscriber` + `TranscribeAsync` block from Step 1 (reuse `settingsNow`/`transcriber`/`transcription` locals scoped to that branch), set `string final = transcription.Text;` and `var producedModelName = transcription.ProviderModelName;`, and set `AsrModelName = producedModelName` in that branch's `Archive` call.
+```csharp
+RawTranscript = transcript.Text,
+```
+
+to:
+
+```csharp
+RawTranscript = transcription.Text,
+```
+
+> Do not leave any `transcript.Text` reference behind. The `transcript` local no longer exists after Step 1; a lingering `transcript.Text` is a CS0103 compile error that Task 10 Step 4's Linux gate will not catch (it builds only `Winpepper.Asr`), so it would surface only during the Windows build in Task 14.
+
+- [ ] **Step 3: Apply the equivalent change to the Toggle path (use distinct local names)**
+
+The Hold-up (`case HotkeyEventKind.HoldUp:`) and Toggle (`case HotkeyEventKind.Toggle:`) branches are `case` sections of the **same `switch` statement with no per-case braces**, so they share one declaration scope. This is why the existing code uses `2`-suffixed names in the Toggle branch (`samples2`, `transcript2`, `final2`). You **must** keep this convention — re-declaring the Step 1 names (`settingsNow`, `transcriber`, `transcription`, `producedModelName`, `final`) in the Toggle branch is a duplicate-declaration compile error (CS0128), and a sibling case's locals are not definitely assigned in this branch, so they cannot be "reused."
+
+In the Toggle branch (around lines 337–489), make the equivalent edits with **fresh, distinct local names**:
+
+1. Replace the direct transcribe call (around line 363):
+
+```csharp
+var transcript2 = await Task.Run(() => _asr!.Transcribe(samples2), ct);
+```
+
+with the selected-transcriber block, naming every local distinctly:
+
+```csharp
+var settingsNow2 = _settings.Load();
+var transcriber2 = _shell.BuildTranscriber(_asr!, settingsNow2, notice =>
+    _ = _toasts.ShowAsync(
+        "Winpepper",
+        "Cloud transcription unavailable — used local speech recognition instead.",
+        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+        TimeSpan.FromSeconds(6)));
+var transcription2 = await transcriber2.TranscribeAsync(samples2, ct);
+```
+
+2. Replace the two downstream references so the rest of the Toggle branch uses the new result:
+
+```csharp
+string final2 = transcription2.Text;
+var producedModelName2 = transcription2.ProviderModelName;
+```
+
+3. In this branch's `Archive(...)` call, change `AsrModelName = _asrModelName,` to `AsrModelName = producedModelName2,` and change `RawTranscript = transcript2.Text,` (PipelineHost.cs:470) to `RawTranscript = transcription2.Text,`. As in the Hold-up path, no `transcript2.Text` reference may remain.
 
 - [ ] **Step 4: Confirm no cross-project break on Linux**
 

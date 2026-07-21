@@ -1,3 +1,4 @@
+using System.Threading;
 using Shouldly;
 using Winpepper.Audio;
 using Xunit;
@@ -92,5 +93,56 @@ public class WarmCaptureCoordinatorTests
         buffer.StartSession(0);
         old.RaiseFrame(new float[] { 5 });
         buffer.StopSession().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void ConcurrencyHammer_RebuildVsFrames_NeverThrows()
+    {
+        // A rolling registry of sources so the frame thread can fire callbacks
+        // from whichever source is (or just was) live, exactly the race the
+        // council could not settle statically.
+        var live = new System.Collections.Concurrent.ConcurrentBag<FakeCaptureSource>();
+        FakeCaptureSource Make() { var s = new FakeCaptureSource(); live.Add(s); return s; }
+
+        var buffer = new WarmCaptureBuffer(ringCapacitySamples: 4000);
+        using var c = new WarmCaptureCoordinator(buffer, Make);
+        c.EnsureStarted();
+        buffer.StartSession(0);
+
+        Exception? escaped = null;
+        var stop = false;
+        var frame = new float[] { 0.1f, -0.1f, 0.2f, -0.2f };
+
+        var frameThread = new Thread(() =>
+        {
+            try
+            {
+                while (!Volatile.Read(ref stop))
+                {
+                    // Fire frames from every source ever made — including ones
+                    // that were just disposed by a concurrent Rebuild. The fake's
+                    // RaiseFrame never throws on its own; the ONLY way an
+                    // exception escapes here is if the coordinator touches a
+                    // disposed source (which the epoch guard must prevent).
+                    foreach (var s in live.ToArray())
+                        s.RaiseFrame(frame);
+                }
+            }
+            catch (Exception ex) { escaped = ex; }
+        });
+
+        var rebuildThread = new Thread(() =>
+        {
+            try { for (var i = 0; i < 5000; i++) c.Rebuild(); }
+            catch (Exception ex) { escaped = ex; }
+            finally { Volatile.Write(ref stop, true); }
+        });
+
+        frameThread.Start();
+        rebuildThread.Start();
+        rebuildThread.Join();
+        frameThread.Join();
+
+        escaped.ShouldBeNull();
     }
 }

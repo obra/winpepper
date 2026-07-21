@@ -141,15 +141,36 @@ public sealed class WarmCaptureCoordinator : IDisposable
         if (ex is null) return; // clean stop, nothing to recover
         bool retry;
         Exception? startFault = null;
+        ICaptureSource? old;
         lock (_lock)
         {
             if (!ReferenceEquals(source, _current)) return; // already replaced
-            SwapOutAndDisposeLocked();
+            old = _current;
+            Volatile.Write(ref _current, null);
+            _activeDeviceId = null;
             var now = _clock();
             retry = _lastFaultUtc is not { } last || (now - last) > _faultBackoff;
             _lastFaultUtc = now;
             if (retry && !_disposed) startFault = StartLocked();
         }
+        // Dispose the faulted source OUTSIDE the lock (still synchronously, on
+        // this same callback thread -- do not defer to a background/threadpool
+        // thread, which would make the deterministic fault tests racy).
+        //
+        // On Windows, NAudio can raise this Stopped callback on the capture
+        // thread itself when the source was started without a
+        // SynchronizationContext (cold-mode capture, or the
+        // EnsureStarted(force:true) restart driven from the background
+        // pipeline thread). In that case this method runs on the very capture
+        // thread that `old.Dispose()` then joins -- a self-join. Disposing
+        // while still holding `_lock` would turn that self-join into a wedge
+        // that blocks every subsequent EnsureStarted/session-start (they all
+        // take `_lock`). Releasing the lock first confines the hazard to this
+        // callback instead of freezing the whole coordinator. The epoch guard
+        // in OnSourceFrame already covers the window between nulling
+        // `_current` (above) and disposing `old` (below): a late frame from
+        // `old` fails the ReferenceEquals check and is dropped.
+        if (old is not null) { try { old.Dispose(); } catch { /* best-effort */ } }
         CaptureFaulted?.Invoke(ex);
         if (startFault is not null) CaptureFaulted?.Invoke(startFault);
     }

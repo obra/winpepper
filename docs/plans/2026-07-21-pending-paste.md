@@ -1462,6 +1462,7 @@ with a decision-gated version:
 ```csharp
         var injectSw = System.Diagnostics.Stopwatch.StartNew();
         var injected = false;
+        var heldPending = false;
         if (!string.IsNullOrWhiteSpace(final))
         {
             var targetAtInject = CaptureTarget();
@@ -1470,7 +1471,10 @@ with a decision-gated version:
             {
                 // Focus moved to a different known field: do NOT inject anywhere.
                 // Hold the text as an in-memory pending paste (never persisted).
+                // heldPending gates OUT the archive block below so the held text
+                // and its audio are never written to the on-disk history store.
                 _vm.EnterPendingPaste(final, _targetAtStart);
+                heldPending = true;
             }
             else
             {
@@ -1494,7 +1498,37 @@ with a decision-gated version:
 ```
 
 Apply the **identical** transformation to the Toggle-stop branch injection block,
-which is at **`PipelineHost.cs:471-490`** (the `if (!string.IsNullOrWhiteSpace(final2)) { injected2 = _injector.TryInject(final2); ... }` block, with `injectSw2`/`final2`/`injected2` locals). Both sites must gate on `PendingPasteDecider.Decide`.
+which is at **`PipelineHost.cs:471-490`** (the `if (!string.IsNullOrWhiteSpace(final2)) { injected2 = _injector.TryInject(final2); ... }` block, with `injectSw2`/`final2`/`injected2` locals). Both sites must gate on `PendingPasteDecider.Decide`. In the Toggle-stop block name the hold flag **`heldPending2`** (declared next to `injected2`, set `true` in the `HoldPending` branch) to match its `2`-suffixed neighbors.
+
+- [ ] **Step 5: Skip history archiving on the HoldPending path (memory-only invariant)**
+
+The injection block above is followed by an **unconditional** `_archiver.Archive(new HistoryArchiveInput { ... CleanedText = final, Samples16k = samples, RawTranscript = ..., ... })` block that persists the dictation's audio and text to the on-disk history store (`HoldUp` site: **`PipelineHost.cs:352-370`**; Toggle-stop site: **`PipelineHost.cs:521-539`**; anchor on the `_archiver.Archive(` call, not the raw numbers). Left as-is, this would write the held pending text (and its audio) to disk on the `HoldPending` path, violating the Global Constraint ("The pending slot is memory-only. It MUST never be written to disk") and failing Windows Smoke Test item 8.
+
+Guard **both** archive blocks so they are skipped when the text was held pending. At the HoldUp site, wrap the existing `_archiver.Archive(...)` call:
+
+```csharp
+        if (!heldPending)
+        {
+            _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+            {
+                // ... existing HistoryArchiveInput initializer UNCHANGED ...
+            });
+        }
+```
+
+Apply the **identical** guard at the Toggle-stop site using `heldPending2`
+(`if (!heldPending2) { _archiver.Archive(new Winpepper.History.HistoryArchiveInput { ... }); }`).
+Do not change the `HistoryArchiveInput` initializer itself, and do not indent-reformat
+its inner lines beyond wrapping — only add the `if (!heldPending) { ... }` / `if (!heldPending2) { ... }` guard around each call.
+
+> **Design note (intentional):** held-then-later-pasted text is NEVER archived,
+> even after a successful pill-click paste (`TryPastePending` does not archive).
+> This is deliberate: the memory-only invariant takes precedence over history
+> completeness for held dictations. Same-target dictations (the `InjectNow` path,
+> `heldPending == false`) continue to archive exactly as before, so item 8's second
+> clause ("History archiving continues to work for actually-injected dictations and
+> is unchanged") still holds. Do not "restore" archiving after paste to close this
+> gap — that would reintroduce the disk-persistence the invariant forbids.
 
 > **DO NOT** wrap the block at `~491-514` — that is the `PostPasteGate.ShouldWatch`
 > post-paste-learning block, **not** the injection block. The Toggle-stop injection
@@ -1511,21 +1545,25 @@ which is at **`PipelineHost.cs:471-490`** (the `if (!string.IsNullOrWhiteSpace(f
 > via `PostPasteGate.ShouldWatch`), and the engine still returns to Idle — the
 > VM's Idle guard (Task 5) keeps the PENDING pill visible.
 
-- [ ] **Step 5: Confirm the pure-managed suite is unaffected + inspect edits**
+- [ ] **Step 6: Confirm the pure-managed suite is unaffected + inspect edits**
 
 ```bash
 export DOTNET_ROOT="$PWD/.dotnet"; export PATH="$DOTNET_ROOT:$PATH"
 dotnet exec tests/Winpepper.Core.Tests/bin/Debug/net9.0/Winpepper.Core.Tests.dll \
     -notrait "Platform=Windows"
-grep -n "CaptureTarget()\|EnterPendingPaste\|TryPastePending\|PendingPasteDecider" \
+grep -n "CaptureTarget()\|EnterPendingPaste\|TryPastePending\|PendingPasteDecider\|heldPending" \
     src/Winpepper.App/Hosting/PipelineHost.cs
 ```
 Expected: `Failed: 0`; grep shows `_targetAtStart = CaptureTarget();` at **two**
 start sites, `PendingPasteDecider.Decide` at **two** inject sites, one
-`EnterPendingPaste` per inject site, and one `TryPastePending` definition. This
-wiring is verified end-to-end in the Windows Smoke Test Checklist (items 1–4).
+`EnterPendingPaste` per inject site, and one `TryPastePending` definition.
+It must also show a hold flag set in each `HoldPending` branch (`heldPending`
+/ `heldPending2`) and a matching `if (!heldPending)` / `if (!heldPending2)`
+guard wrapping each `_archiver.Archive(` call — i.e. **two** archive-guard
+sites, so no archive runs on a held dictation. This wiring is verified
+end-to-end in the Windows Smoke Test Checklist (items 1–4 and 8).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add src/Winpepper.App/Hosting/PipelineHost.cs
@@ -1535,7 +1573,9 @@ feat(app): capture target + decide inject-vs-hold in the pipeline
 Captures the focused-field identity at dictation start (both hotkey branches),
 re-captures at injection time, and uses PendingPasteDecider to inject as today
 or hold as pending. Adds TryPastePending() for the pill click, keeping the
-pending slot on failure and consuming it on success.
+pending slot on failure and consuming it on success. On the HoldPending path,
+skips the history-archive write (both inject sites) so the held text and its
+audio are never persisted to disk, honoring the memory-only invariant.
 
 🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
 
@@ -1688,8 +1728,14 @@ plan lands:
   ONLY, never disk; history archiving separate/unchanged:** `PendingPasteDecider`
   (T2, tested) decides; T8 injects unchanged on `InjectNow` and calls
   `EnterPendingPaste` on `HoldPending`; `PendingPasteState` is memory-only (T3,
-  tested; Global Constraints + Smoke item 8 assert no persistence); no task
-  touches `HistoryArchiver`. ✓
+  tested; Global Constraints + Smoke item 8 assert no persistence). Crucially,
+  T8 Step 5 gates the existing `_archiver.Archive(...)` write behind
+  `if (!heldPending)` at **both** inject sites, so on the `HoldPending` path the
+  held text AND its audio are never written to the on-disk history store —
+  closing the disk-persistence gap the unconditional archive call would
+  otherwise open. The `HistoryArchiver` class itself is untouched, and the
+  `InjectNow` path (`heldPending == false`) archives exactly as before, so Smoke
+  item 8's "archiving continues for actually-injected dictations" clause holds. ✓
 - **Req 3 — pill PENDING state: stays visible (no Idle auto-hide), steady blue
   dot + "Click to paste", no thinking pulse:** `SessionStage.PendingPaste` +
   `PillAnimationMap → None` (T4, tested); VM suppresses Idle hide + sets "Click

@@ -291,6 +291,11 @@ public sealed class AppShell : IDisposable
         Toasts = toasts; ClipboardFallback = clipboardFallback;
         CrashHandler = crashHandler;
         LogTail = logTail; Ui = ui; DiagnosticsHost = diagnosticsHost;
+        // Assigned BEFORE MainWindow below: its NavigationView selection
+        // synchronously navigates to RecordingPage, which reads these.
+        AssemblyAiKeyStore = assemblyAiKeyStore;
+        AssemblyAiClient = assemblyAiClient;
+        AssemblyAiOptions = assemblyAiOptions;
 
         Pill = new StatusPillWindow(sessionVm);
         Tray = new TrayIconHost(sessionVm, AppPaths.AssetsDir, "0.3.0",

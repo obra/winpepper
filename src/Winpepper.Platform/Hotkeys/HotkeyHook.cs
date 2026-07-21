@@ -11,8 +11,6 @@ namespace Winpepper.Platform.Hotkeys;
 /// </summary>
 public sealed class HotkeyHook : IDisposable
 {
-    internal static readonly nint SpaceReplayExtraInfo = unchecked((nint)0x57505052);
-
     private sealed record HotkeyBindings(HotkeyChord Hold, HotkeyChord Toggle, HotkeyChord Cancel);
     private sealed record RawCaptureRegistration(Action<RawKeyTransition> Sink);
 
@@ -48,6 +46,11 @@ public sealed class HotkeyHook : IDisposable
     // when the physical key is no longer held, so a lost key-up can never
     // swallow a key forever.
     private readonly Dictionary<int, DateTimeOffset> _swallowedKeys = new();
+    // vk -> timestamp a physical down was deliberately passed through because
+    // normal processing was unavailable. Once Windows sees the down, repeats
+    // and the matching up must also pass even if the gate changes.
+    // Physical-state pruning heals a lost key-up before a later fresh press.
+    private readonly Dictionary<int, DateTimeOffset> _passedThroughKeys = new();
     private readonly HashSet<int> _observedCancelKeys = new();
     // vk -> timestamp last observed during capture. Same physical-state
     // self-heal as _swallowedKeys: a lost key-up must not wedge drain mode.
@@ -60,7 +63,6 @@ public sealed class HotkeyHook : IDisposable
     private readonly Func<DateTimeOffset> _now;
     private readonly Func<int, bool> _keyPhysicallyDown;
     private readonly Func<bool> _normalTriggersEnabled;
-    private readonly Func<bool> _spaceReplayPermitted;
     private readonly LongPressSpaceStateMachine _spaceHold;
 
     public ChannelReader<HotkeyEvent> Events => _events.Reader;
@@ -79,7 +81,7 @@ public sealed class HotkeyHook : IDisposable
     /// swallowed.
     /// </summary>
     public bool TryProcessKey(int vk, bool down, out HotkeyEvent? evt,
-        int scanCode = 0, bool isInjected = false, nint extraInfo = 0)
+        int scanCode = 0, bool isInjected = false)
     {
         evt = null;
         var now = _now();
@@ -92,8 +94,8 @@ public sealed class HotkeyHook : IDisposable
         _spaceHold.RecoverIfReleased();
 
         // A modifier pressed after a bare Space-down changes the user's intent.
-        // Replay the buffered tap before updating modifier state, then retain
-        // ownership of the physical Space until key-up for down/up symmetry.
+        // Stop observing it as a hold while the already-visible physical press
+        // continues to pass through to Windows.
         if (down && IsLongPressSpaceBinding(bindings.Hold) && IsModifierKey(vk))
             _spaceHold.CancelPendingForModifier();
 
@@ -109,7 +111,7 @@ public sealed class HotkeyHook : IDisposable
         {
             var swallowActiveSpace = vk == VirtualKeyCatalog.Space
                 && _spaceHold.IsActive
-                && _spaceHold.Process(down, extraInfo == SpaceReplayExtraInfo);
+                && _spaceHold.Process(down);
             var isRepeat = down && _captureKeysDown.ContainsKey(vk);
             if (down) _captureKeysDown[vk] = now;
             else _captureKeysDown.Remove(vk);
@@ -124,6 +126,13 @@ public sealed class HotkeyHook : IDisposable
             }
 
             _observedCancelKeys.Remove(vk);
+            if (!isInjected)
+            {
+                if (down && _passedThroughKeys.ContainsKey(vk))
+                    _passedThroughKeys[vk] = now;
+                else if (!down)
+                    _passedThroughKeys.Remove(vk);
+            }
             var swallowWhileCaptured = !down && _swallowedKeys.Remove(vk);
             if (!down && _holding && HoldEndedOnKeyUp(bindings.Hold, vk))
             {
@@ -133,10 +142,11 @@ public sealed class HotkeyHook : IDisposable
             return swallowActiveSpace || swallowWhileCaptured;
         }
 
-        // Once a bare Space-down is swallowed, retain ownership of all of its
-        // repeats and key-up even if modifiers, capture, or bindings change.
+        // Once a bare Space-down is being observed, retain its state across
+        // readiness/binding changes. Only typematic downs during an active hold
+        // are suppressed; the original down and physical up always pass.
         if (vk == VirtualKeyCatalog.Space && _spaceHold.IsActive)
-            return _spaceHold.Process(down, extraInfo == SpaceReplayExtraInfo);
+            return _spaceHold.Process(down);
 
         var suspendRequested = Volatile.Read(ref _suspendRequested) != 0;
         if (suspendRequested || _captureKeysDown.Count != 0)
@@ -147,9 +157,12 @@ public sealed class HotkeyHook : IDisposable
             if (down)
             {
                 _captureKeysDown[vk] = now;
+                if (!isInjected && _passedThroughKeys.ContainsKey(vk))
+                    _passedThroughKeys[vk] = now;
                 return false;
             }
             _captureKeysDown.Remove(vk);
+            if (!isInjected) _passedThroughKeys.Remove(vk);
             _observedCancelKeys.Remove(vk);
 
             // Finish any chord that was already active when capture began, but
@@ -161,6 +174,28 @@ public sealed class HotkeyHook : IDisposable
                 evt = new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow);
             }
             return swallowWhileSuspended;
+        }
+
+        // A physical down that reached Windows while a gate was closed owns a
+        // pass-through sequence until its physical up. A typematic repeat must
+        // not become a new trigger merely because readiness changed mid-press.
+        // For a current down, a false physical probe means the prior up was lost
+        // and this is a fresh press.
+        if (_passedThroughKeys.TryGetValue(vk, out var passedSince))
+        {
+            if (isInjected) return false;
+            if (down && IsKeyEntryLive(vk, passedSince, now))
+            {
+                _passedThroughKeys[vk] = now;
+                return false;
+            }
+
+            _passedThroughKeys.Remove(vk);
+            if (!down)
+            {
+                _observedCancelKeys.Remove(vk);
+                return false;
+            }
         }
 
         // Model-less onboarding still needs the hook for focus-independent raw
@@ -186,6 +221,7 @@ public sealed class HotkeyHook : IDisposable
                 _holding = false;
                 evt = new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow);
             }
+            if (down && !isInjected) _passedThroughKeys[vk] = now;
             return swallowOwnedUp;
         }
 
@@ -193,14 +229,7 @@ public sealed class HotkeyHook : IDisposable
             && vk == VirtualKeyCatalog.Space
             && down
             && _modifiers == Modifier.None)
-        {
-            if (!SpaceReplayPermitted())
-            {
-                _log.LogDebug("Long-press Space bypassed because replay is not permitted for the foreground target");
-                return false;
-            }
-            return _spaceHold.Process(down, extraInfo == SpaceReplayExtraInfo);
-        }
+            return _spaceHold.Process(down);
 
         if (down)
         {
@@ -276,9 +305,7 @@ public sealed class HotkeyHook : IDisposable
         Func<DateTimeOffset>? timeProvider = null,
         Func<int, bool>? keyPhysicallyDown = null,
         ILongPressTimerScheduler? spaceTimerScheduler = null,
-        Func<SpaceReplayResult>? replaySpace = null,
-        Func<bool>? normalTriggersEnabled = null,
-        Func<bool>? spaceReplayPermitted = null)
+        Func<bool>? normalTriggersEnabled = null)
     {
         _bindings = new HotkeyBindings(hold, toggle, cancel);
         _log = log;
@@ -286,22 +313,11 @@ public sealed class HotkeyHook : IDisposable
         _now = timeProvider ?? (() => DateTimeOffset.UtcNow);
         _keyPhysicallyDown = keyPhysicallyDown ?? DefaultKeyPhysicallyDown;
         _normalTriggersEnabled = normalTriggersEnabled ?? (() => true);
-        _spaceReplayPermitted = spaceReplayPermitted ?? ForegroundReplayPermission.CanReplayToForeground;
-        var replay = replaySpace ?? SpaceReplaySender.SendToWindows;
         _spaceHold = new LongPressSpaceStateMachine(
             spaceTimerScheduler ?? new SystemLongPressTimerScheduler(),
             kind => _events.Writer.TryWrite(new HotkeyEvent(kind, _now())),
-            () =>
-            {
-                var result = replay();
-                if (!result.Success)
-                {
-                    _log.LogWarning(
-                        "Synthetic Space replay failed: initialSent={InitialSent}, repairAttempted={RepairAttempted}, repairSucceeded={RepairSucceeded}. SendInput may be blocked by UIPI.",
-                        result.InitialInputsSent, result.RepairAttempted, result.RepairSucceeded);
-                }
-            },
-            isSpacePhysicallyDown: () => _keyPhysicallyDown(VirtualKeyCatalog.Space));
+            isSpacePhysicallyDown: () => _keyPhysicallyDown(VirtualKeyCatalog.Space),
+            canStartHold: NormalTriggersEnabled);
     }
 
     // Real physical key-state probe. Guarded so it is only P/Invoked on Windows;
@@ -336,19 +352,6 @@ public sealed class HotkeyHook : IDisposable
         }
     }
 
-    private bool SpaceReplayPermitted()
-    {
-        try
-        {
-            return _spaceReplayPermitted();
-        }
-        catch (Exception ex)
-        {
-            _log.LogWarning(ex, "Space replay permission check failed; passing physical Space through");
-            return false;
-        }
-    }
-
     /// <summary>Atomically replaces the active hold and toggle chords.</summary>
     public void UpdateChords(HotkeyChord hold, HotkeyChord toggle)
     {
@@ -357,7 +360,7 @@ public sealed class HotkeyHook : IDisposable
 
         var current = Volatile.Read(ref _bindings);
         if (IsLongPressSpaceBinding(current.Hold) && !IsLongPressSpaceBinding(hold))
-            _spaceHold.Cancel(replayPending: true);
+            _spaceHold.Cancel();
         Volatile.Write(ref _bindings, new HotkeyBindings(hold, toggle, current.Cancel));
         _log.LogInformation("Hotkeys updated: hold={Hold}, toggle={Toggle}", hold, toggle);
     }
@@ -368,7 +371,7 @@ public sealed class HotkeyHook : IDisposable
     /// </summary>
     public void SetSuspended(bool suspended)
     {
-        if (suspended) _spaceHold.Cancel(replayPending: true);
+        if (suspended) _spaceHold.Cancel();
         Volatile.Write(ref _suspendRequested, suspended ? 1 : 0);
         _log.LogDebug("Hotkey hook {State} for chord capture", suspended ? "suspended" : "resumed");
     }
@@ -380,7 +383,7 @@ public sealed class HotkeyHook : IDisposable
     public IDisposable BeginRawCapture(Action<RawKeyTransition> sink)
     {
         ArgumentNullException.ThrowIfNull(sink);
-        _spaceHold.Cancel(replayPending: true);
+        _spaceHold.Cancel();
         lock (_captureGate)
         {
             if (_rawCapture is not null)
@@ -450,7 +453,7 @@ public sealed class HotkeyHook : IDisposable
         {
             var injected = (data.Flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) != 0;
             var swallow = TryProcessKey((int)data.VkCode, down, out var evt,
-                (int)data.ScanCode, injected, data.DwExtraInfo);
+                (int)data.ScanCode, injected);
             if (evt is not null) _events.Writer.TryWrite(evt);
             // Swallow chord keys we own so the foreground app doesn't see them,
             // but never hide a key-up whose key-down already reached the system.
@@ -519,6 +522,7 @@ public sealed class HotkeyHook : IDisposable
     {
         PruneStale(_swallowedKeys, now, exceptVk);
         PruneStale(_captureKeysDown, now, exceptVk);
+        PruneStale(_passedThroughKeys, now, exceptVk);
     }
 
     private void PruneStale(Dictionary<int, DateTimeOffset> keys, DateTimeOffset now, int exceptVk)
@@ -558,7 +562,6 @@ public sealed class HotkeyHook : IDisposable
 
     public void Dispose()
     {
-        _spaceHold.Cancel(replayPending: true);
         _spaceHold.Dispose();
         lock (_captureGate) Volatile.Write(ref _rawCapture, null);
         if (_hookThread is null) return;

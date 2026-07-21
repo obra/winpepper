@@ -20,20 +20,22 @@ internal sealed class SystemLongPressTimerScheduler : ILongPressTimerScheduler
 }
 
 /// <summary>
-/// Deterministic dual-role Space policy: a short physical press is replayed,
-/// while reaching the threshold emits HoldDown until physical release.
+/// Replay-free dual-role Space policy. The original physical down/up always
+/// pass through. Reaching the threshold or receiving the first typematic repeat
+/// emits HoldDown; repeat downs are then suppressed until the passed-through
+/// physical release emits HoldUp.
 /// </summary>
 public sealed class LongPressSpaceStateMachine : IDisposable
 {
-    private enum State { Idle, Pending, SuppressingUntilRelease, Holding }
+    private enum State { Idle, Pending, PassingUntilRelease, Holding }
 
     public static readonly TimeSpan DefaultThreshold = TimeSpan.FromMilliseconds(300);
 
     private readonly object _gate = new();
     private readonly ILongPressTimerScheduler _timerScheduler;
     private readonly Action<HotkeyEventKind> _emit;
-    private readonly Action _replaySpace;
     private readonly Func<bool> _isSpacePhysicallyDown;
+    private readonly Func<bool> _canStartHold;
     private readonly TimeSpan _threshold;
     private State _state;
     private IDisposable? _thresholdTimer;
@@ -47,24 +49,21 @@ public sealed class LongPressSpaceStateMachine : IDisposable
     public LongPressSpaceStateMachine(
         ILongPressTimerScheduler timerScheduler,
         Action<HotkeyEventKind> emit,
-        Action replaySpace,
         TimeSpan? threshold = null,
-        Func<bool>? isSpacePhysicallyDown = null)
+        Func<bool>? isSpacePhysicallyDown = null,
+        Func<bool>? canStartHold = null)
     {
         _timerScheduler = timerScheduler ?? throw new ArgumentNullException(nameof(timerScheduler));
         _emit = emit ?? throw new ArgumentNullException(nameof(emit));
-        _replaySpace = replaySpace ?? throw new ArgumentNullException(nameof(replaySpace));
         _isSpacePhysicallyDown = isSpacePhysicallyDown ?? (() => true);
+        _canStartHold = canStartHold ?? (() => true);
         _threshold = threshold ?? DefaultThreshold;
         if (_threshold <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(threshold));
     }
 
-    /// <returns>True when the physical transition must be swallowed.</returns>
-    public bool Process(bool down, bool isOwnReplay)
+    /// <returns>True only for a typematic down that must be suppressed.</returns>
+    public bool Process(bool down)
     {
-        if (isOwnReplay) return false;
-
-        Action? afterLock = null;
         lock (_gate)
         {
             if (_disposed) return false;
@@ -74,82 +73,62 @@ public sealed class LongPressSpaceStateMachine : IDisposable
                 {
                     _state = State.Pending;
                     _thresholdTimer = _timerScheduler.Schedule(_threshold, OnThresholdElapsed);
+                    return false;
                 }
-                // A second down while pending/holding is typematic repeat.
-                return true;
+
+                if (_state == State.Pending)
+                {
+                    CancelTimerLocked();
+                    if (!_canStartHold())
+                    {
+                        _state = State.PassingUntilRelease;
+                        return false;
+                    }
+                    _state = State.Holding;
+                    _emit(HotkeyEventKind.HoldDown);
+                    return true;
+                }
+
+                return _state == State.Holding;
             }
 
-            if (_state == State.Pending)
-            {
-                CancelTimerLocked();
-                _state = State.Idle;
-                afterLock = _replaySpace;
-            }
-            else if (_state == State.Holding)
-            {
-                _state = State.Idle;
-                afterLock = () => _emit(HotkeyEventKind.HoldUp);
-            }
-            else if (_state == State.SuppressingUntilRelease)
-            {
-                _state = State.Idle;
-            }
-            else
-            {
-                return false;
-            }
+            if (_state == State.Pending) CancelTimerLocked();
+            if (_state == State.Holding) _emit(HotkeyEventKind.HoldUp);
+            _state = State.Idle;
+            return false;
         }
-
-        afterLock?.Invoke();
-        return true;
     }
 
     /// <summary>
-    /// Converts a pending bare tap into a replay while retaining ownership of
-    /// the physical Space press until its eventual key-up.
+    /// Stops a pending bare-Space observation when a modifier changes the
+    /// gesture, while keeping the rest of that already-visible press native.
     /// </summary>
     public bool CancelPendingForModifier()
     {
-        Action? replay = null;
         lock (_gate)
         {
             if (_disposed || _state != State.Pending) return false;
             CancelTimerLocked();
             _state = _isSpacePhysicallyDown()
-                ? State.SuppressingUntilRelease
+                ? State.PassingUntilRelease
                 : State.Idle;
-            replay = _replaySpace;
+            return true;
         }
-        replay!();
-        return true;
     }
 
-    public void Cancel(bool replayPending)
+    public void Cancel()
     {
-        Action? afterLock = null;
         lock (_gate)
         {
-            if (_state == State.Pending)
-            {
-                CancelTimerLocked();
-                _state = _isSpacePhysicallyDown()
-                    ? State.SuppressingUntilRelease
-                    : State.Idle;
-                if (replayPending) afterLock = _replaySpace;
-            }
-            else if (_state == State.Holding)
+            if (_state == State.Pending) CancelTimerLocked();
+            if (_state == State.Holding) _emit(HotkeyEventKind.HoldUp);
+            if (_state != State.Idle)
             {
                 _state = _isSpacePhysicallyDown()
-                    ? State.SuppressingUntilRelease
+                    ? State.PassingUntilRelease
                     : State.Idle;
-                _emit(HotkeyEventKind.HoldUp);
-            }
-            else if (_state == State.SuppressingUntilRelease)
-            {
-                if (!_isSpacePhysicallyDown()) _state = State.Idle;
             }
         }
-        afterLock?.Invoke();
     }
 
     /// <summary>
@@ -159,32 +138,17 @@ public sealed class LongPressSpaceStateMachine : IDisposable
     /// </summary>
     public void RecoverIfReleased()
     {
-        Action? afterLock = null;
         lock (_gate)
         {
             if (_disposed || _state == State.Idle || _isSpacePhysicallyDown()) return;
-            if (_state == State.Pending)
-            {
-                CancelTimerLocked();
-                _state = State.Idle;
-                afterLock = _replaySpace;
-            }
-            else if (_state == State.Holding)
-            {
-                _state = State.Idle;
-                _emit(HotkeyEventKind.HoldUp);
-            }
-            else
-            {
-                _state = State.Idle;
-            }
+            if (_state == State.Pending) CancelTimerLocked();
+            if (_state == State.Holding) _emit(HotkeyEventKind.HoldUp);
+            _state = State.Idle;
         }
-        afterLock?.Invoke();
     }
 
     private void OnThresholdElapsed()
     {
-        Action? afterLock = null;
         lock (_gate)
         {
             _thresholdTimer = null;
@@ -192,18 +156,19 @@ public sealed class LongPressSpaceStateMachine : IDisposable
             if (!_isSpacePhysicallyDown())
             {
                 _state = State.Idle;
-                afterLock = _replaySpace;
+                return;
             }
-            else
+            if (!_canStartHold())
             {
-                _state = State.Holding;
-                // Publish while serialized with Process(key-up). Otherwise key-up
-                // can observe Holding and publish HoldUp before this callback gets
-                // a chance to publish HoldDown.
-                _emit(HotkeyEventKind.HoldDown);
+                _state = State.PassingUntilRelease;
+                return;
             }
+
+            _state = State.Holding;
+            // Publish while serialized with Process(key-up). Otherwise key-up
+            // can publish HoldUp before this callback publishes HoldDown.
+            _emit(HotkeyEventKind.HoldDown);
         }
-        afterLock?.Invoke();
     }
 
     private void CancelTimerLocked()
@@ -214,15 +179,13 @@ public sealed class LongPressSpaceStateMachine : IDisposable
 
     public void Dispose()
     {
-        var emitHoldUp = false;
         lock (_gate)
         {
             if (_disposed) return;
             _disposed = true;
             CancelTimerLocked();
-            emitHoldUp = _state == State.Holding;
+            if (_state == State.Holding) _emit(HotkeyEventKind.HoldUp);
             _state = State.Idle;
         }
-        if (emitHoldUp) _emit(HotkeyEventKind.HoldUp);
     }
 }

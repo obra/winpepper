@@ -12,11 +12,12 @@ public class HotkeyHookLogicTests
                                        string toggle = "Ctrl+Shift+Space",
                                        string cancel = "Esc",
                                        Func<bool>? cancelEnabled = null,
-                                       Func<bool>? normalTriggersEnabled = null)
+                                       Func<bool>? normalTriggersEnabled = null,
+                                       Func<int, bool>? keyPhysicallyDown = null)
         // These tests synthesize key events; never consult the host keyboard.
         => new(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle), HotkeyChord.Parse(cancel),
                new NullLogger<HotkeyHook>(), cancelEnabled,
-               keyPhysicallyDown: _ => true,
+               keyPhysicallyDown: keyPhysicallyDown ?? (_ => true),
                normalTriggersEnabled: normalTriggersEnabled);
 
     [Fact]
@@ -41,6 +42,44 @@ public class HotkeyHookLogicTests
         holdUp!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
         hook.TryProcessKey(0x86, true, out var toggle).ShouldBeTrue();
         toggle!.Kind.ShouldBe(HotkeyEventKind.Toggle);
+    }
+
+    [Fact]
+    public void ReadinessEnabledDuringHeldDedicatedKeyDefersActivationUntilNextPress()
+    {
+        var enabled = false;
+        var hook = NewHook(hold: "F24", normalTriggersEnabled: () => enabled);
+
+        hook.TryProcessKey(0x87, true, out var disabledDown).ShouldBeFalse();
+        disabledDown.ShouldBeNull();
+
+        enabled = true;
+        hook.TryProcessKey(0x87, true, out var repeat).ShouldBeFalse();
+        hook.TryProcessKey(0x87, false, out var passedUp).ShouldBeFalse();
+        repeat.ShouldBeNull();
+        passedUp.ShouldBeNull();
+
+        hook.TryProcessKey(0x87, true, out var freshDown).ShouldBeTrue();
+        freshDown!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+        hook.TryProcessKey(0x87, false, out var freshUp).ShouldBeTrue();
+        freshUp!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+    }
+
+    [Fact]
+    public void LostReleaseOfReadinessBypassedKeySelfHealsOnFreshDown()
+    {
+        var enabled = false;
+        var physicallyDown = true;
+        var hook = NewHook(hold: "F24",
+            normalTriggersEnabled: () => enabled,
+            keyPhysicallyDown: _ => physicallyDown);
+
+        hook.TryProcessKey(0x87, true, out _).ShouldBeFalse();
+
+        enabled = true;
+        physicallyDown = false;
+        hook.TryProcessKey(0x87, true, out var freshDown).ShouldBeTrue();
+        freshDown!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
     }
 
     [Fact]

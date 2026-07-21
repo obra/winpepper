@@ -28,142 +28,166 @@ public class LongPressSpaceStateMachineTests
     }
 
     private static (LongPressSpaceStateMachine Machine, FakeTimer Timer,
-        List<HotkeyEventKind> Events, List<string> Replays) NewMachine()
+        List<HotkeyEventKind> Events) NewMachine(Func<bool>? physicallyDown = null,
+        Func<bool>? canStartHold = null)
     {
         var timer = new FakeTimer();
         var events = new List<HotkeyEventKind>();
-        var replays = new List<string>();
-        return (new LongPressSpaceStateMachine(timer, events.Add, () => replays.Add("Space")),
-            timer, events, replays);
+        return (new LongPressSpaceStateMachine(timer, events.Add,
+            isSpacePhysicallyDown: physicallyDown, canStartHold: canStartHold), timer, events);
     }
 
     [Fact]
-    public void ShortTap_IsSwallowedAndReplaysExactlyOneSpace()
+    public void ShortTapPassesOriginalDownAndUpWithoutEvents()
     {
-        var (machine, timer, events, replays) = NewMachine();
+        var (machine, timer, events) = NewMachine();
 
-        machine.Process(down: true, isOwnReplay: false).ShouldBeTrue();
+        machine.Process(down: true).ShouldBeFalse();
         timer.DueTime.ShouldBe(TimeSpan.FromMilliseconds(300));
-        machine.Process(down: false, isOwnReplay: false).ShouldBeTrue();
+        machine.Process(down: false).ShouldBeFalse();
 
-        replays.ShouldBe(new[] { "Space" });
         events.ShouldBeEmpty();
     }
 
     [Fact]
-    public void ThresholdStartsHold_AndReleaseStopsWithoutReplay()
+    public void ThresholdStartsHoldAndPhysicalReleasePassesThrough()
     {
-        var (machine, timer, events, replays) = NewMachine();
-        machine.Process(true, false).ShouldBeTrue();
+        var (machine, timer, events) = NewMachine();
+        machine.Process(true).ShouldBeFalse();
 
         timer.Fire();
         events.ShouldBe(new[] { HotkeyEventKind.HoldDown });
-        machine.Process(false, false).ShouldBeTrue();
+        machine.Process(false).ShouldBeFalse();
 
         events.ShouldBe(new[] { HotkeyEventKind.HoldDown, HotkeyEventKind.HoldUp });
-        replays.ShouldBeEmpty();
     }
 
     [Fact]
-    public void TypematicDownsAreSwallowedAndDoNotRestartThreshold()
+    public void FirstTypematicDownStartsHoldAndIsSuppressed()
     {
-        var (machine, timer, events, _) = NewMachine();
-        machine.Process(true, false).ShouldBeTrue();
-        var due = timer.DueTime;
+        var (machine, timer, events) = NewMachine();
+        machine.Process(true).ShouldBeFalse();
 
-        machine.Process(true, false).ShouldBeTrue();
-        timer.DueTime.ShouldBe(due);
+        machine.Process(true).ShouldBeTrue();
+        events.ShouldBe(new[] { HotkeyEventKind.HoldDown });
+
         timer.Fire();
-
         events.ShouldBe(new[] { HotkeyEventKind.HoldDown });
     }
 
     [Fact]
-    public void OwnInjectedReplayPassesThroughWithoutChangingState()
+    public void FurtherTypematicDownsAreSuppressedUntilPassedThroughRelease()
     {
-        var (machine, _, events, replays) = NewMachine();
+        var (machine, _, events) = NewMachine();
+        machine.Process(true).ShouldBeFalse();
+        machine.Process(true).ShouldBeTrue();
 
-        machine.Process(true, isOwnReplay: true).ShouldBeFalse();
-        machine.Process(false, isOwnReplay: true).ShouldBeFalse();
-
-        events.ShouldBeEmpty();
-        replays.ShouldBeEmpty();
-    }
-
-    [Fact]
-    public void CancellationReplaysPendingTapButEndsActiveHold()
-    {
-        var (pending, _, pendingEvents, pendingReplays) = NewMachine();
-        pending.Process(true, false);
-        pending.Cancel(replayPending: true);
-        pendingEvents.ShouldBeEmpty();
-        pendingReplays.ShouldBe(new[] { "Space" });
-
-        var (holding, timer, holdingEvents, holdingReplays) = NewMachine();
-        holding.Process(true, false);
-        timer.Fire();
-        holding.Cancel(replayPending: true);
-        holdingEvents.ShouldBe(new[] { HotkeyEventKind.HoldDown, HotkeyEventKind.HoldUp });
-        holdingReplays.ShouldBeEmpty();
-    }
-
-    [Fact]
-    public void CancellationCanDiscardPendingTapDuringExplicitShutdown()
-    {
-        var (machine, timer, events, replays) = NewMachine();
-        machine.Process(true, false);
-
-        machine.Cancel(replayPending: false);
-        timer.Fire();
-
-        events.ShouldBeEmpty();
-        replays.ShouldBeEmpty();
-        machine.Process(false, false).ShouldBeTrue();
-    }
-
-    [Fact]
-    public void CancellationDuringHoldingEndsHoldButRetainsReleaseOwnership()
-    {
-        var (machine, timer, events, replays) = NewMachine();
-        machine.Process(true, false);
-        timer.Fire();
-
-        machine.Cancel(replayPending: true);
+        machine.Process(true).ShouldBeTrue();
+        machine.Process(false).ShouldBeFalse();
 
         events.ShouldBe(new[] { HotkeyEventKind.HoldDown, HotkeyEventKind.HoldUp });
-        replays.ShouldBeEmpty();
-        machine.IsActive.ShouldBeTrue();
-        machine.Process(false, false).ShouldBeTrue();
         machine.IsActive.ShouldBeFalse();
     }
 
     [Fact]
-    public void CancellationDuringSuppressionRetainsReleaseOwnership()
+    public void ModifierCancellationPassesRepeatsAndReleaseWithoutStartingHold()
     {
-        var (machine, _, events, replays) = NewMachine();
-        machine.Process(true, false);
-        machine.CancelPendingForModifier().ShouldBeTrue();
+        var (machine, timer, events) = NewMachine();
+        machine.Process(true).ShouldBeFalse();
 
-        machine.Cancel(replayPending: true);
+        machine.CancelPendingForModifier().ShouldBeTrue();
+        machine.Process(true).ShouldBeFalse();
+        timer.Fire();
+        machine.Process(false).ShouldBeFalse();
 
         events.ShouldBeEmpty();
-        replays.ShouldBe(new[] { "Space" });
-        machine.IsActive.ShouldBeTrue();
-        machine.Process(false, false).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void CancellationWhilePendingPassesRemainderOfPhysicalPress()
+    {
+        var (machine, timer, events) = NewMachine();
+        machine.Process(true).ShouldBeFalse();
+
+        machine.Cancel();
+        machine.Process(true).ShouldBeFalse();
+        timer.Fire();
+        machine.Process(false).ShouldBeFalse();
+
+        events.ShouldBeEmpty();
+        machine.IsActive.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void CancellationWhileHoldingEndsHoldAndPassesRemainderOfPhysicalPress()
+    {
+        var (machine, timer, events) = NewMachine();
+        machine.Process(true);
+        timer.Fire();
+
+        machine.Cancel();
+        machine.Process(true).ShouldBeFalse();
+        machine.Process(false).ShouldBeFalse();
+
+        events.ShouldBe(new[] { HotkeyEventKind.HoldDown, HotkeyEventKind.HoldUp });
+        machine.IsActive.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void LostReleaseWhilePendingDoesNotStartHold()
+    {
+        var physicallyDown = true;
+        var (machine, timer, events) = NewMachine(() => physicallyDown);
+        machine.Process(true).ShouldBeFalse();
+
+        physicallyDown = false;
+        timer.Fire();
+
+        events.ShouldBeEmpty();
+        machine.IsActive.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void ReadinessDisabledBeforeThresholdLeavesRemainderNative()
+    {
+        var enabled = true;
+        var (machine, timer, events) = NewMachine(canStartHold: () => enabled);
+        machine.Process(true).ShouldBeFalse();
+
+        enabled = false;
+        timer.Fire();
+        machine.Process(true).ShouldBeFalse();
+        machine.Process(false).ShouldBeFalse();
+
+        events.ShouldBeEmpty();
+        machine.IsActive.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void LostReleaseWhileHoldingEmitsHoldUpDuringRecovery()
+    {
+        var physicallyDown = true;
+        var (machine, timer, events) = NewMachine(() => physicallyDown);
+        machine.Process(true);
+        timer.Fire();
+
+        physicallyDown = false;
+        machine.RecoverIfReleased();
+
+        events.ShouldBe(new[] { HotkeyEventKind.HoldDown, HotkeyEventKind.HoldUp });
         machine.IsActive.ShouldBeFalse();
     }
 
     [Fact]
     public void DisposeDuringHoldingEmitsHoldUpAndClearsState()
     {
-        var (machine, timer, events, replays) = NewMachine();
-        machine.Process(true, false);
+        var (machine, timer, events) = NewMachine();
+        machine.Process(true);
         timer.Fire();
 
         machine.Dispose();
 
         events.ShouldBe(new[] { HotkeyEventKind.HoldDown, HotkeyEventKind.HoldUp });
-        replays.ShouldBeEmpty();
         machine.IsActive.ShouldBeFalse();
     }
 
@@ -182,12 +206,12 @@ public class LongPressSpaceStateMachineTests
                 allowDown.Wait(TestContext.Current.CancellationToken);
             }
             lock (events) events.Add(kind);
-        }, () => { });
-        machine.Process(true, false);
+        });
+        machine.Process(true);
 
         var threshold = Task.Run(timer.Fire, TestContext.Current.CancellationToken);
         downEntered.Wait(TestContext.Current.CancellationToken);
-        var release = Task.Run(() => machine.Process(false, false), TestContext.Current.CancellationToken);
+        var release = Task.Run(() => machine.Process(false), TestContext.Current.CancellationToken);
 
         await Task.Delay(50, TestContext.Current.CancellationToken);
         release.IsCompleted.ShouldBeFalse();

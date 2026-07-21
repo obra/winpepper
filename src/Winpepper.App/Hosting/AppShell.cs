@@ -51,7 +51,8 @@ public sealed class AppShell : IDisposable
             AppPaths.LogsDir, debugConsole: false,
             minimumLevel: LogLevel.Information,
             buffer: logTail);
-        var store = new SettingsStore(AppPaths.SettingsJson);
+        var store = new SettingsStore(AppPaths.SettingsJson,
+            onError: msg => factory.CreateLogger("Winpepper.App.Settings").LogWarning("{SettingsWarning}", msg));
         var settings = store.Load();
         var writer = new DebouncedSettingsWriter(store);
 

@@ -11,7 +11,13 @@ public class SettingsStoreTests : IDisposable
     {
         _path = Path.Combine(Path.GetTempPath(), $"settings-{Guid.NewGuid():N}.json");
     }
-    public void Dispose() { if (File.Exists(_path)) File.Delete(_path); }
+    public void Dispose()
+    {
+        if (File.Exists(_path)) File.Delete(_path);
+        var dir = Path.GetDirectoryName(_path)!;
+        foreach (var f in Directory.GetFiles(dir, $"{Path.GetFileName(_path)}.bad-*"))
+            File.Delete(f);
+    }
 
     [Fact]
     public void Load_MissingFile_ReturnsDefaults()
@@ -81,6 +87,28 @@ public class SettingsStoreTests : IDisposable
         loaded.OnboardingCompleted.ShouldBeTrue();
         loaded.SpeakerFilterEnabled.ShouldBeTrue();
         loaded.LastVersionSeen.ShouldBe("0.3.0");
+    }
+
+    [Fact]
+    public void Load_CorruptFile_BacksUpAndReturnsDefaults()
+    {
+        File.WriteAllText(_path, "{ this is not valid json", System.Text.Encoding.UTF8);
+        string? logged = null;
+        var store = new SettingsStore(_path, msg => logged = msg);
+
+        var s = store.Load();
+
+        // Defaults returned (nothing is silently kept from the corrupt file).
+        s.Schema.ShouldBe(1);
+        s.OnboardingCompleted.ShouldBeFalse();
+
+        // The corrupt file was moved aside to a .bad-* backup, not deleted.
+        File.Exists(_path).ShouldBeFalse();
+        var dir = Path.GetDirectoryName(_path)!;
+        Directory.GetFiles(dir, $"{Path.GetFileName(_path)}.bad-*").Length.ShouldBe(1);
+
+        // The caller was told.
+        logged.ShouldNotBeNull();
     }
 }
 

@@ -12,10 +12,12 @@ public sealed class SettingsStore
     };
 
     private readonly string _path;
+    private readonly Action<string>? _onError;
 
-    public SettingsStore(string path)
+    public SettingsStore(string path, Action<string>? onError = null)
     {
         _path = path;
+        _onError = onError;
     }
 
     public AppSettings Load()
@@ -27,12 +29,33 @@ public sealed class SettingsStore
 
         try
         {
-            var json = File.ReadAllText(_path);
+            var json = File.ReadAllText(_path, System.Text.Encoding.UTF8);
             return JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
+            // A torn/corrupt file (e.g. after an MSI upgrade force-kill) must
+            // NOT silently wipe every setting. Preserve it for diagnosis, then
+            // fall back to defaults. Keep it simple: no partial salvage.
+            BackupCorruptFile(ex);
             return new AppSettings();
+        }
+    }
+
+    private void BackupCorruptFile(Exception ex)
+    {
+        try
+        {
+            var backup = $"{_path}.bad-{DateTime.UtcNow:yyyyMMddHHmmssfff}";
+            File.Move(_path, backup);
+            _onError?.Invoke(
+                $"settings.json was corrupt ({ex.Message}); backed up to " +
+                $"{Path.GetFileName(backup)} and reset to defaults.");
+        }
+        catch (Exception moveEx)
+        {
+            _onError?.Invoke(
+                $"settings.json was corrupt and could not be backed up: {moveEx.Message}");
         }
     }
 

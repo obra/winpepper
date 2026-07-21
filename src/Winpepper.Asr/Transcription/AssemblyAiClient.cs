@@ -180,13 +180,23 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
     private TimeSpan Backoff(int attempt)
         => TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 250 + _rng.Next(0, 250)); // exponential + jitter
 
+    private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromSeconds(30);
+
     private static TimeSpan? RetryAfter(HttpResponseMessage resp)
     {
-        if (resp.Headers.RetryAfter?.Delta is { } delta) return delta;
-        if (resp.Headers.TryGetValues("Retry-After", out var values)
-            && int.TryParse(values.FirstOrDefault(), out var seconds))
-            return TimeSpan.FromSeconds(seconds);
-        return null;
+        TimeSpan? raw = null;
+        if (resp.Headers.RetryAfter?.Delta is { } delta) raw = delta;
+        else if (resp.Headers.TryGetValues("Retry-After", out var values)
+                 && int.TryParse(values.FirstOrDefault(), out var seconds))
+            raw = TimeSpan.FromSeconds(seconds);
+
+        if (raw is null) return null;
+        // Clamp defensively: a negative value would throw from Task.Delay, and a
+        // huge value would freeze dictation past any sane budget.
+        var clamped = raw.Value;
+        if (clamped < TimeSpan.Zero) clamped = TimeSpan.Zero;
+        if (clamped > MaxRetryAfter) clamped = MaxRetryAfter;
+        return clamped;
     }
 
     private static string ReadString(string json, string property)

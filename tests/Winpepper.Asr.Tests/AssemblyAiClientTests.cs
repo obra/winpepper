@@ -147,4 +147,28 @@ public sealed class AssemblyAiClientTests
         (await Make(goodHandler, delays).ValidateKeyAsync(CancellationToken.None)).ShouldBeTrue();
         (await Make(badHandler, delays).ValidateKeyAsync(CancellationToken.None)).ShouldBeFalse();
     }
+
+    [Theory]
+    [InlineData("-5", 0)]        // negative -> clamped to 0
+    [InlineData("99999", 30)]    // huge -> clamped to 30
+    [InlineData("banana", null)] // non-numeric -> ignored, falls back to backoff (>0)
+    public async Task Upload_429_ClampsGarbageRetryAfter(string headerValue, int? expectedSeconds)
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.TooManyRequests, "{}", mutate: r => r.Headers.TryAddWithoutValidation("Retry-After", headerValue))
+            .Enqueue(HttpStatusCode.OK, "{\"upload_url\":\"https://cdn/aai/ok\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var url = await client.UploadAsync(new byte[] { 1 }, CancellationToken.None);
+
+        url.ShouldBe("https://cdn/aai/ok");
+        delays.Count.ShouldBe(1);
+        delays[0].ShouldBeGreaterThanOrEqualTo(TimeSpan.Zero);
+        delays[0].ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(30));
+        if (expectedSeconds is int s)
+            delays[0].ShouldBe(TimeSpan.FromSeconds(s));
+        else
+            delays[0].ShouldBeGreaterThan(TimeSpan.Zero); // non-numeric -> backoff jitter
+    }
 }

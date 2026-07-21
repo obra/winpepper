@@ -24,7 +24,7 @@
   - Upload: `POST https://api.assemblyai.com/v2/upload`, body = **RAW audio bytes** (`ByteArrayContent`, `Content-Type: application/octet-stream`) — never JSON/multipart — returns `{ "upload_url": ... }`.
   - Create: `POST /v2/transcript` json `{"audio_url":...,"speech_models":[<model>],"format_text":true,"punctuate":true,"disfluencies":false,"language_code":"en_us"}` returns `{ "id", "status":"queued" }`. **Use `speech_models` (plural array), NOT the singular `speech_model`** — the singular is documented as **deprecated / replaced by `speech_models`** and may become a no-op that silently ignores the user's model choice. (`language_code:"en_us"` is a valid AssemblyAI code; if a future API change rejects it, `create` fails and the app falls back to local — see Task 13 step 5.)
   - Poll: `GET /v2/transcript/{id}` every ~1s; lifecycle `queued -> processing -> completed | error`; `completed` gives `text`, `words[]`, `confidence`, `audio_duration`.
-  - Model id is a **plain configurable string** placed inside the `speech_models` array; default `"universal-2"` (fast/cheap — a valid current enum value). The premium example is **`"universal-3-5-pro"`** (note the `-5-`; the current AssemblyAI `speech_models` enum is `universal-3-5-pro` / `universal-2` — there is **no** `universal-3-pro`). If the API rejects a model id, surface the API's error message — do not hardcode assumptions.
+  - Model id is a **plain configurable string** placed inside the `speech_models` array; default `"universal-2"` (fast/cheap — a valid current enum value). The recommended premium example is **`"universal-3-pro"`** — AssemblyAI's generally-available Universal-3 Pro flagship (released 2026-02-03). A newer `"universal-3-5-pro"` also exists but may require account-specific availability, so do **not** hardcode it as the premium example. The exact premium string is **not** load-bearing for correctness: the model id is user-editable, and if the API rejects it (e.g. the id is not enabled for the account), `create` fails, the API's error message is surfaced/logged, and the app falls back to local (see Task 13 step 6). Surface the API's error message — do not hardcode assumptions about which premium ids a given account may use.
   - Error handling: `401` = bad key (no retry, tell user to check key); `429` = honor `Retry-After` header seconds; `500/502/503/504` = exponential backoff + jitter retry (up to 3 attempts total); `400/404` = no retry.
   - **Never re-POST the transcript-create call after an id is returned** — retry only the GET poll.
   - Cap total transcription wall-clock at **45s default**, then treat as failure.
@@ -1608,13 +1608,13 @@ git commit -m "feat: add Windows DPAPI key protector, ProtectedData package, and
   - `public IAssemblyAiKeyStore AssemblyAiKeyStore { get; }`
   - `public AssemblyAiClient AssemblyAiClient { get; }`
   - `public AssemblyAiOptions AssemblyAiOptions { get; private set; }`
-  - `public ITranscriber BuildTranscriber(ParakeetSession local, AppSettings settings, Action<string> onFallback)` — returns a bare `ParakeetTranscriber` when `settings.AsrProvider != "assemblyai"`, else a `FallbackTranscriber(assemblyAi, local, ...)`.
+  - `public static ITranscriber BuildTranscriber(ParakeetSession local, AppSettings settings, Action<string> onFallback, IAssemblyAiClient client, IAssemblyAiKeyStore keyStore, ILoggerFactory loggerFactory)` — a **static** factory (holds no `AppShell` instance state) that returns a bare `ParakeetTranscriber` when `settings.AsrProvider != "assemblyai"`, else a `FallbackTranscriber(assemblyAi, local, ...)`. It is static so the pipeline can invoke it through an injected delegate without an `AppShell` instance — see the Task 10 Step 1 wiring note for why no `AppShell` reference exists when `PipelineHost` is constructed.
 
 > Windows-only wiring (App project). Verified via Smoke Checklist Task 14. The building blocks are all unit-tested (Tasks 3–6).
 
 - [ ] **Step 1: Add fields and construct the stack**
 
-In `src/Winpepper.App/Hosting/AppShell.cs`, inside `BootstrapAsync` (near the existing `PipelineHost` construction), add — using `factory` (the existing `ILoggerFactory`) and `AppPaths`:
+In `src/Winpepper.App/Hosting/AppShell.cs`, inside `BootstrapAsync` — **immediately before** the `var pipeline = new PipelineHost(...)` line (AppShell.cs:230) so these locals (`aaiKeyStore`, `aaiClient`, and the existing `factory`) are in scope when Task 10 updates that constructor call — add, using `factory` (the existing `ILoggerFactory`) and `AppPaths`:
 
 ```csharp
         // --- AssemblyAI cloud ASR provider stack (optional; key may be absent) ---
@@ -1631,7 +1631,6 @@ In `src/Winpepper.App/Hosting/AppShell.cs`, inside `BootstrapAsync` (near the ex
         AssemblyAiKeyStore = aaiKeyStore;
         AssemblyAiClient = aaiClient;
         AssemblyAiOptions = aaiOptions;
-        _aaiLoggerFactory = factory;
 ```
 
 Add these members to the `AppShell` class body (fields/properties):
@@ -1640,17 +1639,23 @@ Add these members to the `AppShell` class body (fields/properties):
     public Winpepper.Asr.Transcription.IAssemblyAiKeyStore AssemblyAiKeyStore { get; private set; } = null!;
     public Winpepper.Asr.Transcription.AssemblyAiClient AssemblyAiClient { get; private set; } = null!;
     public Winpepper.Asr.Transcription.AssemblyAiOptions AssemblyAiOptions { get; private set; } = null!;
-    private ILoggerFactory _aaiLoggerFactory = null!;
 
     /// <summary>
     /// Builds the transcriber for a dictation. When AssemblyAI is selected the
     /// cloud provider is wrapped in a FallbackTranscriber so any failure lands
     /// on the local Parakeet session. Otherwise the local transcriber is used.
+    /// Static, taking its dependencies explicitly, so the pipeline can invoke it
+    /// through an injected delegate without holding an AppShell instance — see
+    /// the Task 10 Step 1 wiring note for why no AppShell reference is available
+    /// when PipelineHost is constructed.
     /// </summary>
-    public Winpepper.Asr.Transcription.ITranscriber BuildTranscriber(
+    public static Winpepper.Asr.Transcription.ITranscriber BuildTranscriber(
         Winpepper.Asr.ParakeetSession local,
         AppSettings settings,
-        Action<string> onFallback)
+        Action<string> onFallback,
+        Winpepper.Asr.Transcription.IAssemblyAiClient client,
+        Winpepper.Asr.Transcription.IAssemblyAiKeyStore keyStore,
+        ILoggerFactory loggerFactory)
     {
         var localTranscriber = new Winpepper.Asr.Transcription.ParakeetTranscriber(
             local, Winpepper.Models.ModelRegistry.DefaultAsrName);
@@ -1660,19 +1665,19 @@ Add these members to the `AppShell` class body (fields/properties):
 
         var options = new Winpepper.Asr.Transcription.AssemblyAiOptions { Model = settings.AssemblyAiModel };
         var cloud = new Winpepper.Asr.Transcription.AssemblyAiTranscriber(
-            AssemblyAiClient,
-            AssemblyAiKeyStore,
+            client,
+            keyStore,
             options,
-            _aaiLoggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiTranscriber>());
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiTranscriber>());
 
         return new Winpepper.Asr.Transcription.FallbackTranscriber(
             cloud, localTranscriber,
-            _aaiLoggerFactory.CreateLogger<Winpepper.Asr.Transcription.FallbackTranscriber>(),
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.FallbackTranscriber>(),
             onFallback);
     }
 ```
 
-> If `AppShell` does not already have a `using Microsoft.Extensions.Logging;` and `using System.Net.Http;`, add them at the top of the file.
+> If `AppShell` does not already have a `using Microsoft.Extensions.Logging;` and `using System.Net.Http;`, add them at the top of the file. `BuildTranscriber` is `static`: it takes the AssemblyAI client, key store, and logger factory as parameters rather than reading `AppShell` instance state, which lets the pipeline call it via an injected delegate (Task 10). The public `AssemblyAiKeyStore`/`AssemblyAiClient`/`AssemblyAiOptions` properties remain for the settings-UI Test button (Task 11).
 
 - [ ] **Step 2: Confirm no cross-project break on Linux**
 
@@ -1694,10 +1699,11 @@ git commit -m "feat: wire AssemblyAI provider stack and transcriber factory in A
 ## Task 10: PipelineHost selection + provider recording + fallback notice (Windows-only)
 
 **Files:**
-- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` (both dictation paths: Hold-up ~lines 197–332 and Toggle ~lines 337–489; the transcribe call sites at lines 206 and ~363; the archive calls that set `AsrModelName` at ~lines 310–328 and the toggle equivalent)
+- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` (both dictation paths: Hold-up ~lines 197–332 and Toggle ~lines 337–489; the transcribe call sites at lines 206 and ~363; the archive calls that set `AsrModelName` at ~lines 310–328 and the toggle equivalent; **plus two new constructor parameters** — see Step 1 wiring note)
+- Modify: `src/Winpepper.App/Hosting/AppShell.cs` (add two arguments — a settings provider and a transcriber-factory delegate — to the existing `new PipelineHost(...)` call at line 230; see Step 1 wiring note)
 
 **Interfaces:**
-- Consumes: `AppShell.BuildTranscriber(...)` (Task 9), `ITranscriber`/`TranscriptionResult` (Task 3), the existing `_asr` (`ParakeetSession`), `_settingsProvider`/current `AppSettings`, `_toasts` (`IToastService`), `_archiver`.
+- Consumes: an injected transcriber-factory delegate `_buildTranscriber` (which calls the **static** `AppShell.BuildTranscriber(...)` from Task 9), `ITranscriber`/`TranscriptionResult` (Task 3), the existing `_asr` (`ParakeetSession`), an injected `_settingsProvider` (`Func<AppSettings>`) for the current `AppSettings`, `_toasts` (`IToastService`), `_archiver`.
 - Produces: history entries whose `AsrModelName` is the **actual** provider that produced the text; a non-intrusive toast on fallback.
 
 > Windows-only. Verified via Smoke Checklist Task 14. The selection/fallback/provider-recording logic it depends on is unit-tested in `FallbackTranscriberTests` (Task 3).
@@ -1713,8 +1719,8 @@ var transcript = await Task.Run(() => _asr!.Transcribe(samples), ct);
 with:
 
 ```csharp
-var settingsNow = _settings.Load(); // existing SettingsStore reference on PipelineHost
-var transcriber = _shell.BuildTranscriber(_asr!, settingsNow, notice =>
+var settingsNow = _settingsProvider();
+var transcriber = _buildTranscriber(_asr!, settingsNow, notice =>
     _ = _toasts.ShowAsync(
         "Winpepper",
         "Cloud transcription unavailable — used local speech recognition instead.",
@@ -1730,7 +1736,26 @@ string final = transcription.Text;
 var producedModelName = transcription.ProviderModelName;
 ```
 
-> `_shell` is the `AppShell` reference. If `PipelineHost` does not already hold one, add an `AppShell _shell` constructor parameter and field, and pass `this` from `AppShell.BootstrapAsync` where `PipelineHost` is constructed. If `_settings` (a `SettingsStore`) is not already a field, add it the same way — `AppShell` already has `SettingsStore`.
+> **Wiring — do NOT pass an `AppShell` into `PipelineHost`.** `AppShell.BootstrapAsync` is a **static** factory (AppShell.cs:46): `PipelineHost` is constructed at `AppShell.cs:230` and then passed *into* the `AppShell` constructor at `AppShell.cs:239`, so **no `AppShell` instance exists when `PipelineHost` is built** — an `AppShell _shell` constructor parameter cannot be satisfied (there is no `this` in a static method, and the shell is built after the pipeline). `PipelineHost` also has **no `SettingsStore` field**. Instead, inject two delegates via the `PipelineHost` **constructor**:
+>
+> 1. **Add two new required parameters** to the `PipelineHost` constructor, placed immediately **after** `Winpepper.Core.Notifications.IToastService toasts,` and **before** the first optional parameter (`Winpepper.Cleanup.CleanupRunner? cleanup = null`):
+>
+> ```csharp
+>         Func<AppSettings> settingsProvider,
+>         Func<Winpepper.Asr.ParakeetSession, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> transcriberFactory,
+> ```
+>
+>    Store them in `private readonly Func<AppSettings> _settingsProvider;` and `private readonly Func<Winpepper.Asr.ParakeetSession, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> _buildTranscriber;` fields, assigned in the constructor body: `_settingsProvider = settingsProvider; _buildTranscriber = transcriberFactory;`. Add `using Winpepper.Core.Settings;` to `PipelineHost.cs` (for `AppSettings`) if not already present.
+>
+> 2. **Update the `new PipelineHost(...)` call** in `AppShell.BootstrapAsync` (AppShell.cs:230) to pass the two new arguments right after the `toasts` argument, built from the Task 9 Step 1 AssemblyAI-stack locals (which is why that stack must be constructed **before** line 230):
+>
+> ```csharp
+>         () => store.Load(),
+>         (local, s, onFallback) => AppShell.BuildTranscriber(
+>             local, s, onFallback, aaiClient, aaiKeyStore, factory),
+> ```
+>
+>    `store` and `factory` are existing `BootstrapAsync` locals; `aaiClient`/`aaiKeyStore` are the Task 9 Step 1 locals. `AppShell.BuildTranscriber` is the **static** factory from Task 9, so no `AppShell` instance is required. This closure captures only already-constructed values — there is no circular construction dependency. Calling `store.Load()` per dictation picks up live provider/model changes the user makes in the settings UI.
 
 - [ ] **Step 2: Record the actual provider in history (Hold-up path)**
 
@@ -1777,8 +1802,8 @@ var transcript2 = await Task.Run(() => _asr!.Transcribe(samples2), ct);
 with the selected-transcriber block, naming every local distinctly:
 
 ```csharp
-var settingsNow2 = _settings.Load();
-var transcriber2 = _shell.BuildTranscriber(_asr!, settingsNow2, notice =>
+var settingsNow2 = _settingsProvider();
+var transcriber2 = _buildTranscriber(_asr!, settingsNow2, notice =>
     _ = _toasts.ShowAsync(
         "Winpepper",
         "Cloud transcription unavailable — used local speech recognition instead.",
@@ -1853,7 +1878,7 @@ In `src/Winpepper.App/Views/RecordingPage.xaml`, add inside the page's main vert
             <Button x:Name="TestKeyButton" Content="Test" />
         </StackPanel>
         <TextBox x:Name="AssemblyAiModelBox" Header="Model id" MinWidth="280"
-                 PlaceholderText="universal-2 (fast) or universal-3-5-pro (premium)" />
+                 PlaceholderText="universal-2 (fast) or universal-3-pro (premium)" />
         <TextBlock x:Name="AsrStatusText"
                    TextWrapping="Wrap"
                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
@@ -1991,7 +2016,7 @@ git commit -m "test: green non-Windows suite for AssemblyAI ASR provider" || ech
 3. **Test button — good key:** Click **Test** with the valid key → status "Key is valid."
 4. **Test button — bad key:** Save a wrong key, click **Test** → status "Key rejected (401). Check the key."
 5. **Cloud dictation:** Select "AssemblyAI premium", set model `universal-2`. Dictate a 2–30s clip via the hotkey. Confirm the text is injected. Open History → the entry's `asrModelName` reads `assemblyai/universal-2`.
-6. **Premium model:** Set model `universal-3-5-pro`, dictate again → text injected; history `asrModelName` reads `assemblyai/universal-3-5-pro`. If the API rejects the model id, confirm the fallback toast appears and local text is still delivered (see step 8) and the API's error is logged.
+6. **Premium model:** Set model `universal-3-pro`, dictate again → text injected; history `asrModelName` reads `assemblyai/universal-3-pro`. If the API rejects the model id (e.g. the id is not enabled for this account), confirm the fallback toast appears and local text is still delivered (see step 8) and the API's error is logged.
 7. **Clear key:** Click **Clear key** → status "Key cleared." Confirm the `.key.dat` file is gone.
 8. **Robust fallback (network cable / airplane mode):** With AssemblyAI selected and a valid key saved, disable networking, then dictate. Confirm: (a) the dictation still lands via **local Parakeet**, (b) the non-intrusive toast "Cloud transcription unavailable — used local speech recognition instead." appears, (c) History `asrModelName` reads `parakeet-tdt-0.6b-v3`.
 9. **Fallback with no key:** Select AssemblyAI, clear the key, dictate → local result delivered + fallback toast; History shows the local model.
@@ -2033,10 +2058,10 @@ git commit -m "docs: add Windows smoke checklist for AssemblyAI ASR provider" ||
 
 **2. Placeholder scan:** No "TBD"/"handle edge cases"/"similar to Task N"/"add validation" placeholders; every code step shows complete code and every test step shows exact commands + expected output.
 
-**3. Type consistency:** Names are consistent across tasks: `TranscriptionResult(Text, ProviderModelName)`, `ITranscriber.TranscribeAsync(ReadOnlyMemory<float>, CancellationToken)`, `ITranscriber.ModelName`, `IAssemblyAiClient` methods (`UploadAsync`/`CreateTranscriptAsync`/`GetTranscriptAsync`/`ValidateKeyAsync`), `AssemblyAiTranscript(Status, Text, Confidence, AudioDuration, Error)`, `IApiKeyProtector.Protect/Unprotect`, `IAssemblyAiKeyStore.HasKey/Save/Load/Clear`, `AssemblyAiOptions.{Model,TotalTimeout,PollInterval,MaxTransientRetries,LanguageCode,BaseUrl}`, `AssemblyAiException.{StatusCode,IsAuthError}`, `AppShell.BuildTranscriber(ParakeetSession, AppSettings, Action<string>)`. `ModelName` for cloud is `assemblyai/<model>` everywhere (Task 6 impl, Task 3/6 tests, Smoke steps 5–6). Local model string is `parakeet-tdt-0.6b-v3` / `ModelRegistry.DefaultAsrName` consistently (Tasks 9, 10, Smoke). No signature drift found.
+**3. Type consistency:** Names are consistent across tasks: `TranscriptionResult(Text, ProviderModelName)`, `ITranscriber.TranscribeAsync(ReadOnlyMemory<float>, CancellationToken)`, `ITranscriber.ModelName`, `IAssemblyAiClient` methods (`UploadAsync`/`CreateTranscriptAsync`/`GetTranscriptAsync`/`ValidateKeyAsync`), `AssemblyAiTranscript(Status, Text, Confidence, AudioDuration, Error)`, `IApiKeyProtector.Protect/Unprotect`, `IAssemblyAiKeyStore.HasKey/Save/Load/Clear`, `AssemblyAiOptions.{Model,TotalTimeout,PollInterval,MaxTransientRetries,LanguageCode,BaseUrl}`, `AssemblyAiException.{StatusCode,IsAuthError}`, `AppShell.BuildTranscriber(ParakeetSession, AppSettings, Action<string>, IAssemblyAiClient, IAssemblyAiKeyStore, ILoggerFactory)` (static), invoked by `PipelineHost` through the injected `_buildTranscriber` delegate + `_settingsProvider` (`Func<AppSettings>`) constructor parameters (Task 10). `ModelName` for cloud is `assemblyai/<model>` everywhere (Task 6 impl, Task 3/6 tests, Smoke steps 5–6). Local model string is `parakeet-tdt-0.6b-v3` / `ModelRegistry.DefaultAsrName` consistently (Tasks 9, 10, Smoke). No signature drift found.
 
 **4. Load-bearing validation hardening (2026-07-21):** The plan was stress-tested against 17 load-bearing assumptions (finder → strategist → 5 parallel validators; ledger at `.the-usual-logs/assemblyai-asr-provider/load-bearing-ledger.md`). Five falsifications were fixed in place; the rest verified. No data-loss/irreversible risk found → no halt.
-- **API contract (A9, falsified):** the create payload now sends **`speech_models: [<model>]`** (plural array), not the deprecated singular `speech_model` (Task 5 code + test updated; Global Constraints updated). The premium model string is **`universal-3-5-pro`** (there is no `universal-3-pro`) — fixed in Task 11 placeholder and Task 13 smoke step 6. Default `universal-2` confirmed valid. Verified against official AssemblyAI docs + a live read-only 401 probe.
+- **API contract (A9, falsified):** the create payload now sends **`speech_models: [<model>]`** (plural array), not the deprecated singular `speech_model` (Task 5 code + test updated; Global Constraints updated). The recommended premium model string is **`universal-3-pro`** (AssemblyAI's GA Universal-3 Pro flagship, released 2026-02-03; `universal-3-5-pro` also exists but may be account-gated, so it is not the default premium example) — reflected in Task 11 placeholder and Task 13 smoke step 6. The exact premium id is not load-bearing: a rejected id surfaces the API error and falls back to local. Default `universal-2` confirmed valid. Verified against official AssemblyAI docs + a live read-only 401 probe.
 - **DPAPI/CPM (A12, gap fixed):** Task 8 now adds `System.Security.Cryptography.ProtectedData` to `Directory.Packages.props` + `Winpepper.App.csproj` (required — repo uses Central Package Management; the package was absent). Security model documented (non-portable CurrentUser blob; app ships unpackaged so no MSIX caveat). `AssemblyAiKeyStore.Load()` (Task 4) now catches `CryptographicException` and returns `null` so an undecryptable blob degrades to local fallback + re-prompt (new test added).
 - **Linux build model (A13, falsified):** corrected Global Constraints — the App is excluded from Linux builds by its Windows-only TFM (not `#if WINDOWS`, and not the now-inert `SKIP_WINUI_LINUX` guard); builds MUST be project-scoped (every task already is).
 - **Existing test project (A15, falsified):** `tests/Winpepper.Asr.Tests` already exists in the solution — File Structure now says "add files to it," not "create it."

@@ -118,6 +118,53 @@ public class LongPressSpaceStateMachineTests
 
         events.ShouldBeEmpty();
         replays.ShouldBeEmpty();
+        machine.Process(false, false).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void CancellationDuringHoldingEndsHoldButRetainsReleaseOwnership()
+    {
+        var (machine, timer, events, replays) = NewMachine();
+        machine.Process(true, false);
+        timer.Fire();
+
+        machine.Cancel(replayPending: true);
+
+        events.ShouldBe(new[] { HotkeyEventKind.HoldDown, HotkeyEventKind.HoldUp });
+        replays.ShouldBeEmpty();
+        machine.IsActive.ShouldBeTrue();
+        machine.Process(false, false).ShouldBeTrue();
+        machine.IsActive.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void CancellationDuringSuppressionRetainsReleaseOwnership()
+    {
+        var (machine, _, events, replays) = NewMachine();
+        machine.Process(true, false);
+        machine.CancelPendingForModifier().ShouldBeTrue();
+
+        machine.Cancel(replayPending: true);
+
+        events.ShouldBeEmpty();
+        replays.ShouldBe(new[] { "Space" });
+        machine.IsActive.ShouldBeTrue();
+        machine.Process(false, false).ShouldBeTrue();
+        machine.IsActive.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void DisposeDuringHoldingEmitsHoldUpAndClearsState()
+    {
+        var (machine, timer, events, replays) = NewMachine();
+        machine.Process(true, false);
+        timer.Fire();
+
+        machine.Dispose();
+
+        events.ShouldBe(new[] { HotkeyEventKind.HoldDown, HotkeyEventKind.HoldUp });
+        replays.ShouldBeEmpty();
+        machine.IsActive.ShouldBeFalse();
     }
 
     [Fact]

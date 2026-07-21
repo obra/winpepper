@@ -84,6 +84,11 @@ public sealed class HotkeyHook : IDisposable
         var modifiersBeforeEvent = _modifiers;
         var bindings = Volatile.Read(ref _bindings);
 
+        // Low-level hook callbacks observe async key state before the current
+        // transition is applied. A false Space state therefore proves any
+        // previously owned press ended, while a repeat/up still reads down.
+        _spaceHold.RecoverIfReleased();
+
         // A modifier pressed after a bare Space-down changes the user's intent.
         // Replay the buffered tap before updating modifier state, then retain
         // ownership of the physical Space until key-up for down/up symmetry.
@@ -256,7 +261,8 @@ public sealed class HotkeyHook : IDisposable
                         "Synthetic Space replay failed: initialSent={InitialSent}, repairAttempted={RepairAttempted}, repairSucceeded={RepairSucceeded}. SendInput may be blocked by UIPI.",
                         result.InitialInputsSent, result.RepairAttempted, result.RepairSucceeded);
                 }
-            });
+            },
+            isSpacePhysicallyDown: () => _keyPhysicallyDown(VirtualKeyCatalog.Space));
     }
 
     // Real physical key-state probe. Guarded so it is only P/Invoked on Windows;

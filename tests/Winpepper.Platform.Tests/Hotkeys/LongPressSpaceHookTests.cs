@@ -33,9 +33,10 @@ public class LongPressSpaceHookTests
         }
     }
 
-    private static HotkeyHook NewHook(FakeTimer timer, Func<SpaceReplayResult> replay)
+    private static HotkeyHook NewHook(FakeTimer timer, Func<SpaceReplayResult> replay,
+        Func<int, bool>? keyPhysicallyDown = null)
         => new(HotkeyChord.Parse("Space"), HotkeyChord.Parse("F24"), HotkeyChord.Parse("Esc"),
-            new NullLogger<HotkeyHook>(), keyPhysicallyDown: _ => true,
+            new NullLogger<HotkeyHook>(), keyPhysicallyDown: keyPhysicallyDown ?? (_ => true),
             spaceTimerScheduler: timer, replaySpace: replay);
 
     [Fact]
@@ -84,6 +85,146 @@ public class LongPressSpaceHookTests
         replayCount.ShouldBe(1);
         hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
         hook.TryProcessKey(0x20, false, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void ReconfigurationDuringHoldingEndsHoldAndStillSwallowsPhysicalRelease()
+    {
+        var timer = new FakeTimer();
+        var hook = NewHook(timer, () => SpaceReplayResult.Succeeded);
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+        timer.Fire();
+        hook.Events.TryRead(out var down).ShouldBeTrue();
+        down!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
+
+        hook.UpdateChords(HotkeyChord.Parse("F23"), HotkeyChord.Parse("F24"));
+
+        hook.Events.TryRead(out var up).ShouldBeTrue();
+        up!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+        hook.TryProcessKey(0x20, false, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void SuspensionDuringHoldingEndsHoldAndStillSwallowsPhysicalRelease()
+    {
+        var timer = new FakeTimer();
+        var hook = NewHook(timer, () => SpaceReplayResult.Succeeded);
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+        timer.Fire();
+        hook.Events.TryRead(out _).ShouldBeTrue();
+
+        hook.SetSuspended(true);
+
+        hook.Events.TryRead(out var up).ShouldBeTrue();
+        up!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+        hook.TryProcessKey(0x20, false, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void RawCaptureDuringHoldingEndsHoldAndStillSwallowsPhysicalRelease()
+    {
+        var timer = new FakeTimer();
+        var hook = NewHook(timer, () => SpaceReplayResult.Succeeded);
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+        timer.Fire();
+        hook.Events.TryRead(out _).ShouldBeTrue();
+
+        using var capture = hook.BeginRawCapture(_ => { });
+
+        hook.Events.TryRead(out var up).ShouldBeTrue();
+        up!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+        hook.TryProcessKey(0x20, false, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void ReconfigurationDuringSuppressionStillSwallowsPhysicalRelease()
+    {
+        var timer = new FakeTimer();
+        var hook = NewHook(timer, () => SpaceReplayResult.Succeeded);
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+        hook.TryProcessKey(0xA2, true, out _).ShouldBeFalse();
+
+        hook.UpdateChords(HotkeyChord.Parse("F23"), HotkeyChord.Parse("F24"));
+
+        hook.TryProcessKey(0x20, false, out _).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void LostReleaseWhilePendingReplaysTapInsteadOfStartingHold()
+    {
+        var spaceDown = true;
+        var timer = new FakeTimer();
+        var replays = 0;
+        var hook = NewHook(timer,
+            () => { replays++; return SpaceReplayResult.Succeeded; },
+            vk => vk != 0x20 || spaceDown);
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+
+        spaceDown = false;
+        timer.Fire();
+
+        replays.ShouldBe(1);
+        hook.Events.TryRead(out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void LostReleaseWhileHoldingEmitsHoldUpOnNextKeyEvent()
+    {
+        var spaceDown = true;
+        var timer = new FakeTimer();
+        var hook = NewHook(timer, () => SpaceReplayResult.Succeeded,
+            vk => vk != 0x20 || spaceDown);
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+        timer.Fire();
+        hook.Events.TryRead(out _).ShouldBeTrue();
+
+        spaceDown = false;
+        hook.TryProcessKey(0x41, true, out _).ShouldBeFalse();
+
+        hook.Events.TryRead(out var up).ShouldBeTrue();
+        up!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+    }
+
+    [Fact]
+    public void PhysicalSpaceUpUsesPreTransitionDownStateAndIsSwallowed()
+    {
+        var spaceDownBeforeTransition = true;
+        var timer = new FakeTimer();
+        var replays = 0;
+        var hook = NewHook(timer,
+            () => { replays++; return SpaceReplayResult.Succeeded; },
+            vk => vk != 0x20 || spaceDownBeforeTransition);
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+
+        // LowLevelKeyboardProc runs before async key state reflects this up.
+        hook.TryProcessKey(0x20, false, out _).ShouldBeTrue();
+        spaceDownBeforeTransition = false;
+
+        replays.ShouldBe(1);
+        hook.Events.TryRead(out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void NewSpaceDownAfterLostSuppressedUpRecoversBeforeProcessingDown()
+    {
+        var spaceDown = true;
+        var timer = new FakeTimer();
+        var hook = NewHook(timer, () => SpaceReplayResult.Succeeded,
+            vk => vk != 0x20 || spaceDown);
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+        hook.TryProcessKey(0xA2, true, out _).ShouldBeFalse();
+
+        hook.TryProcessKey(0xA2, false, out _).ShouldBeFalse();
+        spaceDown = false;
+
+        // On a new down, the pre-transition probe still reads the released
+        // state from the missing prior up, so recovery must happen first.
+        hook.TryProcessKey(0x20, true, out _).ShouldBeTrue();
+        spaceDown = true;
+        timer.Fire();
+
+        hook.Events.TryRead(out var down).ShouldBeTrue();
+        down!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
     }
 
     [Fact]

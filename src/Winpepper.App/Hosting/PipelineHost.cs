@@ -21,7 +21,7 @@ public sealed class PipelineHost : IDisposable
     private readonly ILogger<PipelineHost> _log;
     private readonly HotkeyHook _hook;
     private readonly HotkeyReadinessGate _hotkeyReadiness = new();
-    private readonly object _hotkeyStartupGate = new();
+    private readonly HotkeyLifecycleGate _hotkeyLifecycle = new(nameof(PipelineHost));
     private bool _hotkeyLoopStarted;
     private readonly TextInjector _injector;
     private ParakeetSession? _asr;
@@ -101,25 +101,27 @@ public sealed class PipelineHost : IDisposable
     public bool IsRunning { get; private set; }
 
     public void UpdateHotkeys(string hold, string toggle)
-        => _hook.UpdateChords(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle));
+        => _hotkeyLifecycle.Run(() =>
+        {
+            _hook.UpdateChords(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle));
+            return true;
+        });
 
-    public IDisposable BeginHotkeyCapture(Action<RawKeyTransition> sink)
-    {
-        EnsureHotkeyLoopStarted();
-        return _hook.BeginRawCapture(sink);
-    }
+    public IDisposable BeginHotkeyCapture(Action<RawKeyTransition> sink) =>
+        _hotkeyLifecycle.Run(() =>
+        {
+            EnsureHotkeyLoopStarted();
+            return _hook.BeginRawCapture(sink);
+        });
 
     private void EnsureHotkeyLoopStarted()
     {
-        lock (_hotkeyStartupGate)
-        {
-            if (_hotkeyLoopStarted) return;
-            _hook.Start();
-            _runCts = new CancellationTokenSource();
-            _runTask = Task.Run(() => RunAsync(_runCts.Token));
-            _hotkeyLoopStarted = true;
-            _log.LogInformation("Hotkey hook/event loop started");
-        }
+        if (_hotkeyLoopStarted) return;
+        _hook.Start();
+        _runCts = new CancellationTokenSource();
+        _runTask = Task.Run(() => RunAsync(_runCts.Token));
+        _hotkeyLoopStarted = true;
+        _log.LogInformation("Hotkey hook/event loop started");
     }
 
     /// <summary>
@@ -129,13 +131,13 @@ public sealed class PipelineHost : IDisposable
     /// the condition is reported on the error bus (which deep-links to the
     /// Models tab), and the method returns false instead of throwing.
     /// </summary>
-    public bool TryStart()
+    public bool TryStart() => _hotkeyLifecycle.Run(() =>
     {
         // Raw recorder capture is required during onboarding, before a model is
         // installed. Keep the event loop draining normal triggers while gated.
         EnsureHotkeyLoopStarted();
-        lock (_hotkeyStartupGate) return TryStartCore();
-    }
+        return TryStartCore();
+    });
 
     private bool TryStartCore()
     {
@@ -508,12 +510,15 @@ public sealed class PipelineHost : IDisposable
 
     public void Dispose()
     {
-        _hotkeyReadiness.Disable();
-        _runCts?.Cancel();
-        try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
-        _hook.Dispose();
-        _asr?.Dispose();
-        _recorder?.Dispose();
+        _hotkeyLifecycle.Dispose(() =>
+        {
+            _hotkeyReadiness.Disable();
+            _runCts?.Cancel();
+            try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            _hook.Dispose();
+            _asr?.Dispose();
+            _recorder?.Dispose();
+        });
     }
 }
 #endif

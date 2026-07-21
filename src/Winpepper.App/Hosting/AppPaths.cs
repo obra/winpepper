@@ -9,6 +9,7 @@ public static class AppPaths
     public static string ParakeetModelDir => Path.Combine(Root, "models", "parakeet-tdt-0.6b-v3");
     public static string SettingsJson => Path.Combine(Root, "settings.json");
     public static string CorrectionsJson => Path.Combine(Root, "corrections.json");
+    public static string AssemblyAiKeyFile => Path.Combine(Root, "assemblyai.key.dat");
     public static string CleanupSettingsJson => Path.Combine(Root, "cleanup-settings.json");
 
     public static string AssetsDir => Path.Combine(AppContext.BaseDirectory, "Assets");

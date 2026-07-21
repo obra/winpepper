@@ -50,6 +50,18 @@ public class DebouncedSettingsWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task QueueAndFlushAsync_Writes_Immediately_Without_Debounce()
+    {
+        var store = new SettingsStore(_path);
+        // 30 s debounce: only an immediate flush can make this land in time.
+        using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+
+        await writer.QueueAndFlushAsync(s => s with { MicDeviceId = "flushed-now" });
+
+        new SettingsStore(_path).Load().MicDeviceId.ShouldBe("flushed-now");
+    }
+
+    [Fact]
     public async Task Dispose_Flushes_Pending_Writes()
     {
         var store = new SettingsStore(_path);

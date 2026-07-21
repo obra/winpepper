@@ -121,8 +121,9 @@ public sealed class CleanupRunner
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw);
         }
 
-        // 7) Apply deterministic correction post-pass.
-        var withCorrections = CaseAwareReplacer.Apply(sanitized, corrections.Replacements);
+        // 7) Apply deterministic correction post-pass (user corrections, then
+        //    the built-in app-name mishearing correction).
+        var withCorrections = ApplyDeterministicPostPass(sanitized, corrections);
 
         sw.Stop();
         return new CleanupResult(
@@ -179,6 +180,15 @@ public sealed class CleanupRunner
         return false;
     }
 
+    // Deterministic post-pass shared by the LLM-success and fallback paths:
+    // user-configured corrections first, then the built-in app-name mishearing
+    // correction. Applied on every path so injected text always benefits.
+    private static string ApplyDeterministicPostPass(string text, CorrectionsData corrections)
+    {
+        var withCorrections = CaseAwareReplacer.Apply(text, corrections.Replacements);
+        return AppNameCorrector.Apply(withCorrections);
+    }
+
     private static CleanupResult Finalize(
         string rawTranscript,
         string rawModelOutput,
@@ -187,7 +197,7 @@ public sealed class CleanupRunner
         CleanupPath path,
         Stopwatch sw)
     {
-        var cleaned = CaseAwareReplacer.Apply(rawTranscript, corrections.Replacements);
+        var cleaned = ApplyDeterministicPostPass(rawTranscript, corrections);
         sw.Stop();
         return new CleanupResult(cleaned, path, rawModelOutput, assembledPrompt, sw.Elapsed);
     }

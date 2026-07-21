@@ -104,6 +104,28 @@ There are **no** UNRESOLVED COVERAGE GAPS. Optional item ("also track sustained
 zero-energy at the warm stream level") is implemented as a real, tested feature
 in Task 6, not deferred.
 
+**Residual concurrency surface (finding #4, Tasks 7/9).** The coordinator's
+epoch/ring/fault race IS reproduced and proven on Linux by Task 4's hammer. But
+one guarantee lives ONLY in the `#if WINDOWS` NAudio adapters and cannot be
+exercised by the Linux hammer: mutual exclusion between `OnData` (the NAudio
+capture thread) and `Dispose`/teardown (which JOINS that thread). Because
+`WasapiCapture.Dispose()` joins the capture thread, the teardown must not run
+under the same lock `OnData` holds — doing so is a lock↔join inversion that hangs
+on rebuild. Tasks 7 and 9 therefore run their teardown OUTSIDE the callback lock,
+and smoke **S5** is a repeated start/rebuild/unplug stress loop with hang
+detection (not a single unplug) to actually exercise this window.
+
+**Fault-detection scope (finding #7, Task 5).** `ICaptureSource.Stopped(non-null)`
+→ rebuild covers HARD device faults (unplug / disable / reconfigure), which NAudio
+surfaces as a non-null `RecordingStopped` exception (`AUDCLNT_E_DEVICE_INVALIDATED`).
+It does **not** cover "soft" faults — OS mic-privacy toggle and some Bluetooth
+hiccups — which can keep the stream alive delivering silent/zero frames with no
+stop event. Those are caught instead by the Bug 2 session-end silence detector
+(Task 10 `WarnIfSessionSilent`) and the Task 6 `SessionWasSilent` flag, which fire
+on essentially-zero energy regardless of whether a fault event was raised. A full
+no-data/heartbeat watchdog that would let soft faults ALSO trigger auto-rebuild is
+a clean follow-up, not required for this plan.
+
 ---
 
 ## File Structure
@@ -330,7 +352,13 @@ namespace Winpepper.Audio;
 /// </summary>
 public static class AudioEnergy
 {
-    /// <summary>Sessions whose RMS is below this are "essentially zero energy".</summary>
+    /// <summary>
+    /// Sessions whose RMS is below this are "essentially zero energy" (~-80 dBFS).
+    /// This is a ZERO-ENERGY / dead-device detector, NOT a voice-activity detector:
+    /// a live mic's noise floor (~-40..-65 dBFS) stays above this even during long
+    /// pauses, so only muted / privacy-off / zero-filled capture falls below it. Do
+    /// not "improve" this into a VAD or raise it toward speech levels.
+    /// </summary>
     public const double SilenceRmsThreshold = 1e-4;
 
     /// <summary>Root-mean-square amplitude of a mono float frame (0 for empty).</summary>
@@ -1018,6 +1046,16 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
   and Task 10 routing); tests proving fault → `CaptureFaulted` + rebuild + backoff
   + forced restart.
 
+> **Fault-detection scope (see Coverage Map note).** This rebuild-on-fault path
+> is driven ONLY by a non-null `ICaptureSource.Stopped(ex)`, which NAudio raises
+> for HARD device faults (unplug/disable/reconfigure → `AUDCLNT_E_DEVICE_INVALIDATED`).
+> "Soft" faults — OS mic-privacy toggle, some Bluetooth hiccups — can keep the
+> stream alive delivering silent frames with NO stop event, so they do NOT
+> auto-rebuild here; they are surfaced instead by the Bug 2 session-end silence
+> detector (Task 10) and the Task 6 `SessionWasSilent` flag. Do not "fix" the
+> tests to expect auto-recovery from a silent-but-unfaulted stream — that is a
+> deliberate, documented boundary, not a gap.
+
 - [ ] **Step 1: Write the failing tests**
 
 Append to `tests/Winpepper.Audio.Tests/WarmCaptureCoordinatorTests.cs` (inside
@@ -1267,9 +1305,14 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
   seam the coordinator builds (consumed by Task 8).
 
 **Verification:** Linux-unbuildable (`#if WINDOWS`). Verified in the Windows
-Smoke Test Checklist (items S1, S2, S6). The concurrency/lifecycle discipline it
-mirrors is already proven on Linux by Tasks 3–5. This step ships production
-NAudio code — no stub.
+Smoke Test Checklist (items S1, S2, S6). The coordinator's epoch/ring/fault
+discipline is proven on Linux by Tasks 3–5, but this adapter carries ONE
+concurrency guarantee the Linux hammer cannot reach: the mutual exclusion between
+`OnData` (NAudio capture thread) and `Dispose`/teardown (which joins that thread).
+That teardown-vs-callback safety is a residual Windows-only surface — it is why
+`Dispose` deliberately runs the join OUTSIDE the callback lock (see Step 1) and
+why smoke **S5** is a repeated stress loop with hang detection, not a single
+unplug. This step ships production NAudio code — no stub.
 
 - [ ] **Step 1: Write the adapter**
 
@@ -1294,7 +1337,13 @@ namespace Winpepper.Audio;
 /// Decode/downmix/resample all happen here so the coordinator only ever sees
 /// mono 16 kHz frames. <see cref="OnData"/> and <see cref="Dispose"/> are made
 /// mutually safe with a lock + disposed flag, mirroring the epoch discipline the
-/// coordinator unit-tests on Linux.
+/// coordinator unit-tests on Linux. NOTE: <see cref="Dispose"/> performs its
+/// bookkeeping (set disposed, unhook, null the capture) under the lock but runs
+/// the actual teardown (StopRecording/Dispose, which JOINS NAudio's capture
+/// thread) OUTSIDE the lock. OnData holds the same lock, so joining while holding
+/// it would deadlock. This teardown-vs-callback mutual exclusion is the one piece
+/// of concurrency the Linux hammer (Task 4) does NOT cover — it lives only here
+/// and is exercised in the Windows smoke stress loop (S5).
 /// </summary>
 public sealed class WasapiCaptureSource : ICaptureSource
 {
@@ -1465,22 +1514,35 @@ public sealed class WasapiCaptureSource : ICaptureSource
 
     public void Dispose()
     {
+        WasapiCapture? capture;
         lock (_lock)
         {
             if (_disposed) return;
             _disposed = true;
 
-            var capture = _capture;
+            capture = _capture;
             _capture = null;
             if (capture is not null)
             {
-                try { capture.StopRecording(); } catch (Exception ex) { _log?.LogDebug(ex, "StopRecording failed"); }
+                // Unhook INSIDE the lock so no new callback is dispatched. Any
+                // in-flight OnData either already holds the lock (we wait for it) or
+                // will see _disposed and return at the top.
                 capture.DataAvailable -= OnData;
                 capture.RecordingStopped -= OnRecordingStopped;
-                try { capture.Dispose(); } catch (Exception ex) { _log?.LogDebug(ex, "capture dispose failed"); }
             }
-            DisposeResampler();
         }
+        // Bug 4 (deadlock): tear down OUTSIDE _lock. capture.Dispose() calls
+        // WasapiCapture's captureThread.Join(); that capture thread may be parked at
+        // OnData's `lock (_lock)`. Joining while holding _lock is a lock->Join vs
+        // OnData-waiting-on-lock inversion => intermittent hang on rebuild/teardown.
+        // Once _disposed is set and handlers are unhooked above, no OnData touches
+        // _capture or the resampler, so this teardown is race-free without the lock.
+        if (capture is not null)
+        {
+            try { capture.StopRecording(); } catch (Exception ex) { _log?.LogDebug(ex, "StopRecording failed"); }
+            try { capture.Dispose(); } catch (Exception ex) { _log?.LogDebug(ex, "capture dispose failed"); }
+        }
+        DisposeResampler();
     }
 }
 #endif
@@ -1833,39 +1895,51 @@ public sealed class WasapiRecorder : IAudioRecorder
 
     public float[] Stop()
     {
+        WasapiCapture? capture;
+        float[] result;
         lock (_lock)
         {
-            var capture = _capture;
+            capture = _capture;
             _capture = null;
-            if (capture is not null)
-            {
-                try { capture.StopRecording(); } catch (Exception ex) { _log?.LogDebug(ex, "StopRecording failed"); }
-                capture.DataAvailable -= OnData;
-                try { capture.Dispose(); } catch (Exception ex) { _log?.LogDebug(ex, "capture dispose failed"); }
-            }
-            DisposeResampler();
-            return _buffer.ToArray();
+            if (capture is not null) capture.DataAvailable -= OnData;
+            result = _buffer.ToArray();
         }
+        // Bug 8 (deadlock): run teardown OUTSIDE _lock. capture.Dispose() joins
+        // NAudio's capture thread, which may be parked at OnData's `lock (_lock)`;
+        // joining while holding _lock would deadlock. Nulling _capture + unhooking
+        // above means any later OnData returns before touching the resampler.
+        if (capture is not null)
+        {
+            try { capture.StopRecording(); } catch (Exception ex) { _log?.LogDebug(ex, "StopRecording failed"); }
+            try { capture.Dispose(); } catch (Exception ex) { _log?.LogDebug(ex, "capture dispose failed"); }
+        }
+        DisposeResampler();
+        return result;
     }
 
     public void Dispose()
     {
+        WasapiCapture? capture;
         lock (_lock)
         {
             if (_disposed) return;
             _disposed = true;
 
-            var capture = _capture;
+            capture = _capture;
             _capture = null;
-            if (capture is not null)
-            {
-                // Bug 8: StopRecording() and unhook DataAvailable before disposing.
-                try { capture.StopRecording(); } catch (Exception ex) { _log?.LogDebug(ex, "StopRecording failed"); }
-                capture.DataAvailable -= OnData;
-                try { capture.Dispose(); } catch (Exception ex) { _log?.LogDebug(ex, "capture dispose failed"); }
-            }
-            DisposeResampler();
+            // Bug 8: unhook DataAvailable inside the lock so no new callback runs.
+            if (capture is not null) capture.DataAvailable -= OnData;
         }
+        // Bug 8 (deadlock): StopRecording()/Dispose() run OUTSIDE _lock. Dispose()
+        // joins NAudio's capture thread, which may be parked at OnData's
+        // `lock (_lock)`; joining while holding _lock would deadlock. _disposed +
+        // nulled _capture guarantee any later OnData returns before the resampler.
+        if (capture is not null)
+        {
+            try { capture.StopRecording(); } catch (Exception ex) { _log?.LogDebug(ex, "StopRecording failed"); }
+            try { capture.Dispose(); } catch (Exception ex) { _log?.LogDebug(ex, "capture dispose failed"); }
+        }
+        DisposeResampler();
     }
 }
 #endif
@@ -2002,7 +2076,7 @@ Add this private method to `PipelineHost` (e.g. just above `Dispose`):
         if (samples.Length == 0) return; // nothing captured is a distinct (cancel) case
         if (!Winpepper.Audio.AudioEnergy.IsSessionSilent(samples)) return;
 
-        _log.LogWarning("Session {SessionId} captured no audible audio (RMS below silence threshold)", sessionId);
+        _log.LogWarning("Session {SessionId} captured near-zero energy (RMS below the zero-energy threshold \u2014 mic likely muted / privacy-off / disconnected)", sessionId);
         _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Audio,
             new InvalidOperationException("No audio detected — check your microphone / privacy settings."),
             sessionId);
@@ -2204,17 +2278,31 @@ Windows build, then:
 - **S3 — OS mute mid-session:** mute the mic via the OS/hardware, dictate a full
   session, release the hotkey. Confirm the toast "No audio detected — check your
   microphone / privacy settings." appears and an `Audio`-stage record lands on
-  the Diagnostics page.
+  the Diagnostics page. **Also log/record the actual session RMS** in this muted
+  state to confirm it lands below the −80 dBFS (`1e-4`) threshold on real hardware.
 - **S4 — Privacy toggle:** turn off "Let apps access your microphone" in Windows
   Privacy settings, dictate a session. Confirm the same "No audio detected" toast
-  and ErrorBus record. Re-enable and confirm normal capture resumes.
+  and ErrorBus record. Re-enable and confirm normal capture resumes. **Threshold
+  calibration:** also capture a normal live-but-idle (quiet room, mic on) session
+  and log its RMS; confirm the idle-live floor stays ABOVE `1e-4` while muted/
+  privacy-off stays below it — i.e. the −80 dBFS guard band holds on this device.
+  If a very-low-input-gain + very-quiet-room combo lands a live session below the
+  threshold, retune the constant (it is the single `AudioEnergy.SilenceRmsThreshold`).
 
 **Fault & device recovery (findings #3, #4, #7)**
-- **S5 — Rebuild race (unplug/swap mid-session):** with a USB mic, start
-  dictating and physically unplug it mid-session. Confirm: no crash / no
-  `ObjectDisposedException` in the crash log; a capture-fault toast appears; and a
-  subsequent dictation on the built-in mic works (ring cleared, no stale pre-roll
-  audio bleeds in). **[real-hardware proof scenario]**
+- **S5 — Rebuild race / teardown-vs-callback deadlock (unplug/swap mid-session,
+  STRESS LOOP):** the adapter's `OnData`-vs-`Dispose` mutual exclusion (findings
+  #4/#8) is the one concurrency guarantee the Linux hammer cannot reach, and its
+  failure mode is an *intermittent* hang, not a deterministic fault — so a single
+  unplug is NOT sufficient evidence. Run a repeated stress loop: with a USB mic,
+  script/drive **≥50 cycles** of start-dictation → force a rebuild (physically
+  unplug/replug or switch default) → dictate again, as fast as practical, with a
+  watchdog/hang detector on the capture teardown (e.g. assert each
+  `StopSession`/rebuild returns within a few seconds; log a stack dump if it does
+  not). Confirm across all cycles: no hang/deadlock on rebuild; no crash / no
+  `ObjectDisposedException` in the log; a capture-fault toast appears on unplug;
+  and a subsequent dictation on the built-in mic works (ring cleared, no stale
+  pre-roll audio bleeds in). **[real-hardware proof scenario]**
 - **S7 — Change default device between sessions:** dictate on mic A, switch the
   Windows default input to mic B in Sound settings, dictate again. Confirm the
   second session records from mic B (per-session default recheck + rebuild) with

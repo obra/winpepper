@@ -25,10 +25,6 @@ public sealed class AssemblyAiOptions
     // Send Preferred terms as keyterms_prompt (paid add-on on some tiers). Off by default.
     public bool KeytermsEnabled { get; init; } = false;
 
-    // TODO(remove in Task 14): legacy wall-clock cap; kept only so the current
-    // transcriber compiles until it switches to the ct-owned budget.
-    public TimeSpan TotalTimeout { get; init; } = TimeSpan.FromSeconds(45);
-
     /// <summary>Clamp a user-supplied cloud-deadline seconds value to [5, 30].</summary>
     public static TimeSpan ClampDeadline(int seconds)
         => TimeSpan.FromSeconds(Math.Clamp(seconds, 5, 30));

@@ -14,6 +14,7 @@
         <Grid ColumnSpacing="10" VerticalAlignment="Center">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
@@ -23,14 +24,30 @@
                     <ScaleTransform x:Name="DotScale" ScaleX="1.0" ScaleY="1.0" />
                 </Ellipse.RenderTransform>
             </Ellipse>
+            <!-- Live voice meter: 5 vertical bars, lit proportionally to
+                 InputLevel by the 100ms tick while Recording. Collapsed in all
+                 other states. Unlit bars are dim (#33FFFFFF); the code-behind
+                 recolors lit bars to the warm accent. -->
+            <StackPanel x:Name="MeterPanel"
+                        Grid.Column="1"
+                        Orientation="Horizontal"
+                        Spacing="3"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed">
+                <Rectangle x:Name="Bar0" Width="3" Height="8"  RadiusX="1.5" RadiusY="1.5" Fill="#33FFFFFF" />
+                <Rectangle x:Name="Bar1" Width="3" Height="11" RadiusX="1.5" RadiusY="1.5" Fill="#33FFFFFF" />
+                <Rectangle x:Name="Bar2" Width="3" Height="14" RadiusX="1.5" RadiusY="1.5" Fill="#33FFFFFF" />
+                <Rectangle x:Name="Bar3" Width="3" Height="17" RadiusX="1.5" RadiusY="1.5" Fill="#33FFFFFF" />
+                <Rectangle x:Name="Bar4" Width="3" Height="20" RadiusX="1.5" RadiusY="1.5" Fill="#33FFFFFF" />
+            </StackPanel>
             <TextBlock x:Name="StatusText"
-                       Grid.Column="1"
+                       Grid.Column="2"
                        Foreground="White"
                        FontSize="13"
                        Text="Recording..."
                        TextTrimming="CharacterEllipsis" />
             <TextBlock x:Name="ElapsedText"
-                       Grid.Column="2"
+                       Grid.Column="3"
                        Foreground="#AAFFFFFF"
                        FontSize="12"
                        Text="0 ms" />

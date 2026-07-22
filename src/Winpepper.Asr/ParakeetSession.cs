@@ -13,11 +13,6 @@ namespace Winpepper.Asr;
 public sealed class ParakeetSession : IDisposable
 {
     private const int MaxTokensPerStep = 10;
-
-    // Max consecutive emissions of the SAME non-blank token id on a single,
-    // non-advancing frame before the decode loop forces the frame to advance.
-    // Guards against a stuck encoder frame spraying one token (e.g. a period).
-    private const int MaxSameTokenRun = 3;
     private const int DecoderHiddenLayers = 2;
     private const int DecoderHiddenDim = 640;
 
@@ -136,23 +131,6 @@ public sealed class ParakeetSession : IDisposable
         return (flat, (int)lengths[0], d, tprime);
     }
 
-    // Update the same-token run counter for the current frame. A different
-    // token id resets the run to 1. Returns the new (runTokenId, sameTokenRun).
-    internal static (int RunTokenId, int SameTokenRun) AdvanceSameTokenRun(
-        int bestToken, int runTokenId, int sameTokenRun) =>
-        bestToken == runTokenId ? (runTokenId, sameTokenRun + 1) : (bestToken, 1);
-
-    // Whether the decode loop must force a frame advance (stop emitting on this
-    // frame). True when the token is blank, when the per-frame emission cap is
-    // hit, OR when the same non-blank token has repeated too many times on a
-    // non-advancing frame (the degenerate-spray guard).
-    internal static bool ShouldForceFrameAdvance(
-        int bestToken, int blankId, int emitted, int maxTokensPerStep,
-        int sameTokenRun, int maxSameTokenRun) =>
-        bestToken == blankId
-        || emitted >= maxTokensPerStep
-        || sameTokenRun >= maxSameTokenRun;
-
     private ParakeetTranscript GreedyDecode(float[] encoderOut, int validLen, int d, int tprime)
     {
         var vocabSize = _vocab.Size;
@@ -168,8 +146,6 @@ public sealed class ParakeetSession : IDisposable
 
         var t = 0;
         var emitted = 0;
-        var runTokenId = blankId;
-        var sameTokenRun = 0;
         var frameBuf = new float[d];
 
         while (t < Math.Min(tprime, validLen))
@@ -220,23 +196,17 @@ public sealed class ParakeetSession : IDisposable
                 var newC = results.First(r => r.Name == "output_states_2").AsTensor<float>();
                 var hi = 0; foreach (var v in newH) stateH[hi++] = v;
                 var ci = 0; foreach (var v in newC) stateC[ci++] = v;
-                (runTokenId, sameTokenRun) = AdvanceSameTokenRun(bestToken, runTokenId, sameTokenRun);
             }
 
             if (bestDur > 0)
             {
                 t += bestDur;
                 emitted = 0;
-                sameTokenRun = 0;
-                runTokenId = blankId;
             }
-            else if (ShouldForceFrameAdvance(
-                         bestToken, blankId, emitted, MaxTokensPerStep, sameTokenRun, MaxSameTokenRun))
+            else if (bestToken == blankId || emitted >= MaxTokensPerStep)
             {
                 t += 1;
                 emitted = 0;
-                sameTokenRun = 0;
-                runTokenId = blankId;
             }
         }
 

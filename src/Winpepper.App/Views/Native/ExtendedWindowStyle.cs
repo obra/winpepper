@@ -117,7 +117,16 @@ internal static class ExtendedWindowStyle
         _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref color, sizeof(int));
     }
 
-    public static bool ApplyRoundedRegion(IntPtr hwnd, int cornerDiameter)
+    /// <summary>
+    /// Clip the window to a true capsule that exactly matches its client rect.
+    /// The corner diameter equals the shorter client side (the height for the
+    /// wide pill), so the ends are full semicircles; the region bounds are the
+    /// EXCLUSIVE client bounds (no +1 overshoot) so no un-rounded sliver leaks
+    /// outside the capsule. Region is computed from the MEASURED client rect in
+    /// physical pixels, so it is correct at any DPI and after any resize. Call
+    /// after every ResizeClient and on every Show.
+    /// </summary>
+    public static bool ApplyRoundedRegion(IntPtr hwnd)
     {
         if (!GetWindowRect(hwnd, out var windowRect) ||
             !GetClientRect(hwnd, out var clientRect))
@@ -127,17 +136,21 @@ internal static class ExtendedWindowStyle
         if (!ClientToScreen(hwnd, ref clientOrigin))
             return false;
 
-        var left = clientOrigin.X - windowRect.Left;
-        var top = clientOrigin.Y - windowRect.Top;
-        var width = clientRect.Right - clientRect.Left;
-        var height = clientRect.Bottom - clientRect.Top;
+        var geometry = Views.StatusPillRegionGeometry.Compute(
+            windowLeft: windowRect.Left,
+            windowTop: windowRect.Top,
+            clientOriginX: clientOrigin.X,
+            clientOriginY: clientOrigin.Y,
+            clientWidth: clientRect.Right - clientRect.Left,
+            clientHeight: clientRect.Bottom - clientRect.Top);
+
         var region = CreateRoundRectRgn(
-            left,
-            top,
-            left + width + 1,
-            top + height + 1,
-            cornerDiameter,
-            cornerDiameter);
+            geometry.Left,
+            geometry.Top,
+            geometry.Right,
+            geometry.Bottom,
+            geometry.CornerDiameter,
+            geometry.CornerDiameter);
         if (region == IntPtr.Zero)
             return false;
 

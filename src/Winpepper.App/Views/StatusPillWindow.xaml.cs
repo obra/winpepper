@@ -248,7 +248,11 @@ public sealed partial class StatusPillWindow : Window
     {
         var layout = StatusPillLayout.ForDpi(dpi);
         appWindow.ResizeClient(new SizeInt32(layout.ClientWidth, layout.ClientHeight));
-        ExtendedWindowStyle.ApplyRoundedRegion(_hwnd, layout.CornerDiameter);
+        if (!ExtendedWindowStyle.ApplyRoundedRegion(_hwnd))
+            System.Diagnostics.Debug.WriteLine(
+                "[StatusPill] ApplyRoundedRegion failed: window is NOT clipped to the capsule " +
+                "(SetWindowRgn/CreateRoundRectRgn failed or client rect unavailable). " +
+                "If a light halo is visible, this — not the region math — is the cause.");
         return layout;
     }
 }

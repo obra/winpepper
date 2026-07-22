@@ -46,7 +46,7 @@ public sealed class AppShell : IDisposable
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
-    public static async Task<AppShell> BootstrapAsync(Application app)
+    public static AppShell Create()
     {
         Directory.CreateDirectory(AppPaths.Root);
         var logTail = new Winpepper.Core.Logging.LogRingBuffer(capacity: 2000);
@@ -57,6 +57,16 @@ public sealed class AppShell : IDisposable
         var store = new SettingsStore(AppPaths.SettingsJson,
             onError: msg => factory.CreateLogger("Winpepper.App.Settings").LogWarning("{SettingsWarning}", msg));
         var settings = store.Load();
+        var modelsServices = new Winpepper.App.Services.ModelsServices(
+            Path.Combine(AppPaths.Root, "models"), settings.AsrModelName);
+        if (!string.Equals(settings.AsrModelName, modelsServices.AsrDescriptor.Name, StringComparison.Ordinal))
+        {
+            factory.CreateLogger("Winpepper.App").LogWarning(
+                "Unknown ASR model {ConfiguredModel}; restored default {DefaultModel}",
+                settings.AsrModelName, modelsServices.AsrDescriptor.Name);
+            settings = settings with { AsrModelName = modelsServices.AsrDescriptor.Name };
+            store.Save(settings);
+        }
         var writer = new DebouncedSettingsWriter(store);
 
         var uiThread = new DispatcherQueueUiThread(DispatcherQueue.GetForCurrentThread());
@@ -184,7 +194,6 @@ public sealed class AppShell : IDisposable
         };
 
         var historyServices = new Winpepper.App.Services.HistoryServices(AppPaths.HistoryRoot);
-        var modelsServices = new Winpepper.App.Services.ModelsServices(Path.Combine(AppPaths.Root, "models"));
         var cleanupModelName = settings.CleanupModelName;
 
         var cancel = HotkeyChord.Parse("Esc");
@@ -194,7 +203,8 @@ public sealed class AppShell : IDisposable
         // built-in defaults with a logged warning.
         var hold   = HotkeyChord.ParseTriggerOrDefault(
             settings.HoldHotkey, "RightCtrl+RightShift", cancel,
-            m => hotkeyLog.LogWarning("{HotkeyWarning}", m));
+            m => hotkeyLog.LogWarning("{HotkeyWarning}", m),
+            allowLongPressSpace: true);
         var toggle = HotkeyChord.ParseTriggerOrDefault(
             settings.ToggleHotkey, "Ctrl+Shift+Space", cancel,
             m => hotkeyLog.LogWarning("{HotkeyWarning}", m));
@@ -263,14 +273,16 @@ public sealed class AppShell : IDisposable
                                          postPasteLearningEnabled: settings.PostPasteLearningEnabled,
                                          prewarmMicEnabled: settings.PrewarmMicEnabled);
 
-        var shell = new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
-                                  recordingVm, cleanupVm, correctionsVm,
-                                  autostart, pipeline, sounds, historyServices, modelsServices,
-                                  toasts, clipboardFallback, crashHandler,
-                                  logTail, uiThread, diagHost,
-                                  aaiKeyStore, aaiClient, aaiOptions);
-        await shell.StartAsync();
-        return shell;
+        // Shell publication and StartAsync are now driven by PublishedStartup
+        // (App.OnLaunched): Create() stays synchronous and returns the fully
+        // constructed shell. Keep our AssemblyAI ctor params — they must be
+        // assigned before MainWindow is built inside the ctor.
+        return new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
+                            recordingVm, cleanupVm, correctionsVm,
+                            autostart, pipeline, sounds, historyServices, modelsServices,
+                            toasts, clipboardFallback, crashHandler,
+                            logTail, uiThread, diagHost,
+                            aaiKeyStore, aaiClient, aaiOptions);
     }
 
     private AppShell(ILoggerFactory factory, SettingsStore store, AppSettings settings,
@@ -317,7 +329,7 @@ public sealed class AppShell : IDisposable
         Main = new MainWindow(this);
     }
 
-    private async Task StartAsync()
+    internal async Task StartAsync()
     {
         var startHidden = Environment.GetEnvironmentVariable("WINPEPPER_START_HIDDEN") == "1";
         if (!Settings.OnboardingCompleted) ShowMain(navigateToOnboarding: true);
@@ -327,12 +339,27 @@ public sealed class AppShell : IDisposable
         // One-time content-island realization, off the bootstrap call stack (see RealizeOnce doc).
         Pill.RealizeOnce();
 
-        // Start the pipeline only after the window is up so a missing or
-        // corrupt model can never block first paint (issue #6). TryStart
-        // reports a missing model on the error bus and leaves the pipeline
-        // disabled; the Models tab re-attempts after a download completes.
-        Pipeline.TryStart();
-        await Task.CompletedTask;
+        // Start only after first paint and authoritative size/hash verification.
+        // A merely loadable stale model must not enter PipelineHost and later
+        // satisfy onboarding through PipelineHost.IsRunning.
+        try
+        {
+            var startupGate = new AsrPipelineStartupGate(
+                ModelsServices,
+                Pipeline.TryStart,
+                onNotReady: () => ErrorBus.Report(
+                    Winpepper.Core.Errors.ErrorStage.Asr,
+                    new FileNotFoundException(
+                        "Speech model is missing or failed verification. Open Models to download or repair it."),
+                    Guid.Empty));
+            await startupGate.TryStartAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            LogFactory.CreateLogger<AppShell>()
+                .LogError(ex, "ASR verification failed during pipeline startup");
+            ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
+        }
     }
 
     public void ShowMain() => ShowMain(navigateToOnboarding: false);

@@ -22,6 +22,9 @@ public sealed class PipelineHost : IDisposable
 {
     private readonly ILogger<PipelineHost> _log;
     private readonly HotkeyHook _hook;
+    private readonly HotkeyReadinessGate _hotkeyReadiness = new();
+    private readonly HotkeyLifecycleGate _hotkeyLifecycle = new(nameof(PipelineHost));
+    private bool _hotkeyLoopStarted;
     private readonly TextInjector _injector;
     private ParakeetSession? _asr;
     private readonly string _modelDir;
@@ -92,7 +95,8 @@ public sealed class PipelineHost : IDisposable
             toggle,
             cancel,
             factory.CreateLogger<HotkeyHook>(),
-            cancelEnabled: () => _engine.State != SessionState.Idle);
+            cancelEnabled: () => _engine.State != SessionState.Idle,
+            normalTriggersEnabled: () => _hotkeyReadiness.IsEnabled);
         _injector = new TextInjector(factory.CreateLogger<TextInjector>());
         _modelDir = modelDir;
         _archiver = archiver;
@@ -116,10 +120,28 @@ public sealed class PipelineHost : IDisposable
     public bool IsRunning { get; private set; }
 
     public void UpdateHotkeys(string hold, string toggle)
-        => _hook.UpdateChords(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle));
+        => _hotkeyLifecycle.Run(() =>
+        {
+            _hook.UpdateChords(HotkeyChord.Parse(hold), HotkeyChord.Parse(toggle));
+            return true;
+        });
 
-    public void SetHotkeyCaptureActive(bool active)
-        => _hook.SetSuspended(active);
+    public IDisposable BeginHotkeyCapture(Action<RawKeyTransition> sink) =>
+        _hotkeyLifecycle.Run(() =>
+        {
+            EnsureHotkeyLoopStarted();
+            return _hook.BeginRawCapture(sink);
+        });
+
+    private void EnsureHotkeyLoopStarted()
+    {
+        if (_hotkeyLoopStarted) return;
+        _hook.Start();
+        _runCts = new CancellationTokenSource();
+        _runTask = Task.Run(() => RunAsync(_runCts.Token));
+        _hotkeyLoopStarted = true;
+        _log.LogInformation("Hotkey hook/event loop started");
+    }
 
     /// <summary>
     /// Loads the ASR model and starts the hotkey pipeline. Safe to call again
@@ -128,7 +150,15 @@ public sealed class PipelineHost : IDisposable
     /// the condition is reported on the error bus (which deep-links to the
     /// Models tab), and the method returns false instead of throwing.
     /// </summary>
-    public bool TryStart()
+    public bool TryStart() => _hotkeyLifecycle.Run(() =>
+    {
+        // Raw recorder capture is required during onboarding, before a model is
+        // installed. Keep the event loop draining normal triggers while gated.
+        EnsureHotkeyLoopStarted();
+        return TryStartCore();
+    });
+
+    private bool TryStartCore()
     {
         lock (_startGate)
         {
@@ -181,6 +211,9 @@ public sealed class PipelineHost : IDisposable
             _hook.Start();
             _runCts = new CancellationTokenSource();
             _runTask = Task.Run(() => RunAsync(_runCts.Token));
+            // Upstream hotkey readiness gate: mark hotkeys replay-safe now that
+            // the event loop is running. RunAsync consults ShouldHandle(evt).
+            _hotkeyReadiness.Enable(DateTimeOffset.UtcNow);
             IsRunning = true;
             _log.LogInformation("Pipeline started (model dir {ModelDir})", _modelDir);
             return true;
@@ -193,6 +226,11 @@ public sealed class PipelineHost : IDisposable
         {
             await foreach (var evt in _hook.Events.ReadAllAsync(ct))
             {
+                if (!_hotkeyReadiness.ShouldHandle(evt))
+                {
+                    _log.LogDebug("Ignoring {HotkeyKind} while dictation pipeline is not ready", evt.Kind);
+                    continue;
+                }
                 try { await HandleHotkey(evt, ct); }
                 catch (Exception ex)
                 {
@@ -658,17 +696,25 @@ public sealed class PipelineHost : IDisposable
 
     public void Dispose()
     {
-        _runCts?.Cancel();
-        try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
-        _hook.Dispose();
-        _asr?.Dispose();
-        if (_warmRecorder is not null)
+        // Upstream serializes teardown against hotkey startup/capture via the
+        // lifecycle gate and disables the readiness gate first. Inside it we run
+        // OUR warm-recorder teardown (unhook meter + fault handlers before
+        // dispose) instead of the old single _recorder field.
+        _hotkeyLifecycle.Dispose(() =>
         {
-            // Bug 8 (hygiene): unhook the meter + fault handlers before teardown.
-            if (_frameHandler is not null) _warmRecorder.FramesAvailable -= _frameHandler;
-            if (_captureFaultHandler is not null) _warmRecorder.CaptureFaulted -= _captureFaultHandler;
-            _warmRecorder.Dispose();
-        }
+            _hotkeyReadiness.Disable();
+            _runCts?.Cancel();
+            try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            _hook.Dispose();
+            _asr?.Dispose();
+            if (_warmRecorder is not null)
+            {
+                // Bug 8 (hygiene): unhook the meter + fault handlers before teardown.
+                if (_frameHandler is not null) _warmRecorder.FramesAvailable -= _frameHandler;
+                if (_captureFaultHandler is not null) _warmRecorder.CaptureFaulted -= _captureFaultHandler;
+                _warmRecorder.Dispose();
+            }
+        });
     }
 }
 #endif

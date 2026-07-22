@@ -51,10 +51,18 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         try
         {
             var resolver = new MissingModelsResolver();
-            var selectedNames = new[] { AsrCard.SelectedName, CleanupCard.SelectedName };
-            var missing = resolver.FindMissing(_registry.All, _installRoot, selectedNames);
+            var selected = new List<ModelDescriptor>();
+            if (AsrCard.SelectedDescriptor is { } asr)
+            {
+                // ASR must always reach the authoritative provisioning path:
+                // presence-only checks cannot distinguish ready files from a
+                // corrupt or obsolete nonempty installation.
+                selected.Add(asr);
+            }
+            selected.AddRange(resolver.FindMissing(
+                _registry.All, _installRoot, [CleanupCard.SelectedName]));
 
-            foreach (var d in missing)
+            foreach (var d in selected)
             {
                 var card = d.Kind == ModelKind.Asr ? AsrCard : CleanupCard;
                 var progress = new DirectProgress<DownloadProgress>(card.ReportProgress);

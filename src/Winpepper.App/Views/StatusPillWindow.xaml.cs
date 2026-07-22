@@ -52,7 +52,8 @@ public sealed partial class StatusPillWindow : Window
             p.IsResizable = false;
             p.SetBorderAndTitleBar(false, false);
         }
-        appWindow.Resize(new SizeInt32(260, 44));
+        ExtendedWindowStyle.RemoveSystemBorder(_hwnd);
+        ApplyLayout(appWindow, ExtendedWindowStyle.GetWindowDpi(_hwnd));
 
         _hideTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
         _hideTimer.Tick += (_, _) => { _hideTimer.Stop(); _visible = false; appWindow.Hide(); };
@@ -228,9 +229,27 @@ public sealed partial class StatusPillWindow : Window
             ? DisplayArea.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(fgHwnd), DisplayAreaFallback.Nearest)
             : DisplayArea.Primary;
         var work = display.WorkArea;
+
+        // Enter the target display before sizing. Otherwise a pill sized with the target
+        // DPI while still on another monitor can be scaled a second time by WM_DPICHANGED.
+        var targetDpiHwnd = fgHwnd != IntPtr.Zero ? fgHwnd : _hwnd;
+        var targetLayout = StatusPillLayout.ForDpi(ExtendedWindowStyle.GetWindowDpi(targetDpiHwnd));
+        var provisionalX = work.X + (work.Width - appWindow.Size.Width) / 2;
+        var provisionalY = work.Y + work.Height - appWindow.Size.Height - targetLayout.BottomGap;
+        appWindow.Move(new PointInt32(provisionalX, provisionalY));
+
+        var layout = ApplyLayout(appWindow, ExtendedWindowStyle.GetWindowDpi(_hwnd));
         var x = work.X + (work.Width  - appWindow.Size.Width)  / 2;
-        var y = work.Y +  work.Height - appWindow.Size.Height - 48;
+        var y = work.Y + work.Height - appWindow.Size.Height - layout.BottomGap;
         appWindow.Move(new PointInt32(x, y));
+    }
+
+    private StatusPillPixelLayout ApplyLayout(AppWindow appWindow, uint dpi)
+    {
+        var layout = StatusPillLayout.ForDpi(dpi);
+        appWindow.ResizeClient(new SizeInt32(layout.ClientWidth, layout.ClientHeight));
+        ExtendedWindowStyle.ApplyRoundedRegion(_hwnd, layout.CornerDiameter);
+        return layout;
     }
 }
 #endif

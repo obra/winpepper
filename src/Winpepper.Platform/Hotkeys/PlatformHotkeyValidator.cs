@@ -8,7 +8,7 @@ public sealed class PlatformHotkeyValidator : IHotkeyValidator
     // reuse it.
     private static readonly HotkeyChord CancelChord = HotkeyChord.Parse("Esc");
 
-    public string? Validate(string chord)
+    public string? Validate(string chord, bool allowLongPressSpace = false)
     {
         HotkeyChord parsed;
         try { parsed = HotkeyChord.Parse(chord); }
@@ -19,7 +19,7 @@ public sealed class PlatformHotkeyValidator : IHotkeyValidator
 
         // Reject modifier-less common-key triggers (they'd be swallowed globally)
         // and any trigger that reuses the Cancel key.
-        return HotkeyChord.ValidateTriggerBinding(parsed, CancelChord);
+        return HotkeyChord.ValidateTriggerBinding(parsed, CancelChord, allowLongPressSpace);
     }
 
     public bool Clash(string a, string b)

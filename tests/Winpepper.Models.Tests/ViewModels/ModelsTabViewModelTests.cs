@@ -64,6 +64,30 @@ public class ModelsTabViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task DownloadMissingAsync_AlwaysRoutesSelectedAsrThroughAuthoritativeProvisioning()
+    {
+        var registry = new ModelRegistry();
+        foreach (var descriptor in registry.All)
+        {
+            var modelDir = Path.Combine(_root, descriptor.InstallDirRelative);
+            Directory.CreateDirectory(modelDir);
+            foreach (var file in descriptor.Files)
+                await File.WriteAllTextAsync(
+                    Path.Combine(modelDir, file.RelativePath), "nonempty but unverified",
+                    TestContext.Current.CancellationToken);
+        }
+        var fake = new FakeDownloader();
+        var vm = new ModelsTabViewModel(registry, _root, fake,
+            currentAsrName: ModelRegistry.DefaultAsrName,
+            currentCleanupName: ModelRegistry.DefaultCleanupName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { });
+
+        await vm.DownloadMissingAsync(TestContext.Current.CancellationToken);
+
+        fake.DownloadedNames.ShouldBe([ModelRegistry.DefaultAsrName]);
+    }
+
+    [Fact]
     public async Task DownloadMissingAsync_DoesNotCaptureAmbientUiContextForEitherDescriptor()
     {
         var dispatcher = new ManualDispatcher();

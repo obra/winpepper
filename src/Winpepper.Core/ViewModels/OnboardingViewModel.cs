@@ -4,10 +4,11 @@ using Winpepper.Core.Settings;
 
 namespace Winpepper.Core.ViewModels;
 
-public sealed class OnboardingViewModel : INotifyPropertyChanged
+public sealed class OnboardingViewModel : INotifyPropertyChanged, IDisposable
 {
     private readonly ISettingsWriter _writer;
-    private readonly Func<Task> _runDownloader;
+    private readonly IAsrProvisioningService _provisioner;
+    private readonly Func<bool> _tryStartPipeline;
     private readonly IHotkeyValidator _validator;
 
     private OnboardingStep _step = OnboardingStep.PickMic;
@@ -15,7 +16,9 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     private string _holdHotkey = "RightCtrl+RightShift";
     private string _toggleHotkey = "Ctrl+Shift+Space";
     private bool _testDictationDone;
-    private readonly Action<Exception>? _onDownloadError;
+    private bool _isBusy;
+    private double _downloadProgressPercent;
+    private string _downloadStatus = "Speech model required";
     private string? _downloadError;
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -27,13 +30,18 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     /// permissive default: a permissive default would mask conflicts on the
     /// onboarding step.
     /// </summary>
-    public OnboardingViewModel(ISettingsWriter writer, Func<Task> runDownloader, IHotkeyValidator validator,
-                               Action<Exception>? onDownloadError = null)
+    public OnboardingViewModel(
+        ISettingsWriter writer,
+        IAsrProvisioningService provisioner,
+        Func<bool> tryStartPipeline,
+        IHotkeyValidator validator)
     {
         _writer = writer;
-        _runDownloader = runDownloader;
+        _provisioner = provisioner ?? throw new ArgumentNullException(nameof(provisioner));
+        _tryStartPipeline = tryStartPipeline ?? throw new ArgumentNullException(nameof(tryStartPipeline));
         _validator = validator ?? throw new ArgumentNullException(nameof(validator));
-        _onDownloadError = onDownloadError;
+        _provisioner.StateChanged += OnProvisioningStateChanged;
+        ApplyProvisioningState(_provisioner.State);
     }
 
     /// <summary>
@@ -102,25 +110,31 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
         set { if (_testDictationDone == value) return; _testDictationDone = value; Raise(); Raise(nameof(CanAdvance)); }
     }
 
-    public string? HoldHotkeyError => Validate(_holdHotkey, _toggleHotkey, isToggle: false);
-    public string? ToggleHotkeyError => Validate(_toggleHotkey, _holdHotkey, isToggle: true);
-
-    public bool CanAdvance => _step switch
+    public bool IsBusy
     {
-        OnboardingStep.PickMic        => !string.IsNullOrEmpty(_micId),
-        OnboardingStep.PickHotkeys    => HoldHotkeyError is null && ToggleHotkeyError is null,
-        OnboardingStep.DownloadModels => true,
-        OnboardingStep.TestDictation  => _testDictationDone,
-        _ => false,
-    };
+        get => _isBusy;
+        private set
+        {
+            if (_isBusy == value) return;
+            _isBusy = value;
+            Raise();
+            Raise(nameof(CanAdvance));
+            Raise(nameof(CanRetry));
+        }
+    }
 
-    public bool CanSkip => _step == OnboardingStep.DownloadModels;
+    public double DownloadProgressPercent
+    {
+        get => _downloadProgressPercent;
+        private set { if (_downloadProgressPercent == value) return; _downloadProgressPercent = value; Raise(); }
+    }
 
-    /// <summary>
-    /// Friendly, inline error message shown on the Download step when the model
-    /// download fails. Null when there is no error. The Download button doubles
-    /// as Retry: a fresh AdvanceAsync clears this before trying again.
-    /// </summary>
+    public string DownloadStatus
+    {
+        get => _downloadStatus;
+        private set { if (_downloadStatus == value) return; _downloadStatus = value; Raise(); }
+    }
+
     public string? DownloadError
     {
         get => _downloadError;
@@ -129,13 +143,36 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
             if (_downloadError == value) return;
             _downloadError = value;
             Raise();
+            Raise(nameof(CanRetry));
             Raise(nameof(HasDownloadError));
         }
     }
 
+    public string? HoldHotkeyError => Validate(_holdHotkey, _toggleHotkey, isToggle: false);
+    public string? ToggleHotkeyError => Validate(_toggleHotkey, _holdHotkey, isToggle: true);
+
+    public bool CanAdvance => _step switch
+    {
+        OnboardingStep.PickMic        => !string.IsNullOrEmpty(_micId),
+        OnboardingStep.PickHotkeys    => HoldHotkeyError is null && ToggleHotkeyError is null,
+        OnboardingStep.DownloadModels => !_isBusy,
+        OnboardingStep.TestDictation  => _testDictationDone,
+        _ => false,
+    };
+
+    public bool CanSkip => false;
+    public bool CanRetry => _step == OnboardingStep.DownloadModels && !_isBusy && _downloadError is not null;
+
+    /// <summary>
+    /// Convenience flag for the onboarding page: true when an inline download
+    /// error should be shown on the Download step. Backed by the same
+    /// <see cref="DownloadError"/> the provisioner surfaces.
+    /// </summary>
     public bool HasDownloadError => _downloadError is not null;
 
-    public async Task AdvanceAsync()
+    public Task AdvanceAsync() => AdvanceAsync(CancellationToken.None);
+
+    public async Task AdvanceAsync(CancellationToken ct)
     {
         if (!CanAdvance) return;
         switch (_step)
@@ -149,21 +186,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
                 Step = OnboardingStep.DownloadModels;
                 break;
             case OnboardingStep.DownloadModels:
-                DownloadError = null;
-                try
-                {
-                    await _runDownloader();
-                }
-                catch (Exception ex)
-                {
-                    // Never let a network/download failure crash the wizard.
-                    // Stay on this step so Retry (the Download button) and Skip
-                    // remain usable; surface a friendly inline message.
-                    _onDownloadError?.Invoke(ex);
-                    DownloadError = "Couldn't download the models. Check your connection and try again, or Skip to set them up later.";
-                    return;
-                }
-                Step = OnboardingStep.TestDictation;
+                await ProvisionAndStartPipelineAsync(ct);
                 break;
             case OnboardingStep.TestDictation:
                 await _writer.QueueAndFlushAsync(s => s with { OnboardingCompleted = true });
@@ -178,16 +201,69 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
     /// test-dictation step. This prevents onboarding from reappearing forever
     /// (spec 2(iii)).
     /// </summary>
-    public async Task SkipAsync()
+    public void Skip()
     {
-        if (!CanSkip) return;
-        await _writer.QueueAndFlushAsync(s => s with { OnboardingCompleted = true });
-        Step = OnboardingStep.TestDictation;
+        // Model skipping is deliberately unavailable: Test Dictation requires
+        // verified ASR files and a pipeline that has successfully started.
+    }
+
+    private async Task ProvisionAndStartPipelineAsync(CancellationToken ct)
+    {
+        IsBusy = true;
+        DownloadError = null;
+        try
+        {
+            await _provisioner.EnsureReadyAsync(ct);
+            if (!await _provisioner.VerifyReadyAsync(ct))
+            {
+                DownloadError = "The speech model could not be verified. Retry the download.";
+                return;
+            }
+
+            if (!_tryStartPipeline())
+            {
+                DownloadError = "The dictation pipeline could not start. Retry after checking the speech model.";
+                return;
+            }
+
+            Step = OnboardingStep.TestDictation;
+        }
+        catch (OperationCanceledException)
+        {
+            DownloadError = "Speech model download was canceled. Retry to resume.";
+        }
+        catch (Exception ex)
+        {
+            DownloadError = ex.Message;
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void OnProvisioningStateChanged(object? sender, AsrProvisioningState state)
+        => ApplyProvisioningState(state);
+
+    private void ApplyProvisioningState(AsrProvisioningState state)
+    {
+        DownloadProgressPercent = Math.Clamp(state.ProgressPercent, 0, 100);
+        DownloadStatus = state.Status switch
+        {
+            AsrProvisioningStatus.Missing => "Speech model required",
+            AsrProvisioningStatus.Downloading => "Downloading speech model",
+            AsrProvisioningStatus.Verifying => "Verifying speech model",
+            AsrProvisioningStatus.Retrying => "Retrying speech model download",
+            AsrProvisioningStatus.Ready => "Speech model ready",
+            AsrProvisioningStatus.Failed => "Speech model download failed",
+            _ => "Preparing speech model",
+        };
+        if (state.ErrorMessage is not null) DownloadError = state.ErrorMessage;
     }
 
     private string? Validate(string chord, string other, bool isToggle)
     {
-        var sys = _validator.Validate(chord);
+        var sys = _validator.Validate(chord, allowLongPressSpace: !isToggle);
         if (sys is not null) return sys;
         if (_validator.Clash(chord, other))
             return isToggle ? "Same as Hold." : "Same as Toggle.";
@@ -196,4 +272,6 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged
 
     private void Raise([CallerMemberName] string? name = null)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+    public void Dispose() => _provisioner.StateChanged -= OnProvisioningStateChanged;
 }

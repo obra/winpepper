@@ -13,6 +13,7 @@ public sealed partial class OnboardingPage : Page
     private AppShell? _shell;
     private OnboardingViewModel? _vm;
     private WasapiRecorder? _meterRecorder;
+    private CancellationTokenSource? _lifetimeCts;
 
     public OnboardingPage() { InitializeComponent(); }
 
@@ -20,26 +21,16 @@ public sealed partial class OnboardingPage : Page
     {
         var shell = (AppShell)e.Parameter;
         _shell = shell;
-        // Real downloader: fetch ONLY the selected models that are missing,
-        // using the same resolver + downloader as the Models tab (spec 3(iv)).
-        // If nothing is missing this returns immediately and the step
-        // auto-resolves.
-        async Task RunOnboardingDownloadAsync()
-        {
-            var s = shell.Settings;
-            var names = new[] { s.AsrModelName, s.CleanupModelName };
-            var missing = new Winpepper.Models.MissingModelsResolver().FindMissing(
-                shell.ModelsServices.Registry.All, shell.ModelsServices.ModelsRoot, names);
-            foreach (var descriptor in missing)
-            {
-                var progress = new Progress<Winpepper.Models.DownloadProgress>();
-                await shell.ModelsServices.DownloadAsync(
-                    descriptor, shell.ModelsServices.ModelsRoot, progress, CancellationToken.None);
-            }
-        }
-
-        _vm = new OnboardingViewModel(shell.SettingsWriter, RunOnboardingDownloadAsync,
-                                       new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator());
+        _lifetimeCts = new CancellationTokenSource();
+        // Upstream verified-provisioning wiring: ModelsServices implements
+        // IAsrProvisioningService (download + verify), and the VM starts the
+        // pipeline only after the model verifies. Our hydration/skip-resolved
+        // behavior lives below in InitializeFrom.
+        _vm = new OnboardingViewModel(
+            shell.SettingsWriter,
+            shell.ModelsServices,
+            shell.Pipeline.TryStart,
+            new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator());
 
         var devices = DeviceEnumerator.List();
         MicCombo.ItemsSource = devices;
@@ -90,8 +81,8 @@ public sealed partial class OnboardingPage : Page
             ApplyHotkeysIfValid();
             RefreshButtons();
         };
-        HoldBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
-        ToggleBox.RecordingStateChanged += shell.Pipeline.SetHotkeyCaptureActive;
+        HoldBox.CaptureRequested = shell.Pipeline.BeginHotkeyCapture;
+        ToggleBox.CaptureRequested = shell.Pipeline.BeginHotkeyCapture;
         HoldBox.SetChord(_vm.HoldHotkey, _vm.HoldHotkeyError);
         ToggleBox.SetChord(_vm.ToggleHotkey, _vm.ToggleHotkeyError);
 
@@ -106,21 +97,21 @@ public sealed partial class OnboardingPage : Page
     {
         if (_vm is null) return;
         AdvanceButton.IsEnabled = false;
+        if (_vm.Step == OnboardingStep.PickHotkeys)
+        {
+            HoldBox.CancelCapture("leaving hotkey step");
+            ToggleBox.CancelCapture("leaving hotkey step");
+        }
         if (_vm.Step == OnboardingStep.DownloadModels)
         {
             DownloadProgress.Visibility = Visibility.Visible;
         }
-        try { await _vm.AdvanceAsync(); }
-        finally { AdvanceButton.IsEnabled = true; DownloadProgress.Visibility = Visibility.Collapsed; }
+        try { await _vm.AdvanceAsync(_lifetimeCts?.Token ?? CancellationToken.None); }
+        finally { RefreshButtons(); }
         if (_vm.Step == OnboardingStep.Done)
         {
             // Onboarding complete; the user can stay on the page or switch tabs.
         }
-    }
-
-    private async void OnSkip(object sender, RoutedEventArgs e)
-    {
-        if (_vm is not null) await _vm.SkipAsync();
     }
 
     private void RenderStep()
@@ -160,11 +151,19 @@ public sealed partial class OnboardingPage : Page
         AdvanceButton.Content = _vm.Step switch
         {
             OnboardingStep.TestDictation => "Finish",
-            OnboardingStep.DownloadModels => "Download",
+            OnboardingStep.DownloadModels when _vm.CanRetry => "Retry",
+            OnboardingStep.DownloadModels => "Download speech model",
             _ => "Next",
         };
         AdvanceButton.IsEnabled = _vm.CanAdvance;
-        SkipButton.Visibility = _vm.CanSkip ? Visibility.Visible : Visibility.Collapsed;
+        DownloadProgress.Value = _vm.DownloadProgressPercent;
+        DownloadProgress.IsIndeterminate = _vm.IsBusy && _vm.DownloadProgressPercent <= 0;
+        DownloadProgress.Visibility = _vm.Step == OnboardingStep.DownloadModels && _vm.IsBusy
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        DownloadStatusText.Text = _vm.DownloadStatus;
+        DownloadErrorText.Text = _vm.DownloadError ?? "";
+        DownloadErrorText.Visibility = _vm.DownloadError is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void RestartLevelMeter(string deviceId)
@@ -182,8 +181,13 @@ public sealed partial class OnboardingPage : Page
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
+        _lifetimeCts?.Cancel();
+        _lifetimeCts?.Dispose();
+        _lifetimeCts = null;
         _meterRecorder?.Dispose();
-        _shell?.Pipeline.SetHotkeyCaptureActive(false);
+        _vm?.Dispose();
+        HoldBox.CancelCapture("navigated away");
+        ToggleBox.CancelCapture("navigated away");
     }
 }
 #endif

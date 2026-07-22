@@ -7,55 +7,10 @@ namespace Winpepper.Platform.Hotkeys;
 /// </summary>
 public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
 {
-    private static readonly Dictionary<string, Modifier> ModifierMap = new()
-    {
-        ["LeftCtrl"]   = Modifier.LeftCtrl,
-        ["RightCtrl"]  = Modifier.RightCtrl,
-        ["Ctrl"]       = Modifier.Ctrl,
-        ["LeftShift"]  = Modifier.LeftShift,
-        ["RightShift"] = Modifier.RightShift,
-        ["Shift"]      = Modifier.Shift,
-        ["LeftAlt"]    = Modifier.LeftAlt,
-        ["RightAlt"]   = Modifier.RightAlt,
-        ["Alt"]        = Modifier.Alt,
-        ["LeftWin"]    = Modifier.LeftWin,
-        ["RightWin"]   = Modifier.RightWin,
-        ["Win"]        = Modifier.Win,
-    };
-
-    // Subset of common keys, expand as needed. Names map to Windows VK_* codes.
-    private static readonly Dictionary<string, int> KeyMap = BuildKeyMap();
-
-    private static Dictionary<string, int> BuildKeyMap()
-    {
-        var map = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["Space"]  = 0x20,
-            ["Esc"]    = 0x1B,
-            ["Escape"] = 0x1B,
-            ["Tab"]    = 0x09,
-            ["Enter"]  = 0x0D,
-            ["Back"]   = 0x08,
-            ["Insert"] = 0x2D,
-            ["Delete"] = 0x2E,
-            ["Home"]   = 0x24,
-            ["End"]    = 0x23,
-            ["PageUp"] = 0x21,
-            ["PageDown"] = 0x22,
-            ["Left"]   = 0x25,
-            ["Up"]     = 0x26,
-            ["Right"]  = 0x27,
-            ["Down"]   = 0x28,
-        };
-        for (var i = 1; i <= 12; i++) { map[$"F{i}"] = 0x70 + i - 1; }
-        for (var c = 'A'; c <= 'Z'; c++) { map[c.ToString()] = c; }
-        for (var c = '0'; c <= '9'; c++) { map[c.ToString()] = c; }
-        return map;
-    }
-
     public static HotkeyChord Parse(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) throw new FormatException("Empty chord.");
+        if (VirtualKeyCatalog.TryParseChordAlias(text, out var alias)) return alias;
 
         var parts = text.Split('+', StringSplitOptions.None);
         if (parts.Any(string.IsNullOrEmpty))
@@ -66,11 +21,11 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
 
         foreach (var part in parts)
         {
-            if (ModifierMap.TryGetValue(part, out var m))
+            if (VirtualKeyCatalog.TryParseModifier(part, out var m))
             {
                 mods |= m;
             }
-            else if (KeyMap.TryGetValue(part, out var k))
+            else if (VirtualKeyCatalog.TryParseKey(part, out var k))
             {
                 if (key.HasValue)
                     throw new FormatException($"Chord '{text}' has more than one non-modifier key.");
@@ -86,10 +41,10 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
         return new HotkeyChord(mods, key ?? 0);
     }
 
-    // VK_F1 (0x70) .. VK_F24 (0x87). Only function keys are conventional as
-    // bare (modifier-less) global hotkeys; every other common key would be
-    // swallowed system-wide if bound as a hold/toggle trigger.
-    private static bool IsBareTriggerAllowed(int vk) => vk is >= 0x70 and <= 0x87;
+    // Only function keys and the Application key are conventional as bare
+    // (modifier-less) global hotkeys; ordinary keys would be swallowed while
+    // bound. Space is handled separately by the explicit dual-role policy.
+    private static bool IsBareTriggerAllowed(int vk) => VirtualKeyCatalog.IsDedicatedBareKey(vk);
 
     /// <summary>
     /// Policy gate for hold/toggle trigger bindings. Returns null when the
@@ -106,7 +61,8 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
     ///  * The trigger key may never equal the Cancel chord's key, so the
     ///    pass-through Cancel/Esc key can never be turned into a swallowed trigger.
     /// </summary>
-    public static string? ValidateTriggerBinding(HotkeyChord chord, HotkeyChord cancel)
+    public static string? ValidateTriggerBinding(
+        HotkeyChord chord, HotkeyChord cancel, bool allowLongPressSpace = false)
     {
         ArgumentNullException.ThrowIfNull(chord);
         ArgumentNullException.ThrowIfNull(cancel);
@@ -117,6 +73,7 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
         if (chord.VirtualKey == 0) return null;                  // modifier-only: safe
         if (chord.Modifiers != Modifier.None) return null;       // modifier + key: safe
         if (IsBareTriggerAllowed(chord.VirtualKey)) return null; // bare F-key: safe
+        if (allowLongPressSpace && chord.VirtualKey == VirtualKeyCatalog.Space) return null;
 
         return $"'{chord}' has no modifier and would be swallowed system-wide. " +
                "Add a modifier (e.g. Ctrl+Shift+...) or use an F-key.";
@@ -130,7 +87,8 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
     /// hand-edited settings file can never bind a swallowed common key.
     /// </summary>
     public static HotkeyChord ParseTriggerOrDefault(
-        string configured, string defaultChord, HotkeyChord cancel, Action<string>? onRejected = null)
+        string configured, string defaultChord, HotkeyChord cancel,
+        Action<string>? onRejected = null, bool allowLongPressSpace = false)
     {
         HotkeyChord parsed;
         try
@@ -143,7 +101,7 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
             return Parse(defaultChord);
         }
 
-        var reason = ValidateTriggerBinding(parsed, cancel);
+        var reason = ValidateTriggerBinding(parsed, cancel, allowLongPressSpace);
         if (reason is not null)
         {
             onRejected?.Invoke($"Hotkey '{configured}' rejected: {reason} Using default '{defaultChord}'.");
@@ -221,6 +179,8 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
 
     public override string ToString()
     {
+        if (this == VirtualKeyCatalog.CopilotChord) return "Copilot";
+
         var parts = new List<string>();
         AppendGroup(parts, Modifier.Ctrl,  Modifier.LeftCtrl,  Modifier.RightCtrl,  "Ctrl",  "LeftCtrl",  "RightCtrl");
         AppendGroup(parts, Modifier.Shift, Modifier.LeftShift, Modifier.RightShift, "Shift", "LeftShift", "RightShift");
@@ -229,7 +189,7 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
 
         if (VirtualKey != 0)
         {
-            var keyName = ReverseKeyName(VirtualKey);
+            var keyName = VirtualKeyCatalog.NameForKey(VirtualKey);
             parts.Add(keyName);
         }
         return string.Join("+", parts);
@@ -245,15 +205,4 @@ public sealed record HotkeyChord(Modifier Modifiers, int VirtualKey)
         else if ((Modifiers & right) != Modifier.None) parts.Add(rightName);
     }
 
-    private static string ReverseKeyName(int vk) => vk switch
-    {
-        0x20 => "Space", 0x1B => "Esc", 0x09 => "Tab", 0x0D => "Enter",
-        0x08 => "Back", 0x2D => "Insert", 0x2E => "Delete",
-        0x24 => "Home", 0x23 => "End", 0x21 => "PageUp", 0x22 => "PageDown",
-        0x25 => "Left", 0x26 => "Up", 0x27 => "Right", 0x28 => "Down",
-        >= 0x70 and <= 0x7B => $"F{vk - 0x70 + 1}",
-        >= 0x30 and <= 0x39 => ((char)vk).ToString(),
-        >= 0x41 and <= 0x5A => ((char)vk).ToString(),
-        _ => $"VK_0x{vk:X2}",
-    };
 }

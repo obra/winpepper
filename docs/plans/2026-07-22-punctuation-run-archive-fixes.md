@@ -297,18 +297,40 @@ git commit -m "fix(cleanup): collapse degenerate punctuation runs on every path"
 
 Root-cause fix B. `ParakeetSession.GreedyDecode` can emit up to
 `MaxTokensPerStep = 10` tokens per encoder frame via argmax with no
-repetition control (`ParakeetSession.cs` ~lines 176-210). A stuck frame
-(duration head predicts 0 while the same non-blank token keeps winning argmax)
-sprays that token — e.g. `..........`. Add a consecutive-same-token cap: if the
-same non-blank token id is emitted `MaxSameTokenRun` (3) times on a
+*same-token* repetition control (`ParakeetSession.cs` ~lines 176-210). A stuck
+frame (duration head predicts 0 while the same non-blank token keeps winning
+argmax) sprays that token — e.g. `..........`. Add a consecutive-same-token
+cap: if the same non-blank token id is emitted `MaxSameTokenRun` (3) times on a
 **non-advancing** frame, force the frame to advance. Legitimate repeated words
 ("no no no") are separate emissions across **different** frames — each advances
 `t` via a positive duration (`bestDur > 0`), which resets the run counter — so
 they are untouched.
 
+> **Scope of this fix (verified by code inspection, ledger A5):** the existing
+> `emitted >= MaxTokensPerStep (10)` branch (`ParakeetSession.cs:206-209`)
+> **already guarantees termination** — a stuck frame emits at most 10 copies
+> then force-advances `t`, resetting `emitted` per frame. So CHANGE 3 is **not**
+> a hang/infinite-loop fix; it is a **quality/tightening** fix that lowers the
+> per-frame same-token bound from 10 to 3. Do not frame it as preventing an
+> infinite decode.
+
+> **Load-bearing model premise (ledger A4 — un-runnable on Linux):** the
+> "legitimate repeats are untouched" guarantee rests on a property of the
+> Parakeet TDT weights — that a genuine repeated token id **always** arrives on
+> a *separate*, frame-advancing (`bestDur > 0`) frame, and never as ≥3
+> same-id emissions on a single **non-advancing** (`bestDur == 0`) frame. The
+> code *invariant* (frame advance resets the run counter) is confirmed by
+> inspection, but this runtime premise **cannot be exercised on Linux** (no
+> ONNX/DirectML model). The seam unit tests below are therefore **necessary but
+> not sufficient** for it — the runtime half is closed by **Task 6, Item 7**
+> (Windows smoke: dictate repeated words / digit runs, verify no dropped
+> repeats vs the pre-change build). CHANGE 2's punctuation collapse is a second
+> line of defense for the punctuation-spray outcome regardless of this cap.
+
 The decode loop needs an ONNX model, so it is not unit-testable directly.
 Per the spec, extract the cap decision and the run-counter update into two
-pure `internal static` seam helpers and unit-test those in isolation.
+pure `internal static` seam helpers and unit-test those in isolation (a
+necessary-but-not-sufficient gate, per the premise above).
 
 **Files:**
 - Modify: `src/Winpepper.Asr/Winpepper.Asr.csproj` (add `InternalsVisibleTo`)
@@ -849,6 +871,17 @@ the H1 title line), insert this addendum block:
 > and is discarded on the next hotkey. Archiving happens at *completion time*
 > from the pipeline locals (as for a normal dictation) — the pending slot
 > itself is never the thing persisted.
+>
+> **Retention consequence (verified, ledger A1):** `HistoryStore.Append` prunes
+> to `MaxEntries = 50` (plus a 30-day age prune) on every append, so
+> unconditionally archiving held-then-discarded dictations means they now
+> consume history slots and evict genuinely-pasted entries sooner. This is an
+> intended consequence of "treat aborted dictations like any other" — it is
+> policy-driven eviction, NOT data corruption (`Append` is append-only;
+> existing rows are never overwritten). Held entries also record an `InjectMs`
+> timing even though no injection occurred (harmless; no consumer asserts on
+> it). No history consumer keys on inject/paste status — the schema has no such
+> field — so held entries are indistinguishable from injected ones by design.
 ```
 
 - [ ] **Step 10: Privacy-wording check (pill "Click to paste" state)**
@@ -1091,6 +1124,17 @@ end-to-end. Run on a real Windows build. Record PASS/FAIL for each item.
   bound and erase such sprays; a genuine "..." ellipsis still renders normally.
   (CHANGE 2 + CHANGE 3 end-to-end.)
 
+- [ ] **Item 7 — Legitimate repeated tokens are NOT truncated by the cap.**
+  This closes the one load-bearing premise CHANGE 3 relies on that **cannot be
+  tested on Linux** (the seam unit tests are necessary but not sufficient; see
+  ledger A4). On a real Windows build with the ONNX/DirectML Parakeet model,
+  dictate utterances with genuine consecutive repeats — e.g. "no no no", "that
+  that", and a spoken digit run ("nine nine nine nine") — and confirm the
+  transcript preserves **every** repeat (no dropped words) vs. the pre-change
+  build. If any legitimate repeat is truncated, the `MaxSameTokenRun=3` cap is
+  too aggressive and must be raised (or gated on `bestDur==0` more tightly).
+  (CHANGE 3 runtime correctness — the half not provable on Linux.)
+
 ---
 
 ## Self-Review
@@ -1109,8 +1153,9 @@ end-to-end. Run on a real Windows build. Record PASS/FAIL for each item.
 | CHANGE 2 — genuine "..." survives; ordinary text unchanged | Task 1 Step 1 `_OrdinaryText_Unchanged` theory |
 | CHANGE 2 — runs on every path incl. raw-ASR passthrough | Task 1 Step 4 (in `ApplyDeterministicPostPass`) + Step 1 fallback-path E2E test |
 | CHANGE 3 — cap consecutive same-token emissions (N=3), force frame advance | Task 2 Steps 4-5 |
-| CHANGE 3 — normal decoding untouched; "no no no" still works | Task 2 seam design + `RepeatedWordAcrossFrames_NeverCapped` test |
+| CHANGE 3 — normal decoding untouched; "no no no" still works | Task 2 seam design (code invariant confirmed, ledger A3/A4) + `RepeatedWordAcrossFrames_NeverCapped` test (necessary, **not** sufficient) + **Task 6 Item 7** (Windows-smoke: the runtime half un-provable on Linux) |
 | CHANGE 3 — add a testable seam since decode loop isn't unit-testable | Task 2 Steps 1,2,4 (two internal static helpers + InternalsVisibleTo) |
+| CHANGE 3 — rationale precision: tightening/quality fix, NOT a hang fix (existing 10-cap already guarantees termination — ledger A5) | Task 2 intro scope note |
 | CHANGE 4 — log hold decision (chars, words) | Task 4 Steps 1-2 |
 | CHANGE 4 — log paste outcome (injected/failed) | Task 4 Step 3 |
 | CHANGE 4 — log discard-by-new-hotkey | Task 4 Steps 4-5 |

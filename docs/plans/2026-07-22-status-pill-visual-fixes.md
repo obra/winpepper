@@ -32,6 +32,11 @@ Windows smoke checklist because it cannot render on Linux.
   and runs on Windows only; a green Linux run is necessary but NOT sufficient.
   (from `AGENTS.md`)
 - **The full test suite must pass before pushing.** (from `AGENTS.md`)
+- **Build/run test projects SEQUENTIALLY, not in parallel.** Building two test
+  projects concurrently races on shared NuGet restore artifacts and fails with
+  `NuGet.targets: error : The file '.../obj/*.nuget.g.props' already exists.`
+  (observed during plan validation). A serial retry builds clean. Task 7's loop
+  is already sequential; keep any multi-project build serial.
 - **Do NOT touch** the keyboard hook or packaging/installer code. (spec)
 - **Preserve pill behavior:** click-through in normal states, clickability in
   PENDING, topmost re-assert, no focus stealing, and all existing states/
@@ -153,6 +158,30 @@ checklist (Task 8); the contingency is recorded there for the on-device
 operator. This is not a deferral of the requirement — the production region fix
 IS implemented and shipped in Tasks 2–4/6; the smoke checklist is its acceptance
 evidence because the pixels only exist on Windows.
+
+**Magnitude caveat — the region fix is necessary but may not be sufficient (read
+this).** A load-bearing validation of this plan flagged a size mismatch worth
+stating plainly: of the two region bugs above, only **bug #1 (the 1-px overshoot)
+is active today** — bug #2 (corner diameter from the DIP constant) is currently
+dormant because `CornerDiameterDip == ClientHeightDip`, so the DIP value already
+equals the client height at every DPI today (the plan admits this). By the plan's
+own words bug #1 produces "a square sliver," i.e. a hairline, **not** a full light
+rounded rectangle. So if the reported symptom is a *large* halo around the whole
+pill, the dominant cause is more likely one of: (a) the light content-island
+backdrop showing through the transparent Border corners / Windows-11 auto-round
+(which the tight region ALSO trims — the region fix addresses this), or
+(b) `SetWindowRgn`/`CreateRoundRectRgn` **silently failing** on the user's machine
+(DPI-virtualization mismatch between `GetClientRect` and the DirectComposition
+surface, or a call-ordering race vs `ResizeClient`), which would leave the window
+entirely unclipped — a symptom the region-math fix would NOT resolve. Today's code
+**discards** `ApplyRoundedRegion`'s `bool` return, so such a failure is invisible.
+Task 3 therefore adds a diagnostic on that return (see Task 3, Step 2), and Task 8
+adds a magnitude-mismatch branch to the smoke checklist, so the on-device operator
+can distinguish "region is exact but the halo persists → escalate to the
+SystemBackdrop/transparent-root contingency" from "the region call is silently
+failing → a different bug." The region fix still ships as the spec-preferred
+primary fix; this caveat only ensures its possible insufficiency is observable
+rather than silent.
 
 ---
 
@@ -653,17 +682,31 @@ In `src/Winpepper.App/Views/StatusPillWindow.xaml.cs`, change `ApplyLayout`
 ```
 
 to (drop the `dpi`-derived corner-diameter argument; the region measures the
-client itself):
+client itself). **Capture the `bool` return and trace on failure** — today the
+return is silently discarded, which hides a `SetWindowRgn`/`CreateRoundRectRgn`
+failure that would leave the window entirely unclipped (the most plausible cause
+of a *full* light halo — see the Root Cause "Magnitude caveat"). A `Debug` trace
+lets the on-device operator distinguish "region applied but halo persists →
+escalate to the SystemBackdrop contingency" from "region call failed → a different
+bug", without changing release behavior:
 
 ```csharp
     private StatusPillPixelLayout ApplyLayout(AppWindow appWindow, uint dpi)
     {
         var layout = StatusPillLayout.ForDpi(dpi);
         appWindow.ResizeClient(new SizeInt32(layout.ClientWidth, layout.ClientHeight));
-        ExtendedWindowStyle.ApplyRoundedRegion(_hwnd);
+        if (!ExtendedWindowStyle.ApplyRoundedRegion(_hwnd))
+            System.Diagnostics.Debug.WriteLine(
+                "[StatusPill] ApplyRoundedRegion failed: window is NOT clipped to the capsule " +
+                "(SetWindowRgn/CreateRoundRectRgn failed or client rect unavailable). " +
+                "If a light halo is visible, this — not the region math — is the cause.");
         return layout;
     }
 ```
+
+(No new `using` is required — the call uses the fully-qualified
+`System.Diagnostics.Debug`. This is diagnostic only; it does not alter the shipped
+visual behavior.)
 
 - [ ] **Step 3: Verify no other caller passes `cornerDiameter`**
 
@@ -849,8 +892,17 @@ git commit -m "refactor(app): widen pill to 300 DIP for meter; drop unused Corne
 
 - [ ] **Step 1: Replace the Grid contents to add the meter column**
 
+> **Preserve the root `<Border>` — replace ONLY the inner `<Grid>`.** The pill's
+> root element is `<Border Background="#FF202020" CornerRadius="24" Padding="16,8"
+> PointerPressed="OnRootPointerPressed">` (line 12); the `<Grid>` (lines 14-37) is
+> its child. That Border IS the dark capsule and its `PointerPressed` handler is
+> the pending-paste "click to paste" wiring. Replace only the `<Grid>…</Grid>`
+> block below — do NOT touch or remove the surrounding `<Border>` opening/closing
+> tags or its attributes, or you will drop the capsule background and break
+> PENDING clickability.
+
 Replace the `<Grid>...</Grid>` block in `src/Winpepper.App/Views/StatusPillWindow.xaml`
-(currently lines 14-37) with:
+(the inner child of the root `<Border>`, currently lines 14-37) with:
 
 ```xml
         <Grid ColumnSpacing="10" VerticalAlignment="Center">
@@ -1150,11 +1202,28 @@ Change 1 — capsule silhouette (no white rounded rectangle):
       halo, or square sliver at the right/bottom edges.
   [ ] Move the foreground window to a second monitor with a DIFFERENT scale and
       dictate there: the pill is capsule-only on that monitor too.
+  [ ] MAGNITUDE CHECK (do this BEFORE concluding the region fix worked): recall
+      what the halo looked like BEFORE this change. If it was a THIN line/sliver
+      on the right and/or bottom edge only, the +1-overshoot fix (Tasks 2-3)
+      fully explains and fixes it. If it was a FULL light rounded rectangle
+      around the WHOLE pill, that is inconsistent with the 1-px-overshoot bug
+      alone (that bug is a hairline) -- do NOT assume Tasks 2-3 fixed it just
+      because no error was thrown. Re-test specifically at 100% DPI, single
+      monitor (the simplest repro) and check the debug output (next item).
+  [ ] Check the debug trace: `ApplyLayout` now logs
+      "[StatusPill] ApplyRoundedRegion failed ..." if the region call fails. If
+      you see that line, the window is NOT being clipped at all (a silent
+      SetWindowRgn/CreateRoundRectRgn failure) -- the region math is not the
+      cause; go straight to the SystemBackdrop escalation below. If you do NOT
+      see that line but a full halo persists, the region is applied yet the
+      light backdrop still shows -> also the SystemBackdrop escalation.
   [ ] If a white/light rounded rectangle STILL appears at any scale, the GDI
       window region is not clipping the composited content on this machine.
-      Escalation (documented, do NOT do blindly): set the window SystemBackdrop
-      to none and the content root background to transparent so the corner
-      cutouts reveal nothing. Re-verify capsule-only after that change.
+      Escalation (documented conditional fix, do NOT do blindly): set the window
+      SystemBackdrop to none and the content root background to transparent so
+      the corner cutouts reveal nothing. (This directly neutralizes the light
+      backdrop regardless of the region, and is the spec-sanctioned fallback for
+      the same requirement.) Re-verify capsule-only after that change.
 
 Change 2 — live voice meter:
   [ ] While Recording, 5 vertical bars are visible between the dot and the
@@ -1245,3 +1314,37 @@ compile/build failure.
   and `MeterPanel.Visibility` (Task 6). Match.
 
 No issues found beyond those already resolved inline.
+
+**4. Load-bearing validation hardening (2026-07-22).** This plan was run through a
+load-bearing assumption review; 6 assumptions were verified with evidence and 1
+(the Windows-only pixel outcome of Change 1) was accepted as a designed-in
+residual risk with strengthened hedging. Verified by execution/inspection on the
+Linux host:
+- The provisioned SDK is `9.0.100` and `Winpepper.Platform.Tests` (196 tests) +
+  `Winpepper.Core.Tests` (228 tests) build and run green on Linux via the
+  `build -f net9.0` + `dotnet exec` convention; both reference `Shouldly`;
+  Platform.Tests has NO `Winpepper.App` project reference (so the link-compile of
+  `StatusPillLayout.cs`/`StatusPillRegionGeometry.cs` cannot double-define types).
+- Every code anchor Task 6 grafts onto exists (`_animMode`, `_tickTimer`,
+  `ApplyAnimationFrame` VoiceLevel case, `OnVmChanged` else-branch, `ResetPillVisual`,
+  ctor `InitializeComponent`); `SessionStage` = {Idle, Recording, Transcribing,
+  CleaningUp, Injecting, PendingPaste, Error} (name-based switches only).
+- `_vm.InputLevel` is a `double` hard-clamped to `[0,1]` at source
+  (`LevelMeterModel.Push`), so `BarsLit`'s clamp (not throw) on `level` is safe.
+- The complete consumer set of `CornerDiameter`/`ApplyRoundedRegion` (8 sites) is
+  fully covered by Tasks 3-4; no dangling Windows-only or Linux-test consumer.
+
+Hardening edits made as a result (all additive, no contract changes):
+(a) Root Cause "Magnitude caveat" — the active bug (1-px overshoot) alone is a
+    hairline, so a *full* halo more likely comes from a silent `SetWindowRgn`
+    failure or the light backdrop; the region fix is necessary but maybe not
+    sufficient.
+(b) Task 3 now captures `ApplyRoundedRegion`'s `bool` and `Debug.WriteLine`s on
+    failure (observability for the silent-clip-failure path).
+(c) Task 5 caution to replace only the inner `<Grid>` and preserve the root
+    `<Border>` + `PointerPressed="OnRootPointerPressed"`.
+(d) Task 8 magnitude-mismatch checklist branch (full-rect vs sliver; check the
+    debug trace; escalate to SystemBackdrop=none + transparent root if needed).
+(e) Global Constraints: build/exec test projects sequentially (NuGet restore race).
+The assumption ledger with full evidence lives at
+`../.the-usual-logs/status-pill-visual-fixes/load-bearing-ledger.md`.

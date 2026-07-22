@@ -19,6 +19,13 @@
 > from the pipeline locals (as for a normal dictation) — the pending slot
 > itself is never the thing persisted.
 >
+> **Persistence consequence (intended):** unpasted/aborted (held-then-discarded)
+> dictation content — audio, raw transcript, and cleaned text the user chose
+> not to paste — is now DURABLY PERSISTED to the on-disk history store at
+> completion time, where previously such rejected dictations were memory-only
+> and discarded. This is an intended consequence of the owner's "treat aborted
+> dictations like any other" decision.
+>
 > **Retention consequence (verified, ledger A1):** `HistoryStore.Append` prunes
 > to `MaxEntries = 50` (plus a 30-day age prune) on every append, so
 > unconditionally archiving held-then-discarded dictations means they now

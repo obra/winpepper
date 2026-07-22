@@ -16,8 +16,9 @@
     <ProjectReference Include="..\..\src\Winpepper.Platform\Winpepper.Platform.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <!-- Compile the pure production layout helper without loading the WinUI app assembly. -->
+    <!-- Compile the pure production helpers without loading the WinUI app assembly. -->
     <Compile Include="..\..\src\Winpepper.App\Views\StatusPillLayout.cs" Link="Production\StatusPillLayout.cs" />
+    <Compile Include="..\..\src\Winpepper.App\Views\StatusPillRegionGeometry.cs" Link="Production\StatusPillRegionGeometry.cs" />
   </ItemGroup>
   <PropertyGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">
     <DefineConstants>$(DefineConstants);WINDOWS</DefineConstants>

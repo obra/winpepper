@@ -208,9 +208,10 @@ public sealed class PipelineHost : IDisposable
                 recorder.CaptureFaulted += _captureFaultHandler;
                 _warmRecorder = recorder;
             }
-            _hook.Start();
-            _runCts = new CancellationTokenSource();
-            _runTask = Task.Run(() => RunAsync(_runCts.Token));
+            // NOTE: the hook + event loop are started by EnsureHotkeyLoopStarted()
+            // in TryStart() (upstream design: the loop may run pre-model for
+            // onboarding capture, gated by _hotkeyReadiness). Starting the hook
+            // again here throws "HotkeyHook already started" (merge regression).
             // Upstream hotkey readiness gate: mark hotkeys replay-safe now that
             // the event loop is running. RunAsync consults ShouldHandle(evt).
             _hotkeyReadiness.Enable(DateTimeOffset.UtcNow);

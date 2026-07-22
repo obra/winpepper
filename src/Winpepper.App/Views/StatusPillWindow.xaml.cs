@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
+using Microsoft.UI.Xaml.Shapes;
 using Windows.Graphics;
 using Winpepper.App.Views.Native;
 using Winpepper.Core.ViewModels;
@@ -23,6 +24,14 @@ public sealed partial class StatusPillWindow : Window
     private double _pulsePhase;
     private PillAnimationMode _animMode = PillAnimationMode.None;
 
+    private const int MeterBarCount = 5;
+    private Rectangle[] _meterBars = Array.Empty<Rectangle>();
+
+    private static readonly SolidColorBrush MeterLitBrush =
+        new(Windows.UI.Color.FromArgb(0xFF, 0xF5, 0x9E, 0x0B)); // warm amber accent
+    private static readonly SolidColorBrush MeterDimBrush =
+        new(Windows.UI.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)); // dim unlit bar
+
     /// <summary>
     /// Invoked when the user clicks the pill while it is in the PENDING state.
     /// Wired by AppShell to perform the paste at click time. Returns true when
@@ -34,6 +43,7 @@ public sealed partial class StatusPillWindow : Window
     {
         _vm = vm;
         InitializeComponent();
+        _meterBars = new[] { Bar0, Bar1, Bar2, Bar3, Bar4 };
 
         // Step 1: realize HWND.
         _hwnd = WindowNative.GetWindowHandle(this);
@@ -161,6 +171,7 @@ public sealed partial class StatusPillWindow : Window
                 SessionStage.Injecting   => Microsoft.UI.Colors.LimeGreen,
                 _ => Microsoft.UI.Colors.Gray,
             });
+            SetMeterVisible(_vm.Stage == SessionStage.Recording);
             _pulsePhase = 0;
             PositionBottomCenter(appWindow);
             appWindow.Show(activateWindow: false);
@@ -187,6 +198,21 @@ public sealed partial class StatusPillWindow : Window
         Dot.Opacity = 1.0;
         DotScale.ScaleX = 1.0;
         DotScale.ScaleY = 1.0;
+        SetMeterVisible(false);
+    }
+
+    /// <summary>Light the first <paramref name="lit"/> bars, dim the rest.</summary>
+    private void UpdateMeter(int lit)
+    {
+        for (var i = 0; i < _meterBars.Length; i++)
+            _meterBars[i].Fill = i < lit ? MeterLitBrush : MeterDimBrush;
+    }
+
+    /// <summary>Show or hide the meter; hiding also clears all bars to dim.</summary>
+    private void SetMeterVisible(bool visible)
+    {
+        MeterPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        if (!visible) UpdateMeter(0);
     }
 
     /// <summary>
@@ -203,6 +229,7 @@ public sealed partial class StatusPillWindow : Window
                 DotScale.ScaleX = scale;
                 DotScale.ScaleY = scale;
                 Dot.Opacity = 1.0;
+                UpdateMeter(VoiceMeter.BarsLit(_vm.InputLevel, MeterBarCount));
                 break;
 
             case PillAnimationMode.Thinking:

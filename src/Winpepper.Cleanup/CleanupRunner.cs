@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Winpepper.Corrections;
 
@@ -246,7 +247,39 @@ public sealed class CleanupRunner
     // page if they want it.
     private static string ApplyDeterministicPostPass(string text, CorrectionsData corrections)
     {
-        return CaseAwareReplacer.Apply(text, corrections.Replacements);
+        var corrected = CaseAwareReplacer.Apply(text, corrections.Replacements);
+        return CollapsePunctuationRuns(corrected);
+    }
+
+    // Collapse degenerate punctuation runs produced by a mis-firing ASR or a
+    // 0.5B cleanup model (e.g. a stuck decoder spraying ". . . . ." or
+    // "..........."). Runs on EVERY cleanup path via ApplyDeterministicPostPass
+    // (LLM success, fallback, and raw-ASR bypass) because the plausibility
+    // guards are punctuation-blind and let a punctuation spray through.
+    //
+    // Rules (marks: '.', '!', '?'):
+    //   - Contiguous run of 4+ identical marks (".....") -> one mark.
+    //     A genuine 3-dot ellipsis "..." is a run of exactly 3 and is preserved
+    //     (the pattern requires 4+).
+    //   - Space-separated run of 3+ identical marks (". . ." / "! ! !") -> one
+    //     mark. Two marks (". .") are below threshold and left untouched.
+    // Ordinary text ("Wait... really?", "e.g. one. two. three.") is unchanged:
+    // it has neither a 4+ contiguous run nor a 3+ space-separated run of the
+    // same mark.
+    internal static string CollapsePunctuationRuns(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+
+        // Contiguous 4+ ( \1{3,} = the captured mark plus 3 or more = 4+ total;
+        // "..." is exactly 3 and does not match).
+        var collapsed = Regex.Replace(text, @"([.!?])\1{3,}", "$1");
+
+        // Space-separated 3+ ( (?: \1){2,} = 2 or more repeats of
+        // "<space><same mark>" = 3+ marks total; ". ." has one repeat and does
+        // not match).
+        collapsed = Regex.Replace(collapsed, @"([.!?])(?: \1){2,}", "$1");
+
+        return collapsed;
     }
 
     private static CleanupResult Finalize(

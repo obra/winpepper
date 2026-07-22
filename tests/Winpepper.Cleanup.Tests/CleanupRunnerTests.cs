@@ -342,4 +342,46 @@ public class CleanupRunnerTests
         result.CleanedText.ShouldBe("deploy to Kubernetes now"); // correction applied deterministically
         backend.CallCount.ShouldBe(0); // LLM never called
     }
+
+    [Theory]
+    [InlineData(". . . .", ".")]        // space-separated run of 4 -> one
+    [InlineData(". . .", ".")]          // space-separated run of 3 -> one
+    [InlineData("! ! !", "!")]          // works for other marks
+    [InlineData("? ? ? ?", "?")]
+    [InlineData(".....", ".")]          // contiguous run of 5 -> one
+    [InlineData("!!!!", "!")]           // contiguous run of 4 -> one
+    public void CollapsePunctuationRuns_DegenerateRuns_CollapseToSingleMark(
+        string input, string expected)
+    {
+        CleanupRunner.CollapsePunctuationRuns(input).ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData("...")]                     // genuine 3-dot ellipsis survives
+    [InlineData("Wait... really?")]         // ellipsis mid-sentence survives
+    [InlineData("e.g. one. two. three.")]   // ordinary sentence punctuation
+    [InlineData(". .")]                       // two marks: below the 3+ threshold
+    [InlineData("Hello world.")]             // nothing to collapse
+    [InlineData("!!!")]                       // contiguous run of exactly 3 survives
+    public void CollapsePunctuationRuns_OrdinaryText_Unchanged(string input)
+    {
+        CleanupRunner.CollapsePunctuationRuns(input).ShouldBe(input);
+    }
+
+    [Fact]
+    public async Task Run_PunctuationSprayInRawTranscript_CollapsedOnFallbackPath()
+    {
+        // Model output is implausibly long garbage -> FallbackImplausible path,
+        // which finalizes from the RAW transcript through
+        // ApplyDeterministicPostPass. The raw transcript carries a degenerate
+        // punctuation spray no plausibility guard catches; the deterministic
+        // collapse must neutralize it even on the raw-passthrough path.
+        var runner = NewRunner(new FakeLlamaCleanupBackend { Output = new string('x', 500) });
+        var result = await runner.RunAsync(
+            "please review the document . . . . .",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.FallbackImplausible);
+        result.CleanedText.ShouldBe("please review the document .");
+    }
 }

@@ -289,6 +289,11 @@ public sealed class PipelineHost : IDisposable
                 Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
                 TimeSpan.FromSeconds(6));
         }
+        if (injected)
+            _log.LogInformation("Pending paste injected");
+        else
+            _log.LogWarning("Pending paste injection failed");
+
         return _vm.NotifyPasteAttempted(injected);
     }
 
@@ -298,6 +303,8 @@ public sealed class PipelineHost : IDisposable
         {
             case HotkeyEventKind.HoldDown:
                 if (_engine.State != SessionState.Idle) return;
+                if (_vm.HasPendingPaste)
+                    _log.LogInformation("Pending paste discarded unpasted");
                 _engine.Apply(SessionEvent.StartRequested);
                 _currentSessionId = Guid.NewGuid();
                 _sounds.PlayStart();
@@ -402,6 +409,10 @@ public sealed class PipelineHost : IDisposable
                         // completion below, exactly like an injected one — the pending
                         // slot itself remains memory-only and is not what gets persisted.
                         _vm.EnterPendingPaste(final, _targetAtStart);
+                        _log.LogInformation(
+                            "Held as pending paste ({Chars} chars, {Words} words)",
+                            final.Length,
+                            final.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length);
                     }
                     else
                     {
@@ -482,6 +493,8 @@ public sealed class PipelineHost : IDisposable
             case HotkeyEventKind.Toggle:
                 if (_engine.State == SessionState.Idle)
                 {
+                    if (_vm.HasPendingPaste)
+                        _log.LogInformation("Pending paste discarded unpasted");
                     _engine.Apply(SessionEvent.StartRequested);
                     _currentSessionId = Guid.NewGuid();
                     _sounds.PlayStart();
@@ -586,6 +599,10 @@ public sealed class PipelineHost : IDisposable
                             // completion below, exactly like an injected one — the pending
                             // slot itself remains memory-only and is not what gets persisted.
                             _vm.EnterPendingPaste(final2, _targetAtStart);
+                            _log.LogInformation(
+                                "Held as pending paste ({Chars} chars, {Words} words)",
+                                final2.Length,
+                                final2.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length);
                         }
                         else
                         {

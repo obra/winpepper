@@ -1,5 +1,35 @@
 # Pending Paste Implementation Plan
 
+> ## Addendum — 2026-07-22: Owner decision, ALWAYS archive
+>
+> **Supersedes:** the "Skip history archiving on the HoldPending path" step
+> and the "held-then-later-pasted text is NEVER archived" design note in this
+> document.
+>
+> **Decision (owner, 2026-07-22):** treat aborted (never-pasted) dictations
+> like any other. EVERY completed dictation is archived to history at
+> completion time (wav + raw transcript + cleaned text + timings) regardless
+> of whether it was injected, held-then-pasted, or held-then-discarded. The
+> `if (!heldPending)` / `if (!heldPending2)` archive gates in `PipelineHost`
+> were removed so `HistoryArchiver.Archive` runs unconditionally at dictation
+> completion.
+>
+> **Unchanged:** the in-memory `PendingPasteState` slot is still memory-only
+> and is discarded on the next hotkey. Archiving happens at *completion time*
+> from the pipeline locals (as for a normal dictation) — the pending slot
+> itself is never the thing persisted.
+>
+> **Retention consequence (verified, ledger A1):** `HistoryStore.Append` prunes
+> to `MaxEntries = 50` (plus a 30-day age prune) on every append, so
+> unconditionally archiving held-then-discarded dictations means they now
+> consume history slots and evict genuinely-pasted entries sooner. This is an
+> intended consequence of "treat aborted dictations like any other" — it is
+> policy-driven eviction, NOT data corruption (`Append` is append-only;
+> existing rows are never overwritten). Held entries also record an `InjectMs`
+> timing even though no injection occurred (harmless; no consumer asserts on
+> it). No history consumer keys on inject/paste status — the schema has no such
+> field — so held entries are indistinguishable from injected ones by design.
+
 > **For agentic workers:** This plan is executed task-by-task by the
 > workflow's execute stage: a fresh implementer per task, with a spec +
 > quality review after each task. Steps use checkbox (`- [ ]`) syntax

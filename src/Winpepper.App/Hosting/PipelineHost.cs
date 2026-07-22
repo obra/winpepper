@@ -390,7 +390,6 @@ public sealed class PipelineHost : IDisposable
 
                 var injectSw = System.Diagnostics.Stopwatch.StartNew();
                 var injected = false;
-                var heldPending = false;
                 if (!string.IsNullOrWhiteSpace(final))
                 {
                     var targetAtInject = CaptureTarget();
@@ -398,11 +397,11 @@ public sealed class PipelineHost : IDisposable
                     if (decision == InjectionDecision.HoldPending)
                     {
                         // Focus moved to a different known field: do NOT inject anywhere.
-                        // Hold the text as an in-memory pending paste (never persisted).
-                        // heldPending gates OUT the archive block below so the held text
-                        // and its audio are never written to the on-disk history store.
+                        // Hold the text as an in-memory pending paste (memory-only slot).
+                        // Owner decision (2026-07-22): the dictation is STILL archived at
+                        // completion below, exactly like an injected one — the pending
+                        // slot itself remains memory-only and is not what gets persisted.
                         _vm.EnterPendingPaste(final, _targetAtStart);
-                        heldPending = true;
                     }
                     else
                     {
@@ -453,28 +452,25 @@ public sealed class PipelineHost : IDisposable
                                      + transcribeSw.ElapsedMilliseconds
                                      + cleanupSw.ElapsedMilliseconds
                                      + injectSw.ElapsedMilliseconds);
-                if (!heldPending)
+                _archiver.Archive(new Winpepper.History.HistoryArchiveInput
                 {
-                    _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                    Samples16k = samples,
+                    RawTranscript = transcription.Text,
+                    CleanedText = final,
+                    AsrModelName = producedModelName,
+                    CleanupModelName = cleanupUsedModel,
+                    WindowContextUsed = windowContextUsed,
+                    WindowTitleAtStart = "",
+                    WindowTitleAtInject = "",
+                    Timings = new Winpepper.History.HistoryTimings
                     {
-                        Samples16k = samples,
-                        RawTranscript = transcription.Text,
-                        CleanedText = final,
-                        AsrModelName = producedModelName,
-                        CleanupModelName = cleanupUsedModel,
-                        WindowContextUsed = windowContextUsed,
-                        WindowTitleAtStart = "",
-                        WindowTitleAtInject = "",
-                        Timings = new Winpepper.History.HistoryTimings
-                        {
-                            RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
-                            TranscribeMs = (int)transcribeSw.ElapsedMilliseconds,
-                            CleanupMs = (int)cleanupSw.ElapsedMilliseconds,
-                            InjectMs = (int)injectSw.ElapsedMilliseconds,
-                            TotalMs = totalMs,
-                        },
-                    });
-                }
+                        RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                        TranscribeMs = (int)transcribeSw.ElapsedMilliseconds,
+                        CleanupMs = (int)cleanupSw.ElapsedMilliseconds,
+                        InjectMs = (int)injectSw.ElapsedMilliseconds,
+                        TotalMs = totalMs,
+                    },
+                });
 
                 _ctxPrefetchTask = null;
                 _recordStopwatch = null;
@@ -578,7 +574,6 @@ public sealed class PipelineHost : IDisposable
 
                     var injectSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var injected2 = false;
-                    var heldPending2 = false;
                     if (!string.IsNullOrWhiteSpace(final2))
                     {
                         var targetAtInject2 = CaptureTarget();
@@ -586,11 +581,11 @@ public sealed class PipelineHost : IDisposable
                         if (decision2 == InjectionDecision.HoldPending)
                         {
                             // Focus moved to a different known field: do NOT inject anywhere.
-                            // Hold the text as an in-memory pending paste (never persisted).
-                            // heldPending2 gates OUT the archive block below so the held text
-                            // and its audio are never written to the on-disk history store.
+                            // Hold the text as an in-memory pending paste (memory-only slot).
+                            // Owner decision (2026-07-22): the dictation is STILL archived at
+                            // completion below, exactly like an injected one — the pending
+                            // slot itself remains memory-only and is not what gets persisted.
                             _vm.EnterPendingPaste(final2, _targetAtStart);
-                            heldPending2 = true;
                         }
                         else
                         {
@@ -641,28 +636,25 @@ public sealed class PipelineHost : IDisposable
                                          + transcribeSw2.ElapsedMilliseconds
                                          + cleanupSw2.ElapsedMilliseconds
                                          + injectSw2.ElapsedMilliseconds);
-                    if (!heldPending2)
+                    _archiver.Archive(new Winpepper.History.HistoryArchiveInput
                     {
-                        _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                        Samples16k = samples2,
+                        RawTranscript = transcription2.Text,
+                        CleanedText = final2,
+                        AsrModelName = producedModelName2,
+                        CleanupModelName = cleanupUsedModel2,
+                        WindowContextUsed = windowContextUsed2,
+                        WindowTitleAtStart = "",
+                        WindowTitleAtInject = "",
+                        Timings = new Winpepper.History.HistoryTimings
                         {
-                            Samples16k = samples2,
-                            RawTranscript = transcription2.Text,
-                            CleanedText = final2,
-                            AsrModelName = producedModelName2,
-                            CleanupModelName = cleanupUsedModel2,
-                            WindowContextUsed = windowContextUsed2,
-                            WindowTitleAtStart = "",
-                            WindowTitleAtInject = "",
-                            Timings = new Winpepper.History.HistoryTimings
-                            {
-                                RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
-                                TranscribeMs = (int)transcribeSw2.ElapsedMilliseconds,
-                                CleanupMs = (int)cleanupSw2.ElapsedMilliseconds,
-                                InjectMs = (int)injectSw2.ElapsedMilliseconds,
-                                TotalMs = totalMs2,
-                            },
-                        });
-                    }
+                            RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                            TranscribeMs = (int)transcribeSw2.ElapsedMilliseconds,
+                            CleanupMs = (int)cleanupSw2.ElapsedMilliseconds,
+                            InjectMs = (int)injectSw2.ElapsedMilliseconds,
+                            TotalMs = totalMs2,
+                        },
+                    });
 
                     _ctxPrefetchTask = null;
                     _recordStopwatch = null;

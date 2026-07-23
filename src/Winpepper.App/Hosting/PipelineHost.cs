@@ -269,8 +269,9 @@ public sealed class PipelineHost : IDisposable
     /// Paste the held pending text into whatever field is focused NOW (the
     /// user's explicit choice via the pill click). Uses the normal injection
     /// path. On success the VM consumes the slot and hides the pill; on failure
-    /// the error is surfaced via the ErrorBus/clipboard/toast pattern and the
-    /// pending slot is kept (NotifyPasteAttempted(false)) so the user can retry.
+    /// the pending slot is kept (NotifyPasteAttempted(false)) so the pill stays
+    /// in its click-to-paste state and the user simply clicks again — no toast,
+    /// no clipboard clobbering (consumer policy: the pill IS the surface).
     /// Returns true when the paste succeeded. Runs on the UI thread.
     /// </summary>
     public bool TryPastePending()
@@ -280,16 +281,11 @@ public sealed class PipelineHost : IDisposable
         var injected = !string.IsNullOrWhiteSpace(text) && _injector.TryInject(text);
         if (!injected)
         {
+            // Slot is kept below; the pill stays clickable for a retry.
             _errorBus.Report(
                 Winpepper.Core.Errors.ErrorStage.Injection,
-                new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
+                new InvalidOperationException("SendInput refused; pending slot kept for retry"),
                 _currentSessionId);
-            _clipboardFallback.Copy(text);
-            _ = _toasts.ShowAsync(
-                "Winpepper",
-                "Couldn't type into the active window. The text is on your clipboard.",
-                Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                TimeSpan.FromSeconds(6));
         }
         if (injected)
             _log.LogInformation("Pending paste injected");
@@ -422,16 +418,18 @@ public sealed class PipelineHost : IDisposable
                         injected = _injector.TryInject(toType);
                         if (!injected)
                         {
+                            // Injection failed (SendInput refused). Consumer policy:
+                            // no toast, no clipboard clobbering — hold the text as a
+                            // pending paste so the pill shows "Click to paste" and
+                            // the user pastes on their own terms.
                             _errorBus.Report(
                                 Winpepper.Core.Errors.ErrorStage.Injection,
-                                new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
+                                new InvalidOperationException("SendInput refused; held as pending paste"),
                                 _currentSessionId);
-                            _clipboardFallback.Copy(toType);
-                            _ = _toasts.ShowAsync(
-                                "Winpepper",
-                                "Couldn't type into the active window. The cleaned text is on your clipboard.",
-                                Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                                TimeSpan.FromSeconds(6));
+                            _vm.EnterPendingPaste(final, _targetAtStart);
+                            _log.LogInformation(
+                                "Injection failed; held as pending paste ({Chars} chars)",
+                                final.Length);
                         }
                     }
                 }
@@ -613,16 +611,16 @@ public sealed class PipelineHost : IDisposable
                             injected2 = _injector.TryInject(toType2);
                             if (!injected2)
                             {
+                                // See hold path: failure -> pending click-to-paste,
+                                // no toast, no clipboard clobbering.
                                 _errorBus.Report(
                                     Winpepper.Core.Errors.ErrorStage.Injection,
-                                    new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
+                                    new InvalidOperationException("SendInput refused; held as pending paste"),
                                     _currentSessionId);
-                                _clipboardFallback.Copy(toType2);
-                                _ = _toasts.ShowAsync(
-                                    "Winpepper",
-                                    "Couldn't type into the active window. The cleaned text is on your clipboard.",
-                                    Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                                    TimeSpan.FromSeconds(6));
+                                _vm.EnterPendingPaste(final2, _targetAtStart);
+                                _log.LogInformation(
+                                    "Injection failed; held as pending paste ({Chars} chars)",
+                                    final2.Length);
                             }
                         }
                     }

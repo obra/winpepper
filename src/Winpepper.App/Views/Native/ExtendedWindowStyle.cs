@@ -126,13 +126,14 @@ internal static class ExtendedWindowStyle
         var color = DWMWA_COLOR_NONE;
         _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref color, sizeof(int));
 
-        // Disable ALL DWM non-client rendering — most importantly the system
-        // DROP SHADOW. On a layered window DWM cannot composite the shadow and
-        // its surface degenerates into an opaque light ROUNDED RECTANGLE
-        // painted behind the pill (the "white rectangle" bug). The pill is a
-        // transient overlay; it needs no system shadow.
-        var ncPolicy = DWMNCRP_DISABLED;
-        _ = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, ref ncPolicy, sizeof(int));
+        // IMPORTANT: do NOT set DWMWA_NCRENDERING_POLICY = DISABLED here. DWM's
+        // non-client rendering is the machinery that implements BOTH the corner
+        // rounding below AND the border-colour suppression above; disabling it
+        // left the pill un-rounded with visible frame lines (owner-reported:
+        // "white lines around the edges, not exactly rounded"). The system drop
+        // shadow this policy was originally disabled for is judged empirically
+        // by the on-device pixel probe instead — if it ever degenerates into a
+        // light halo again, fix the cause, not the whole NC pipeline.
 
         // Round the window's own corners. The pill window is painted a single
         // uniform colour edge-to-edge, so DWM's rounding IS the pill shape —

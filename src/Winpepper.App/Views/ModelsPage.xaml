@@ -21,11 +21,64 @@
                         <FontIcon Glyph="&#xE720;" FontSize="18" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
                         <StackPanel>
                             <TextBlock Text="Speech recognition" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="ASR model — turns your voice into raw text"
+                            <TextBlock Text="ASR &#8212; turns your voice into raw text"
                                        Style="{ThemeResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </StackPanel>
                     </StackPanel>
+
+                    <!-- Provider selection (top of the card): where transcription runs -->
+                    <ComboBox x:Name="AsrProviderCombo" Header="Provider"
+                              AutomationProperties.AutomationId="ModelsAsrProviderCombo"
+                              HorizontalAlignment="Stretch">
+                        <ComboBoxItem Content="Local processing (on this PC)" Tag="local" />
+                        <ComboBoxItem Content="AssemblyAI (cloud)" Tag="assemblyai" />
+                    </ComboBox>
+
+                    <!-- AssemblyAI cloud config: key + model + test + privacy + retention.
+                         Collapsed unless the AssemblyAI provider is selected. -->
+                    <StackPanel x:Name="AssemblyAiPanel" Spacing="8" Margin="0,4,0,0">
+                        <TextBlock x:Name="AsrPrivacyText"
+                                   Text="Cloud transcription sends your recorded audio to AssemblyAI. Winpepper asks AssemblyAI to delete your audio and transcript after transcription (deletion happens on AssemblyAI's servers and may not be immediate). Turn deletion off below to keep them per AssemblyAI's retention policy."
+                                   TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Style="{ThemeResource CaptionTextBlockStyle}" />
+                        <PasswordBox x:Name="AssemblyAiKeyBox" Header="API key"
+                                     AutomationProperties.AutomationId="ModelsAssemblyAiKeyBox"
+                                     HorizontalAlignment="Stretch"
+                                     PlaceholderText="Paste your AssemblyAI API key" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="SaveKeyButton" Content="Save key" AutomationProperties.AutomationId="ModelsAssemblyAiSaveKeyButton" />
+                            <Button x:Name="ClearKeyButton" Content="Clear key" AutomationProperties.AutomationId="ModelsAssemblyAiClearKeyButton" />
+                            <Button x:Name="TestKeyButton" Content="Test" AutomationProperties.AutomationId="ModelsAssemblyAiTestKeyButton" />
+                        </StackPanel>
+                        <ComboBox x:Name="AssemblyAiModelCombo" Header="Model"
+                                  AutomationProperties.AutomationId="ModelsAssemblyAiModelCombo"
+                                  HorizontalAlignment="Stretch" />
+                        <TextBox x:Name="AssemblyAiModelBox" Header="Custom model id"
+                                 HorizontalAlignment="Stretch"
+                                 Visibility="Collapsed"
+                                 PlaceholderText="Advanced: exact AssemblyAI speech_model id" />
+                        <TextBlock x:Name="AssemblyAiModelWarning"
+                                   Visibility="Collapsed"
+                                   Text="Custom model ids are not validated and will fail at dictation time if wrong."
+                                   TextWrapping="Wrap"
+                                   Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                   Style="{ThemeResource CaptionTextBlockStyle}" />
+                        <ToggleSwitch x:Name="AssemblyAiDeleteToggle" Header="Delete audio from AssemblyAI after transcription" />
+                        <ToggleSwitch x:Name="AssemblyAiKeytermsToggle" Header="Send preferred terms as keyterms" />
+                        <TextBlock Text="Preferred terms may incur extra AssemblyAI cost on some plans. Off by default. Your corrections list is always applied via custom spelling at no extra cost."
+                                   TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Style="{ThemeResource CaptionTextBlockStyle}" />
+                        <TextBlock x:Name="AsrStatusText"
+                                   TextWrapping="Wrap"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                   Style="{ThemeResource CaptionTextBlockStyle}" />
+                    </StackPanel>
+
+                    <!-- Local model (always available as fallback; downloadable via the button below) -->
+                    <TextBlock Text="Local model (fallback)" Style="{ThemeResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon x:Name="AsrInstalledIcon" Glyph="&#xE73E;" FontSize="14" Foreground="{ThemeResource SystemFillColorSuccessBrush}" VerticalAlignment="Center" />
                         <FontIcon x:Name="AsrNotInstalledIcon" Glyph="&#xE896;" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" Visibility="Collapsed" />
@@ -33,7 +86,7 @@
                     </StackPanel>
                     <ComboBox x:Name="AsrCombo"
                               AutomationProperties.AutomationId="ModelsAsrCombo"
-                              Header="Active model"
+                              Header="Active local model"
                               HorizontalAlignment="Stretch"
                               ItemsSource="{x:Bind ViewModel.AsrCard.Available, Mode=OneWay}"
                               DisplayMemberPath="DisplayName"

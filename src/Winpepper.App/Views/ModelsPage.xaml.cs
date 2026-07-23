@@ -53,6 +53,7 @@ public sealed partial class ModelsPage : Page
         AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
         UpdateInstalledLabels();
+        WireSpeechProvider(s);
         try
         {
             await models.VerifyReadyAsync(_lifetimeCts.Token);
@@ -89,6 +90,148 @@ public sealed partial class ModelsPage : Page
             ViewModel.CleanupCard.CommitSelection();
             UpdateInstalledLabels();
         }
+    }
+
+    // All speech-recognition provider config lives here (owner decision: the
+    // model section owns ASR config, including the API key). Ported verbatim
+    // from the former RecordingPage "Speech recognition" section so behavior
+    // (debounced settings writes, honest key testing, model canonicalization +
+    // custom escape hatch) is unchanged.
+    private void WireSpeechProvider(Winpepper.Core.Settings.AppSettings current)
+    {
+        var shell = App.Shell!;
+        var keyStore = shell.AssemblyAiKeyStore;
+
+        // Provider picker
+        AsrProviderCombo.SelectedIndex =
+            string.Equals(current.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+        AssemblyAiPanel.Visibility = AsrProviderCombo.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+        AsrProviderCombo.SelectionChanged += (_, _) =>
+        {
+            var tag = (AsrProviderCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "local";
+            AssemblyAiPanel.Visibility = tag == "assemblyai" ? Visibility.Visible : Visibility.Collapsed;
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AsrProvider = tag });
+        };
+
+        // Model picker: known ids + an "Advanced/custom" escape hatch.
+        const string CustomTag = "__custom__";
+        AssemblyAiModelCombo.Items.Clear();
+        foreach (var m in Winpepper.Asr.Transcription.AssemblyAiModels.Known)
+            AssemblyAiModelCombo.Items.Add(new ComboBoxItem { Content = m.Label, Tag = m.Id });
+        AssemblyAiModelCombo.Items.Add(new ComboBoxItem { Content = "Advanced / custom\u2026", Tag = CustomTag });
+
+        void SelectModelInCombo(string modelId)
+        {
+            // A model can be "known" via an accepted alias (e.g. "universal-3-pro")
+            // that has no dedicated combo item; canonicalize first so any accepted
+            // spelling resolves to the listed id, then look the item up safely. If no
+            // listed item matches (truly custom id) we fall back to the custom item
+            // rather than throwing.
+            var canonical = Winpepper.Asr.Transcription.AssemblyAiModels.CanonicalId(modelId);
+            var matchIndex = -1;
+            for (var i = 0; i < AssemblyAiModelCombo.Items.Count; i++)
+            {
+                var tag = (string?)((ComboBoxItem)AssemblyAiModelCombo.Items[i]).Tag;
+                if (tag != CustomTag && string.Equals(tag, canonical, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchIndex = i;
+                    break;
+                }
+            }
+
+            var hasItem = matchIndex >= 0;
+            AssemblyAiModelCombo.SelectedIndex = hasItem ? matchIndex : AssemblyAiModelCombo.Items.Count - 1; // the custom item
+            var isCustom = !hasItem;
+            AssemblyAiModelBox.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+            AssemblyAiModelWarning.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+            AssemblyAiModelBox.Text = isCustom ? modelId : "";
+        }
+        SelectModelInCombo(current.AssemblyAiModel);
+
+        AssemblyAiModelCombo.SelectionChanged += (_, _) =>
+        {
+            var tag = (AssemblyAiModelCombo.SelectedItem as ComboBoxItem)?.Tag as string
+                      ?? Winpepper.Asr.Transcription.AssemblyAiModels.DefaultId;
+            var isCustom = tag == CustomTag;
+            AssemblyAiModelBox.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+            AssemblyAiModelWarning.Visibility = isCustom ? Visibility.Visible : Visibility.Collapsed;
+            if (!isCustom)
+                _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiModel = tag });
+        };
+        AssemblyAiModelBox.LostFocus += (_, _) =>
+        {
+            var model = string.IsNullOrWhiteSpace(AssemblyAiModelBox.Text)
+                ? Winpepper.Asr.Transcription.AssemblyAiModels.DefaultId
+                : AssemblyAiModelBox.Text.Trim();
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiModel = model });
+        };
+
+        // Retention + keyterms toggles.
+        AssemblyAiDeleteToggle.IsOn = current.AssemblyAiDeleteAfterTranscribe;
+        AssemblyAiDeleteToggle.Toggled += (_, _) =>
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiDeleteAfterTranscribe = AssemblyAiDeleteToggle.IsOn });
+        AssemblyAiKeytermsToggle.IsOn = current.AssemblyAiKeytermsEnabled;
+        AssemblyAiKeytermsToggle.Toggled += (_, _) =>
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiKeytermsEnabled = AssemblyAiKeytermsToggle.IsOn });
+
+        // Key status
+        AsrStatusText.Text = keyStore.HasKey ? "A key is saved on this PC." : "No key saved.";
+
+        SaveKeyButton.Click += (_, _) =>
+        {
+            var key = AssemblyAiKeyBox.Password;
+            if (string.IsNullOrWhiteSpace(key)) { AsrStatusText.Text = "Enter a key first."; return; }
+            keyStore.Save(key.Trim());
+            AssemblyAiKeyBox.Password = "";
+            AsrStatusText.Text = "Key saved on this PC.";
+        };
+
+        ClearKeyButton.Click += (_, _) =>
+        {
+            keyStore.Clear();
+            AssemblyAiKeyBox.Password = "";
+            AsrStatusText.Text = "Key cleared.";
+        };
+
+        TestKeyButton.Click += async (_, _) =>
+        {
+            var typed = AssemblyAiKeyBox.Password;
+            var hasTyped = !string.IsNullOrWhiteSpace(typed);
+            if (!hasTyped && !keyStore.HasKey) { AsrStatusText.Text = "Enter or save a key before testing."; return; }
+
+            AsrStatusText.Text = hasTyped ? "Testing the key you typed\u2026" : "Testing the saved key\u2026";
+            try
+            {
+                Winpepper.Asr.Transcription.IAssemblyAiClient clientToTest = shell.AssemblyAiClient;
+                if (hasTyped)
+                {
+                    // Validate exactly what the user typed, not a previously saved key.
+                    var typedKey = typed.Trim();
+                    var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+                    clientToTest = new Winpepper.Asr.Transcription.AssemblyAiClient(
+                        http, () => typedKey, shell.AssemblyAiOptions,
+                        shell.LogFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiClient>());
+                }
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                var ok = await clientToTest.ValidateKeyAsync(cts.Token);
+                if (ok && hasTyped)
+                {
+                    keyStore.Save(typed.Trim());          // typed key is valid -> save it
+                    AssemblyAiKeyBox.Password = "";
+                    AsrStatusText.Text = "Typed key is valid and was saved on this PC.";
+                }
+                else
+                {
+                    AsrStatusText.Text = ok
+                        ? "Saved key is valid."
+                        : (hasTyped ? "Typed key rejected (401). Check the key." : "Saved key rejected (401). Check the key.");
+                }
+            }
+            catch (Exception ex)
+            {
+                AsrStatusText.Text = $"Test failed: {ex.Message}";
+            }
+        };
     }
 
     private async void OnDownloadMissing(object sender, RoutedEventArgs e)

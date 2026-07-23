@@ -36,6 +36,39 @@ public static class VoiceMeter
         return norm < 0 ? 0 : norm > 1 ? 1 : norm;
     }
 
+    /// <summary>
+    /// Wave-style meter: per-bar heights (0..1) for a centre-weighted "voice
+    /// wave" with a gentle per-bar shimmer, driven only by (level, tick).
+    /// Pure math per tick — no FFT, no allocation-heavy work — so the cost is
+    /// negligible at a 100 ms cadence. Deterministic for a given input.
+    /// </summary>
+    public static double[] BarHeights(double level, int tick, int barCount)
+    {
+        if (barCount <= 0)
+            throw new ArgumentOutOfRangeException(nameof(barCount));
+
+        if (level < 0 || double.IsNaN(level)) level = 0;
+        if (level > 1) level = 1;
+
+        var heights = new double[barCount];
+        var center = (barCount - 1) / 2.0;
+        var sigma = barCount / 3.5;
+
+        for (var i = 0; i < barCount; i++)
+        {
+            // Centre-weighted envelope: middle bars tallest, ends taper.
+            var w = Math.Exp(-Math.Pow((i - center) / sigma, 2));
+            // Per-bar shimmer: fixed golden-angle phase spread so neighbouring
+            // bars move independently and the wave "dances" with speech.
+            var phase = (tick * (0.55 + 0.13 * (i % 5))) + (i * 2.399);
+            var shimmer = 0.72 + (0.28 * Math.Sin(phase));
+            var v = level * w * shimmer;
+            heights[i] = v < 0 ? 0 : v > 1 ? 1 : v;
+        }
+
+        return heights;
+    }
+
     public static int BarsLit(double level, int barCount)
     {
         if (barCount <= 0)

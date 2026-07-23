@@ -24,13 +24,15 @@ public sealed partial class StatusPillWindow : Window
     private double _pulsePhase;
     private PillAnimationMode _animMode = PillAnimationMode.None;
 
-    private const int MeterBarCount = 5;
+    // Wave-style voice meter: bars are generated at construction (BuildMeterBars)
+    // and animated per tick from VoiceMeter.BarHeights. Each bar keeps ONE
+    // SolidColorBrush whose Color is mutated in place — no per-tick allocations.
+    private const int MeterBarCount = 12;
+    private const double MeterBarMinPx = 3;   // resting stub height
+    private const double MeterBarMaxPx = 22;  // full-scale height
     private Rectangle[] _meterBars = Array.Empty<Rectangle>();
-
-    private static readonly SolidColorBrush MeterLitBrush =
-        new(Windows.UI.Color.FromArgb(0xFF, 0xF5, 0x9E, 0x0B)); // warm amber accent
-    private static readonly SolidColorBrush MeterDimBrush =
-        new(Windows.UI.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF)); // dim unlit bar
+    private SolidColorBrush[] _meterBrushes = Array.Empty<SolidColorBrush>();
+    private int _meterTick;
 
     /// <summary>
     /// Invoked when the user clicks the pill while it is in the PENDING state.
@@ -43,7 +45,7 @@ public sealed partial class StatusPillWindow : Window
     {
         _vm = vm;
         InitializeComponent();
-        _meterBars = new[] { Bar0, Bar1, Bar2, Bar3, Bar4 };
+        BuildMeterBars();
 
         // Step 1: realize HWND.
         _hwnd = WindowNative.GetWindowHandle(this);
@@ -72,7 +74,7 @@ public sealed partial class StatusPillWindow : Window
         _tickTimer.Tick += (_, _) =>
         {
             _vm.Tick();
-            ElapsedText.Text = $"{_vm.ElapsedMs / 1000.0:0.0} s";
+            ElapsedText.Text = $"{_vm.ElapsedMs / 1000} s";
 
             // Cheap: keep us pinned to the top even if another topmost window
             // was created after our last show. Only while visible.
@@ -204,18 +206,67 @@ public sealed partial class StatusPillWindow : Window
         SetMeterVisible(false);
     }
 
-    /// <summary>Light the first <paramref name="lit"/> bars, dim the rest.</summary>
-    private void UpdateMeter(int lit)
+    /// <summary>
+    /// Create the wave-meter bars once. Each bar owns one SolidColorBrush that
+    /// is mutated in place every tick (no per-tick allocations).
+    /// </summary>
+    private void BuildMeterBars()
     {
-        for (var i = 0; i < _meterBars.Length; i++)
-            _meterBars[i].Fill = i < lit ? MeterLitBrush : MeterDimBrush;
+        _meterBars = new Rectangle[MeterBarCount];
+        _meterBrushes = new SolidColorBrush[MeterBarCount];
+        for (var i = 0; i < MeterBarCount; i++)
+        {
+            _meterBrushes[i] = new SolidColorBrush(Windows.UI.Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
+            _meterBars[i] = new Rectangle
+            {
+                Width = 3,
+                Height = MeterBarMinPx,
+                RadiusX = 1.5,
+                RadiusY = 1.5,
+                VerticalAlignment = VerticalAlignment.Center,
+                Fill = _meterBrushes[i],
+            };
+            MeterPanel.Children.Add(_meterBars[i]);
+        }
     }
 
-    /// <summary>Show or hide the meter; hiding also clears all bars to dim.</summary>
+    /// <summary>
+    /// Render one wave frame: bar heights from VoiceMeter.BarHeights, colour
+    /// lerped teal -> amber -> red with the bar's own height. Cheap: 12 height
+    /// writes + 12 in-place Color writes per 100 ms tick.
+    /// </summary>
+    private void UpdateMeterWave(double[] heights)
+    {
+        for (var i = 0; i < _meterBars.Length && i < heights.Length; i++)
+        {
+            var h = heights[i];
+            _meterBars[i].Height = MeterBarMinPx + (h * (MeterBarMaxPx - MeterBarMinPx));
+            _meterBrushes[i].Color = WaveColor(h);
+        }
+    }
+
+    /// <summary>Teal (quiet) -> amber (speaking) -> red (loud) by bar height.</summary>
+    private static Windows.UI.Color WaveColor(double h)
+    {
+        static byte Lerp(byte a, byte b, double t) => (byte)(a + ((b - a) * t));
+        // teal #2DD4BF -> amber #F59E0B -> red #EF4444
+        if (h < 0.05) return Windows.UI.Color.FromArgb(0x44, 0xFF, 0xFF, 0xFF); // resting stub
+        if (h < 0.5)
+        {
+            var t = h / 0.5;
+            return Windows.UI.Color.FromArgb(0xFF, Lerp(0x2D, 0xF5, t), Lerp(0xD4, 0x9E, t), Lerp(0xBF, 0x0B, t));
+        }
+        var u = (h - 0.5) / 0.5;
+        return Windows.UI.Color.FromArgb(0xFF, Lerp(0xF5, 0xEF, u), Lerp(0x9E, 0x44, u), Lerp(0x0B, 0x44, u));
+    }
+
+    private static readonly double[] MeterAtRest = new double[MeterBarCount];
+
+    /// <summary>Show or hide the meter; hiding also drops all bars to rest.</summary>
     private void SetMeterVisible(bool visible)
     {
         MeterPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-        if (!visible) UpdateMeter(0);
+        if (!visible) UpdateMeterWave(MeterAtRest);
     }
 
     /// <summary>
@@ -236,7 +287,7 @@ public sealed partial class StatusPillWindow : Window
                 DotScale.ScaleX = scale;
                 DotScale.ScaleY = scale;
                 Dot.Opacity = 1.0;
-                UpdateMeter(VoiceMeter.BarsLit(level, MeterBarCount));
+                UpdateMeterWave(VoiceMeter.BarHeights(level, _meterTick++, MeterBarCount));
                 break;
 
             case PillAnimationMode.Thinking:

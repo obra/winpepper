@@ -51,4 +51,50 @@ public sealed class VoiceMeterTests
         VoiceMeter.BarsLit(VoiceMeter.Perceptual(0.15), 5).ShouldBeGreaterThanOrEqualTo(3);
         VoiceMeter.BarsLit(VoiceMeter.Perceptual(0.3), 5).ShouldBeGreaterThanOrEqualTo(4);
     }
+
+    [Fact]
+    public void BarHeights_SilenceYieldsAllZero()
+    {
+        var h = VoiceMeter.BarHeights(0.0, tick: 7, barCount: 12);
+        h.Length.ShouldBe(12);
+        h.ShouldAllBe(v => v == 0.0);
+    }
+
+    [Fact]
+    public void BarHeights_CenterWeighted_MiddleBarsTallestOnAverage()
+    {
+        // Average over many ticks so per-bar shimmer cancels out.
+        var sums = new double[12];
+        for (var t = 0; t < 200; t++)
+        {
+            var h = VoiceMeter.BarHeights(0.8, t, 12);
+            for (var i = 0; i < 12; i++) sums[i] += h[i];
+        }
+        var mid = (sums[5] + sums[6]) / 2;
+        mid.ShouldBeGreaterThan(sums[0]);
+        mid.ShouldBeGreaterThan(sums[11]);
+    }
+
+    [Fact]
+    public void BarHeights_AllValuesClamped01()
+    {
+        for (var t = 0; t < 50; t++)
+            foreach (var v in VoiceMeter.BarHeights(1.5, t, 12)) // over-range level
+            {
+                v.ShouldBeGreaterThanOrEqualTo(0.0);
+                v.ShouldBeLessThanOrEqualTo(1.0);
+            }
+    }
+
+    [Fact]
+    public void BarHeights_DeterministicForSameInputs()
+        => VoiceMeter.BarHeights(0.5, 42, 12).ShouldBe(VoiceMeter.BarHeights(0.5, 42, 12));
+
+    [Fact]
+    public void BarHeights_VariesAcrossTicks()
+        => VoiceMeter.BarHeights(0.5, 1, 12).ShouldNotBe(VoiceMeter.BarHeights(0.5, 5, 12));
+
+    [Fact]
+    public void BarHeights_RejectsNonPositiveBarCount()
+        => Should.Throw<System.ArgumentOutOfRangeException>(() => VoiceMeter.BarHeights(0.5, 0, 0));
 }

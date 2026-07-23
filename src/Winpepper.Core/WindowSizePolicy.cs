@@ -14,4 +14,14 @@ public static class WindowSizePolicy
         var h = Math.Max(platformHeight / 2, minHeight);
         return (w, h);
     }
+
+    /// <summary>
+    /// Whether a window size is worth persisting/restoring. Minimized windows
+    /// report a caption-strip rect (~160x28 at 96 DPI); persisting that and
+    /// restoring it later yields a window that barely fits the caption buttons.
+    /// Anything below the usable minimum is rejected both when saving and when
+    /// restoring.
+    /// </summary>
+    public static bool IsSaneSize(int width, int height, int minWidth = 480, int minHeight = 400)
+        => width >= minWidth && height >= minHeight;
 }

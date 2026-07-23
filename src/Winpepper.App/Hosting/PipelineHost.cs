@@ -195,14 +195,15 @@ public sealed class PipelineHost : IDisposable
                 _frameHandler = frame => _vm.ReportAudioFrame(frame);
                 _captureFaultHandler = ex =>
                 {
-                    // Bug 3: capture faults are no longer silent — log and tell the user.
+                    // Capture faults are logged and recorded for Diagnostics but
+                    // show NO toast: recovery is automatic (rebuild-on-fault +
+                    // session-start rebuild), so there is nothing for the user
+                    // to act on. The actionable failure — a dictation that
+                    // captured no audio — has its own toast at session end
+                    // (WarnIfSessionSilent). Consumer toast policy: see
+                    // ErrorToastPolicy (Audio stage is silent on the bus too).
                     _log.LogError(ex, "microphone capture faulted");
                     _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Audio, ex, _currentSessionId);
-                    _ = _toasts.ShowAsync(
-                        "Winpepper",
-                        "Microphone capture stopped unexpectedly — attempting to recover. Check your microphone if this repeats.",
-                        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                        TimeSpan.FromSeconds(6));
                 };
                 recorder.FramesAvailable += _frameHandler;
                 recorder.CaptureFaulted += _captureFaultHandler;

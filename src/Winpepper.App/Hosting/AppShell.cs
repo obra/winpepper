@@ -85,6 +85,10 @@ public sealed class AppShell : IDisposable
 
         errorBus.Subscribe(rec =>
         {
+            // Consumer toast policy: only interrupt the user when they can act
+            // on it. Non-actionable reports stay on the bus (Diagnostics page)
+            // and in the logs, but never pop UI. See ErrorToastPolicy.
+            if (!Winpepper.Core.Errors.ErrorToastPolicy.ShouldToast(rec.Stage)) return;
             var tag = Winpepper.Core.Errors.ErrorDeepLink.NavigationTagFor(rec.Stage);
             var label = Winpepper.Core.Errors.ErrorDeepLink.ActionLabelFor(rec.Stage);
             _ = toasts.ShowAsync(

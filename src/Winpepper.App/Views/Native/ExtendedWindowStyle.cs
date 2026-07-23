@@ -11,7 +11,11 @@ internal static class ExtendedWindowStyle
     private const int DWMNCRP_DISABLED = 1;
     private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
     private const int DWMWCP_ROUND = 2;
+    public const int GWL_STYLE   = -16;
     public const int GWL_EXSTYLE = -20;
+    private const long WS_CAPTION    = 0x00C00000; // WS_BORDER | WS_DLGFRAME
+    private const long WS_THICKFRAME = 0x00040000;
+    private const long WS_SYSMENU    = 0x00080000;
     public const int WS_EX_TOPMOST     = 0x00000008;
     public const int WS_EX_LAYERED     = 0x00080000;
     public const int WS_EX_TRANSPARENT = 0x00000020;
@@ -21,9 +25,11 @@ internal static class ExtendedWindowStyle
     public const int LWA_ALPHA         = 0x00000002;
 
     private static readonly IntPtr HWND_TOPMOST = new(-1);
-    private const uint SWP_NOSIZE     = 0x0001;
-    private const uint SWP_NOMOVE     = 0x0002;
-    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint SWP_NOSIZE       = 0x0001;
+    private const uint SWP_NOMOVE       = 0x0002;
+    private const uint SWP_NOZORDER     = 0x0004;
+    private const uint SWP_NOACTIVATE   = 0x0010;
+    private const uint SWP_FRAMECHANGED = 0x0020;
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
@@ -119,27 +125,63 @@ internal static class ExtendedWindowStyle
         return dpi == 0 ? 96u : dpi;
     }
 
+    /// <summary>
+    /// Diagnostics from the most recent <see cref="RemoveSystemBorder"/> call:
+    /// DWM HRESULTs, the stripped style bits, and the window-vs-client rect
+    /// inset. Logged by the pill preview harness so the on-device probe can see
+    /// WHY an edge artifact exists instead of guessing. Empirically the pill's
+    /// white edge ring matched a non-client inset (client rect smaller than the
+    /// window rect), i.e. residual frame — not app-painted content.
+    /// </summary>
+    public static string LastBorderDiagnostics { get; private set; } = "";
+
     public static void RemoveSystemBorder(IntPtr hwnd)
     {
+        // Strip every classic frame style. The pill previously kept residual
+        // WS frame bits (WinUI's OverlappedPresenter hides chrome but does not
+        // necessarily clear them), leaving a 2-3px non-client ring that DWM
+        // paints light — the owner-visible "white lines around the edges".
+        var style = (long)GetWindowLongPtr64(hwnd, GWL_STYLE);
+        var strippedStyle = style & ~(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU);
+        if (strippedStyle != style)
+        {
+            SetWindowLongPtr64(hwnd, GWL_STYLE, new IntPtr(strippedStyle));
+            // Style changes take effect only after a frame-changed poke.
+            SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        }
+
         // Windows 11 can draw a one-pixel DWM border even when the presenter chrome is hidden.
         // This attribute is unavailable on Windows 10, where the rounded region remains the fallback.
         var color = DWMWA_COLOR_NONE;
-        _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref color, sizeof(int));
+        var hrBorder = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref color, sizeof(int));
 
         // IMPORTANT: do NOT set DWMWA_NCRENDERING_POLICY = DISABLED here. DWM's
-        // non-client rendering is the machinery that implements BOTH the corner
-        // rounding below AND the border-colour suppression above; disabling it
-        // left the pill un-rounded with visible frame lines (owner-reported:
-        // "white lines around the edges, not exactly rounded"). The system drop
-        // shadow this policy was originally disabled for is judged empirically
-        // by the on-device pixel probe instead — if it ever degenerates into a
-        // light halo again, fix the cause, not the whole NC pipeline.
+        // non-client rendering implements the corner rounding below; disabling
+        // it is a heavier hammer than the frame-style strip above.
 
         // Round the window's own corners. The pill window is painted a single
         // uniform colour edge-to-edge, so DWM's rounding IS the pill shape —
         // no shaped-window/colour-key tricks required.
         var corner = DWMWCP_ROUND;
-        _ = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref corner, sizeof(int));
+        var hrCorner = DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref corner, sizeof(int));
+
+        // Record what actually happened for the preview harness to log.
+        var insetText = "rects unavailable";
+        if (GetWindowRect(hwnd, out var wr) && GetClientRect(hwnd, out var cr))
+        {
+            var origin = new POINT();
+            if (ClientToScreen(hwnd, ref origin))
+            {
+                insetText =
+                    $"window {wr.Right - wr.Left}x{wr.Bottom - wr.Top} at {wr.Left},{wr.Top}; " +
+                    $"client {cr.Right - cr.Left}x{cr.Bottom - cr.Top} at {origin.X},{origin.Y}; " +
+                    $"inset L{origin.X - wr.Left} T{origin.Y - wr.Top} " +
+                    $"R{wr.Right - (origin.X + cr.Right - cr.Left)} B{wr.Bottom - (origin.Y + cr.Bottom - cr.Top)}";
+            }
+        }
+        LastBorderDiagnostics =
+            $"style 0x{style:X8} -> 0x{strippedStyle:X8}; hrBorderColor=0x{hrBorder:X8}; hrCorner=0x{hrCorner:X8}; {insetText}";
     }
 
     /// <summary>

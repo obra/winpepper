@@ -8,10 +8,13 @@ namespace Winpepper.Core;
 public static class InjectionText
 {
     /// <summary>
-    /// Paste ergonomics: a dictation that ends with a period gets a trailing
-    /// space so the user (or the next dictation) can continue typing without
-    /// manually inserting one. Anything else is returned unchanged.
+    /// Paste ergonomics: a dictation that ends with sentence-final punctuation
+    /// (period, question mark, exclamation mark) gets a trailing space so the
+    /// user (or the next dictation) can continue typing without manually
+    /// inserting one. Anything else is returned unchanged.
     /// </summary>
     public static string ForPaste(string text)
-        => text.EndsWith('.') ? text + " " : text;
+        => text.EndsWith('.') || text.EndsWith('?') || text.EndsWith('!')
+            ? text + " "
+            : text;
 }

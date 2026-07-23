@@ -102,13 +102,13 @@ public sealed partial class ModelsPage : Page
         var shell = App.Shell!;
         var keyStore = shell.AssemblyAiKeyStore;
 
-        // Provider picker
-        AsrProviderCombo.SelectedIndex =
+        // Provider picker (radio buttons — owner preference over a dropdown)
+        AsrProviderRadios.SelectedIndex =
             string.Equals(current.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
-        AssemblyAiPanel.Visibility = AsrProviderCombo.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
-        AsrProviderCombo.SelectionChanged += (_, _) =>
+        AssemblyAiPanel.Visibility = AsrProviderRadios.SelectedIndex == 1 ? Visibility.Visible : Visibility.Collapsed;
+        AsrProviderRadios.SelectionChanged += (_, _) =>
         {
-            var tag = (AsrProviderCombo.SelectedItem as ComboBoxItem)?.Tag as string ?? "local";
+            var tag = (AsrProviderRadios.SelectedItem as RadioButton)?.Tag as string ?? "local";
             AssemblyAiPanel.Visibility = tag == "assemblyai" ? Visibility.Visible : Visibility.Collapsed;
             _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AsrProvider = tag });
         };

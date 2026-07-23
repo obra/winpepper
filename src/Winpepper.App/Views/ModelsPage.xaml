@@ -28,12 +28,11 @@
                     </StackPanel>
 
                     <!-- Provider selection (top of the card): where transcription runs -->
-                    <ComboBox x:Name="AsrProviderCombo" Header="Provider"
-                              AutomationProperties.AutomationId="ModelsAsrProviderCombo"
-                              HorizontalAlignment="Stretch">
-                        <ComboBoxItem Content="Local processing (on this PC)" Tag="local" />
-                        <ComboBoxItem Content="AssemblyAI (cloud)" Tag="assemblyai" />
-                    </ComboBox>
+                    <RadioButtons x:Name="AsrProviderRadios" Header="Provider"
+                                  AutomationProperties.AutomationId="ModelsAsrProviderRadios">
+                        <RadioButton Content="Local processing (on this PC)" Tag="local" />
+                        <RadioButton Content="AssemblyAI (cloud)" Tag="assemblyai" />
+                    </RadioButtons>
 
                     <!-- AssemblyAI cloud config: key + model + test + privacy + retention.
                          Collapsed unless the AssemblyAI provider is selected. -->

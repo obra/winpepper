@@ -58,9 +58,11 @@ TFM); the WinUI `Winpepper.App` project is Windows-only.
 
 ## Baseline (verify before starting)
 
-The full non-Windows suite is currently green (~810 tests; Core 278,
-Asr 86, Platform 209 on the Linux TFM). The two projects this plan's pure
-change touches:
+The full non-Windows suite is currently green (~810 tests across all **9**
+Linux-testable test projects — e.g. Core 278, Asr 85, Platform 209 on the
+Linux TFM; counts are indicative, not a gate). Per AGENTS.md the pre-push gate
+is "all 9 test projects" — see Task 5 for the authoritative list. The two
+projects this plan's pure change touches:
 
 - `tests/Winpepper.Asr.Tests` (86 tests) — model metadata, client, transcribers.
 - `tests/Winpepper.Core.Tests` (278 tests) — settings defaults, etc.
@@ -262,14 +264,22 @@ public static class AssemblyAiModels
 
     public static string DefaultId => "universal-3-5-pro";
 
-    // Accepted aliases map to the listed (canonical) id they represent.
-    // AssemblyAI's docs' model-selection page and the API's default array use
-    // "universal-3-5-pro" (our canonical, listed id); the pricing page uses
-    // "universal-3-pro" for the SAME model, so accept it as an alias. Also accept
-    // AssemblyAI's deprecated-but-still-routing aliases "best" and "nano".
-    // Canonicalizing every alias to a listed id lets the settings-page picker
-    // always select a real combo item for a stored value (see crash-guard test),
-    // and keeps neither official spelling flagged as a "custom" model.
+    // Accepted aliases map to the listed model id we want the picker to select.
+    // NOTE (verified against AssemblyAI docs, 2026-07): these are display/selection
+    // mappings, NOT a claim that the alias and target are the same model server-side.
+    //  - "universal-3-pro" is a now-DEPRECATED PREDECESSOR model. AssemblyAI itself
+    //    migrates it to "universal-3-5-pro" (active accounts are auto-routed on the
+    //    vendor's cutover; new/inactive accounts have "universal-3-pro" rejected with
+    //    an error that recommends "universal-3-5-pro"). Aliasing it to our current
+    //    listed id matches that vendor migration.
+    //  - "best"/"nano" are legacy names AssemblyAI still accepts but routes to the
+    //    ACCOUNT-DEFAULT model (not to a fixed tier). We map them to the closest
+    //    listed id purely so the picker highlights a real item.
+    // Canonicalizing every accepted alias to a listed id lets the settings-page picker
+    // always select a real combo item for a stored value (see crash-guard test) and
+    // keeps these spellings from being flagged as a "custom" model. The outbound
+    // transcription path sends the RAW stored value (no canonicalization), so this
+    // table never silently rewrites what goes over the wire.
     private static readonly IReadOnlyDictionary<string, string> KnownAliases =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -364,10 +374,15 @@ In `src/Winpepper.Core/Settings/AppSettings.cs`, change line 19 from:
 to:
 
 ```csharp
-    // Default speech_model id sent to AssemblyAI. Kept in sync with
-    // AssemblyAiModels.DefaultId ("universal-3-5-pro" = Universal-3.5 Pro, latest).
+    // Default speech model id sent to AssemblyAI (in the plural speech_models
+    // array; see AssemblyAiClient). Kept in sync with AssemblyAiModels.DefaultId
+    // ("universal-3-5-pro" = Universal-3.5 Pro, latest — a documented, accepted
+    // speech_models value and AssemblyAI's own server-side default).
     // No migration for stored values: an existing "universal-2" or "universal-3-pro"
-    // is respected as-is (universal-3-pro canonicalizes to the same model).
+    // is respected as-is and sent over the wire verbatim. NOTE: "universal-3-pro" is
+    // a now-deprecated PREDECESSOR model that AssemblyAI itself migrates to
+    // "universal-3-5-pro"; if the vendor rejects it at dictation time, the existing
+    // invalid-model config-error surfacing + local fallback handle it gracefully.
     public string AssemblyAiModel { get; init; } = "universal-3-5-pro";
 ```
 
@@ -390,12 +405,23 @@ git commit -m "feat(core): default persisted AssemblyAiModel to universal-3-5-pr
 ```
 
 **Residual / known limitation (spec-acknowledged, no code owed):** We cannot
-live-test that the AssemblyAI API accepts `universal-3-5-pro` without an API
-key. If a dictation-time request returns a 400 for that id, the existing
-invalid-model config-error surfacing (`AppShell.cs:447`, "AssemblyAI model
-rejected …") plus the local-transcriber fallback already handle it — the user
-sees an actionable error and dictation still works locally. No additional
-behavior is required by this plan.
+run a live keyed request from here. However, official AssemblyAI documentation
+(verified 2026-07) lists `universal-3-5-pro` as a supported `speech_models`
+value and as AssemblyAI's own server-side default, and the client already sends
+the **plural `speech_models` array** (`AssemblyAiClient.cs:70`) — the required
+form, since the singular `speech_model` param is deprecated. So the wire risk of
+the default flip is low, not merely unknown. If a dictation-time request still
+returns a 400 for the id, the existing invalid-model config-error surfacing
+(`AppShell.cs:447`, "AssemblyAI model rejected …") plus the local-transcriber
+fallback already handle it — the user sees an actionable error and dictation
+still works locally. No additional behavior is required by this plan.
+
+**Out-of-scope observation (no code owed, noted for completeness):** AssemblyAI's
+documented default `speech_models` array is 2-element (`["universal-3-5-pro",
+"universal-2"]`) — the fallback entry matters because Universal-3.5 Pro covers
+fewer languages than Universal-2. The client sends a single-element array
+(`AssemblyAiClient.cs:70`, an explicit intentional non-change). Not altered by
+this plan; the owner dictates English (covered by both models).
 
 ---
 
@@ -420,6 +446,23 @@ behavior is required by this plan.
 > (Task 5). Keep the code-behind thin and mirror the existing RecordingPage
 > patterns exactly. All new code stays inside the existing `#if WINDOWS`
 > region of the code-behind.
+>
+> **Lifecycle safety (verified — the port is safe as-is, these are cheap
+> insurance):** `ModelsPage` today has no `NavigationCacheMode` set (WinUI
+> default `Disabled`), so a fresh instance is created per navigation and
+> `OnNavigatedTo`'s `+=` handlers do not double-subscribe — the same lifecycle
+> RecordingPage relies on in production. `App.Shell` is guaranteed non-null on
+> every path that reaches `ModelsPage` (the startup shell is published before
+> the window is shown, the only pre-publish navigation targets the Recording
+> page, and the config-error deep-link handler null-guards `App.Shell` before
+> navigating). Two optional one-line hardenings that make these invariants
+> future-proof without changing behavior: (a) begin `WireSpeechProvider` with an
+> idempotence guard (`if (_speechWired) return; _speechWired = true;`) so it
+> stays correct even if `NavigationCacheMode` is ever enabled; (b) if `ModelsPage`
+> is ever made the first/default nav item, have it read `(AppShell)e.Parameter`
+> (already passed at `MainWindow.xaml.cs:108`) instead of `App.Shell!`, since a
+> default page's `OnNavigatedTo` runs inside the `AppShell` constructor before
+> `App.Shell` is assigned. Neither is required for the current menu order.
 
 - [ ] **Step 1: Add the provider picker + AssemblyAI panel to the ASR card XAML**
 
@@ -864,7 +907,8 @@ build on Linux:
 ```bash
 for p in Winpepper.Core.Tests Winpepper.Asr.Tests Winpepper.Platform.Tests \
          Winpepper.Audio.Tests Winpepper.Models.Tests Winpepper.History.Tests \
-         Winpepper.Cleanup.Tests Winpepper.Corrections.Tests; do
+         Winpepper.Cleanup.Tests Winpepper.Corrections.Tests \
+         Winpepper.IntegrationTests; do
   proj="tests/$p/$p.csproj"
   [ -f "$proj" ] || continue
   dotnet build "$proj" -f net9.0 -p:EnableWindowsTargeting=true || exit 1
@@ -986,3 +1030,24 @@ are exactly the set Task 4 removes from RecordingPage. `AppSettings` record
 fields used in `s with { ... }` (`AsrProvider`, `AssemblyAiModel`,
 `AssemblyAiDeleteAfterTranscribe`, `AssemblyAiKeytermsEnabled`) all exist in
 `AppSettings.cs`. Consistent. ✔
+
+**4. Load-bearing validation (Stage 2, 2026-07-23).** 17 load-bearing
+assumptions surfaced and validated (14 verified, 3 falsified — all fixed here;
+no data-loss risk, no halt). Verified by code inspection/baseline run: the
+client already sends the plural `speech_models` array (`AssemblyAiClient.cs:70`);
+the outbound path sends the raw stored model id with no canonicalization
+(`CanonicalId` is UI-only); the 400→config-error→local-fallback mitigation
+exists and is unit-tested; `AssemblyAiModels.cs` current state matches the TDD
+"expected FAIL" signature; the embedded WinUI port is faithful and all consumed
+symbols check out against the Linux-buildable libs; ModelsPage's load path,
+`App.Shell` non-nullness, and per-navigation instance lifecycle are all safe.
+Falsified and corrected: (a) `universal-3-pro` and `universal-3-5-pro` are
+DISTINCT successive models, not two spellings — the alias direction still stands
+(it matches AssemblyAI's own forced migration) but the "same model" rationale in
+the Task 1/Task 2 comments was wrong and is fixed; (b) `best`/`nano` route to the
+account-default model, not fixed tiers — kept as UI-display approximations with
+corrected comments; (c) the Task 5 loop omitted `Winpepper.IntegrationTests` (the
+9th Linux-testable project AGENTS.md requires) — now added. Also confirmed:
+`universal-3-5-pro` is a documented, accepted `speech_models` value and
+AssemblyAI's own server-side default, so the default flip is wire-safe (residual
+note updated). ✔

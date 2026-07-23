@@ -339,6 +339,15 @@ public sealed class AppShell : IDisposable
         // One-time content-island realization, off the bootstrap call stack (see RealizeOnce doc).
         Pill.RealizeOnce();
 
+        // On-device visual verification: force-show the pill with a synthetic
+        // level sweep (no audio needed) so a screenshot/pixel probe can verify
+        // the capsule silhouette and voice meter. Dev/diagnostics only.
+        if (Environment.GetEnvironmentVariable("WINPEPPER_PILL_PREVIEW") == "1")
+        {
+            var previewLog = LogFactory.CreateLogger<StatusPillWindow>();
+            Main?.DispatcherQueue.TryEnqueue(() => Pill.StartPreview(previewLog));
+        }
+
         // Start only after first paint and authoritative size/hash verification.
         // A merely loadable stale model must not enter PipelineHost and later
         // satisfy onboarding through PipelineHost.IsRunning.

@@ -16,6 +16,26 @@ public static class VoiceMeter
     /// clamped to 0..1. Returns 0 at (or below) silence, otherwise
     /// ceil(level * barCount) clamped to [1, barCount].
     /// </summary>
+    /// <summary>
+    /// Perceptual (dB) mapping of a linear 0..1 amplitude to a 0..1 display
+    /// value. Speech peaks at normal mic gain live around 0.05..0.3 linear, so
+    /// a linear meter sits stuck on its first bar. Mapping the dB range
+    /// -50 dBFS (floor, effectively silence) .. -10 dBFS (loud speech) to 0..1
+    /// spreads normal speech across the full meter.
+    /// </summary>
+    public static double Perceptual(double linear)
+    {
+        const double FloorDb = -50.0;
+        const double CeilingDb = -10.0;
+
+        if (linear <= 0 || double.IsNaN(linear)) return 0;
+        if (linear > 1) linear = 1;
+
+        var db = 20.0 * Math.Log10(linear);
+        var norm = (db - FloorDb) / (CeilingDb - FloorDb);
+        return norm < 0 ? 0 : norm > 1 ? 1 : norm;
+    }
+
     public static int BarsLit(double level, int barCount)
     {
         if (barCount <= 0)

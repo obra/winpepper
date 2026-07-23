@@ -7,12 +7,15 @@ internal static class ExtendedWindowStyle
 {
     private const int DWMWA_BORDER_COLOR = 34;
     private const int DWMWA_COLOR_NONE = unchecked((int)0xFFFFFFFE);
+    private const int DWMWA_NCRENDERING_POLICY = 2;
+    private const int DWMNCRP_DISABLED = 1;
     public const int GWL_EXSTYLE = -20;
     public const int WS_EX_TOPMOST     = 0x00000008;
     public const int WS_EX_LAYERED     = 0x00080000;
     public const int WS_EX_TRANSPARENT = 0x00000020;
     public const int WS_EX_TOOLWINDOW  = 0x00000080;
     public const int WS_EX_NOACTIVATE  = 0x08000000;
+    public const int LWA_COLORKEY      = 0x00000001;
     public const int LWA_ALPHA         = 0x00000002;
 
     private static readonly IntPtr HWND_TOPMOST = new(-1);
@@ -66,7 +69,14 @@ internal static class ExtendedWindowStyle
         var existing = (long)GetWindowLongPtr64(hwnd, GWL_EXSTYLE);
         var updated  = existing | WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
         SetWindowLongPtr64(hwnd, GWL_EXSTYLE, new IntPtr(updated));
-        SetLayeredWindowAttributes(hwnd, 0, alpha, LWA_ALPHA);
+        // LWA_COLORKEY: pure-black (0x000000) pixels become fully transparent.
+        // The pill's root Grid paints exactly this key colour behind the dark
+        // capsule Border, so everything outside the capsule vanishes. This is
+        // the ONLY silhouette mechanism that works here: SetWindowRgn is
+        // documented to be IGNORED on layered windows using
+        // SetLayeredWindowAttributes, which is why the previous region-based
+        // capsule clip silently did nothing (white rectangle behind the pill).
+        SetLayeredWindowAttributes(hwnd, 0x00000000, alpha, LWA_ALPHA | LWA_COLORKEY);
         AssertTopmost(hwnd);
     }
 
@@ -115,6 +125,15 @@ internal static class ExtendedWindowStyle
         // This attribute is unavailable on Windows 10, where the rounded region remains the fallback.
         var color = DWMWA_COLOR_NONE;
         _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, ref color, sizeof(int));
+
+        // Disable ALL DWM non-client rendering — most importantly the system
+        // DROP SHADOW. On a layered window (WS_EX_LAYERED + colour-key) DWM
+        // cannot composite the shadow against the keyed-transparent client
+        // area, and the shadow surface degenerates into an opaque light
+        // ROUNDED RECTANGLE painted behind the capsule (the "white rectangle"
+        // bug). The pill is a transient overlay; it needs no system shadow.
+        var ncPolicy = DWMNCRP_DISABLED;
+        _ = DwmSetWindowAttribute(hwnd, DWMWA_NCRENDERING_POLICY, ref ncPolicy, sizeof(int));
     }
 
     /// <summary>

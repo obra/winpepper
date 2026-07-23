@@ -28,4 +28,27 @@ public sealed class VoiceMeterTests
     [Fact]
     public void BarsLit_RejectsNonPositiveBarCount()
         => Should.Throw<System.ArgumentOutOfRangeException>(() => VoiceMeter.BarsLit(0.5, 0));
+
+    [Theory]
+    // Perceptual dB mapping: -50 dBFS floor .. -10 dBFS ceiling -> 0..1
+    [InlineData(0.0, 0.0)]        // silence
+    [InlineData(-1.0, 0.0)]       // negative clamps to 0
+    [InlineData(0.001, 0.0)]      // -60 dB, below floor
+    [InlineData(0.00316, 0.0)]    // -50 dB, at floor
+    [InlineData(0.0316, 0.5)]     // -30 dB, midpoint
+    [InlineData(0.316, 1.0)]      // -10 dB, at ceiling
+    [InlineData(1.0, 1.0)]        // 0 dBFS clamps to 1
+    [InlineData(2.0, 1.0)]        // above range clamps to 1
+    public void Perceptual_MapsDbRangeToUnitInterval(double linear, double expected)
+        => VoiceMeter.Perceptual(linear).ShouldBe(expected, tolerance: 0.02);
+
+    [Fact]
+    public void Perceptual_TypicalSpeechPeak_LightsMultipleBars()
+    {
+        // Regression: raw speech peaks (~0.05..0.3 linear) previously mapped to
+        // a single stuck bar. Perceptually they must light 2+ of 5 bars.
+        VoiceMeter.BarsLit(VoiceMeter.Perceptual(0.05), 5).ShouldBeGreaterThanOrEqualTo(2);
+        VoiceMeter.BarsLit(VoiceMeter.Perceptual(0.15), 5).ShouldBeGreaterThanOrEqualTo(3);
+        VoiceMeter.BarsLit(VoiceMeter.Perceptual(0.3), 5).ShouldBeGreaterThanOrEqualTo(4);
+    }
 }

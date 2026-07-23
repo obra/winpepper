@@ -72,7 +72,7 @@ public sealed partial class StatusPillWindow : Window
         _tickTimer.Tick += (_, _) =>
         {
             _vm.Tick();
-            ElapsedText.Text = $"{_vm.ElapsedMs} ms";
+            ElapsedText.Text = $"{_vm.ElapsedMs / 1000.0:0.0} s";
 
             // Cheap: keep us pinned to the top even if another topmost window
             // was created after our last show. Only while visible.
@@ -225,11 +225,15 @@ public sealed partial class StatusPillWindow : Window
         switch (_animMode)
         {
             case PillAnimationMode.VoiceLevel:
-                var scale = 1.0 + (_vm.InputLevel * 0.8); // 1.0 .. 1.8
+                // Perceptual (dB) mapping: raw peak level for speech sits at
+                // ~0.05..0.3 linear, which a linear meter renders as one stuck
+                // bar. Perceptual() spreads normal speech across the range.
+                var level = _previewActive ? NextPreviewLevel() : VoiceMeter.Perceptual(_vm.InputLevel);
+                var scale = 1.0 + (level * 0.8); // 1.0 .. 1.8
                 DotScale.ScaleX = scale;
                 DotScale.ScaleY = scale;
                 Dot.Opacity = 1.0;
-                UpdateMeter(VoiceMeter.BarsLit(_vm.InputLevel, MeterBarCount));
+                UpdateMeter(VoiceMeter.BarsLit(level, MeterBarCount));
                 break;
 
             case PillAnimationMode.Thinking:
@@ -275,12 +279,47 @@ public sealed partial class StatusPillWindow : Window
     {
         var layout = StatusPillLayout.ForDpi(dpi);
         appWindow.ResizeClient(new SizeInt32(layout.ClientWidth, layout.ClientHeight));
-        if (!ExtendedWindowStyle.ApplyRoundedRegion(_hwnd))
-            System.Diagnostics.Debug.WriteLine(
-                "[StatusPill] ApplyRoundedRegion failed: window is NOT clipped to the capsule " +
-                "(SetWindowRgn/CreateRoundRectRgn failed or client rect unavailable). " +
-                "If a light halo is visible, this — not the region math — is the cause.");
+        // No SetWindowRgn here: window regions are IGNORED on layered windows
+        // (WS_EX_LAYERED + SetLayeredWindowAttributes), which this window is —
+        // that's why the old region clip left a visible light rectangle. The
+        // capsule silhouette comes from LWA_COLORKEY instead: the XAML root
+        // Grid paints pure black (#000000) and MakeClickThroughTopmostTool
+        // keys that colour out, leaving only the capsule Border visible.
         return layout;
+    }
+
+    // ---- Preview mode (WINPEPPER_PILL_PREVIEW=1) ------------------------
+    // Forces the pill visible in the Recording visual state with a synthetic
+    // level sweep so the meter/dot animate without any audio. Used by the
+    // on-device visual verification loop (screenshot + pixel probe).
+    private bool _previewActive;
+    private double _previewPhase;
+
+    private double NextPreviewLevel()
+    {
+        _previewPhase += 2 * Math.PI / 30.0; // ~3 s full sweep at 100 ms ticks
+        return (Math.Sin(_previewPhase) + 1.0) / 2.0;
+    }
+
+    public void StartPreview(Microsoft.Extensions.Logging.ILogger log)
+    {
+        _previewActive = true;
+        _animMode = PillAnimationMode.VoiceLevel;
+        StatusText.Text = "Recording...";
+        Dot.Fill = new SolidColorBrush(Microsoft.UI.Colors.Red);
+        SetMeterVisible(true);
+        var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(_hwnd));
+        PositionBottomCenter(appWindow);
+        appWindow.Show(activateWindow: false);
+        _visible = true;
+        ExtendedWindowStyle.AssertTopmost(_hwnd);
+        _tickTimer.Start();
+        _hideTimer.Stop();
+        var pos = appWindow.Position;
+        var size = appWindow.Size;
+        Microsoft.Extensions.Logging.LoggerExtensions.LogInformation(log,
+            "Pill preview shown at {X},{Y} {W}x{H} (dpi {Dpi})",
+            pos.X, pos.Y, size.Width, size.Height, ExtendedWindowStyle.GetWindowDpi(_hwnd));
     }
 }
 #endif

@@ -9,6 +9,12 @@
          OURS: PointerPressed on the root for PENDING click-to-paste, plus the
          DotScale ScaleTransform the code-behind animates for the voice meter /
          thinking pulse. -->
+    <!-- Root Grid paints the LWA_COLORKEY key colour (pure black #000000):
+         SetLayeredWindowAttributes(... LWA_COLORKEY) makes every key-coloured
+         pixel fully transparent, so only the capsule Border is visible.
+         SetWindowRgn CANNOT do this job: regions are ignored on layered
+         windows, which is why the old region clip left a white rectangle. -->
+    <Grid Background="#FF000000">
     <Border Background="#FF202020" CornerRadius="24" Padding="16,8"
             PointerPressed="OnRootPointerPressed">
         <Grid ColumnSpacing="10" VerticalAlignment="Center">
@@ -50,7 +56,8 @@
                        Grid.Column="3"
                        Foreground="#AAFFFFFF"
                        FontSize="12"
-                       Text="0 ms" />
+                       Text="0.0 s" />
         </Grid>
     </Border>
+    </Grid>
 </Window>

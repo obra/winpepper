@@ -16,7 +16,16 @@ public record AppSettings
 
     // ASR provider selection
     public string AsrProvider { get; init; } = "local"; // "local" | "assemblyai"
-    public string AssemblyAiModel { get; init; } = "universal-2"; // speech_model id sent to AssemblyAI
+    // Default speech model id sent to AssemblyAI (in the plural speech_models
+    // array; see AssemblyAiClient). Kept in sync with AssemblyAiModels.DefaultId
+    // ("universal-3-5-pro" = Universal-3.5 Pro, latest — a documented, accepted
+    // speech_models value and AssemblyAI's own server-side default).
+    // No migration for stored values: an existing "universal-2" or "universal-3-pro"
+    // is respected as-is and sent over the wire verbatim. NOTE: "universal-3-pro" is
+    // a now-deprecated PREDECESSOR model that AssemblyAI itself migrates to
+    // "universal-3-5-pro"; if the vendor rejects it at dictation time, the existing
+    // invalid-model config-error surfacing + local fallback handle it gracefully.
+    public string AssemblyAiModel { get; init; } = "universal-3-5-pro";
 
     // AssemblyAI retention: delete the remote transcript after we have the text
     // so dictated audio/text does not persist on AssemblyAI servers. On by default.

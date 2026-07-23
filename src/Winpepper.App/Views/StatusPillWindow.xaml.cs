@@ -106,9 +106,9 @@ public sealed partial class StatusPillWindow : Window
                 void OnLoaded(object s, RoutedEventArgs e)
                 {
                     root.Loaded -= OnLoaded;
-                    appWindow.Hide();
+                    if (!_previewActive) appWindow.Hide(); // don't hide an active preview
                 }
-                if (root.IsLoaded) { appWindow.Hide(); }
+                if (root.IsLoaded) { if (!_previewActive) appWindow.Hide(); }
                 else { root.Loaded += OnLoaded; }
             }
             else
@@ -120,6 +120,9 @@ public sealed partial class StatusPillWindow : Window
 
     private void OnVmChanged(object? sender, PropertyChangedEventArgs e)
     {
+        // Preview mode owns the pill: stage/status churn from the real pipeline
+        // (e.g. startup settling into Idle) must not hide or restyle it.
+        if (_previewActive) return;
         if (e.PropertyName is not (nameof(SessionViewModel.Stage) or nameof(SessionViewModel.StatusText))) return;
 
         var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(_hwnd));

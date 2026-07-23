@@ -52,6 +52,15 @@
                     <TextBlock Text="Options" Style="{ThemeResource BodyStrongTextBlockStyle}" />
                     <ToggleSwitch x:Name="SoundsToggle" AutomationProperties.AutomationId="RecordingSoundsToggle" Header="Play start/stop sounds" />
                     <ToggleSwitch x:Name="SpeakerFilterToggle" AutomationProperties.AutomationId="RecordingSpeakerFilterToggle" Header="Speaker filter (experimental)" />
+                    <ToggleSwitch x:Name="PostPasteLearningToggle" AutomationProperties.AutomationId="RecordingPostPasteLearningToggle" Header="Offer to learn corrections after typing" />
+                    <ToggleSwitch x:Name="PrewarmMicToggle" AutomationProperties.AutomationId="RecordingPrewarmMicToggle" Header="Keep the mic warm to capture the start of speech (mic indicator stays on)" ToolTipService.ToolTip="Uses a little extra CPU and battery to keep the mic ready; the mic-in-use indicator stays on." />
+                    <TextBlock TextWrapping="Wrap"
+                               Text="Keeps one microphone stream open the whole time Winpepper runs (the mic-in-use indicator stays on and it uses a little CPU and battery). Turn it off to only use the mic while dictating."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Text="After Winpepper types, watch for an edit you make and offer to remember it as a correction. Off by default."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     <ToggleSwitch x:Name="AutostartToggle" AutomationProperties.AutomationId="RecordingAutostartToggle" Header="Start with Windows" />
                 </StackPanel>
             </Border>
@@ -75,6 +84,53 @@
                     </Grid>
                 </StackPanel>
             </Border>
+
+            <!-- Speech recognition -->
+            <StackPanel Spacing="8" Margin="0,16,0,0">
+                <TextBlock Text="Speech recognition" Style="{StaticResource SubtitleTextBlockStyle}" />
+
+                <ComboBox x:Name="AsrProviderCombo" Header="Provider" MinWidth="280">
+                    <ComboBoxItem Content="Local processing (on this PC)" Tag="local" />
+                    <ComboBoxItem Content="AssemblyAI (cloud)" Tag="assemblyai" />
+                </ComboBox>
+
+                <TextBlock
+                    x:Name="AsrPrivacyText"
+                    Text="Cloud transcription sends your recorded audio to AssemblyAI. Winpepper asks AssemblyAI to delete your audio and transcript after transcription (deletion happens on AssemblyAI's servers and may not be immediate). Turn deletion off below to keep them per AssemblyAI's retention policy."
+                    TextWrapping="Wrap"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Style="{StaticResource CaptionTextBlockStyle}" />
+
+                <StackPanel x:Name="AssemblyAiPanel" Spacing="8" Margin="0,4,0,0">
+                    <PasswordBox x:Name="AssemblyAiKeyBox" Header="API key" MinWidth="280"
+                                 PlaceholderText="Paste your AssemblyAI API key" />
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button x:Name="SaveKeyButton" Content="Save key" />
+                        <Button x:Name="ClearKeyButton" Content="Clear key" />
+                        <Button x:Name="TestKeyButton" Content="Test" />
+                    </StackPanel>
+                    <ComboBox x:Name="AssemblyAiModelCombo" Header="Model" MinWidth="280" />
+                    <TextBox x:Name="AssemblyAiModelBox" Header="Custom model id" MinWidth="280"
+                             Visibility="Collapsed"
+                             PlaceholderText="Advanced: exact AssemblyAI speech_model id" />
+                    <TextBlock x:Name="AssemblyAiModelWarning"
+                               Visibility="Collapsed"
+                               Text="Custom model ids are not validated and will fail at dictation time if wrong."
+                               TextWrapping="Wrap"
+                               Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                    <ToggleSwitch x:Name="AssemblyAiDeleteToggle" Header="Delete audio from AssemblyAI after transcription" />
+                    <ToggleSwitch x:Name="AssemblyAiKeytermsToggle" Header="Send preferred terms as keyterms" />
+                    <TextBlock Text="Preferred terms may incur extra AssemblyAI cost on some plans. Off by default. Your corrections list is always applied via custom spelling at no extra cost."
+                               TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                    <TextBlock x:Name="AsrStatusText"
+                               TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Style="{StaticResource CaptionTextBlockStyle}" />
+                </StackPanel>
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
 </Page>

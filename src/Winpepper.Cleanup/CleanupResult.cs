@@ -17,4 +17,6 @@ public enum CleanupPath
     FallbackTimeout,     // The 15s timeout fired.
     FallbackBackendError, // The backend threw.
     FallbackImplausible,  // The LLM output echoed prompt scaffolding or blew past plausible length.
+    BypassShort,          // Raw transcript under 4 words; LLM skipped, deterministic path taken.
+    BypassProvider, // cloud provider already formatted server-side; corrections only
 }

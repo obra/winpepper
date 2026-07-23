@@ -1,0 +1,303 @@
+using System.Linq;
+using System.Threading;
+using Shouldly;
+using Winpepper.Audio;
+using Xunit;
+
+namespace Winpepper.Audio.Tests;
+
+public class WarmCaptureCoordinatorTests
+{
+    private static WarmCaptureCoordinator NewCoordinator(
+        Func<ICaptureSource> factory, out WarmCaptureBuffer buffer)
+    {
+        buffer = new WarmCaptureBuffer(ringCapacitySamples: 16000);
+        return new WarmCaptureCoordinator(buffer, factory);
+    }
+
+    [Fact]
+    public void EnsureStarted_StartsExactlyOneSource()
+    {
+        var made = new List<FakeCaptureSource>();
+        var c = NewCoordinator(() => { var s = new FakeCaptureSource(); made.Add(s); return s; }, out _);
+
+        c.EnsureStarted();
+        c.EnsureStarted(); // idempotent
+
+        made.Count.ShouldBe(1);
+        made[0].Started.ShouldBeTrue();
+        c.IsRunning.ShouldBeTrue();
+        c.ActiveDeviceId.ShouldBe("fake-device");
+    }
+
+    [Fact]
+    public void Frames_RouteToBuffer_AndReRaiseOnlyDuringSession()
+    {
+        FakeCaptureSource? src = null;
+        var c = NewCoordinator(() => src = new FakeCaptureSource(), out var buffer);
+        var reRaised = new List<float>();
+        c.FramesAvailable += f => reRaised.AddRange(f.ToArray());
+
+        c.EnsureStarted();
+        src!.RaiseFrame(new float[] { 1, 2 });   // idle: ring only, no re-raise
+        buffer.StartSession(prerollSamples: 0);
+        src!.RaiseFrame(new float[] { 3, 4 });   // active: re-raised
+        var session = buffer.StopSession();
+
+        reRaised.ShouldBe(new float[] { 3, 4 });
+        session.ShouldBe(new float[] { 3, 4 });
+    }
+
+    [Fact]
+    public void Rebuild_DisposesOldSource_ClearsRing_AndStartsNew()
+    {
+        var made = new List<FakeCaptureSource>();
+        // Distinguish the "caller" thread (driving EnsureStarted/Rebuild, e.g. the
+        // pipeline/UI thread) from the simulated capture-callback thread below --
+        // in real life these are different OS threads, which is exactly what lets
+        // Rebuild's teardown dispose the old source inline instead of deferring
+        // (deferral is only for the self-join case, covered by the
+        // Dispose_FromCaptureThread_* tests further down).
+        var currentId = 1;
+        var buffer = new WarmCaptureBuffer(ringCapacitySamples: 16000);
+        var c = new WarmCaptureCoordinator(
+            buffer,
+            () => { var s = new FakeCaptureSource(); made.Add(s); return s; },
+            currentThreadId: () => currentId);
+
+        c.EnsureStarted();
+        currentId = 2; // simulate the frame arriving on the real capture thread
+        made[0].RaiseFrame(new float[] { 9, 9, 9 }); // stale-device audio into the ring
+        currentId = 1; // back on the caller thread for Rebuild
+        c.Rebuild();
+
+        made.Count.ShouldBe(2);
+        made[0].Disposed.ShouldBeTrue();   // old disposed
+        made[1].Started.ShouldBeTrue();    // new started
+        c.ActiveDeviceId.ShouldBe("fake-device");
+
+        // Ring was cleared on rebuild: a session started now sees no stale audio.
+        buffer.StartSession(prerollSamples: 16000);
+        buffer.StopSession().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void StartLocked_DisposesPartialSource_WhenStartThrows()
+    {
+        FakeCaptureSource? src = null;
+        var c = NewCoordinator(() => src = new FakeCaptureSource { ThrowOnStart = true }, out _);
+
+        c.EnsureStarted();          // must swallow the throw, not leak the source
+
+        c.IsRunning.ShouldBeFalse();
+        src!.Disposed.ShouldBeTrue(); // partial source disposed (Bug 5)
+    }
+
+    [Fact]
+    public void StaleSourceFrame_AfterRebuild_IsIgnored_NoDisposedAccess()
+    {
+        var made = new List<FakeCaptureSource>();
+        var c = NewCoordinator(() => { var s = new FakeCaptureSource(); made.Add(s); return s; }, out var buffer);
+        c.EnsureStarted();
+        var old = made[0];
+        c.Rebuild();
+
+        // A late frame from the disposed old source must be dropped by the epoch
+        // guard without ever routing into the buffer.
+        buffer.StartSession(0);
+        old.RaiseFrame(new float[] { 5 });
+        buffer.StopSession().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void ConcurrencyHammer_RebuildVsFrames_NeverThrows()
+    {
+        // A rolling registry of sources so the frame thread can fire callbacks
+        // from whichever source is (or just was) live, exactly the race the
+        // council could not settle statically.
+        var live = new System.Collections.Concurrent.ConcurrentBag<FakeCaptureSource>();
+        FakeCaptureSource Make() { var s = new FakeCaptureSource(); live.Add(s); return s; }
+
+        var buffer = new WarmCaptureBuffer(ringCapacitySamples: 4000);
+        using var c = new WarmCaptureCoordinator(buffer, Make);
+        c.EnsureStarted();
+        buffer.StartSession(0);
+
+        Exception? escaped = null;
+        var stop = false;
+        var frame = new float[] { 0.1f, -0.1f, 0.2f, -0.2f };
+
+        var frameThread = new Thread(() =>
+        {
+            try
+            {
+                while (!Volatile.Read(ref stop))
+                {
+                    // Fire frames from every source ever made — including ones
+                    // that were just disposed by a concurrent Rebuild. The fake's
+                    // RaiseFrame never throws on its own; the ONLY way an
+                    // exception escapes here is if the coordinator touches a
+                    // disposed source (which the epoch guard must prevent).
+                    foreach (var s in live.ToArray())
+                        s.RaiseFrame(frame);
+                }
+            }
+            catch (Exception ex) { escaped = ex; }
+        });
+
+        var rebuildThread = new Thread(() =>
+        {
+            try { for (var i = 0; i < 5000; i++) c.Rebuild(); }
+            catch (Exception ex) { escaped = ex; }
+            finally { Volatile.Write(ref stop, true); }
+        });
+
+        frameThread.Start();
+        rebuildThread.Start();
+        // Bounded joins: a genuine deadlock inside Rebuild()/OnSourceFrame must
+        // fail this test fast and loudly instead of hanging the whole run.
+        rebuildThread.Join(TimeSpan.FromSeconds(30)).ShouldBeTrue();
+        frameThread.Join(TimeSpan.FromSeconds(30)).ShouldBeTrue();
+
+        escaped.ShouldBeNull();
+
+        // Deterministic post-race phase: the assertion above only proves the
+        // race didn't crash — it never inspects buffer contents, so it would
+        // still pass even if the epoch guard in OnSourceFrame were deleted
+        // entirely. Prove the stale-bleed guarantee explicitly, the same way
+        // StaleSourceFrame_AfterRebuild_IsIgnored_NoDisposedAccess does, but
+        // right after the concurrency churn above.
+        //
+        // At any quiescent point (no Rebuild/EnsureStarted in flight) exactly
+        // one FakeCaptureSource in `live` is non-disposed: Rebuild disposes
+        // the prior current source and starts a new one atomically under the
+        // coordinator's lock, and this test never disposes a source any other
+        // way. That makes Single(...) an order-independent way to pick out
+        // "the source that is current right now" even though `live` is a
+        // ConcurrentBag with no defined enumeration order.
+        var staleSource = live.ToArray().Single(s => !s.Disposed);
+        c.Rebuild(); // staleSource becomes stale/disposed; a fresh source becomes current
+        var currentSource = live.ToArray().Single(s => !s.Disposed);
+
+        buffer.StartSession(prerollSamples: 0);
+        staleSource.RaiseFrame(new float[] { 42 });   // stale-device audio: must be dropped
+        currentSource.RaiseFrame(new float[] { 7 });  // current-device audio: must land
+        buffer.StopSession().ShouldBe(new float[] { 7 });
+    }
+
+    [Fact]
+    public void Fault_RaisesCaptureFaulted_AndAutoRebuildsWhenPastBackoff()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var made = new List<FakeCaptureSource>();
+        var buffer = new WarmCaptureBuffer(1000);
+        var c = new WarmCaptureCoordinator(
+            buffer,
+            () => { var s = new FakeCaptureSource(); made.Add(s); return s; },
+            clock: () => now,
+            faultBackoff: TimeSpan.FromSeconds(2));
+
+        var faults = new List<Exception>();
+        c.CaptureFaulted += faults.Add;
+        c.EnsureStarted();
+
+        made[0].RaiseStopped(new InvalidOperationException("device removed"));
+
+        faults.Count.ShouldBe(1);
+        made.Count.ShouldBe(2);          // auto-rebuilt (first fault, no prior)
+        made[0].Disposed.ShouldBeTrue();
+        c.IsRunning.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void StormingFaults_WithinBackoff_DoNotAutoRebuild()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var made = new List<FakeCaptureSource>();
+        var buffer = new WarmCaptureBuffer(1000);
+        var c = new WarmCaptureCoordinator(
+            buffer,
+            () => { var s = new FakeCaptureSource(); made.Add(s); return s; },
+            clock: () => now,
+            faultBackoff: TimeSpan.FromSeconds(2));
+        c.EnsureStarted();                       // made[0]
+
+        made[0].RaiseStopped(new Exception("f1")); // past-backoff (no prior) -> rebuild made[1]
+        made[1].RaiseStopped(new Exception("f2")); // same clock -> within backoff -> no rebuild
+
+        made.Count.ShouldBe(2);
+        c.IsRunning.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void EnsureStarted_Force_RestartsAFaultedStreamIgnoringBackoff()
+    {
+        var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var made = new List<FakeCaptureSource>();
+        var buffer = new WarmCaptureBuffer(1000);
+        var c = new WarmCaptureCoordinator(
+            buffer,
+            () => { var s = new FakeCaptureSource(); made.Add(s); return s; },
+            clock: () => now,
+            faultBackoff: TimeSpan.FromSeconds(2));
+        c.EnsureStarted();
+        made[0].RaiseStopped(new Exception("f1")); // rebuild made[1]
+        made[1].RaiseStopped(new Exception("f2")); // within backoff -> stays down
+
+        c.IsRunning.ShouldBeFalse();
+        c.EnsureStarted(force: true);              // user starts a session on a faulted stream (Bug 7)
+
+        c.IsRunning.ShouldBeTrue();
+        made.Count.ShouldBe(3);
+    }
+
+    [Fact]
+    public void Dispose_FromCaptureThread_SchedulesOffThread_NoInlineSelfJoin()
+    {
+        var source = new FakeCaptureSource();
+        var scheduled = new List<Action>();
+        // currentThreadId returns the SAME id the coordinator recorded from callbacks (7).
+        var coord = new WarmCaptureCoordinator(
+            new WarmCaptureBuffer(16000),
+            sourceFactory: () => source,
+            currentThreadId: () => 7,
+            disposeScheduler: a => scheduled.Add(a));
+        coord.EnsureStarted(force: true);
+
+        // Simulate a capture-thread callback so the coordinator records thread id 7.
+        source.RaiseFrame(new float[] { 0f });
+
+        coord.Dispose();
+
+        // Because we are "on" the capture thread (id 7), dispose must be deferred, not inline.
+        scheduled.Count.ShouldBe(1);
+        source.DisposedOnThreadId.ShouldBeNull(); // not yet disposed inline
+        scheduled[0]();                            // run the scheduled dispose
+        source.Disposed.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Dispose_FromOtherThread_DisposesInline()
+    {
+        var source = new FakeCaptureSource();
+        var scheduled = new List<Action>();
+        var recordedCallbackId = 7;
+        var currentId = 99; // a DIFFERENT thread from the capture callbacks
+        var coord = new WarmCaptureCoordinator(
+            new WarmCaptureBuffer(16000),
+            sourceFactory: () => source,
+            currentThreadId: () => currentId,
+            disposeScheduler: a => scheduled.Add(a));
+        coord.EnsureStarted(force: true);
+
+        // Record callback thread id 7 by overriding currentId during the callback.
+        currentId = recordedCallbackId;
+        source.RaiseFrame(new float[] { 0f });
+        currentId = 99; // now we're on a normal (non-capture) thread
+
+        coord.Dispose();
+
+        scheduled.Count.ShouldBe(0);      // no deferral needed
+        source.Disposed.ShouldBeTrue();    // disposed inline
+    }
+}

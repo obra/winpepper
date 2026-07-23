@@ -9,6 +9,7 @@
     <PackageReference Include="NWaves" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\Winpepper.Core\Winpepper.Core.csproj" />
+    <ProjectReference Include="..\\Winpepper.Core\\Winpepper.Core.csproj" />
+    <ProjectReference Include="..\\Winpepper.Corrections\\Winpepper.Corrections.csproj" />
   </ItemGroup>
 </Project>

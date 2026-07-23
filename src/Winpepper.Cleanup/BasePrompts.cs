@@ -2,10 +2,28 @@ namespace Winpepper.Cleanup;
 
 /// <summary>
 /// Built-in cleanup base prompts. Spec §6.3 (Default) and §6.4 (Literal).
+///
+/// Bug-3 fix (iv): the Default prompt now carries a SINGLE worked example.
+/// Feeding a 0.5B instruct model several "Input:/Output:" pairs made it slip
+/// into few-shot completion mode and echo an example's output verbatim as if
+/// it were the dictation. The one retained example (self-correction, the most
+/// error-prone transform) is exposed as <see cref="DefaultExampleOutputs"/> so
+/// the runner can detect verbatim echoes; building both from the same constant
+/// keeps them from drifting apart.
 /// </summary>
 public static class BasePrompts
 {
-    public const string Default = """
+    private const string DefaultExampleInput =
+        "write me a function called add_numbers no wait scratch that call it sum";
+    private const string DefaultExampleOutput = "Write me a function called sum.";
+
+    /// <summary>Output text of every example embedded in <see cref="Default"/>.
+    /// The runner rejects a cleaned result that matches one of these verbatim
+    /// when it shares little content with the raw transcript (spec fix-(ii)).</summary>
+    public static readonly IReadOnlyList<string> DefaultExampleOutputs =
+        new[] { DefaultExampleOutput };
+
+    public static readonly string Default = $$"""
 You are a dictation cleanup assistant. The user spoke into a microphone and an
 automatic speech recognizer produced the raw transcript inside the USER-INPUT
 block. Your job is to return the same content in clean written form.
@@ -32,16 +50,10 @@ The output must read as if a human had typed it directly. Output the cleaned
 text and nothing else — no preamble, no closing remark, no quoting, no
 explanation of changes.
 
-Three examples follow.
+One example follows.
 
-Input: um so like I think we should basically just ship it tomorrow you know
-Output: I think we should just ship it tomorrow.
-
-Input: write me a function called add_numbers no wait scratch that call it sum
-Output: Write me a function called sum.
-
-Input: send the message to anne thropic about the chat gbt integration
-Output: Send the message to Anthropic about the ChatGPT integration.
+Input: {{DefaultExampleInput}}
+Output: {{DefaultExampleOutput}}
 """;
 
     public const string Literal = """

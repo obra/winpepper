@@ -50,6 +50,10 @@
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        TextWrapping="Wrap" />
                             <ComboBox x:Name="MicCombo" AutomationProperties.AutomationId="OnboardingMicCombo" HorizontalAlignment="Stretch" PlaceholderText="Select an input device" />
+                            <TextBlock TextWrapping="Wrap"
+                                       Style="{ThemeResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       Text="While Winpepper runs, the microphone stays warm so your first words are never clipped — the mic-in-use indicator will stay on. You can turn this off in Settings." />
                             <ProgressBar x:Name="LevelMeter" AutomationProperties.AutomationId="OnboardingLevelMeter" Minimum="0" Maximum="1" Height="6" />
                         </StackPanel>
                     </Border>

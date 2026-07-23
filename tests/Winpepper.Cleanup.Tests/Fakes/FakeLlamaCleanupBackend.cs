@@ -11,13 +11,16 @@ internal sealed class FakeLlamaCleanupBackend : ILlamaCleanupBackend
     public TimeSpan Delay { get; init; } = TimeSpan.Zero;
     public Exception? Throw { get; init; }
     public int CallCount { get; private set; }
-    public string? LastPrompt { get; private set; }
+    public string? LastSystemPrompt { get; private set; }
+    public string? LastUserPrompt { get; private set; }
     public int? LastMaxNewTokens { get; private set; }
 
-    public async Task<string> GenerateAsync(string prompt, int maxNewTokens, float temperature, CancellationToken ct)
+    public async Task<string> GenerateAsync(string systemPrompt, string userPrompt,
+        int maxNewTokens, float temperature, CancellationToken ct)
     {
         CallCount++;
-        LastPrompt = prompt;
+        LastSystemPrompt = systemPrompt;
+        LastUserPrompt = userPrompt;
         LastMaxNewTokens = maxNewTokens;
         if (Delay > TimeSpan.Zero) await Task.Delay(Delay, ct);
         if (Throw is not null) throw Throw;

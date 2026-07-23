@@ -228,6 +228,61 @@ if (Test-Path -LiteralPath $correctionsPath) {
     Add-Result 'CorrectionsJson' 'WARN' "missing $correctionsPath (created once a correction is added)"
 }
 
+# ----- Status Pill Visual Fixes — Windows smoke checklist (manual on-device verification) ---
+#
+# Setup:
+#   - Build & run the app on Windows (Windows App SDK). Start a dictation so the
+#     pill appears at the bottom-center of the foreground window's monitor.
+#
+# Change 1 — capsule silhouette (no white rounded rectangle):
+#   [ ] At 100% display scale: the pill is ONLY the dark #202020 capsule. No
+#       white/light rounded rectangle is visible around or behind it.
+#   [ ] At 150% display scale (Settings > Display > Scale = 150%, then relaunch):
+#       still capsule-only; the rounded ends are true semicircles; no light band,
+#       halo, or square sliver at the right/bottom edges.
+#   [ ] Move the foreground window to a second monitor with a DIFFERENT scale and
+#       dictate there: the pill is capsule-only on that monitor too.
+#   [ ] MAGNITUDE CHECK (do this BEFORE concluding the region fix worked): recall
+#       what the halo looked like BEFORE this change. If it was a THIN line/sliver
+#       on the right and/or bottom edge only, the +1-overshoot fix (Tasks 2-3)
+#       fully explains and fixes it. If it was a FULL light rounded rectangle
+#       around the WHOLE pill, that is inconsistent with the 1-px-overshoot bug
+#       alone (that bug is a hairline) -- do NOT assume Tasks 2-3 fixed it just
+#       because no error was thrown. Re-test specifically at 100% DPI, single
+#       monitor (the simplest repro) and check the debug output (next item).
+#   [ ] Check the debug trace: `ApplyLayout` now logs
+#       "[StatusPill] ApplyRoundedRegion failed ..." if the region call fails. If
+#       you see that line, the window is NOT being clipped at all (a silent
+#       SetWindowRgn/CreateRoundRectRgn failure) -- the region math is not the
+#       cause; go straight to the SystemBackdrop escalation below. If you do NOT
+#       see that line but a full halo persists, the region is applied yet the
+#       light backdrop still shows -> also the SystemBackdrop escalation.
+#   [ ] If a white/light rounded rectangle STILL appears at any scale, the GDI
+#       window region is not clipping the composited content on this machine.
+#       Escalation (documented conditional fix, do NOT do blindly): set the window
+#       SystemBackdrop to none and the content root background to transparent so
+#       the corner cutouts reveal nothing. (This directly neutralizes the light
+#       backdrop regardless of the region, and is the spec-sanctioned fallback for
+#       the same requirement.) Re-verify capsule-only after that change.
+#
+# Change 2 — live voice meter:
+#   [ ] While Recording, 5 vertical bars are visible between the dot and the
+#       "Recording..." text.
+#   [ ] Speaking louder lights MORE bars (up to all 5); silence leaves 0 lit
+#       (all dim #33FFFFFF); lit bars are warm amber (#F59E0B). The bars react in
+#       near-real-time (100ms tick).
+#   [ ] The meter is HIDDEN in Thinking (Transcribing/CleaningUp/Injecting),
+#       PendingPaste, Error, and Idle states.
+#
+# Preserved behavior (regression guard):
+#   [ ] Normal states are click-through (clicks pass to the app underneath).
+#   [ ] In PendingPaste the pill is CLICKABLE and clicking pastes into the focused
+#       field; clicking never steals focus.
+#   [ ] The pill stays on top (create another topmost window; the pill re-asserts
+#       above it within a tick).
+#   [ ] Dot color per stage and the Thinking opacity pulse still work; the dot
+#       still swells with voice level while Recording.
+
 # ------------------------------------------------------------- manual steps ---
 Add-Result 'Dictation'      'MANUAL' 'focus Notepad, hold the hotkey, speak a known phrase, verify the text appears'
 Add-Result 'RebootCycle'    'MANUAL' 'reboot; verify Winpepper autostarts hidden to tray, reopens from tray, still dictates'

@@ -37,11 +37,11 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
     /// <summary>Pre-warm: pages in weights and shader pipeline (no persistent KV cache with StatelessExecutor). Spec §5.5.</summary>
     public async Task WarmAsync(CancellationToken ct)
     {
-        const string warmupPrompt = "Hello.";
         try
         {
             _log.LogDebug("Pre-warming cleanup LLM context...");
-            await GenerateAsync(warmupPrompt, maxNewTokens: 4, temperature: 0.1f, ct).ConfigureAwait(false);
+            await GenerateAsync("You are a helpful assistant.", "Hello.",
+                maxNewTokens: 4, temperature: 0.1f, ct).ConfigureAwait(false);
             _log.LogDebug("Cleanup LLM pre-warm complete.");
         }
         catch (Exception ex)
@@ -50,28 +50,31 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
         }
     }
 
-    public async Task<string> GenerateAsync(string prompt, int maxNewTokens, float temperature, CancellationToken ct)
+    public async Task<string> GenerateAsync(string systemPrompt, string userPrompt,
+        int maxNewTokens, float temperature, CancellationToken ct)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // StatelessExecutor: a fresh context per call, so consecutive
-            // dictations never share KV-cache state. The previous
-            // InstructExecutor-over-shared-LLamaContext setup corrupted the
-            // context after the first call (llama_decode 'InvalidInputBatch'
-            // on every subsequent dictation) and wrapped the prompt in
-            // Alpaca-style "### Instruction:" markers that qwen2.5-instruct
-            // was never trained on, sending the model into open-ended
-            // completion. ApplyTemplate=true formats the prompt with the
-            // model's own chat template (ChatML for Qwen) as a user message.
+            // Bug-3 fix-(iv): hand the model a real ChatML system turn
+            // (instructions/examples) separate from the user turn (transcript),
+            // so it cleans the transcript instead of continuing the few-shot
+            // block. We build ChatML ourselves (Qwen2.5's template) and disable
+            // StatelessExecutor.ApplyTemplate, which only knows how to wrap a
+            // single user message.
+            var templated =
+                "<|im_start|>system\n" + systemPrompt + "<|im_end|>\n" +
+                "<|im_start|>user\n" + userPrompt + "<|im_end|>\n" +
+                "<|im_start|>assistant\n";
+
             var executor = new StatelessExecutor(_weights, _params, _log)
             {
-                ApplyTemplate = true,
+                ApplyTemplate = false,
             };
             var inferenceParams = new InferenceParams
             {
                 MaxTokens = maxNewTokens,
-                AntiPrompts = new List<string> { "</USER-INPUT>", "<USER-INPUT>", "<BASE-PROMPT>", "<|im_end|>" },
+                AntiPrompts = new List<string> { "<|im_end|>", "</USER-INPUT>", "<USER-INPUT>", "<BASE-PROMPT>" },
                 SamplingPipeline = new DefaultSamplingPipeline
                 {
                     Temperature = temperature,
@@ -81,7 +84,7 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
             };
 
             var sb = new StringBuilder();
-            await foreach (var token in executor.InferAsync(prompt, inferenceParams, ct).ConfigureAwait(false))
+            await foreach (var token in executor.InferAsync(templated, inferenceParams, ct).ConfigureAwait(false))
             {
                 sb.Append(token);
                 if (sb.Length > maxNewTokens * 8) break; // hard char cap as belt-and-braces

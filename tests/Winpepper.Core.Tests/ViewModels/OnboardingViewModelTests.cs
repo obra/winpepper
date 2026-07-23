@@ -45,8 +45,9 @@ public class OnboardingViewModelTests
     private sealed class FakeWriter : ISettingsWriter
     {
         public AppSettings Current = new();
+        public int Flushes;
         public void Queue(Func<AppSettings, AppSettings> m) => Current = m(Current);
-        public Task FlushAsync() => Task.CompletedTask;
+        public Task FlushAsync() { Flushes++; return Task.CompletedTask; }
     }
 
     private sealed class PermissiveValidator : IHotkeyValidator
@@ -152,6 +153,28 @@ public class OnboardingViewModelTests
         vm.CanRetry.ShouldBeTrue();
     }
 
+    // Ported from our (now-removed) OnboardingDownloadErrorTests: the Download
+    // button doubles as Retry. After a failure a fresh Advance must clear the
+    // inline error and, once provisioning succeeds, move to Test Dictation.
+    [Fact]
+    public async Task Retry_AfterFailureThenSuccess_ClearsErrorAndAdvances()
+    {
+        var provisioner = new FakeProvisioner { EnsureError = new IOException("first fails") };
+        var vm = CreateViewModel(provisioner: provisioner);
+        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync(TestContext.Current.CancellationToken);
+        await vm.AdvanceAsync(TestContext.Current.CancellationToken); // -> DownloadModels
+        await vm.AdvanceAsync(TestContext.Current.CancellationToken); // fails
+
+        vm.HasDownloadError.ShouldBeTrue();
+        vm.Step.ShouldBe(OnboardingStep.DownloadModels);
+
+        provisioner.EnsureError = null;                              // recover
+        await vm.AdvanceAsync(TestContext.Current.CancellationToken); // retry succeeds
+
+        vm.HasDownloadError.ShouldBeFalse();
+        vm.Step.ShouldBe(OnboardingStep.TestDictation);
+    }
+
     [Fact]
     public async Task DownloadModels_CannotSkipIntoTestDictation()
     {
@@ -209,6 +232,89 @@ public class OnboardingViewModelTests
         await vm.AdvanceAsync(TestContext.Current.CancellationToken);
         vm.Step.ShouldBe(OnboardingStep.Done);
         w.Current.OnboardingCompleted.ShouldBeTrue();
+    }
+
+    // NOTE: our old skip-based tests (SkipAsync_Sets_OnboardingCompleted_And_Flushes,
+    // Skip_From_DownloadModels_Advances_Without_Running_Stub,
+    // DownloadModels_Step_Awaits_Stub_And_Advances) are intentionally dropped:
+    // they are superseded by the upstream verified-provisioning requirement.
+    // Skipping the model download can no longer complete onboarding
+    // (DownloadModels_CannotSkipIntoTestDictation covers the new behavior), and
+    // the stub downloader was replaced by IAsrProvisioningService. Our
+    // hydration / skip-resolved-step behavior is retained below via InitializeFrom.
+
+    [Fact]
+    public async Task Advance_From_PickMic_Flushes_The_Checkpoint()
+    {
+        var w = new FakeWriter();
+        var vm = CreateViewModel(writer: w);
+        vm.SelectedMicDeviceId = "{mic-1}";
+
+        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
+
+        w.Current.MicDeviceId.ShouldBe("{mic-1}");
+        w.Flushes.ShouldBeGreaterThan(0);                       // checkpoint flushed
+    }
+
+    [Fact]
+    public void InitializeFrom_NoMic_StartsAtPickMic()
+    {
+        var vm = CreateViewModel();
+        vm.InitializeFrom(new AppSettings { MicDeviceId = "" },
+            persistedMicPresent: false, modelsResolved: false);
+        vm.Step.ShouldBe(OnboardingStep.PickMic);
+    }
+
+    [Fact]
+    public void InitializeFrom_MicSetButMissingDevice_StartsAtPickMic()
+    {
+        var vm = CreateViewModel();
+        vm.InitializeFrom(new AppSettings { MicDeviceId = "{gone}" },
+            persistedMicPresent: false, modelsResolved: true);
+        vm.Step.ShouldBe(OnboardingStep.PickMic);
+    }
+
+    [Fact]
+    public void InitializeFrom_MicPresent_HotkeysValid_ModelsMissing_StartsAtDownloadModels()
+    {
+        var vm = CreateViewModel();
+        vm.InitializeFrom(
+            new AppSettings { MicDeviceId = "{mic}", HoldHotkey = "RightCtrl+RightShift", ToggleHotkey = "Ctrl+Shift+Space" },
+            persistedMicPresent: true, modelsResolved: false);
+        vm.Step.ShouldBe(OnboardingStep.DownloadModels);
+    }
+
+    [Fact]
+    public void InitializeFrom_AllResolved_StartsAtTestDictation()
+    {
+        var vm = CreateViewModel();
+        vm.InitializeFrom(
+            new AppSettings { MicDeviceId = "{mic}", HoldHotkey = "RightCtrl+RightShift", ToggleHotkey = "Ctrl+Shift+Space" },
+            persistedMicPresent: true, modelsResolved: true);
+        vm.Step.ShouldBe(OnboardingStep.TestDictation);
+    }
+
+    [Fact]
+    public void InitializeFrom_InvalidHotkey_StartsAtPickHotkeys()
+    {
+        // Validator flags the persisted toggle chord as conflicting.
+        var vm = CreateViewModel(validator: new FakeValidator("Ctrl+Shift+Space"));
+        vm.InitializeFrom(
+            new AppSettings { MicDeviceId = "{mic}", HoldHotkey = "RightCtrl+RightShift", ToggleHotkey = "Ctrl+Shift+Space" },
+            persistedMicPresent: true, modelsResolved: true);
+        vm.Step.ShouldBe(OnboardingStep.PickHotkeys);
+    }
+
+    [Fact]
+    public void InitializeFrom_Prefills_Mic_And_Hotkeys()
+    {
+        var vm = CreateViewModel();
+        vm.InitializeFrom(
+            new AppSettings { MicDeviceId = "{mic}", HoldHotkey = "LeftAlt+F9", ToggleHotkey = "LeftCtrl+LeftShift" },
+            persistedMicPresent: true, modelsResolved: true);
+        vm.SelectedMicDeviceId.ShouldBe("{mic}");
+        vm.HoldHotkey.ShouldBe("LeftAlt+F9");
+        vm.ToggleHotkey.ShouldBe("LeftCtrl+LeftShift");
     }
 
     private static OnboardingViewModel CreateViewModel(

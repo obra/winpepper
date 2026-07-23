@@ -43,6 +43,12 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
         Flush();
     }
 
+    public async Task QueueAndFlushAsync(Func<AppSettings, AppSettings> mutator)
+    {
+        Queue(mutator);
+        await FlushAsync();
+    }
+
     private void Flush()
     {
         AppSettings? toWrite = null;

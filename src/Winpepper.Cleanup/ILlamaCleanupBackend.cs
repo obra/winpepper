@@ -7,11 +7,13 @@ namespace Winpepper.Cleanup;
 public interface ILlamaCleanupBackend
 {
     /// <summary>
-    /// Run the model on the assembled prompt and return the raw output. The
-    /// implementation is responsible for honoring <paramref name="ct"/>.
+    /// Run the model with a system message (instructions/hints/OCR) and a user
+    /// message (the transcript), returning the raw output. The implementation
+    /// is responsible for honoring <paramref name="ct"/>.
     /// </summary>
     Task<string> GenerateAsync(
-        string prompt,
+        string systemPrompt,
+        string userPrompt,
         int maxNewTokens,
         float temperature,
         CancellationToken ct);

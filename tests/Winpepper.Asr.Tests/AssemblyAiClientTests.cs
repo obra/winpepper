@@ -1,0 +1,319 @@
+using System.Net;
+using System.Text;
+using Microsoft.Extensions.Logging.Abstractions;
+using Shouldly;
+using Winpepper.Asr.Transcription;
+using Xunit;
+
+namespace Winpepper.Asr.Tests;
+
+public sealed class AssemblyAiClientTests
+{
+    private static AssemblyAiClient Make(FakeHttpMessageHandler handler, List<TimeSpan> delays, string? key = "KEY")
+    {
+        var http = new HttpClient(handler);
+        var opts = new AssemblyAiOptions { MaxTransientRetries = 3 };
+        return new AssemblyAiClient(http, () => key, opts, NullLogger<AssemblyAiClient>.Instance,
+            (ts, _) => { delays.Add(ts); return Task.CompletedTask; });
+    }
+
+    [Fact]
+    public async Task Upload_SendsRawBytesWithBareAuthHeader()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"upload_url\":\"https://cdn/aai/xyz\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var body = new byte[] { 1, 2, 3, 4 };
+        var url = await client.UploadAsync(body, CancellationToken.None);
+
+        url.ShouldBe("https://cdn/aai/xyz");
+        var req = handler.Requests[0];
+        req.Method.ShouldBe(HttpMethod.Post);
+        req.RequestUri!.ToString().ShouldEndWith("/v2/upload");
+        req.Headers.GetValues("authorization").ShouldContain("KEY"); // no "Bearer "
+        req.Content!.Headers.ContentType!.MediaType.ShouldBe("application/octet-stream");
+        handler.RequestBodies[0].ShouldBe(body); // raw bytes, not JSON/multipart
+    }
+
+    [Fact]
+    public async Task Upload_401_ThrowsAuthErrorWithoutRetry()
+    {
+        var handler = new FakeHttpMessageHandler().Enqueue(HttpStatusCode.Unauthorized, "{\"error\":\"bad key\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var ex = await Should.ThrowAsync<AssemblyAiException>(() => client.UploadAsync(new byte[] { 1 }, CancellationToken.None));
+        ex.IsAuthError.ShouldBeTrue();
+        ex.StatusCode.ShouldBe(401);
+        handler.Requests.Count.ShouldBe(1);
+        delays.Count.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Upload_400_ThrowsWithoutRetry()
+    {
+        var handler = new FakeHttpMessageHandler().Enqueue(HttpStatusCode.BadRequest, "{\"error\":\"bad request\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var ex = await Should.ThrowAsync<AssemblyAiException>(() => client.UploadAsync(new byte[] { 1 }, CancellationToken.None));
+        ex.StatusCode.ShouldBe(400);
+        ex.IsAuthError.ShouldBeFalse();
+        handler.Requests.Count.ShouldBe(1);
+        delays.Count.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Upload_429_HonorsRetryAfterThenSucceeds()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.TooManyRequests, "{}", mutate: r => r.Headers.TryAddWithoutValidation("Retry-After", "2"))
+            .Enqueue(HttpStatusCode.OK, "{\"upload_url\":\"https://cdn/aai/ok\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var url = await client.UploadAsync(new byte[] { 1 }, CancellationToken.None);
+
+        url.ShouldBe("https://cdn/aai/ok");
+        handler.Requests.Count.ShouldBe(2);
+        delays.Count.ShouldBe(1);
+        delays[0].ShouldBe(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public async Task Upload_503_BacksOffThenSucceeds()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}")
+            .Enqueue(HttpStatusCode.OK, "{\"upload_url\":\"https://cdn/aai/ok\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var url = await client.UploadAsync(new byte[] { 1 }, CancellationToken.None);
+
+        url.ShouldBe("https://cdn/aai/ok");
+        handler.Requests.Count.ShouldBe(2);
+        delays.Count.ShouldBe(1);
+        delays[0].ShouldBeGreaterThan(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public async Task CreateTranscript_SendsSpeechModelPayload_NoVocab_NoWordBoost()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"id\":\"t-123\",\"status\":\"queued\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var id = await client.CreateTranscriptAsync("https://cdn/aai/ok", "universal-2",
+            AssemblyAiRequestExtras.Empty, CancellationToken.None);
+
+        id.ShouldBe("t-123");
+        var json = Encoding.UTF8.GetString(handler.RequestBodies[0]);
+        json.ShouldContain("\"speech_models\":[\"universal-2\"]");
+        json.ShouldContain("\"audio_url\":\"https://cdn/aai/ok\"");
+        json.ShouldContain("\"format_text\":true");
+        json.ShouldContain("\"punctuate\":true");
+        json.ShouldContain("\"disfluencies\":false");
+        json.ShouldContain("\"language_code\":\"en_us\"");
+        json.ShouldNotContain("word_boost");        // never
+        json.ShouldNotContain("custom_spelling");   // empty extras -> omitted
+        json.ShouldNotContain("keyterms_prompt");   // empty extras -> omitted
+    }
+
+    [Fact]
+    public async Task CreateTranscript_MapsCustomSpelling_AndKeyterms()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"id\":\"t-9\",\"status\":\"queued\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var extras = new AssemblyAiRequestExtras(
+            new[] { new AssemblyAiCustomSpelling(new[] { "kubernetes", "kubernettes" }, "Kubernetes") },
+            new[] { "Winpepper" });
+
+        await client.CreateTranscriptAsync("https://cdn/aai/ok", "universal-3-pro", extras, CancellationToken.None);
+
+        var json = Encoding.UTF8.GetString(handler.RequestBodies[0]);
+        json.ShouldContain("\"custom_spelling\":[{\"from\":[\"kubernetes\",\"kubernettes\"],\"to\":\"Kubernetes\"}]");
+        json.ShouldContain("\"keyterms_prompt\":[\"Winpepper\"]");
+        json.ShouldNotContain("word_boost");
+    }
+
+    [Fact]
+    public async Task CreateTranscript_401_ThrowsAuthError()
+    {
+        var handler = new FakeHttpMessageHandler().Enqueue(HttpStatusCode.Unauthorized, "{\"error\":\"bad key\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var ex = await Should.ThrowAsync<AssemblyAiException>(
+            () => client.CreateTranscriptAsync("https://cdn/aai/ok", "universal-2", AssemblyAiRequestExtras.Empty, CancellationToken.None));
+        ex.IsAuthError.ShouldBeTrue();
+        ex.StatusCode.ShouldBe(401);
+    }
+
+    [Fact]
+    public async Task GetTranscript_ParsesCompletedFields()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"status\":\"completed\",\"text\":\"hello world\",\"confidence\":0.97,\"audio_duration\":3.2}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var tr = await client.GetTranscriptAsync("t-123", CancellationToken.None);
+
+        tr.Status.ShouldBe("completed");
+        tr.Text.ShouldBe("hello world");
+        tr.Confidence.ShouldBe(0.97);
+        tr.AudioDuration.ShouldBe(3.2);
+        handler.Requests[0].Method.ShouldBe(HttpMethod.Get);
+        handler.Requests[0].RequestUri!.ToString().ShouldEndWith("/v2/transcript/t-123");
+    }
+
+    [Fact]
+    public async Task ValidateKey_404MeansValid_401MeansBadKey()
+    {
+        var goodHandler = new FakeHttpMessageHandler().Enqueue(HttpStatusCode.NotFound, "{\"error\":\"not found\"}");
+        var badHandler = new FakeHttpMessageHandler().Enqueue(HttpStatusCode.Unauthorized, "{\"error\":\"bad key\"}");
+        var delays = new List<TimeSpan>();
+
+        (await Make(goodHandler, delays).ValidateKeyAsync(CancellationToken.None)).ShouldBeTrue();
+        (await Make(badHandler, delays).ValidateKeyAsync(CancellationToken.None)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task ValidateKey_RetriesTransient_ThenReturnsTrueOn404()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}")            // transient, retried
+            .Enqueue(HttpStatusCode.NotFound, "{\"error\":\"not found\"}"); // 404 => valid key
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        (await client.ValidateKeyAsync(CancellationToken.None)).ShouldBeTrue();
+        handler.Requests.Count.ShouldBe(2);
+        delays.Count.ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData("-5", 0)]        // negative -> clamped to 0
+    [InlineData("99999", 30)]    // huge -> clamped to 30
+    [InlineData("banana", null)] // non-numeric -> ignored, falls back to backoff (>0)
+    public async Task Upload_429_ClampsGarbageRetryAfter(string headerValue, int? expectedSeconds)
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.TooManyRequests, "{}", mutate: r => r.Headers.TryAddWithoutValidation("Retry-After", headerValue))
+            .Enqueue(HttpStatusCode.OK, "{\"upload_url\":\"https://cdn/aai/ok\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var url = await client.UploadAsync(new byte[] { 1 }, CancellationToken.None);
+
+        url.ShouldBe("https://cdn/aai/ok");
+        delays.Count.ShouldBe(1);
+        delays[0].ShouldBeGreaterThanOrEqualTo(TimeSpan.Zero);
+        delays[0].ShouldBeLessThanOrEqualTo(TimeSpan.FromSeconds(30));
+        if (expectedSeconds is int s)
+            delays[0].ShouldBe(TimeSpan.FromSeconds(s));
+        else
+            delays[0].ShouldBeGreaterThan(TimeSpan.Zero); // non-numeric -> backoff jitter
+    }
+
+    [Fact]
+    public async Task Upload_503_RetriesUpToMax_ThenThrows_WithMonotonicBackoff()
+    {
+        // 4 consecutive 503s with MaxTransientRetries=3 -> 3 delays, then throw.
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}")
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}")
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}")
+            .Enqueue(HttpStatusCode.ServiceUnavailable, "{}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var ex = await Should.ThrowAsync<AssemblyAiException>(() => client.UploadAsync(new byte[] { 1 }, CancellationToken.None));
+        ex.StatusCode.ShouldBe(503);
+        delays.Count.ShouldBe(3);                      // exactly MaxTransientRetries delays
+        foreach (var d in delays) d.ShouldBeGreaterThan(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public async Task Upload_RequestTimeout_IsRetriedThenSucceeds()
+    {
+        // First send throws TaskCanceledException NOT tied to the caller token
+        // (models a per-request timeout); second send succeeds.
+        var handler = new FakeHttpMessageHandler()
+            .EnqueueThrow(new TaskCanceledException("per-request timeout"))
+            .Enqueue(HttpStatusCode.OK, "{\"upload_url\":\"https://cdn/aai/ok\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var url = await client.UploadAsync(new byte[] { 1 }, CancellationToken.None);
+
+        url.ShouldBe("https://cdn/aai/ok");
+        handler.Requests.Count.ShouldBe(2);
+        delays.Count.ShouldBe(1); // one backoff before the retry
+    }
+
+    [Fact]
+    public async Task Upload_CallerCancellation_IsNotRetried()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var handler = new FakeHttpMessageHandler(); // no scripted responses needed
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        await Should.ThrowAsync<OperationCanceledException>(
+            () => client.UploadAsync(new byte[] { 1 }, cts.Token));
+        delays.Count.ShouldBe(0);       // never retried
+        handler.Requests.Count.ShouldBeLessThanOrEqualTo(1);
+    }
+
+    [Fact]
+    public async Task GetTranscript_NonStringStatus_IsCoercedNotDropped()
+    {
+        // Defensive: even if status arrives as a JSON number, we must surface it
+        // (as "123") rather than silently returning empty and burning the budget.
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"status\":123,\"text\":\"hi\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var tr = await client.GetTranscriptAsync("t-1", CancellationToken.None);
+        tr.Status.ShouldBe("123");
+        tr.Text.ShouldBe("hi");
+    }
+
+    [Theory]
+    [InlineData(400)]
+    [InlineData(404)]
+    public async Task GetTranscript_ClientError_Throws(int code)
+    {
+        var handler = new FakeHttpMessageHandler().Enqueue((HttpStatusCode)code, "{\"error\":\"nope\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        var ex = await Should.ThrowAsync<AssemblyAiException>(() => client.GetTranscriptAsync("t-1", CancellationToken.None));
+        ex.StatusCode.ShouldBe(code);
+    }
+
+    [Fact]
+    public async Task DeleteTranscript_IssuesDeleteWithAuth()
+    {
+        var handler = new FakeHttpMessageHandler().Enqueue(HttpStatusCode.OK, "{\"status\":\"deleted\"}");
+        var delays = new List<TimeSpan>();
+        var client = Make(handler, delays);
+
+        await client.DeleteTranscriptAsync("t-42", CancellationToken.None);
+
+        var req = handler.Requests[0];
+        req.Method.ShouldBe(HttpMethod.Delete);
+        req.RequestUri!.ToString().ShouldEndWith("/v2/transcript/t-42");
+        req.Headers.GetValues("authorization").ShouldContain("KEY");
+    }
+}

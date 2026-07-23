@@ -2,6 +2,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Winpepper.App.Hosting;
+using Windows.Graphics;
 
 namespace Winpepper.App.Views;
 
@@ -22,6 +23,42 @@ public sealed partial class MainWindow : Window
 
         Nav.SelectionChanged += OnNavSelectionChanged;
         Nav.SelectedItem = Nav.MenuItems[0];
+
+        // Size (spec Task 4): restore a remembered size, else default to a
+        // third of the platform width and half its height (clamped). Only
+        // applied when no persisted size exists.
+        var appWindow = AppWindow;
+        var persisted = _shell.Settings;
+        if (persisted.WindowWidth is int savedW && persisted.WindowHeight is int savedH &&
+            Winpepper.Core.WindowSizePolicy.IsSaneSize(savedW, savedH))
+        {
+            appWindow.Resize(new SizeInt32(savedW, savedH));
+        }
+        else
+        {
+            // No persisted size, or an insane one (e.g. a minimized caption
+            // strip that slipped into settings) — fall back to the default.
+            var (w, h) = Winpepper.Core.WindowSizePolicy.ComputeDefault(
+                appWindow.Size.Width, appWindow.Size.Height);
+            appWindow.Resize(new SizeInt32(w, h));
+        }
+
+        // Remember user resizes durably (physical px). No position persistence.
+        // Guard against minimize: a minimized window reports a ~160x28 caption
+        // strip as its size, and persisting that restores the app as a tiny
+        // window. Only persist sizes from the normal Restored state that pass
+        // the sanity floor.
+        appWindow.Changed += (sender, args) =>
+        {
+            if (!args.DidSizeChange) return;
+            if (sender.Presenter is Microsoft.UI.Windowing.OverlappedPresenter op &&
+                op.State != Microsoft.UI.Windowing.OverlappedPresenterState.Restored) return;
+            var size = sender.Size;
+            if (!Winpepper.Core.WindowSizePolicy.IsSaneSize(size.Width, size.Height)) return;
+            _ = _shell.SettingsWriter.QueueAndFlushAsync(
+                st => st with { WindowWidth = size.Width, WindowHeight = size.Height });
+        };
+
         AppWindow.Closing += OnAppWindowClosing;
     }
 

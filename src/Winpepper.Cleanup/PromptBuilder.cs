@@ -4,7 +4,10 @@ using Winpepper.Corrections;
 namespace Winpepper.Cleanup;
 
 /// <summary>
-/// Assembles the four-block cleanup prompt per spec §6.2. Pure-string,
+/// Assembles the cleanup prompt per spec §6.2, split into a system message
+/// (instructions + correction hints + OCR context) and a user message (the raw
+/// transcript). Bug-3 fix-(iv): the previous single-blob prompt gave the 0.5B
+/// model no system role, so it pattern-completed the examples. Pure-string,
 /// stateless. Omission rules:
 /// - &lt;CORRECTION-HINTS&gt; omitted iff both preferred and replacements are empty.
 /// - &lt;OCR-RULES&gt; and &lt;WINDOW-OCR-CONTENT&gt; omitted iff windowContext
@@ -15,18 +18,17 @@ public static class PromptBuilder
 {
     public const int WindowContextMaxChars = 4000;
 
-    public static string Build(
+    /// <summary>Instructions + optional correction hints + optional OCR context.
+    /// Does NOT include the transcript.</summary>
+    public static string BuildSystem(
         string basePrompt,
         CorrectionsData corrections,
-        string? windowContext,
-        string userInput)
+        string? windowContext)
     {
         var sb = new StringBuilder(capacity: 8192);
 
-        // <BASE-PROMPT>
         sb.Append("<BASE-PROMPT>\n").Append(basePrompt).Append("\n</BASE-PROMPT>");
 
-        // <CORRECTION-HINTS> (omit when both lists empty)
         var hasPreferred = corrections.Preferred.Count > 0;
         var hasReplacements = corrections.Replacements.Count > 0;
         if (hasPreferred || hasReplacements)
@@ -47,7 +49,6 @@ public static class PromptBuilder
             sb.Append("\n</CORRECTION-HINTS>");
         }
 
-        // <OCR-RULES> + <WINDOW-OCR-CONTENT> (omit when window context is empty)
         var truncated = TruncateWindowContext(windowContext);
         if (!string.IsNullOrEmpty(truncated))
         {
@@ -60,11 +61,12 @@ public static class PromptBuilder
             sb.Append("\n\n<WINDOW-OCR-CONTENT>\n").Append(truncated).Append("\n</WINDOW-OCR-CONTENT>");
         }
 
-        // <USER-INPUT>
-        sb.Append("\n\n<USER-INPUT>\n").Append((userInput ?? string.Empty).Trim()).Append("\n</USER-INPUT>");
-
         return sb.ToString();
     }
+
+    /// <summary>The raw transcript, trimmed, wrapped in a USER-INPUT block.</summary>
+    public static string BuildUser(string userInput)
+        => "<USER-INPUT>\n" + (userInput ?? string.Empty).Trim() + "\n</USER-INPUT>";
 
     private static string? TruncateWindowContext(string? raw)
     {

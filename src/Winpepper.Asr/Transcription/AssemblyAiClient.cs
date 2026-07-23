@@ -1,0 +1,265 @@
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Extensions.Logging;
+
+namespace Winpepper.Asr.Transcription;
+
+/// <summary>A single AssemblyAI batch-transcript status snapshot.</summary>
+public sealed record AssemblyAiTranscript(string Status, string? Text, double? Confidence, double? AudioDuration, string? Error);
+
+public interface IAssemblyAiClient
+{
+    Task<string> UploadAsync(byte[] audio, CancellationToken ct);
+    Task<string> CreateTranscriptAsync(string audioUrl, string model, AssemblyAiRequestExtras extras, CancellationToken ct);
+    Task<AssemblyAiTranscript> GetTranscriptAsync(string id, CancellationToken ct);
+    Task<bool> ValidateKeyAsync(CancellationToken ct);
+    Task DeleteTranscriptAsync(string id, CancellationToken ct);
+}
+
+/// <summary>
+/// Raw-HttpClient AssemblyAI batch client. There is no maintained official C#
+/// SDK, so every call is hand-built. Retry policy: transient 5xx/429/network
+/// errors are retried with backoff (429 honors Retry-After); 401/400/404 are
+/// terminal. The create-transcript POST is only retried before an id exists.
+/// </summary>
+public sealed class AssemblyAiClient : IAssemblyAiClient
+{
+    private readonly HttpClient _http;
+    private readonly Func<string?> _apiKey;
+    private readonly AssemblyAiOptions _opts;
+    private readonly ILogger<AssemblyAiClient> _log;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delay;
+
+    public AssemblyAiClient(
+        HttpClient http,
+        Func<string?> apiKeyProvider,
+        AssemblyAiOptions options,
+        ILogger<AssemblyAiClient> logger,
+        Func<TimeSpan, CancellationToken, Task>? delay = null)
+    {
+        _http = http;
+        _apiKey = apiKeyProvider;
+        _opts = options;
+        _log = logger;
+        _delay = delay ?? ((ts, ct) => Task.Delay(ts, ct));
+    }
+
+    public async Task<string> UploadAsync(byte[] audio, CancellationToken ct)
+    {
+        using var resp = await SendWithRetryAsync(() =>
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, $"{_opts.BaseUrl}/v2/upload");
+            var content = new ByteArrayContent(audio);
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            req.Content = content;
+            return req;
+        }, ct);
+
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        return ReadString(json, "upload_url");
+    }
+
+    public async Task<string> CreateTranscriptAsync(string audioUrl, string model, AssemblyAiRequestExtras extras, CancellationToken ct)
+    {
+        // Build the payload as a mutable dictionary so custom_spelling / keyterms_prompt
+        // are only present when non-empty. NEVER add word_boost (downgrades universal-3).
+        var payload = new Dictionary<string, object?>
+        {
+            ["audio_url"] = audioUrl,
+            ["speech_models"] = new[] { model }, // plural array — singular `speech_model` is deprecated
+            ["format_text"] = true,
+            ["punctuate"] = true,
+            ["disfluencies"] = false,
+            ["language_code"] = _opts.LanguageCode,
+        };
+        if (extras.CustomSpelling.Count > 0)
+            payload["custom_spelling"] = extras.CustomSpelling
+                .Select(cs => new { from = cs.From, to = cs.To })
+                .ToArray();
+        if (extras.Keyterms.Count > 0)
+            payload["keyterms_prompt"] = extras.Keyterms.ToArray();
+
+        var body = JsonSerializer.Serialize(payload);
+
+        using var resp = await SendWithRetryAsync(() =>
+        {
+            var req = new HttpRequestMessage(HttpMethod.Post, $"{_opts.BaseUrl}/v2/transcript")
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+            return req;
+        }, ct);
+
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        return ReadString(json, "id");
+    }
+
+    public async Task<AssemblyAiTranscript> GetTranscriptAsync(string id, CancellationToken ct)
+    {
+        using var resp = await SendWithRetryAsync(
+            () => new HttpRequestMessage(HttpMethod.Get, $"{_opts.BaseUrl}/v2/transcript/{id}"), ct);
+
+        var json = await resp.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        return new AssemblyAiTranscript(
+            Status: ReadStatus(root),
+            Text: root.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null,
+            Confidence: root.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetDouble() : null,
+            AudioDuration: root.TryGetProperty("audio_duration", out var d) && d.ValueKind == JsonValueKind.Number ? d.GetDouble() : null,
+            Error: root.TryGetProperty("error", out var e) && e.ValueKind == JsonValueKind.String ? e.GetString() : null);
+    }
+
+    public async Task DeleteTranscriptAsync(string id, CancellationToken ct)
+    {
+        using var resp = await SendWithRetryAsync(
+            () => new HttpRequestMessage(HttpMethod.Delete, $"{_opts.BaseUrl}/v2/transcript/{id}"), ct);
+        // Body is irrelevant; a 2xx means the remote transcript is gone. Log id, never the key.
+        _log.LogInformation("AssemblyAI transcript {Id} deleted", id);
+    }
+
+    /// <summary>
+    /// Read `status` tolerant of JSON kind. AssemblyAI sends a string, but a
+    /// non-string value must never silently drop a completed transcript: coerce
+    /// numbers/bools to their raw text and let the transcriber's poll loop treat
+    /// an unrecognized status explicitly.
+    /// </summary>
+    private static string ReadStatus(JsonElement root)
+    {
+        if (!root.TryGetProperty("status", out var s)) return "";
+        return s.ValueKind switch
+        {
+            JsonValueKind.String => s.GetString() ?? "",
+            JsonValueKind.Null => "",
+            JsonValueKind.Number => s.GetRawText(),
+            JsonValueKind.True or JsonValueKind.False => s.GetRawText(),
+            _ => s.GetRawText(),
+        };
+    }
+
+    public async Task<bool> ValidateKeyAsync(CancellationToken ct)
+    {
+        // GET a bogus id through the retry helper: 401 => bad key; anything the
+        // helper accepts (or a terminal 404) => key is accepted. Transient 5xx /
+        // request-timeouts are retried before we decide.
+        try
+        {
+            using var resp = await SendWithRetryAsync(
+                () => new HttpRequestMessage(HttpMethod.Get, $"{_opts.BaseUrl}/v2/transcript/winpepper-key-check-000000000000"), ct);
+            return true; // 2xx accepted
+        }
+        catch (AssemblyAiException ex)
+        {
+            // 401 => invalid; 404 (bogus id) and other non-auth terminals => key was accepted.
+            return ex.StatusCode != 401;
+        }
+    }
+
+    private void AddAuth(HttpRequestMessage req)
+    {
+        var key = _apiKey();
+        if (string.IsNullOrEmpty(key))
+            throw new AssemblyAiException("No AssemblyAI API key configured.", isAuthError: true);
+        req.Headers.TryAddWithoutValidation("authorization", key); // NO "Bearer " prefix
+    }
+
+    private async Task<HttpResponseMessage> SendWithRetryAsync(Func<HttpRequestMessage> requestFactory, CancellationToken ct)
+    {
+        var attempt = 0;
+        while (true)
+        {
+            attempt++;
+            using var req = requestFactory();
+            AddAuth(req);
+
+            // Cap each HTTP round-trip independently of the global HttpClient.Timeout.
+            using var reqCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            reqCts.CancelAfter(_opts.PerRequestTimeout);
+
+            HttpResponseMessage resp;
+            try
+            {
+                resp = await _http.SendAsync(req, reqCts.Token);
+            }
+            catch (Exception ex) when (
+                (ex is HttpRequestException ||
+                 // A per-request timeout surfaces as (Task)OperationCanceledException whose
+                 // cause is reqCts, NOT the caller's ct. Treat that as a retryable transient.
+                 (ex is OperationCanceledException && !ct.IsCancellationRequested))
+                && attempt <= _opts.MaxTransientRetries)
+            {
+                await _delay(Backoff(attempt), ct);
+                continue;
+            }
+            // Caller aborted (ct cancelled): let the OperationCanceledException propagate.
+
+            var code = (int)resp.StatusCode;
+            if (resp.IsSuccessStatusCode) return resp;
+
+            if (code == 401)
+            {
+                resp.Dispose();
+                throw new AssemblyAiException("AssemblyAI rejected the API key (401). Check your key.", 401, isAuthError: true);
+            }
+            if (code is 400 or 404)
+            {
+                var body = await resp.Content.ReadAsStringAsync(ct);
+                resp.Dispose();
+                throw new AssemblyAiException($"AssemblyAI request failed ({code}): {body}", code);
+            }
+            if (code == 429)
+            {
+                var wait = RetryAfter(resp) ?? Backoff(attempt);
+                resp.Dispose();
+                if (attempt > _opts.MaxTransientRetries)
+                    throw new AssemblyAiException("AssemblyAI rate limit (429) exceeded retries.", 429);
+                await _delay(wait, ct);
+                continue;
+            }
+            if (code is 500 or 502 or 503 or 504)
+            {
+                resp.Dispose();
+                if (attempt > _opts.MaxTransientRetries)
+                    throw new AssemblyAiException($"AssemblyAI server error ({code}) exceeded retries.", code);
+                await _delay(Backoff(attempt), ct);
+                continue;
+            }
+
+            var other = await resp.Content.ReadAsStringAsync(ct);
+            resp.Dispose();
+            throw new AssemblyAiException($"AssemblyAI unexpected status ({code}): {other}", code);
+        }
+    }
+
+    private static TimeSpan Backoff(int attempt)
+        // exponential + jitter; Random.Shared is thread-safe (no shared unlocked field)
+        => TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 250 + Random.Shared.Next(0, 250));
+
+    private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromSeconds(30);
+
+    private static TimeSpan? RetryAfter(HttpResponseMessage resp)
+    {
+        TimeSpan? raw = null;
+        if (resp.Headers.RetryAfter?.Delta is { } delta) raw = delta;
+        else if (resp.Headers.TryGetValues("Retry-After", out var values)
+                 && int.TryParse(values.FirstOrDefault(), out var seconds))
+            raw = TimeSpan.FromSeconds(seconds);
+
+        if (raw is null) return null;
+        // Clamp defensively: a negative value would throw from Task.Delay, and a
+        // huge value would freeze dictation past any sane budget.
+        var clamped = raw.Value;
+        if (clamped < TimeSpan.Zero) clamped = TimeSpan.Zero;
+        if (clamped > MaxRetryAfter) clamped = MaxRetryAfter;
+        return clamped;
+    }
+
+    private static string ReadString(string json, string property)
+    {
+        using var doc = JsonDocument.Parse(json);
+        if (doc.RootElement.TryGetProperty(property, out var v) && v.ValueKind == JsonValueKind.String)
+            return v.GetString()!;
+        throw new AssemblyAiException($"AssemblyAI response missing '{property}'.");
+    }
+}

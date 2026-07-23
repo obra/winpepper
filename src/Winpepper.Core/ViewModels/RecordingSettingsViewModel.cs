@@ -21,6 +21,8 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
     private string _micDeviceId;
     private bool _playSounds;
     private bool _speakerFilterEnabled;
+    private bool _postPasteLearningEnabled;
+    private bool _prewarmMicEnabled;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -33,6 +35,8 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         _micDeviceId = initial.MicDeviceId;
         _playSounds = initial.PlaySounds;
         _speakerFilterEnabled = initial.SpeakerFilterEnabled;
+        _postPasteLearningEnabled = initial.PostPasteLearningEnabled;
+        _prewarmMicEnabled = initial.PrewarmMicEnabled;
     }
 
     private sealed class NullHotkeyValidator : IHotkeyValidator
@@ -41,6 +45,12 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
     }
 
+    // Commit a settings change durably: apply it and flush past the debounce so
+    // a subsequent force-kill (MSI upgrade) can't lose it. Fire-and-forget is
+    // acceptable here (spec 2(ii)); the writer swallows write errors.
+    private void CommitDurable(Func<AppSettings, AppSettings> mutator)
+        => _ = _writer.QueueAndFlushAsync(mutator);
+
     public string HoldHotkey
     {
         get => _holdHotkey;
@@ -48,7 +58,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_holdHotkey == value) return;
             _holdHotkey = value;
-            _writer.Queue(s => s with { HoldHotkey = value });
+            CommitDurable(s => s with { HoldHotkey = value });
             Raise(nameof(HoldHotkey));
             Raise(nameof(HoldHotkeyConflict));
             Raise(nameof(ToggleHotkeyConflict));
@@ -62,7 +72,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_toggleHotkey == value) return;
             _toggleHotkey = value;
-            _writer.Queue(s => s with { ToggleHotkey = value });
+            CommitDurable(s => s with { ToggleHotkey = value });
             Raise(nameof(ToggleHotkey));
             Raise(nameof(HoldHotkeyConflict));
             Raise(nameof(ToggleHotkeyConflict));
@@ -76,7 +86,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_micDeviceId == value) return;
             _micDeviceId = value;
-            _writer.Queue(s => s with { MicDeviceId = value });
+            CommitDurable(s => s with { MicDeviceId = value });
             Raise(nameof(MicDeviceId));
         }
     }
@@ -88,7 +98,7 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_playSounds == value) return;
             _playSounds = value;
-            _writer.Queue(s => s with { PlaySounds = value });
+            CommitDurable(s => s with { PlaySounds = value });
             Raise(nameof(PlaySounds));
         }
     }
@@ -100,8 +110,32 @@ public sealed class RecordingSettingsViewModel : INotifyPropertyChanged
         {
             if (_speakerFilterEnabled == value) return;
             _speakerFilterEnabled = value;
-            _writer.Queue(s => s with { SpeakerFilterEnabled = value });
+            CommitDurable(s => s with { SpeakerFilterEnabled = value });
             Raise(nameof(SpeakerFilterEnabled));
+        }
+    }
+
+    public bool PostPasteLearningEnabled
+    {
+        get => _postPasteLearningEnabled;
+        set
+        {
+            if (_postPasteLearningEnabled == value) return;
+            _postPasteLearningEnabled = value;
+            CommitDurable(s => s with { PostPasteLearningEnabled = value });
+            Raise(nameof(PostPasteLearningEnabled));
+        }
+    }
+
+    public bool PrewarmMicEnabled
+    {
+        get => _prewarmMicEnabled;
+        set
+        {
+            if (_prewarmMicEnabled == value) return;
+            _prewarmMicEnabled = value;
+            CommitDurable(s => s with { PrewarmMicEnabled = value });
+            Raise(nameof(PrewarmMicEnabled));
         }
     }
 

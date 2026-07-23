@@ -22,6 +22,10 @@ public sealed partial class OnboardingPage : Page
         var shell = (AppShell)e.Parameter;
         _shell = shell;
         _lifetimeCts = new CancellationTokenSource();
+        // Upstream verified-provisioning wiring: ModelsServices implements
+        // IAsrProvisioningService (download + verify), and the VM starts the
+        // pipeline only after the model verifies. Our hydration/skip-resolved
+        // behavior lives below in InitializeFrom.
         _vm = new OnboardingViewModel(
             shell.SettingsWriter,
             shell.ModelsServices,
@@ -31,6 +35,22 @@ public sealed partial class OnboardingPage : Page
         var devices = DeviceEnumerator.List();
         MicCombo.ItemsSource = devices;
         MicCombo.DisplayMemberPath = nameof(CaptureDevice.FriendlyName);
+
+        // Hydrate from persisted settings and start at the first unresolved
+        // step (spec 3). persistedMicPresent: the saved device still exists in
+        // the current enumeration. modelsResolved: no selected model missing.
+        var settings = shell.Settings;
+        var persistedMicPresent = !string.IsNullOrEmpty(settings.MicDeviceId)
+                                   && devices.Any(d => d.Id == settings.MicDeviceId);
+        var missing = new Winpepper.Models.MissingModelsResolver().FindMissing(
+            shell.ModelsServices.Registry.All,
+            shell.ModelsServices.ModelsRoot,
+            new[] { settings.AsrModelName, settings.CleanupModelName });
+        var modelsResolved = missing.Count == 0;
+        _vm.InitializeFrom(settings, persistedMicPresent, modelsResolved);
+
+        // Reflect the hydrated device selection in the combo.
+        MicCombo.SelectedItem = devices.FirstOrDefault(d => d.Id == settings.MicDeviceId);
         MicCombo.SelectionChanged += (_, _) =>
         {
             if (MicCombo.SelectedItem is CaptureDevice d)
@@ -103,6 +123,9 @@ public sealed partial class OnboardingPage : Page
         Show(DownloadPanel,  OnboardingStep.DownloadModels);
         Show(TestPanel,      OnboardingStep.TestDictation);
         Show(DonePanel,      OnboardingStep.Done);
+
+        DownloadErrorText.Text = _vm.DownloadError ?? string.Empty;
+        DownloadErrorText.Visibility = _vm.HasDownloadError ? Visibility.Visible : Visibility.Collapsed;
 
         Border Dot(int i) => i switch { 1 => StepDot1, 2 => StepDot2, 3 => StepDot3, _ => StepDot4 };
         // Prefer the theme brushes so the dots track light/dark mode and the

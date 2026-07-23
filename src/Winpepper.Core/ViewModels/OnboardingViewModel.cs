@@ -44,6 +44,42 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged, IDisposable
         ApplyProvisioningState(_provisioner.State);
     }
 
+    /// <summary>
+    /// Prefill the VM from persisted settings and start at the first unresolved
+    /// step. All steps remain reachable via Back; this only moves the starting
+    /// position (spec 3(i),(ii)). <paramref name="persistedMicPresent"/> is
+    /// supplied by the page (device enumeration lives there);
+    /// <paramref name="modelsResolved"/> is true when no selected model is
+    /// missing (computed via MissingModelsResolver).
+    /// </summary>
+    public void InitializeFrom(AppSettings settings, bool persistedMicPresent, bool modelsResolved)
+    {
+        _micId = settings.MicDeviceId;
+        _holdHotkey = settings.HoldHotkey;
+        _toggleHotkey = settings.ToggleHotkey;
+
+        Raise(nameof(SelectedMicDeviceId));
+        Raise(nameof(HoldHotkey));
+        Raise(nameof(ToggleHotkey));
+        Raise(nameof(HoldHotkeyError));
+        Raise(nameof(ToggleHotkeyError));
+
+        Step = FirstUnresolvedStep(persistedMicPresent, modelsResolved);
+    }
+
+    private OnboardingStep FirstUnresolvedStep(bool persistedMicPresent, bool modelsResolved)
+    {
+        var micResolved = !string.IsNullOrEmpty(_micId) && persistedMicPresent;
+        if (!micResolved) return OnboardingStep.PickMic;
+
+        var hotkeysResolved = HoldHotkeyError is null && ToggleHotkeyError is null;
+        if (!hotkeysResolved) return OnboardingStep.PickHotkeys;
+
+        if (!modelsResolved) return OnboardingStep.DownloadModels;
+
+        return OnboardingStep.TestDictation;
+    }
+
     public OnboardingStep Step
     {
         get => _step;
@@ -108,6 +144,7 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged, IDisposable
             _downloadError = value;
             Raise();
             Raise(nameof(CanRetry));
+            Raise(nameof(HasDownloadError));
         }
     }
 
@@ -126,6 +163,13 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged, IDisposable
     public bool CanSkip => false;
     public bool CanRetry => _step == OnboardingStep.DownloadModels && !_isBusy && _downloadError is not null;
 
+    /// <summary>
+    /// Convenience flag for the onboarding page: true when an inline download
+    /// error should be shown on the Download step. Backed by the same
+    /// <see cref="DownloadError"/> the provisioner surfaces.
+    /// </summary>
+    public bool HasDownloadError => _downloadError is not null;
+
     public Task AdvanceAsync() => AdvanceAsync(CancellationToken.None);
 
     public async Task AdvanceAsync(CancellationToken ct)
@@ -134,24 +178,29 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged, IDisposable
         switch (_step)
         {
             case OnboardingStep.PickMic:
-                _writer.Queue(s => s with { MicDeviceId = _micId });
+                await _writer.QueueAndFlushAsync(s => s with { MicDeviceId = _micId });
                 Step = OnboardingStep.PickHotkeys;
                 break;
             case OnboardingStep.PickHotkeys:
-                _writer.Queue(s => s with { HoldHotkey = _holdHotkey, ToggleHotkey = _toggleHotkey });
+                await _writer.QueueAndFlushAsync(s => s with { HoldHotkey = _holdHotkey, ToggleHotkey = _toggleHotkey });
                 Step = OnboardingStep.DownloadModels;
                 break;
             case OnboardingStep.DownloadModels:
                 await ProvisionAndStartPipelineAsync(ct);
                 break;
             case OnboardingStep.TestDictation:
-                _writer.Queue(s => s with { OnboardingCompleted = true });
-                await _writer.FlushAsync();
+                await _writer.QueueAndFlushAsync(s => s with { OnboardingCompleted = true });
                 Step = OnboardingStep.Done;
                 break;
         }
     }
 
+    /// <summary>
+    /// Skipping the (optional) model download still completes setup: the user
+    /// chose to skip, so persist OnboardingCompleted durably and move on to the
+    /// test-dictation step. This prevents onboarding from reappearing forever
+    /// (spec 2(iii)).
+    /// </summary>
     public void Skip()
     {
         // Model skipping is deliberately unavailable: Test Dictation requires

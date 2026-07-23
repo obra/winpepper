@@ -40,6 +40,9 @@ public sealed class AppShell : IDisposable
     public Winpepper.Core.Logging.LogRingBuffer LogTail { get; }
     public Winpepper.Core.Threading.IUiThread Ui { get; }
     public Winpepper.App.Hosting.DiagnosticsHost DiagnosticsHost { get; }
+    public Winpepper.Asr.Transcription.IAssemblyAiKeyStore AssemblyAiKeyStore { get; }
+    public Winpepper.Asr.Transcription.AssemblyAiClient AssemblyAiClient { get; }
+    public Winpepper.Asr.Transcription.AssemblyAiOptions AssemblyAiOptions { get; }
 
     private readonly WinUiSoundEffectPlayer _sounds;
 
@@ -51,7 +54,8 @@ public sealed class AppShell : IDisposable
             AppPaths.LogsDir, debugConsole: false,
             minimumLevel: LogLevel.Information,
             buffer: logTail);
-        var store = new SettingsStore(AppPaths.SettingsJson);
+        var store = new SettingsStore(AppPaths.SettingsJson,
+            onError: msg => factory.CreateLogger("Winpepper.App.Settings").LogWarning("{SettingsWarning}", msg));
         var settings = store.Load();
         var modelsServices = new Winpepper.App.Services.ModelsServices(
             Path.Combine(AppPaths.Root, "models"), settings.AsrModelName);
@@ -236,18 +240,49 @@ public sealed class AppShell : IDisposable
             factory.CreateLogger<Winpepper.Core.Crash.CrashHandler>());
         App.CrashHandler = crashHandler;
 
+        // --- AssemblyAI cloud ASR provider stack (optional; key may be absent) ---
+        var aaiKeyStore = new Winpepper.Asr.Transcription.AssemblyAiKeyStore(
+            AppPaths.AssemblyAiKeyFile, new Winpepper.App.Asr.DpapiApiKeyProtector());
+        // No global HttpClient.Timeout: per-request timeouts are enforced inside
+        // AssemblyAiClient via a linked CTS, and the total cloud budget is owned by
+        // FallbackTranscriber. A single large safety cap guards against a truly wedged socket.
+        var aaiHttp = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+        var aaiOptions = new Winpepper.Asr.Transcription.AssemblyAiOptions
+        {
+            Model = settings.AssemblyAiModel,
+            CloudDeadline = Winpepper.Asr.Transcription.AssemblyAiOptions.ClampDeadline(settings.AssemblyAiCloudDeadlineSeconds),
+            DeleteAfterTranscribe = settings.AssemblyAiDeleteAfterTranscribe,
+            KeytermsEnabled = settings.AssemblyAiKeytermsEnabled,
+        };
+        var aaiClient = new Winpepper.Asr.Transcription.AssemblyAiClient(
+            aaiHttp,
+            () => aaiKeyStore.Load(),
+            aaiOptions,
+            factory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiClient>());
+
         var pipeline = new PipelineHost(factory, errorBus, engine, sessionVm, sounds,
                                          hold, toggle, cancel, AppPaths.ParakeetModelDir,
                                          historyServices.Archiver, settings.AsrModelName, cleanupModelName,
                                          clipboardFallback, toasts,
+                                         () => store.Load(),
+                                         (local, s, onFallback) => AppShell.BuildTranscriber(
+                                             local, s, onFallback, aaiClient, aaiKeyStore, aaiOptions,
+                                             correctionStore, errorBus, factory),
                                          cleanup, correctionStore, windowContext, cleanupOptions,
-                                         postPaste: postPaste, focusedCapturer: focusedCapturer);
+                                         postPaste: postPaste, focusedCapturer: focusedCapturer,
+                                         postPasteLearningEnabled: settings.PostPasteLearningEnabled,
+                                         prewarmMicEnabled: settings.PrewarmMicEnabled);
 
+        // Shell publication and StartAsync are now driven by PublishedStartup
+        // (App.OnLaunched): Create() stays synchronous and returns the fully
+        // constructed shell. Keep our AssemblyAI ctor params — they must be
+        // assigned before MainWindow is built inside the ctor.
         return new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
                             recordingVm, cleanupVm, correctionsVm,
                             autostart, pipeline, sounds, historyServices, modelsServices,
                             toasts, clipboardFallback, crashHandler,
-                            logTail, uiThread, diagHost);
+                            logTail, uiThread, diagHost,
+                            aaiKeyStore, aaiClient, aaiOptions);
     }
 
     private AppShell(ILoggerFactory factory, SettingsStore store, AppSettings settings,
@@ -264,7 +299,10 @@ public sealed class AppShell : IDisposable
                      Winpepper.Core.Crash.CrashHandler crashHandler,
                      Winpepper.Core.Logging.LogRingBuffer logTail,
                      Winpepper.Core.Threading.IUiThread ui,
-                     Winpepper.App.Hosting.DiagnosticsHost diagnosticsHost)
+                     Winpepper.App.Hosting.DiagnosticsHost diagnosticsHost,
+                     Winpepper.Asr.Transcription.IAssemblyAiKeyStore assemblyAiKeyStore,
+                     Winpepper.Asr.Transcription.AssemblyAiClient assemblyAiClient,
+                     Winpepper.Asr.Transcription.AssemblyAiOptions assemblyAiOptions)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;
@@ -275,8 +313,16 @@ public sealed class AppShell : IDisposable
         Toasts = toasts; ClipboardFallback = clipboardFallback;
         CrashHandler = crashHandler;
         LogTail = logTail; Ui = ui; DiagnosticsHost = diagnosticsHost;
+        // Assigned BEFORE MainWindow below: its NavigationView selection
+        // synchronously navigates to RecordingPage, which reads these.
+        AssemblyAiKeyStore = assemblyAiKeyStore;
+        AssemblyAiClient = assemblyAiClient;
+        AssemblyAiOptions = assemblyAiOptions;
 
         Pill = new StatusPillWindow(sessionVm);
+        // Clicking the pill in its PENDING state pastes the held text into the
+        // field focused at click time, via the normal injection path.
+        Pill.PastePendingHandler = Pipeline.TryPastePending;
         Tray = new TrayIconHost(sessionVm, AppPaths.AssetsDir, "0.3.0",
                                  openSettings: ShowMain, quit: Quit,
                                  log: factory.CreateLogger<TrayIconHost>());
@@ -289,6 +335,18 @@ public sealed class AppShell : IDisposable
         if (!Settings.OnboardingCompleted) ShowMain(navigateToOnboarding: true);
         else if (!startHidden) ShowMain(navigateToOnboarding: false);
         // else: stay tray-only (autostart with --tray).
+
+        // One-time content-island realization, off the bootstrap call stack (see RealizeOnce doc).
+        Pill.RealizeOnce();
+
+        // On-device visual verification: force-show the pill with a synthetic
+        // level sweep (no audio needed) so a screenshot/pixel probe can verify
+        // the capsule silhouette and voice meter. Dev/diagnostics only.
+        if (Environment.GetEnvironmentVariable("WINPEPPER_PILL_PREVIEW") == "1")
+        {
+            var previewLog = LogFactory.CreateLogger<StatusPillWindow>();
+            Main?.DispatcherQueue.TryEnqueue(() => Pill.StartPreview(previewLog));
+        }
 
         // Start only after first paint and authoritative size/hash verification.
         // A merely loadable stale model must not enter PipelineHost and later
@@ -335,6 +393,56 @@ public sealed class AppShell : IDisposable
         "Custom"   => Winpepper.Cleanup.CleanupProfile.Custom,
         _          => Winpepper.Cleanup.CleanupProfile.Ordinary,
     };
+
+    /// <summary>
+    /// Builds the transcriber for a dictation. When AssemblyAI is selected the
+    /// cloud provider is wrapped in a FallbackTranscriber so any failure lands
+    /// on the local Parakeet session. Otherwise the local transcriber is used.
+    /// Static, taking its dependencies explicitly, so the pipeline can invoke it
+    /// through an injected delegate without holding an AppShell instance — see
+    /// the Task 10 Step 1 wiring note for why no AppShell reference is available
+    /// when PipelineHost is constructed.
+    /// </summary>
+    public static Winpepper.Asr.Transcription.ITranscriber BuildTranscriber(
+        Winpepper.Asr.ParakeetSession local,
+        AppSettings settings,
+        Action<string> onFallback,
+        Winpepper.Asr.Transcription.IAssemblyAiClient client,
+        Winpepper.Asr.Transcription.IAssemblyAiKeyStore keyStore,
+        Winpepper.Asr.Transcription.AssemblyAiOptions options,
+        Winpepper.Corrections.CorrectionStore? correctionStore,
+        Winpepper.Core.Errors.ErrorBus errorBus,
+        ILoggerFactory loggerFactory)
+    {
+        var localTranscriber = new Winpepper.Asr.Transcription.ParakeetTranscriber(
+            local, Winpepper.Models.ModelRegistry.DefaultAsrName);
+
+        if (!string.Equals(settings.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase))
+            return localTranscriber;
+
+        // Snapshot corrections into request extras at build time; keyterms only when opted in.
+        Winpepper.Asr.Transcription.AssemblyAiRequestExtras Extras()
+        {
+            var data = correctionStore?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
+            return Winpepper.Asr.Transcription.CorrectionSpellingMapper.ToExtras(data, options.KeytermsEnabled);
+        }
+
+        var cloud = new Winpepper.Asr.Transcription.AssemblyAiTranscriber(
+            client, keyStore, options,
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiTranscriber>(),
+            extrasProvider: Extras);
+
+        return new Winpepper.Asr.Transcription.FallbackTranscriber(
+            cloud, localTranscriber,
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.FallbackTranscriber>(),
+            onFallback: onFallback,
+            cloudDeadline: options.CloudDeadline,
+            onConfigError: msg => errorBus.Report(
+                Winpepper.Core.Errors.ErrorStage.Asr,
+                new InvalidOperationException(
+                    $"AssemblyAI model rejected ({settings.AssemblyAiModel}). Check the model setting. {msg}"),
+                Guid.Empty)); // config-level error, not tied to a capture session
+    }
 
     public void Dispose()
     {

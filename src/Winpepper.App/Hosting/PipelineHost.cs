@@ -275,7 +275,7 @@ public sealed class PipelineHost : IDisposable
     public bool TryPastePending()
     {
         if (!_vm.HasPendingPaste) return false;
-        var text = _vm.PendingPasteText;
+        var text = Winpepper.Core.InjectionText.ForPaste(_vm.PendingPasteText);
         var injected = !string.IsNullOrWhiteSpace(text) && _injector.TryInject(text);
         if (!injected)
         {
@@ -417,14 +417,15 @@ public sealed class PipelineHost : IDisposable
                     }
                     else
                     {
-                        injected = _injector.TryInject(final);
+                        var toType = Winpepper.Core.InjectionText.ForPaste(final);
+                        injected = _injector.TryInject(toType);
                         if (!injected)
                         {
                             _errorBus.Report(
                                 Winpepper.Core.Errors.ErrorStage.Injection,
                                 new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
                                 _currentSessionId);
-                            _clipboardFallback.Copy(final);
+                            _clipboardFallback.Copy(toType);
                             _ = _toasts.ShowAsync(
                                 "Winpepper",
                                 "Couldn't type into the active window. The cleaned text is on your clipboard.",
@@ -607,14 +608,15 @@ public sealed class PipelineHost : IDisposable
                         }
                         else
                         {
-                            injected2 = _injector.TryInject(final2);
+                            var toType2 = Winpepper.Core.InjectionText.ForPaste(final2);
+                            injected2 = _injector.TryInject(toType2);
                             if (!injected2)
                             {
                                 _errorBus.Report(
                                     Winpepper.Core.Errors.ErrorStage.Injection,
                                     new InvalidOperationException("SendInput refused; clipboard fallback engaged"),
                                     _currentSessionId);
-                                _clipboardFallback.Copy(final2);
+                                _clipboardFallback.Copy(toType2);
                                 _ = _toasts.ShowAsync(
                                     "Winpepper",
                                     "Couldn't type into the active window. The cleaned text is on your clipboard.",

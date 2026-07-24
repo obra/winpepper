@@ -87,4 +87,12 @@ public sealed class ModelRegistry
         return Find(defaultName)
             ?? throw new InvalidOperationException($"Default {kind} model '{defaultName}' is absent from the registry.");
     }
+
+    /// <summary>
+    /// Absolute install directory for the requested model, under
+    /// <paramref name="installRoot"/>. Unknown or null names fall back to the
+    /// kind default (see <see cref="ResolveOrDefault"/>).
+    /// </summary>
+    public string InstallDirFor(string installRoot, string? requestedName, ModelKind kind)
+        => Path.Combine(installRoot, ResolveOrDefault(requestedName, kind).InstallDirRelative);
 }

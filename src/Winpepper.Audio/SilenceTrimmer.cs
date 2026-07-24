@@ -90,15 +90,93 @@ public static class SilenceTrimmer
             };
         }
 
-        // Increment A (Task 1): speech present — pass the whole buffer through.
-        // Trimming is added in Task 2.
+        var noiseFloor = Percentile(sorted, NoiseFloorPercentile);
+
+        // Adaptive threshold. (Task 3 adds the 0.15*speechLevel fail-safe cap.)
+        var threshold = Math.Max(ThresholdNoiseMultiplier * noiseFloor, ThresholdAbsFloor);
+
+        var isSilence = new bool[frameCount];
+        for (var f = 0; f < frameCount; f++)
+            isSilence[f] = rms[f] < threshold;
+
+        // Walk contiguous silence runs; build the ordered list of whole-frame
+        // segments to KEEP. Interior runs keep 600 ms per speech edge; edge runs
+        // keep 600 ms adjacent to their single speech edge; the middle is deleted.
+        var kept = new List<(int start, int len)>();
+        var removedFrames = 0;
+        var runsTrimmed = 0;
+
+        var i = 0;
+        while (i < frameCount)
+        {
+            if (!isSilence[i])
+            {
+                AppendKeep(kept, i, 1);
+                i++;
+                continue;
+            }
+
+            var runStart = i;
+            while (i < frameCount && isSilence[i]) i++;
+            var runEnd = i; // exclusive
+            var runLen = runEnd - runStart;
+
+            var hasLeftSpeech = runStart > 0;
+            var hasRightSpeech = runEnd < frameCount;
+            var edges = (hasLeftSpeech ? 1 : 0) + (hasRightSpeech ? 1 : 0);
+            var keepBudget = edges * KeepFramesPerEdge;
+
+            if (edges > 0 && runLen > keepBudget)
+            {
+                if (hasLeftSpeech) AppendKeep(kept, runStart, KeepFramesPerEdge);
+                if (hasRightSpeech) AppendKeep(kept, runEnd - KeepFramesPerEdge, KeepFramesPerEdge);
+                removedFrames += runLen - keepBudget;
+                runsTrimmed++;
+            }
+            else
+            {
+                // Short enough to keep whole, or an all-silence buffer with no
+                // speech edge (defensive; the IsSilent gate normally catches it).
+                AppendKeep(kept, runStart, runLen);
+            }
+        }
+
+        var keptFrames = 0;
+        foreach (var seg in kept) keptFrames += seg.len;
+        var tail = n - frameCount * FrameSamples;
+        var outBuf = new float[keptFrames * FrameSamples + tail];
+
+        var w = 0;
+        foreach (var (start, len) in kept)
+        {
+            samples.Slice(start * FrameSamples, len * FrameSamples).CopyTo(outBuf.AsSpan(w));
+            w += len * FrameSamples;
+        }
+        if (tail > 0)
+            samples.Slice(frameCount * FrameSamples, tail).CopyTo(outBuf.AsSpan(w));
+
         return new TrimResult
         {
-            Trimmed = samples.ToArray(),
-            RemovedMs = 0,
-            RunsTrimmed = 0,
+            Trimmed = outBuf,
+            RemovedMs = removedFrames * FrameMs,
+            RunsTrimmed = runsTrimmed,
             IsSilent = false,
         };
+    }
+
+    private static void AppendKeep(List<(int start, int len)> segs, int start, int len)
+    {
+        if (len <= 0) return;
+        if (segs.Count > 0)
+        {
+            var last = segs[^1];
+            if (last.start + last.len == start)
+            {
+                segs[^1] = (last.start, last.len + len);
+                return;
+            }
+        }
+        segs.Add((start, len));
     }
 
     private static double Percentile(double[] sortedAsc, double p)

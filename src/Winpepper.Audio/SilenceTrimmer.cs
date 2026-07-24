@@ -92,7 +92,7 @@ public static class SilenceTrimmer
 
         var noiseFloor = Percentile(sorted, NoiseFloorPercentile);
 
-        // Adaptive threshold. (Task 3 adds the 0.15*speechLevel fail-safe cap.)
+        // Adaptive threshold based on noise floor and speech level.
         var threshold = Math.Max(ThresholdNoiseMultiplier * noiseFloor, ThresholdAbsFloor);
         // Fail-safe: when the noise floor is high relative to speech, silence
         // cannot be confidently separated. Capping the threshold at a fraction

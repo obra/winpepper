@@ -180,14 +180,14 @@ public class SilenceTrimmerTests
     [Fact]
     public void Trim_NoisyFloorRelativeToSpeech_IsNoOp()
     {
-        // Quiet speech at 0.02, "silence" at 0.01 (high floor vs speech).
-        // noiseFloor≈0.01, speechLevel≈0.02 -> 3*floor=0.03 but capped at
-        // 0.15*0.02=0.003; silence frames (0.01) stay ABOVE 0.003 -> not
+        // Speech at 0.05, "silence" at 0.01 (high floor vs speech).
+        // noiseFloor≈0.01, speechLevel≈0.05 -> 3*floor=0.03 capped at
+        // 0.15*0.05=0.0075; silence frames (0.01) stay ABOVE 0.0075 -> not
         // classified as silence -> nothing trimmed.
         var buf = Concat(
-            Const(25 * FrameSamples, 0.02f),
+            Const(25 * FrameSamples, 0.05f),
             Const(150 * FrameSamples, 0.01f),
-            Const(25 * FrameSamples, 0.02f));
+            Const(25 * FrameSamples, 0.05f));
         var r = SilenceTrimmer.Trim(buf);
         r.IsSilent.ShouldBeFalse();
         r.RemovedMs.ShouldBe(0);

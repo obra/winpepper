@@ -14,10 +14,10 @@ public sealed class AppSettingsDefaultsTests
     }
 
     [Fact]
-    public void Defaults_UseFastAssemblyAiModel()
+    public void Defaults_UseLatestAssemblyAiModel()
     {
         var s = new AppSettings();
-        s.AssemblyAiModel.ShouldBe("universal-2");
+        s.AssemblyAiModel.ShouldBe("universal-3-5-pro");
     }
 
     [Fact]

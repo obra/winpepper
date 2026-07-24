@@ -214,8 +214,12 @@ public sealed class ParakeetSession : IDisposable
         return new ParakeetTranscript(text, tokens, frameIndices, durations);
     }
 
+    private bool _disposed;
+
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
         _encoder.Dispose();
         _decoderJoint.Dispose();
     }

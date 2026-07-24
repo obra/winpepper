@@ -366,6 +366,10 @@ public sealed partial class StatusPillWindow : Window
         PositionBottomCenter(appWindow);
         appWindow.Show(activateWindow: false);
         _visible = true;
+        // Re-apply the border/corner treatment AFTER the window is shown: the
+        // presenter/show pipeline can reset styles, and applying to a visible
+        // window also produces fresh diagnostics for the on-device probe.
+        ExtendedWindowStyle.RemoveSystemBorder(_hwnd);
         ExtendedWindowStyle.AssertTopmost(_hwnd);
         _tickTimer.Start();
         _hideTimer.Stop();
@@ -374,6 +378,8 @@ public sealed partial class StatusPillWindow : Window
         Microsoft.Extensions.Logging.LoggerExtensions.LogInformation(log,
             "Pill preview shown at {X},{Y} {W}x{H} (dpi {Dpi})",
             pos.X, pos.Y, size.Width, size.Height, ExtendedWindowStyle.GetWindowDpi(_hwnd));
+        Microsoft.Extensions.Logging.LoggerExtensions.LogInformation(log,
+            "Pill border diagnostics: {Diag}", ExtendedWindowStyle.LastBorderDiagnostics);
     }
 }
 #endif

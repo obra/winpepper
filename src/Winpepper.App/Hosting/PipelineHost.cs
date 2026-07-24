@@ -400,6 +400,42 @@ public sealed class PipelineHost : IDisposable
                 WarnIfSessionSilent(samples, _currentSessionId);
                 _sounds.PlayStop();
 
+                var trimmed = TrimForTranscription(samples, _currentSessionId);
+                if (trimmed is null)
+                {
+                    // Live-mic silence: skip transcription + injection (the ASR-saving
+                    // point of the feature) but STILL archive the ORIGINAL buffer,
+                    // exactly like an empty-final-text dictation does today. This keeps
+                    // the drop non-destructive: a mis-classified real dictation stays
+                    // recoverable in history. Then complete like an empty-final-text
+                    // dictation (Transcribing -> Injecting -> Idle) so the pill returns
+                    // to idle. No cleanup, no injection, no toast.
+                    _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                    {
+                        Samples16k = samples,
+                        RawTranscript = "",
+                        CleanedText = "",
+                        AsrModelName = "",
+                        CleanupModelName = "",
+                        WindowContextUsed = false,
+                        WindowTitleAtStart = "",
+                        WindowTitleAtInject = "",
+                        Timings = new Winpepper.History.HistoryTimings
+                        {
+                            RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                            TranscribeMs = 0,
+                            CleanupMs = 0,
+                            InjectMs = 0,
+                            TotalMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                        },
+                    });
+                    _engine.Apply(SessionEvent.TranscriptReady);
+                    _engine.Apply(SessionEvent.InjectionCompleted);
+                    _ctxPrefetchTask = null;
+                    _recordStopwatch = null;
+                    break;
+                }
+
                 var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
                 var settingsNow = _settingsProvider();
                 var cloudSelected = string.Equals(
@@ -429,7 +465,7 @@ public sealed class PipelineHost : IDisposable
                         "Cloud transcription unavailable — used local speech recognition instead.",
                         Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
                         TimeSpan.FromSeconds(6)));
-                var transcription = await transcriber.TranscribeAsync(samples, ct);
+                var transcription = await transcriber.TranscribeAsync(trimmed, ct);
                 transcribeSw.Stop();
                 _engine.Apply(SessionEvent.TranscriptReady);
 
@@ -614,6 +650,41 @@ public sealed class PipelineHost : IDisposable
                     WarnIfSessionSilent(samples2, _currentSessionId);
                     _sounds.PlayStop();
 
+                    var trimmed2 = TrimForTranscription(samples2, _currentSessionId);
+                    if (trimmed2 is null)
+                    {
+                        // Live-mic silence: skip transcription + injection but STILL
+                        // archive the ORIGINAL buffer (empty transcript), exactly like
+                        // an empty-final-text dictation does today, so the drop is
+                        // non-destructive. Then complete like an empty-final-text
+                        // dictation (Transcribing -> Injecting -> Idle). No cleanup,
+                        // no injection, no toast. See the HoldUp block for details.
+                        _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                        {
+                            Samples16k = samples2,
+                            RawTranscript = "",
+                            CleanedText = "",
+                            AsrModelName = "",
+                            CleanupModelName = "",
+                            WindowContextUsed = false,
+                            WindowTitleAtStart = "",
+                            WindowTitleAtInject = "",
+                            Timings = new Winpepper.History.HistoryTimings
+                            {
+                                RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                                TranscribeMs = 0,
+                                CleanupMs = 0,
+                                InjectMs = 0,
+                                TotalMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                            },
+                        });
+                        _engine.Apply(SessionEvent.TranscriptReady);
+                        _engine.Apply(SessionEvent.InjectionCompleted);
+                        _ctxPrefetchTask = null;
+                        _recordStopwatch = null;
+                        break;
+                    }
+
                     var transcribeSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var settingsNow2 = _settingsProvider();
                     var cloudSelected2 = string.Equals(
@@ -637,7 +708,7 @@ public sealed class PipelineHost : IDisposable
                             "Cloud transcription unavailable — used local speech recognition instead.",
                             Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
                             TimeSpan.FromSeconds(6)));
-                    var transcription2 = await transcriber2.TranscribeAsync(samples2, ct);
+                    var transcription2 = await transcriber2.TranscribeAsync(trimmed2, ct);
                     transcribeSw2.Stop();
                     _engine.Apply(SessionEvent.TranscriptReady);
 
@@ -789,6 +860,34 @@ public sealed class PipelineHost : IDisposable
                 }
                 break;
         }
+    }
+
+    /// <summary>
+    /// Silence-trims the finished recording for TRANSCRIPTION ONLY. Returns the
+    /// trimmed samples to send to ASR, or <c>null</c> when the recording has no
+    /// speech (live mic, nobody spoke) and the caller should DROP the dictation.
+    /// Logs a content-free info line for either outcome. The ORIGINAL buffer is
+    /// still archived by the caller — only the transcription input is trimmed.
+    /// Runs AFTER WarnIfSessionSilent, so a dead-mic session has already toasted
+    /// (actionable); the quiet drop below adds no toast (consumer policy: a
+    /// live-mic-nobody-spoke drop is not actionable).
+    /// </summary>
+    private float[]? TrimForTranscription(float[] samples, Guid sessionId)
+    {
+        var result = Winpepper.Audio.SilenceTrimmer.Trim(samples);
+        if (result.IsSilent)
+        {
+            var ms = (int)((long)samples.Length * 1000 / 16000);
+            _log.LogInformation("dropped silent recording, {Ms} ms", ms);
+            return null;
+        }
+
+        if (result.RemovedMs > 0)
+            _log.LogInformation(
+                "trimmed silence: {Ms} ms across {Runs} runs",
+                result.RemovedMs, result.RunsTrimmed);
+
+        return result.Trimmed;
     }
 
     /// <summary>

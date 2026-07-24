@@ -1394,11 +1394,19 @@ single guarded call:
 ```
 
 Leave the rest of `TryStartCore` (warm-recorder setup, `IsRunning = true;`,
-`return true;`) and its `lock (_startGate)` unchanged. Because `TryStartCore`
-still returns early on `if (IsRunning) return true;` (line 165), the
-download-completion `Pipeline.TryStart()` path (ModelsPage line 251) continues to
-no-op once running — swaps happen only at the dictation seam (Step 4), never from
-the UI thread.
+`return true;`) and its `lock (_startGate)` unchanged. Once the pipeline is
+already running, `TryStartCore` returns early on `if (IsRunning) return true;`
+(line 165), so subsequent `Pipeline.TryStart()` calls no-op and model *swaps*
+happen only at the dictation seam (Step 4), never from the UI thread. **But the
+FIRST `TryStart()` — including the post-download call at `ModelsPage.xaml.cs:251`
+(issue #6) and the boot startup-gate call at `AppShell.cs:362` — does NOT no-op:
+it runs `TryEnsureAsrModel`, whose `_isAsrModelReady(desired)` check
+(`VerifyAsrModelReady`) computes a full size + SHA-256.** These call sites are on
+the UI thread, so each MUST prime the verified-readiness cache off-thread before
+calling `TryStart` (Task 8 Step 1's two priming edits) so the synchronous check
+here is a cache hit, never a dispatcher-blocking hash. The only place a
+cold-cache hash may actually compute is the dictation seam (Step 4), which runs
+on the threadpool run loop.
 
 - [ ] **Step 4: Apply the swap at both dictation transcribe seams — provider-aware, with a terminal-state early-exit — and pass the live name**
 
@@ -1640,25 +1648,103 @@ authoritative. Add to `src/Winpepper.App/Services/ModelsServices.cs`:
     }
 ```
 
-> This method is called from `PipelineHost`'s serialized run loop (threadpool
-> continuations), never the UI thread, so the synchronous wait is safe there.
-> The name-keyed cache is the "invalidate when `AsrModelName` changes" rule: a
-> promote changes the requested name, which misses the cache and forces a fresh
-> descriptor-level verification before the swap.
+> **UI-thread safety — the synchronous ~1.1 GB SHA-256 must never compute on a
+> cold cache from the dispatcher.** `VerifyAsrModelReady` is reached from TWO
+> kinds of caller: (a) the dictation seam on `PipelineHost`'s serialized run
+> loop (threadpool continuations) — where a synchronous size+hash on a genuine
+> model swap is acceptable; and (b) `PipelineHost.TryStart()` → `TryStartCore`
+> → `TryEnsureAsrModel`, which IS reachable on the UI thread (the startup gate
+> at `AppShell.cs:362`, onboarding at `OnboardingPage.xaml.cs:32`, and the
+> post-download call at `ModelsPage.xaml.cs:251`). On every UI-thread call site
+> the caller MUST run the authoritative async verification FIRST so the
+> synchronous check here is a guaranteed cache HIT (see the two priming edits
+> below), leaving the seam (threadpool) as the only place a cold-cache hash can
+> actually compute. The name-keyed cache is also the "invalidate when
+> `AsrModelName` changes" rule: a promote changes the requested name, which
+> misses the cache and forces a fresh descriptor-level verification before the
+> next swap — that recompute lands on the threadpool seam, never the dispatcher.
+
+**Priming edit 1 — make the async provisioner verification seed the cache.**
+`ModelsServices` is itself the `IAsrProvisioningService` passed to
+`AsrPipelineStartupGate` (`AppShell.cs:360`) and to the onboarding VM, and its
+async `VerifyReadyAsync(ct)` (`ModelsServices.cs:63-64`) already runs and
+completes BEFORE the gate calls `Pipeline.TryStart`. Make that success seed the
+same cache so the gate's/onboarding's subsequent UI-thread `TryStart` hits it.
+Replace:
+```csharp
+    public Task<bool> VerifyReadyAsync(CancellationToken ct)
+        => _coordinator.VerifyReadyAsync(AsrDescriptor, ct);
+```
+with:
+```csharp
+    public async Task<bool> VerifyReadyAsync(CancellationToken ct)
+    {
+        var ready = await _coordinator.VerifyReadyAsync(AsrDescriptor, ct);
+        // Seed the synchronous cache: the boot model just passed the same
+        // descriptor-level size+SHA-256 off the UI thread, so a UI-thread
+        // TryStart() reading AsrDescriptor.Name below need not re-hash.
+        if (ready) _verifiedAsrModelName = AsrDescriptor.Name;
+        return ready;
+    }
+```
+(At boot the slot seed and `TryStartCore`'s `desired` both equal
+`AsrDescriptor.Name` — the reconciled persisted model — so the cache key matches.)
+
+The second priming edit — for the post-download `ModelsPage.xaml.cs:251` path,
+which does NOT go through the async gate (the model was missing at boot, so the
+gate returned not-ready and never primed) — is applied in Task 8 Step 4 item 4.
 
 - [ ] **Step 2: Pass the resolvers + readiness check and drop the dead name arg**
 
-In `src/Winpepper.App/Hosting/AppShell.cs`, first create and expose the shared
-slot (before the `PipelineHost` construction, after the settings/model-name
-reconcile at lines 62–67 so the seed is the reconciled boot value):
+In `src/Winpepper.App/Hosting/AppShell.cs`, first create the shared slot as a
+LOCAL in the static `Create()` factory (before the `PipelineHost` construction,
+after the settings/model-name reconcile at lines 62–67 so the seed is the
+reconciled boot value):
 
 ```csharp
         var asrSelection = new Winpepper.Core.Settings.AsrModelSelectionSlot();
         asrSelection.Publish(settings.AsrModelName); // seed with the persisted boot value
-        AsrModelSelection = asrSelection;
 ```
 
-and add the public property next to the shell's other exposed services:
+> **Do NOT assign `AsrModelSelection = asrSelection;` here.** `Create()` is a
+> `static` factory; assigning the non-static instance property from static
+> context is a hard compile error (CS0120). Every other exposed service
+> (`SettingsWriter`, `Engine`, `SettingsStore`, …) is assigned in the private
+> instance constructor from a constructor parameter, and `AsrModelSelection`
+> must follow that exact pattern. Making the property `static` is NOT an option
+> — Task 8 Step 5's promote callbacks use `App.Shell!.AsrModelSelection`
+> (instance access), which a static property would break (CS0176).
+
+Thread the `asrSelection` local through the private constructor. Three edits:
+
+1. Add `asrSelection` as the FINAL argument to the `new AppShell(...)` call
+   (currently lines 284–289), after `aaiOptions`:
+   ```csharp
+        return new AppShell(factory, store, settings, writer, engine, sessionVm, errorBus,
+                            recordingVm, cleanupVm, correctionsVm,
+                            autostart, pipeline, sounds, historyServices, modelsServices,
+                            toasts, clipboardFallback, crashHandler,
+                            logTail, uiThread, diagHost,
+                            aaiKeyStore, aaiClient, aaiOptions, asrSelection);
+   ```
+   (The same `asrSelection` local is also captured by the `() => asrSelection.Read()`
+   lambda passed to `PipelineHost` above — one object, two consumers.)
+
+2. Add the matching parameter to the constructor signature, after
+   `assemblyAiOptions` (currently line 309):
+   ```csharp
+                     Winpepper.Asr.Transcription.AssemblyAiOptions assemblyAiOptions,
+                     Winpepper.Core.Settings.AsrModelSelectionSlot asrSelection)
+   ```
+
+3. Assign the property in the constructor body, next to the other assignments
+   (e.g. after the AssemblyAI block at lines 322–324):
+   ```csharp
+        AsrModelSelection = asrSelection;
+   ```
+
+and declare the public read-only property next to the shell's other exposed
+services (mirroring the `{ get; }` shape they use, NOT `{ get; private set; }`):
 
 ```csharp
     /// <summary>
@@ -1666,7 +1752,7 @@ and add the public property next to the shell's other exposed services:
     /// publish the newly selected raw name here (persistence to settings.json
     /// is durability only), and PipelineHost's dictation seam reads it.
     /// </summary>
-    public Winpepper.Core.Settings.AsrModelSelectionSlot AsrModelSelection { get; private set; } = null!;
+    public Winpepper.Core.Settings.AsrModelSelectionSlot AsrModelSelection { get; }
 ```
 
 Then, the `PipelineHost` construction is at
@@ -1789,6 +1875,44 @@ UI is not acceptable):
    live verification for the newly selected name (as in item 1) and then
    `UpdateInstalledLabels()`, so the label reflects the newly promoted model
    without renavigating.
+4. **Priming edit 2 — verify off the UI thread before the post-download start.**
+   `OnDownloadMissing` (`ModelsPage.xaml.cs:237-`) brings the pipeline up after a
+   download with a synchronous `App.Shell!.Pipeline.TryStart();` on the UI thread
+   (line 251). Because the model was missing at boot, the async startup gate
+   returned not-ready and never primed the cache, so this FIRST `TryStart()` would
+   otherwise run `VerifyAsrModelReady`'s full ~1.1 GB SHA-256 on the dispatcher and
+   freeze the app. Prime the cache off-thread first. Replace:
+   ```csharp
+            await ViewModel.DownloadMissingAsync(_lifetimeCts?.Token ?? CancellationToken.None);
+            UpdateInstalledLabels();
+
+            // If the pipeline was left disabled at boot because models were
+            // missing (issue #6), bring it up now that the download finished.
+            App.Shell!.Pipeline.TryStart();
+   ```
+   with:
+   ```csharp
+            await ViewModel.DownloadMissingAsync(_lifetimeCts?.Token ?? CancellationToken.None);
+            UpdateInstalledLabels();
+
+            // If the pipeline was left disabled at boot because models were
+            // missing (issue #6), bring it up now that the download finished.
+            // The readiness check inside TryStart() does a full size + SHA-256
+            // (~1.1 GB) that must NOT run on the UI thread, so verify off-thread
+            // first — this primes ModelsServices' verified-readiness cache so the
+            // synchronous check inside TryStart() below is a cache hit, not a
+            // dispatcher-blocking re-hash.
+            var shell = App.Shell!;
+            var canonicalAsr = shell.ModelsServices.Registry
+                .ResolveOrDefault(shell.AsrModelSelection.Read(), ModelKind.Asr).Name;
+            await Task.Run(() => shell.ModelsServices.VerifyAsrModelReady(canonicalAsr));
+            shell.Pipeline.TryStart();
+   ```
+   (`AsrModelSelection.Read()` returns the currently-selected raw name — the same
+   value `TryEnsureAsrModel` will read from the slot — so the primed cache key
+   matches the `desired` the synchronous check resolves. If the shell exposes the
+   slot under a different member, use that; the requirement is: resolve and verify
+   the SELECTED model off the UI thread before calling `TryStart()`.)
 
 - [ ] **Step 5: Publish promotes to the slot + single-writer persistence (F1/S4)**
 

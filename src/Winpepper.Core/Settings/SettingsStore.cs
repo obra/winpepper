@@ -13,6 +13,7 @@ public sealed class SettingsStore
 
     private readonly string _path;
     private readonly Action<string>? _onError;
+    private AppSettings? _lastGood;
 
     public SettingsStore(string path, Action<string>? onError = null)
     {
@@ -27,18 +28,37 @@ public sealed class SettingsStore
             return new AppSettings();
         }
 
-        try
+        for (var attempt = 0; ; attempt++)
         {
-            var json = File.ReadAllText(_path, System.Text.Encoding.UTF8);
-            return JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
-        }
-        catch (JsonException ex)
-        {
-            // A torn/corrupt file (e.g. after an MSI upgrade force-kill) must
-            // NOT silently wipe every setting. Preserve it for diagnosis, then
-            // fall back to defaults. Keep it simple: no partial salvage.
-            BackupCorruptFile(ex);
-            return new AppSettings();
+            try
+            {
+                var json = File.ReadAllText(_path, System.Text.Encoding.UTF8);
+                var loaded = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
+                _lastGood = loaded;
+                return loaded;
+            }
+            catch (JsonException ex)
+            {
+                // A torn/corrupt file (e.g. after an MSI upgrade force-kill) must
+                // NOT silently wipe every setting. Preserve it for diagnosis, then
+                // fall back to defaults. Keep it simple: no partial salvage.
+                BackupCorruptFile(ex);
+                return new AppSettings();
+            }
+            catch (IOException) when (attempt < 2)
+            {
+                // Transient share/replace race: an atomic Save (MoveFileEx
+                // REPLACE_EXISTING) can collide with this open read handle on
+                // Windows. Brief retry, then fall back — a Load must never
+                // throw into a dictation (HandleHotkey calls it per dictation).
+                Thread.Sleep(15);
+            }
+            catch (IOException ex)
+            {
+                _onError?.Invoke(
+                    $"settings.json read failed transiently ({ex.Message}); using last known settings.");
+                return _lastGood ?? new AppSettings();
+            }
         }
     }
 

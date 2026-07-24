@@ -13,9 +13,28 @@ and drop recordings where nobody spoke — without changing what gets archived.
 mono buffer, derives an adaptive threshold from frame-RMS percentiles, and
 compresses over-long below-threshold runs to a fixed cap. `PipelineHost` (the
 Windows-only WinUI host) calls it after the existing dead-mic check: silent
-recordings are dropped (no transcribe/inject/archive, session returns to idle
-like an empty-final-text dictation); non-silent recordings are transcribed on
-the *trimmed* buffer while the *original* buffer is still archived.
+recordings skip transcription and injection but the *original* buffer is STILL
+archived (exactly like an empty-final-text dictation is today — see the
+Load-Bearing Correction below), and the session returns to idle; non-silent
+recordings are transcribed on the *trimmed* buffer while the *original* buffer
+is archived.
+
+### Load-Bearing Correction (drop path must archive)
+
+An earlier draft had the silent-drop path skip archiving ("no
+transcribe/inject/archive"). Code inspection of the current `PipelineHost`
+falsified the premise behind that: an **empty-final-text dictation IS archived
+today** — the empty-text guards (`PipelineHost.cs:442/:492`, twins `:650/:700`)
+skip only *cleanup* and *injection*, then fall through to the unconditional
+`_archiver.Archive(...)` at `:561/:767`. So a drop path that `break`s before the
+archive would *diverge* from the empty-text precedent and, worse, would make the
+feature destructive: a false-positive "silent" verdict (see the P90 caveat in
+Task 1) would discard the only copy of a real dictation. The plan's own goal is
+"**without changing what gets archived**". Therefore the silent-drop path MUST
+archive the original buffer (with an empty transcript) before returning to idle.
+`HistoryArchiveInput` requires only `Samples16k`; `RawTranscript`/`CleanedText`
+default to `""` and `HistoryArchiver.Archive` does no validation, so archiving
+with an empty transcript needs zero History-layer changes.
 
 **Tech Stack:** C# / .NET 9, xUnit v3 + Shouldly (pure-managed tests run on
 Linux via the in-process runner), WinUI 3 (Windows-only host).
@@ -53,6 +72,15 @@ Linux via the in-process runner), WinUI 3 (Windows-only host).
   - Rationale for 1200: at cap=1200, the experiment removed 59.0 s audio /
     saved 11.4 s ASR across 45 real dictations with only cosmetic transcript
     changes; cap=500/800 caused real word damage. 1200 is the safe point.
+- **Accepted residual risk (P90 sparse-speech).** `speechLevel = P90` of frame
+  RMS is a robust speech estimator for normal dictations, but for a long,
+  mostly-silent recording with a brief speech burst (speech in <10% of frames)
+  P90 can measure the noise floor, so `speechLevel < 0.004` may misclassify a real
+  recording as SILENT. The owner-fixed params are NOT re-derived here. This is
+  acceptable ONLY because the drop path now archives the original (Load-Bearing
+  Correction) — a false "silent" verdict is recoverable from history, not lost.
+  Task 1 SHOULD add a characterization test that pins this burst-speech behavior
+  so any future change to the estimator is a deliberate, visible decision.
 
 ---
 
@@ -68,8 +96,12 @@ Linux via the in-process runner), WinUI 3 (Windows-only host).
 - **Modify `src/Winpepper.App/Hosting/PipelineHost.cs`** — add one private
   helper `TrimForTranscription(...)` and wire it into both the hold path
   (`HoldUp`, `samples`) and the toggle path (`Toggle`/Recording, `samples2`),
-  after `WarnIfSessionSilent` and before building the transcriber. Windows-only;
-  verified by the Windows build + smoke checklist (Task 4).
+  after `WarnIfSessionSilent` and before building the transcriber. On the silent
+  branch, archive the ORIGINAL buffer (empty transcript) then complete to idle —
+  do NOT `break` before the archive. Windows-only; **cannot be compiled on Linux
+  at all** (WinUI XAML compiler is unavailable — verified: `dotnet build
+  src/Winpepper.App` fails with `WMC0621 GenXbf.dll`), so Task 4 is verified by a
+  mandatory Windows build + smoke checklist (Task 4 Step 5).
 
 ### Decomposition rationale (monotone single-cap trimming)
 
@@ -703,22 +735,33 @@ git commit -m "feat(audio): fail-safe threshold cap so noisy recordings are a no
   `SessionEngine.Apply` (existing — the empty-final-text completion seam:
   `Transcribing --TranscriptReady--> Injecting --InjectionCompleted--> Idle`).
 - Produces: no public surface change. Behavioral contract:
-  - Silent recording → DROP: content-free info log `"dropped silent recording,
-    N ms"`; no transcribe/cleanup/injection/archive; session driven to Idle via
-    `TranscriptReady` + `InjectionCompleted`; no toast.
+  - Silent recording → DROP transcription+injection ONLY: content-free info log
+    `"dropped silent recording, N ms"`; no transcribe/cleanup/injection; **the
+    ORIGINAL buffer IS still archived** (empty transcript), exactly like an
+    empty-final-text dictation today; session driven to Idle via `TranscriptReady`
+    + `InjectionCompleted`; no toast. (The drop is non-destructive: a false-positive
+    "silent" verdict leaves the real recording recoverable in history.)
   - Non-silent → transcribe the TRIMMED buffer; log `"trimmed silence: N ms
     across R runs"` only when `RemovedMs > 0`.
-  - Archive still receives the ORIGINAL `samples`/`samples2`; `RecordMs` and the
-    archived `DurationMs` stay based on the original recording.
+  - Archive ALWAYS receives the ORIGINAL `samples`/`samples2` (both branches);
+    `RecordMs` and the archived `DurationMs` stay based on the original recording.
 
-> **Why no Linux unit test here:** `PipelineHost.cs` is wrapped in
-> `#if WINDOWS` and depends on the WinUI host — it cannot compile or run on
-> Linux. The drop-vs-transcribe DECISION is exactly `TrimResult.IsSilent`,
-> which is fully proven by the pure `SilenceTrimmerTests` (silent → drop;
-> non-silent → transcribe trimmed). This task's own end-to-end proof is the
-> Windows smoke checklist in Step 5. This is a platform-inherent verification
-> boundary, not a stubbed or deferred behavior: the wiring is real production
-> code shipped in the Windows build.
+> **Why no Linux unit test here — and why a Windows BUILD is mandatory:**
+> `PipelineHost.cs` is wrapped in `#if WINDOWS` and depends on the WinUI host.
+> **Verified fact:** `dotnet build src/Winpepper.App -c Release` FAILS on Linux
+> with `XamlCompiler error WMC0621: Cannot resolve 'GenXbf.dll'` — the WinUI XAML
+> compiler's native binary is unavailable on Linux, and the failure happens at the
+> XAML stage *before* the C# compiler runs. So Task 4's edits get **zero** local
+> compile coverage on Linux: not even a syntax check. A syntax error or typo in the
+> Task 4 diff will NOT be caught by any Linux step. Therefore a **Windows build is
+> a required gate** (Step 5), not optional polish.
+>
+> The drop-vs-transcribe DECISION is exactly `TrimResult.IsSilent`, which is fully
+> proven by the pure `SilenceTrimmerTests` (silent → drop; non-silent → transcribe
+> trimmed). But the WIRING (archive-on-drop, the two-event completion, both call
+> sites) is only exercised by the Windows build + smoke checklist in Step 5. This
+> is a platform-inherent verification boundary, not a stubbed or deferred behavior:
+> the wiring is real production code shipped in the Windows build.
 
 - [ ] **Step 1: Read the two call sites and confirm current line anchors**
 
@@ -775,10 +818,33 @@ insert:
                 var trimmed = TrimForTranscription(samples, _currentSessionId);
                 if (trimmed is null)
                 {
-                    // Live-mic silence: complete exactly like an empty-final-text
-                    // dictation (Transcribing -> Injecting -> Idle) so the pill
-                    // returns to idle and does not hang. No transcription,
-                    // cleanup, injection, or archive; no toast.
+                    // Live-mic silence: skip transcription + injection (the ASR-saving
+                    // point of the feature) but STILL archive the ORIGINAL buffer,
+                    // exactly like an empty-final-text dictation does today. This keeps
+                    // the drop non-destructive: a mis-classified real dictation stays
+                    // recoverable in history. Then complete like an empty-final-text
+                    // dictation (Transcribing -> Injecting -> Idle) so the pill returns
+                    // to idle. No cleanup, no injection, no toast.
+                    //
+                    // IMPORTANT: mirror the existing end-of-block `_archiver.Archive(
+                    // new Winpepper.History.HistoryArchiveInput { ... })` call, but:
+                    //   - keep `Samples16k = samples` (the ORIGINAL, untrimmed buffer);
+                    //   - set `RawTranscript = ""` and `CleanedText = ""` (no transcript);
+                    //   - populate the remaining fields (e.g. DurationMs / RecordMs)
+                    //     using ONLY values available here — the original buffer length
+                    //     and `_recordStopwatch`. Do NOT reference `transcription` or
+                    //     `final`; they do not exist yet at this point. Transcription-
+                    //     timing fields default to 0.
+                    // Only `Samples16k` is required by HistoryArchiveInput; the string
+                    // fields default to "" and HistoryArchiver.Archive does no validation.
+                    _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                    {
+                        Samples16k = samples,
+                        RawTranscript = "",
+                        CleanedText = "",
+                        // ...remaining fields as in the existing Archive call, computed
+                        //    from the original recording (see note above)...
+                    });
                     _engine.Apply(SessionEvent.TranscriptReady);
                     _engine.Apply(SessionEvent.InjectionCompleted);
                     _ctxPrefetchTask = null;
@@ -810,9 +876,23 @@ before `var transcribeSw2 = System.Diagnostics.Stopwatch.StartNew();`, insert:
                     var trimmed2 = TrimForTranscription(samples2, _currentSessionId);
                     if (trimmed2 is null)
                     {
-                        // Live-mic silence: complete like an empty-final-text
-                        // dictation (Transcribing -> Injecting -> Idle). No
-                        // transcription, cleanup, injection, or archive; no toast.
+                        // Live-mic silence: skip transcription + injection but STILL
+                        // archive the ORIGINAL buffer (empty transcript), exactly like
+                        // an empty-final-text dictation does today, so the drop is
+                        // non-destructive. Then complete like an empty-final-text
+                        // dictation (Transcribing -> Injecting -> Idle). No cleanup,
+                        // no injection, no toast. See the HoldUp block (Step 3) for the
+                        // archive-field guidance: keep `Samples16k = samples2` (ORIGINAL),
+                        // empty transcript strings, and populate remaining fields from the
+                        // original recording / `_recordStopwatch` — do NOT reference
+                        // `transcription2`/`final`, which do not exist yet here.
+                        _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                        {
+                            Samples16k = samples2,
+                            RawTranscript = "",
+                            CleanedText = "",
+                            // ...remaining fields as in the existing Archive call...
+                        });
                         _engine.Apply(SessionEvent.TranscriptReady);
                         _engine.Apply(SessionEvent.InjectionCompleted);
                         _ctxPrefetchTask = null;
@@ -835,8 +915,22 @@ Leave the archive call unchanged — it must keep `Samples16k = samples2`.
 
 - [ ] **Step 5: Verify — full non-Windows suite + Windows smoke checklist**
 
-Because `PipelineHost` is Windows-only, verification is (a) the full Linux
-suite stays green, and (b) a manual Windows smoke pass.
+Because `PipelineHost` is Windows-only AND cannot be compiled on Linux at all
+(the WinUI XAML compiler `GenXbf.dll` is unavailable — `dotnet build
+src/Winpepper.App` fails on Linux with `WMC0621`), verification is (a) the full
+Linux suite stays green for the pure-managed projects, (b) a **required Windows
+build of `Winpepper.App`** to catch any syntax/compile error in the Task 4 diff
+(the ONLY thing that compiles this code), and (c) a manual Windows smoke pass.
+
+**Required Windows build gate (run on a Windows host per AGENTS.md — this is
+the only compile check the Task 4 edits get):**
+```powershell
+# On the Windows host (repo has scripts/windows-sandbox/ for this):
+dotnet build src/Winpepper.App -c Release
+```
+Expected: `Build succeeded`, 0 errors. A failure here means the Task 4 diff has a
+syntax/type error that NO Linux step could have caught — fix it before the smoke
+pass. Do not consider Task 4 done until this build is green on Windows.
 
 Run the full non-Windows suite (build + in-process exec each pure-managed test
 project; baseline 833/0). Do them one project at a time so a failure is
@@ -866,9 +960,11 @@ the wiring the Linux suite cannot reach):
       `trimmed silence` line (RemovedMs == 0, so no log spam).
 - [ ] Hold the hotkey silently for ~5 s with a LIVE mic (nobody speaks) →
       nothing is pasted; NO toast; the log shows `dropped silent recording,
-      N ms`; the status pill returns to idle (does not hang in transcribing).
+      N ms`; the status pill returns to idle (does not hang in transcribing);
+      **a history entry IS created containing the original silent audio with an
+      empty transcript** (drop is non-destructive).
 - [ ] Confirm the same drop behavior via the toggle hotkey (start, stay silent,
-      stop) → dropped, pill idle, no toast.
+      stop) → dropped, pill idle, no toast, original audio still archived.
 - [ ] Verify the dead-mic path is unchanged: with the mic muted / privacy off,
       the existing "No audio detected" toast still fires (WarnIfSessionSilent),
       and the session still returns to idle.
@@ -896,9 +992,9 @@ git commit -m "feat(app): drop silent recordings and transcribe trimmed audio in
 | Trim runs > cap; interior 600+600, edge 600 adjacent to speech; runs ≤ budget untouched; tail preserved | Task 2 |
 | Do NOT modify `AudioEnergy.SilenceRmsThreshold` | Honored — Task 1 only *reuses* `Rms`; no `AudioEnergy` edit in any task |
 | PipelineHost wiring on BOTH hold + toggle, after `WarnIfSessionSilent`, before building transcriber | Task 4 (Steps 3, 4) |
-| Silent ⇒ drop: content-free log, skip transcribe/cleanup/injection/archive, complete like empty-final-text, no toast | Task 4 (drop block reuses `TranscriptReady`+`InjectionCompleted` seam) |
+| Silent ⇒ drop transcribe+injection, content-free log, complete like empty-final-text, no toast — but STILL archive ORIGINAL (drop is non-destructive) | Task 4 drop block: archive original + `TranscriptReady`+`InjectionCompleted` seam (corrected per Load-Bearing Correction; empty-text dictations archive today, so drop must too) |
 | Non-silent ⇒ transcribe TRIMMED; log `trimmed silence: N ms across R runs` only when removedMs>0 | Task 4 helper + transcribe-call change |
-| Archive ORIGINAL untrimmed samples | Task 4 leaves `Samples16k = samples`/`samples2` unchanged (verified in Steps 3-4) |
+| Archive ORIGINAL untrimmed samples on BOTH branches | Task 4 keeps `Samples16k = samples`/`samples2` in the completion path AND adds an explicit original-buffer archive on the drop path (verified in Steps 3-4) |
 | durationMs / timings stay based on original recording | Task 4 — archive uses original buffer; `RecordMs` from `_recordStopwatch`; not conflated |
 | No new settings/UI; constants with rationale; no changes to AssemblyAI/cleanup/injection | Tasks 1-4 (constants only; no touched stages) |
 | Verification: pure tests on Linux via xUnit v3 in-process runner; full non-Windows suite; Windows smoke checklist | Tasks 1-3 test dll runs; Task 4 Step 5 |

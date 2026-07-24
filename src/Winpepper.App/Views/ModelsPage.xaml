@@ -131,9 +131,10 @@
                         <FontIcon Glyph="&#xE90F;" FontSize="18" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
                         <StackPanel>
                             <TextBlock Text="Cleanup" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="Language model — polishes raw transcripts into clean text"
+                            <TextBlock Text="Language model — polishes local transcripts into clean text (not used for AssemblyAI cloud results)"
                                        Style="{ThemeResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                       TextWrapping="Wrap" />
                         </StackPanel>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" Spacing="8">

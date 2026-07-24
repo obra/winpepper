@@ -10,6 +10,10 @@
             <TextBlock Text="Polish raw transcripts with an on-device language model before they are typed."
                        Style="{ThemeResource BodyTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap" />
+            <TextBlock Text="Applies to local transcription only. AssemblyAI (cloud) results arrive already formatted and skip cleanup — your text corrections still apply. If a cloud dictation falls back to local processing, cleanup runs as usual."
+                       Style="{ThemeResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        TextWrapping="Wrap"
                        Margin="0,0,0,8" />
 

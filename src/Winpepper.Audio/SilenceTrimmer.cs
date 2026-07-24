@@ -94,6 +94,11 @@ public static class SilenceTrimmer
 
         // Adaptive threshold. (Task 3 adds the 0.15*speechLevel fail-safe cap.)
         var threshold = Math.Max(ThresholdNoiseMultiplier * noiseFloor, ThresholdAbsFloor);
+        // Fail-safe: when the noise floor is high relative to speech, silence
+        // cannot be confidently separated. Capping the threshold at a fraction
+        // of speechLevel keeps genuine silence-vs-speech separable and makes
+        // low-SNR recordings a no-op instead of eating real audio.
+        threshold = Math.Min(threshold, SpeechCapFactor * speechLevel);
 
         var isSilence = new bool[frameCount];
         for (var f = 0; f < frameCount; f++)

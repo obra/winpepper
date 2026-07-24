@@ -36,7 +36,7 @@ public sealed partial class ModelsPage : Page
             {
                 var shell = App.Shell!;
                 shell.AsrModelSelection.Publish(name); // effective immediately
-                _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AsrModelName = name }); // durability
+                _ = shell.SettingsWriter.QueueAndFlushAsync(s2 => s2 with { AsrModelName = name }); // durability
             },
             promoteCleanup: name =>
             {

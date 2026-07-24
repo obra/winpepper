@@ -27,7 +27,11 @@ public sealed class PipelineHost : IDisposable
     private bool _hotkeyLoopStarted;
     private readonly TextInjector _injector;
     private ParakeetSession? _asr;
-    private readonly string _modelDir;
+    private readonly Func<string, string> _resolveModelDir;
+    private readonly Func<string?> _desiredAsrModel;
+    private readonly Func<string?, string> _resolveAsrModelName;
+    private readonly Func<string, bool> _isAsrModelReady;
+    private readonly Winpepper.Core.Asr.AsrModelSwapState _asrSwap = new();
     private readonly SessionEngine _engine;
     private readonly SessionViewModel _vm;
     private readonly ISoundEffectPlayer _sounds;
@@ -45,7 +49,6 @@ public sealed class PipelineHost : IDisposable
     private Task<Winpepper.Platform.WindowContext.WindowContextResult>? _ctxPrefetchTask;    // PLAN2-TYPE
 
     private readonly Winpepper.History.HistoryArchiver _archiver;
-    private readonly string _asrModelName;
     private readonly string _cleanupModelName;
     private System.Diagnostics.Stopwatch? _recordStopwatch;
 
@@ -54,7 +57,7 @@ public sealed class PipelineHost : IDisposable
     private readonly Winpepper.Platform.Injection.ClipboardFallback _clipboardFallback;
     private readonly Winpepper.Core.Notifications.IToastService _toasts;
     private readonly Func<AppSettings> _settingsProvider;
-    private readonly Func<Winpepper.Asr.ParakeetSession, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> _buildTranscriber;
+    private readonly Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> _buildTranscriber;
     private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
     private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
     private InjectionTarget _targetAtStart = InjectionTarget.Empty;
@@ -68,14 +71,16 @@ public sealed class PipelineHost : IDisposable
         SessionViewModel vm,
         ISoundEffectPlayer sounds,
         HotkeyChord hold, HotkeyChord toggle, HotkeyChord cancel,
-        string modelDir,
+        Func<string, string> resolveModelDir,
+        Func<string?> desiredAsrModelName,
+        Func<string?, string> resolveAsrModelName,
+        Func<string, bool> isAsrModelReady,
         Winpepper.History.HistoryArchiver archiver,
-        string asrModelName,
         string cleanupModelName,
         Winpepper.Platform.Injection.ClipboardFallback clipboardFallback,
         Winpepper.Core.Notifications.IToastService toasts,
         Func<AppSettings> settingsProvider,
-        Func<Winpepper.Asr.ParakeetSession, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> transcriberFactory,
+        Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> transcriberFactory,
         Winpepper.Cleanup.CleanupRunner? cleanup = null,                       // PLAN2-TYPE
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
@@ -98,9 +103,11 @@ public sealed class PipelineHost : IDisposable
             cancelEnabled: () => _engine.State != SessionState.Idle,
             normalTriggersEnabled: () => _hotkeyReadiness.IsEnabled);
         _injector = new TextInjector(factory.CreateLogger<TextInjector>());
-        _modelDir = modelDir;
+        _resolveModelDir = resolveModelDir;
+        _desiredAsrModel = desiredAsrModelName;
+        _resolveAsrModelName = resolveAsrModelName;
+        _isAsrModelReady = isAsrModelReady;
         _archiver = archiver;
-        _asrModelName = asrModelName;
         _cleanupModelName = cleanupModelName;
         _cleanup = cleanup;
         _corrections = corrections;
@@ -158,32 +165,98 @@ public sealed class PipelineHost : IDisposable
         return TryStartCore();
     });
 
+    /// <summary>
+    /// Ensure the local ASR session matches the currently-selected model.
+    /// Called only from the serialized run loop (`await foreach` + inline
+    /// `await HandleHotkey`), so it can never race another dictation; it takes
+    /// <see cref="_startGate"/> around all session mutation, including disposal
+    /// of the old session. Resolves the canonical descriptor name FIRST, feeds
+    /// the decider descriptor-level VERIFIED readiness (size + SHA-256, cached
+    /// per selection change), loads the first session, swaps to a newly
+    /// selected model (disposing the old one), or keeps the current session
+    /// when the selection is unchanged or the desired model is not yet
+    /// verified-ready. On load failure the previous working session is kept
+    /// and, when <paramref name="reportErrors"/> is true, the error is
+    /// reported; the cloud path passes false to soften the local error surface.
+    /// Returns true iff a usable session is loaded afterward.
+    /// </summary>
+    private bool TryEnsureAsrModel(bool reportErrors = true)
+    {
+        lock (_startGate)
+        {
+            // Read the desired name from the in-memory slot — NOT from
+            // _settingsProvider(): the settings-file round-trip is not a safe
+            // cross-thread transport (a Windows atomic replace can fail against
+            // this loop's open read handle, silently dropping a promote).
+            // Then resolve FIRST: unknown/null/"" values fall back to the
+            // default descriptor via ModelRegistry.ResolveOrDefault, so the
+            // decider only ever sees canonical catalog names. Planning or
+            // committing the raw name would record a model that never ran and
+            // cause spurious swaps between two unknown names.
+            var desired = _resolveAsrModelName(_desiredAsrModel());
+            var desiredDir = _resolveModelDir(desired);
+            // Descriptor-level verified readiness (per-file size + SHA-256 via
+            // ModelProvisioningCoordinator.VerifyReadyAsync, cached per
+            // selection change by ModelsServices) — NOT a bare File.Exists.
+            // "A merely loadable stale model must not enter PipelineHost."
+            var ready = _isAsrModelReady(desired);
+            var action = _asrSwap.Plan(desired, ready);
+
+            switch (action)
+            {
+                case Winpepper.Core.Asr.AsrSwapAction.KeepCurrent:
+                    return _asr is not null;
+
+                case Winpepper.Core.Asr.AsrSwapAction.CannotStart:
+                    _log.LogWarning(
+                        "ASR model {Model} not verified-ready in {ModelDir}; pipeline disabled until models are downloaded",
+                        desired, desiredDir);
+                    if (reportErrors)
+                    {
+                        _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                            new FileNotFoundException("Speech model not installed. Open the Models tab to download it."),
+                            Guid.Empty);
+                    }
+                    return false;
+
+                case Winpepper.Core.Asr.AsrSwapAction.Load:
+                case Winpepper.Core.Asr.AsrSwapAction.Swap:
+                    try
+                    {
+                        var previousModel = _asrSwap.LoadedModelName;
+                        var fresh = new ParakeetSession(desiredDir);
+                        var old = _asr;
+                        _asr = fresh;
+                        _asrSwap.CommitLoad(desired);
+                        old?.Dispose(); // under _startGate; idempotent (Step 5)
+                        _log.LogInformation(
+                            "ASR model loaded (swap #{Generation}): {Previous} -> {Model}",
+                            _asrSwap.Generation, previousModel ?? "(none)", desired);
+                        return true;
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogError(ex,
+                            "Failed to load ASR model {Model} from {ModelDir}; keeping previous session",
+                            desired, desiredDir);
+                        if (reportErrors)
+                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
+                        return _asr is not null; // keep-old-on-failure
+                    }
+
+                default:
+                    return _asr is not null;
+            }
+        }
+    }
+
     private bool TryStartCore()
     {
         lock (_startGate)
         {
             if (IsRunning) return true;
-            if (_asr is null)
-            {
-                if (!ParakeetSession.ModelFilesPresent(_modelDir))
-                {
-                    _log.LogWarning("ASR model files missing in {ModelDir}; pipeline disabled until models are downloaded", _modelDir);
-                    _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                        new FileNotFoundException("Speech model not installed. Open the Models tab to download it."),
-                        Guid.Empty);
-                    return false;
-                }
-                try
-                {
-                    _asr = new ParakeetSession(_modelDir);
-                }
-                catch (Exception ex)
-                {
-                    _log.LogError(ex, "Failed to load ASR model from {ModelDir}; pipeline disabled", _modelDir);
-                    _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
-                    return false;
-                }
-            }
+            if (!TryEnsureAsrModel())
+                return false;
             // Bug-2: one warm recorder for the app lifetime. Frames flow (and the
             // meter animates) only while a session is active, so subscribe once.
             if (_warmRecorder is null)
@@ -217,7 +290,7 @@ public sealed class PipelineHost : IDisposable
             // the event loop is running. RunAsync consults ShouldHandle(evt).
             _hotkeyReadiness.Enable(DateTimeOffset.UtcNow);
             IsRunning = true;
-            _log.LogInformation("Pipeline started (model dir {ModelDir})", _modelDir);
+            _log.LogInformation("Pipeline started (ASR model {Model})", _asrSwap.LoadedModelName);
             return true;
         }
     }
@@ -329,7 +402,28 @@ public sealed class PipelineHost : IDisposable
 
                 var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
                 var settingsNow = _settingsProvider();
-                var transcriber = _buildTranscriber(_asr!, settingsNow, notice =>
+                var cloudSelected = string.Equals(
+                    settingsNow.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase);
+                // Provider-aware (req 6): a failed LOCAL swap never skips or
+                // aborts a CLOUD dictation; soften its error surface.
+                var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
+                if ((!localReady && !cloudSelected) || _asr is null)
+                {
+                    // Terminal-state early-exit (S2): never bare-return — drive
+                    // the engine back so the next dictation can start.
+                    _engine.Apply(SessionEvent.Failed);
+                    if (cloudSelected && _asr is null)
+                    {
+                        // Cloud selected but no local session exists at all (the
+                        // fallback wrapper needs one): surface this rare case.
+                        _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                            new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
+                            Guid.Empty);
+                    }
+                    _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
+                    return;
+                }
+                var transcriber = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow, notice =>
                     _ = _toasts.ShowAsync(
                         "Winpepper",
                         "Cloud transcription unavailable — used local speech recognition instead.",
@@ -522,7 +616,22 @@ public sealed class PipelineHost : IDisposable
 
                     var transcribeSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var settingsNow2 = _settingsProvider();
-                    var transcriber2 = _buildTranscriber(_asr!, settingsNow2, notice =>
+                    var cloudSelected2 = string.Equals(
+                        settingsNow2.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase);
+                    var localReady2 = TryEnsureAsrModel(reportErrors: !cloudSelected2);
+                    if ((!localReady2 && !cloudSelected2) || _asr is null)
+                    {
+                        _engine.Apply(SessionEvent.Failed);
+                        if (cloudSelected2 && _asr is null)
+                        {
+                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                                new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
+                                Guid.Empty);
+                        }
+                        _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
+                        return;
+                    }
+                    var transcriber2 = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow2, notice =>
                         _ = _toasts.ShowAsync(
                             "Winpepper",
                             "Cloud transcription unavailable — used local speech recognition instead.",
@@ -717,7 +826,11 @@ public sealed class PipelineHost : IDisposable
             _runCts?.Cancel();
             try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
             _hook.Dispose();
-            _asr?.Dispose();
+            lock (_startGate)
+            {
+                _asr?.Dispose();
+                _asr = null;
+            }
             if (_warmRecorder is not null)
             {
                 // Bug 8 (hygiene): unhook the meter + fault handlers before teardown.

@@ -63,8 +63,9 @@ public sealed partial class HistoryDetailPage : Page
             history.TranscriptionRerun, history.CleanupRerun,
             promoteAsrDefault: name =>
             {
-                var s = settings.Load();
-                settings.Save(s with { AsrModelName = name });
+                var shell = App.Shell!;
+                shell.AsrModelSelection.Publish(name); // effective immediately
+                _ = shell.SettingsWriter.QueueAndFlushAsync(s2 => s2 with { AsrModelName = name }); // durability
             },
             promoteCleanupDefault: name =>
             {

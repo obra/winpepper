@@ -44,6 +44,13 @@ public sealed class AppShell : IDisposable
     public Winpepper.Asr.Transcription.AssemblyAiClient AssemblyAiClient { get; }
     public Winpepper.Asr.Transcription.AssemblyAiOptions AssemblyAiOptions { get; }
 
+    /// <summary>
+    /// Thread-safe in-memory desired-ASR-model transport: promote callbacks
+    /// publish the newly selected raw name here (persistence to settings.json
+    /// is durability only), and PipelineHost's dictation seam reads it.
+    /// </summary>
+    public Winpepper.Core.Settings.AsrModelSelectionSlot AsrModelSelection { get; }
+
     private readonly WinUiSoundEffectPlayer _sounds;
 
     public static AppShell Create()
@@ -67,6 +74,8 @@ public sealed class AppShell : IDisposable
             settings = settings with { AsrModelName = modelsServices.AsrDescriptor.Name };
             store.Save(settings);
         }
+        var asrSelection = new Winpepper.Core.Settings.AsrModelSelectionSlot();
+        asrSelection.Publish(settings.AsrModelName); // seed with the persisted boot value
         var writer = new DebouncedSettingsWriter(store);
 
         var uiThread = new DispatcherQueueUiThread(DispatcherQueue.GetForCurrentThread());
@@ -265,12 +274,18 @@ public sealed class AppShell : IDisposable
             factory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiClient>());
 
         var pipeline = new PipelineHost(factory, errorBus, engine, sessionVm, sounds,
-                                         hold, toggle, cancel, AppPaths.ParakeetModelDir,
-                                         historyServices.Archiver, settings.AsrModelName, cleanupModelName,
+                                         hold, toggle, cancel,
+                                         name => modelsServices.Registry.InstallDirFor(
+                                             modelsServices.ModelsRoot, name, Winpepper.Models.ModelKind.Asr),
+                                         () => asrSelection.Read(),
+                                         raw => modelsServices.Registry.ResolveOrDefault(
+                                             raw, Winpepper.Models.ModelKind.Asr).Name,
+                                         name => modelsServices.VerifyAsrModelReady(name),
+                                         historyServices.Archiver, cleanupModelName,
                                          clipboardFallback, toasts,
                                          () => store.Load(),
-                                         (local, s, onFallback) => AppShell.BuildTranscriber(
-                                             local, s, onFallback, aaiClient, aaiKeyStore, aaiOptions,
+                                         (local, loadedModelName, s, onFallback) => AppShell.BuildTranscriber(
+                                             local, loadedModelName, s, onFallback, aaiClient, aaiKeyStore, aaiOptions,
                                              correctionStore, errorBus, factory),
                                          cleanup, correctionStore, windowContext, cleanupOptions,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
@@ -286,7 +301,7 @@ public sealed class AppShell : IDisposable
                             autostart, pipeline, sounds, historyServices, modelsServices,
                             toasts, clipboardFallback, crashHandler,
                             logTail, uiThread, diagHost,
-                            aaiKeyStore, aaiClient, aaiOptions);
+                            aaiKeyStore, aaiClient, aaiOptions, asrSelection);
     }
 
     private AppShell(ILoggerFactory factory, SettingsStore store, AppSettings settings,
@@ -306,7 +321,8 @@ public sealed class AppShell : IDisposable
                      Winpepper.App.Hosting.DiagnosticsHost diagnosticsHost,
                      Winpepper.Asr.Transcription.IAssemblyAiKeyStore assemblyAiKeyStore,
                      Winpepper.Asr.Transcription.AssemblyAiClient assemblyAiClient,
-                     Winpepper.Asr.Transcription.AssemblyAiOptions assemblyAiOptions)
+                     Winpepper.Asr.Transcription.AssemblyAiOptions assemblyAiOptions,
+                     Winpepper.Core.Settings.AsrModelSelectionSlot asrSelection)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;
@@ -322,6 +338,7 @@ public sealed class AppShell : IDisposable
         AssemblyAiKeyStore = assemblyAiKeyStore;
         AssemblyAiClient = assemblyAiClient;
         AssemblyAiOptions = assemblyAiOptions;
+        AsrModelSelection = asrSelection;
 
         Pill = new StatusPillWindow(sessionVm);
         // Clicking the pill in its PENDING state pastes the held text into the
@@ -409,6 +426,7 @@ public sealed class AppShell : IDisposable
     /// </summary>
     public static Winpepper.Asr.Transcription.ITranscriber BuildTranscriber(
         Winpepper.Asr.ParakeetSession local,
+        string loadedModelName,
         AppSettings settings,
         Action<string> onFallback,
         Winpepper.Asr.Transcription.IAssemblyAiClient client,
@@ -419,7 +437,7 @@ public sealed class AppShell : IDisposable
         ILoggerFactory loggerFactory)
     {
         var localTranscriber = new Winpepper.Asr.Transcription.ParakeetTranscriber(
-            local, Winpepper.Models.ModelRegistry.DefaultAsrName);
+            local, loadedModelName);
 
         if (!string.Equals(settings.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase))
             return localTranscriber;

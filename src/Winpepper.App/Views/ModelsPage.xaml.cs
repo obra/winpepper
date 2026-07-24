@@ -11,6 +11,7 @@ namespace Winpepper.App.Views;
 public sealed partial class ModelsPage : Page
 {
     private bool _downloadInProgress;
+    private bool _asrSelectedVerified;
     private CancellationTokenSource? _lifetimeCts;
 
     public ModelsTabViewModel ViewModel { get; private set; } = null!;
@@ -33,8 +34,9 @@ public sealed partial class ModelsPage : Page
             currentCleanupName: s.CleanupModelName,
             promoteAsr: name =>
             {
-                var cur = settings.Load();
-                settings.Save(cur with { AsrModelName = name });
+                var shell = App.Shell!;
+                shell.AsrModelSelection.Publish(name); // effective immediately
+                _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AsrModelName = name }); // durability
             },
             promoteCleanup: name =>
             {
@@ -56,7 +58,10 @@ public sealed partial class ModelsPage : Page
         WireSpeechProvider(s);
         try
         {
-            await models.VerifyReadyAsync(_lifetimeCts.Token);
+            var selectedAsr = App.Shell!.ModelsServices.Registry.ResolveOrDefault(
+                App.Shell!.SettingsStore.Load().AsrModelName, ModelKind.Asr).Name;
+            _asrSelectedVerified = await Task.Run(
+                () => App.Shell!.ModelsServices.VerifyAsrModelReady(selectedAsr));
             UpdateInstalledLabels();
         }
         catch (OperationCanceledException)
@@ -72,13 +77,31 @@ public sealed partial class ModelsPage : Page
         }
     }
 
-    private void OnAsrChanged(object sender, SelectionChangedEventArgs e)
+    private async void OnAsrChanged(object sender, SelectionChangedEventArgs e)
     {
         if (AsrCombo.SelectedItem is ModelDescriptor d)
         {
             ViewModel.AsrCard.SelectedName = d.Name;
             ViewModel.AsrCard.CommitSelection();
             UpdateInstalledLabels();
+
+            // Refresh the "Installed" state for the newly promoted model so the
+            // label follows the live selection without renavigating.
+            try
+            {
+                var selectedAsr = App.Shell!.ModelsServices.Registry
+                    .ResolveOrDefault(d.Name, ModelKind.Asr).Name;
+                _asrSelectedVerified = await Task.Run(
+                    () => App.Shell!.ModelsServices.VerifyAsrModelReady(selectedAsr));
+                UpdateInstalledLabels();
+            }
+            catch (Exception ex)
+            {
+                App.Shell!.LogFactory.CreateLogger<ModelsPage>()
+                    .LogError(ex, "ASR readiness verification failed after promote");
+                App.Shell!.ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
+                UpdateInstalledLabels();
+            }
         }
     }
 
@@ -248,7 +271,16 @@ public sealed partial class ModelsPage : Page
 
             // If the pipeline was left disabled at boot because models were
             // missing (issue #6), bring it up now that the download finished.
-            App.Shell!.Pipeline.TryStart();
+            // The readiness check inside TryStart() does a full size + SHA-256
+            // (~1.1 GB) that must NOT run on the UI thread, so verify off-thread
+            // first — this primes ModelsServices' verified-readiness cache so the
+            // synchronous check inside TryStart() below is a cache hit, not a
+            // dispatcher-blocking re-hash.
+            var shell = App.Shell!;
+            var canonicalAsr = shell.ModelsServices.Registry
+                .ResolveOrDefault(shell.AsrModelSelection.Read(), ModelKind.Asr).Name;
+            await Task.Run(() => shell.ModelsServices.VerifyAsrModelReady(canonicalAsr));
+            shell.Pipeline.TryStart();
         }
         catch (OperationCanceledException)
         {
@@ -271,8 +303,7 @@ public sealed partial class ModelsPage : Page
 
     private void UpdateInstalledLabels()
     {
-        var asrInstalled = App.Shell!.ModelsServices.State.Status ==
-            Winpepper.Core.ViewModels.AsrProvisioningStatus.Ready;
+        var asrInstalled = _asrSelectedVerified;
         AsrInstalledText.Text = asrInstalled ? "Installed" : "Not downloaded";
         AsrInstalledIcon.Visibility = asrInstalled ? Visibility.Visible : Visibility.Collapsed;
         AsrNotInstalledIcon.Visibility = asrInstalled ? Visibility.Collapsed : Visibility.Visible;

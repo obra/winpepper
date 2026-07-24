@@ -60,8 +60,42 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
     public Task EnsureReadyAsync(CancellationToken ct)
         => _coordinator.EnsureReadyAsync(AsrDescriptor, ct);
 
-    public Task<bool> VerifyReadyAsync(CancellationToken ct)
-        => _coordinator.VerifyReadyAsync(AsrDescriptor, ct);
+    public async Task<bool> VerifyReadyAsync(CancellationToken ct)
+    {
+        var ready = await _coordinator.VerifyReadyAsync(AsrDescriptor, ct);
+        // Seed the synchronous cache: the boot model just passed the same
+        // descriptor-level size+SHA-256 off the UI thread, so a UI-thread
+        // TryStart() reading AsrDescriptor.Name below need not re-hash.
+        if (ready) _verifiedAsrModelName = AsrDescriptor.Name;
+        return ready;
+    }
+
+    private string? _verifiedAsrModelName; // last canonical name that passed descriptor-level verification
+
+    /// <summary>
+    /// Descriptor-level verified readiness (per-file size + SHA-256 via
+    /// ModelProvisioningCoordinator.VerifyReadyAsync, which queues behind any
+    /// in-flight download) for the CANONICAL model name — resolved per-name
+    /// because <see cref="AsrDescriptor"/> is frozen at boot. The positive
+    /// result is CACHED per selection change: a full ~1.1 GB SHA-256 on every
+    /// dictation start is too slow, so we re-verify only when the requested
+    /// name differs from the last verified one. A negative result is never
+    /// cached (missing files short-circuit cheaply, and the next dictation
+    /// should pick up a completed download). Only the per-descriptor
+    /// VerifyReadyAsync return is authoritative — the coordinator's global
+    /// <see cref="State"/> is not a per-model signal.
+    /// </summary>
+    public bool VerifyAsrModelReady(string canonicalName)
+    {
+        if (string.Equals(_verifiedAsrModelName, canonicalName, StringComparison.Ordinal))
+            return true;
+
+        var descriptor = Registry.ResolveOrDefault(canonicalName, ModelKind.Asr);
+        var ready = _coordinator.VerifyReadyAsync(descriptor, CancellationToken.None)
+                                .GetAwaiter().GetResult();
+        if (ready) _verifiedAsrModelName = canonicalName;
+        return ready;
+    }
 
     private void OnCoordinatorStateChanged(object? sender, ModelProvisioningState state)
     {

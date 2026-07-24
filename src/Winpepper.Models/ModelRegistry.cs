@@ -8,6 +8,7 @@ namespace Winpepper.Models;
 public sealed class ModelRegistry
 {
     public const string DefaultAsrName = "parakeet-tdt-0.6b-v3";
+    public const string SecondAsrName = "parakeet-tdt-0.6b-v2";
     public const string DefaultCleanupName = "qwen2.5-0.5b-instruct-q4_k_m";
 
     private readonly List<ModelDescriptor> _all;
@@ -44,6 +45,37 @@ public sealed class ModelRegistry
                         Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt",
                         Sha256 = "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d",
                         SizeBytes = 93_939,
+                    },
+                },
+            },
+            new ModelDescriptor
+            {
+                Name = SecondAsrName,
+                Kind = ModelKind.Asr,
+                DisplayName = "Parakeet TDT v2 (0.6B, int8 ONNX, English)",
+                InstallDirRelative = "parakeet-tdt-0.6b-v2",
+                Files = new[]
+                {
+                    new ModelFile
+                    {
+                        RelativePath = "encoder-model.int8.onnx",
+                        Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.int8.onnx",
+                        Sha256 = "3e0581fda6ab843888b51e56d7ee78b6d5bc3237ec113af1f732d1d5286aa155",
+                        SizeBytes = 652_184_014,
+                    },
+                    new ModelFile
+                    {
+                        RelativePath = "decoder_joint-model.int8.onnx",
+                        Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/decoder_joint-model.int8.onnx",
+                        Sha256 = "a449f49acd68979d418651dd2dcb737cc0f1bf0225e009e29ee326354edbf7d3",
+                        SizeBytes = 8_998_286,
+                    },
+                    new ModelFile
+                    {
+                        RelativePath = "vocab.txt",
+                        Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/vocab.txt",
+                        Sha256 = "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d",
+                        SizeBytes = 9_384,
                     },
                 },
             },

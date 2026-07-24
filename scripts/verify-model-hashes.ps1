@@ -10,6 +10,9 @@ $files = @(
     @{ Name = "encoder-model.int8.onnx";       Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/encoder-model.int8.onnx" },
     @{ Name = "decoder_joint-model.int8.onnx"; Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/decoder_joint-model.int8.onnx" },
     @{ Name = "vocab.txt";                     Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx/resolve/main/vocab.txt" },
+    @{ Name = "encoder-model.int8.onnx";       Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/encoder-model.int8.onnx" },
+    @{ Name = "decoder_joint-model.int8.onnx"; Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/decoder_joint-model.int8.onnx" },
+    @{ Name = "vocab.txt";                     Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/vocab.txt" },
     @{ Name = "qwen2.5-0.5b-instruct-q4_k_m.gguf"; Url = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf" }
 )
 

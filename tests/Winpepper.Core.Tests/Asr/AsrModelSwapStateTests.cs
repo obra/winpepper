@@ -36,4 +36,75 @@ public class AsrModelSwapStateTests
         state.LoadedModelName.ShouldBeNull();
         state.Generation.ShouldBe(0);
     }
+
+    [Fact]
+    public void CommitLoad_SetsLoadedNameAndIncrementsGeneration()
+    {
+        var state = new AsrModelSwapState();
+
+        state.CommitLoad("parakeet-tdt-0.6b-v3");
+
+        state.LoadedModelName.ShouldBe("parakeet-tdt-0.6b-v3");
+        state.Generation.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Plan_SameModelLoaded_ReturnsKeepCurrent()
+    {
+        var state = new AsrModelSwapState();
+        state.CommitLoad("model-a");
+
+        state.Plan("model-a", desiredFilesPresent: true)
+             .ShouldBe(AsrSwapAction.KeepCurrent);
+    }
+
+    [Fact]
+    public void Plan_DifferentModelLoaded_DesiredPresent_ReturnsSwap()
+    {
+        var state = new AsrModelSwapState();
+        state.CommitLoad("model-a");
+
+        state.Plan("model-b", desiredFilesPresent: true)
+             .ShouldBe(AsrSwapAction.Swap);
+    }
+
+    [Fact]
+    public void Plan_DifferentModelLoaded_DesiredMissing_ReturnsKeepCurrent()
+    {
+        var state = new AsrModelSwapState();
+        state.CommitLoad("model-a");
+
+        // Desired model not downloaded yet: stay on the working model.
+        state.Plan("model-b", desiredFilesPresent: false)
+             .ShouldBe(AsrSwapAction.KeepCurrent);
+    }
+
+    [Fact]
+    public void CommitLoad_AfterSwap_AdvancesLoadedNameAndGeneration()
+    {
+        var state = new AsrModelSwapState();
+        state.CommitLoad("model-a");
+
+        state.CommitLoad("model-b");
+
+        state.LoadedModelName.ShouldBe("model-b");
+        state.Generation.ShouldBe(2);
+    }
+
+    [Fact]
+    public void FailedSwap_NoCommit_KeepsPreviousModelAndGeneration()
+    {
+        var state = new AsrModelSwapState();
+        state.CommitLoad("model-a");
+
+        // Host planned a Swap but the load threw, so it does NOT call CommitLoad.
+        var action = state.Plan("model-b", desiredFilesPresent: true);
+        action.ShouldBe(AsrSwapAction.Swap);
+        // (no CommitLoad)
+
+        state.LoadedModelName.ShouldBe("model-a");
+        state.Generation.ShouldBe(1);
+        // Next dictation still wants model-b and will retry the swap.
+        state.Plan("model-b", desiredFilesPresent: true).ShouldBe(AsrSwapAction.Swap);
+    }
 }

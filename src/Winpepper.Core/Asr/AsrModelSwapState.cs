@@ -35,8 +35,13 @@ public sealed class AsrModelSwapState
         if (LoadedModelName is null)
             return desiredFilesPresent ? AsrSwapAction.Load : AsrSwapAction.CannotStart;
 
-        // Later task fills in the loaded-session branches.
-        return AsrSwapAction.KeepCurrent;
+        if (string.Equals(desiredModelName, LoadedModelName, StringComparison.Ordinal))
+            return AsrSwapAction.KeepCurrent;
+
+        // A different model is selected. Swap only if its files are present;
+        // otherwise keep the current working session until the download/verify
+        // completes (a later dictation will re-evaluate and swap).
+        return desiredFilesPresent ? AsrSwapAction.Swap : AsrSwapAction.KeepCurrent;
     }
 
     /// <summary>

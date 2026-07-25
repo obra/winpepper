@@ -3,19 +3,43 @@ namespace Winpepper.Asr;
 /// <summary>
 /// Streaming analogue of Winpepper.Audio.SilenceTrimmer's INTERIOR-run policy.
 /// Sits between the leading-silence gate and the mel extractor. Constants
-/// duplicated from SilenceTrimmer (KeepMsPerEdge=600, abs floor=0.002, 20 ms
-/// frames) because Winpepper.Asr does not reference Winpepper.Audio — same
-/// precedent as ParakeetStreamingSession.LeadingSilenceRmsFloor.
-/// Deviation from batch (inherent to streaming): fixed absolute threshold
-/// instead of the utterance-adaptive one, so this trims LESS than batch, never
-/// more. Runs at or below 2*keepEdge are kept whole (batch parity).
+/// duplicated from SilenceTrimmer (KeepMsPerEdge=600, abs floor=0.002,
+/// SpeechCapFactor=0.15, 20 ms frames) because Winpepper.Asr does not reference
+/// Winpepper.Audio — same precedent as
+/// ParakeetStreamingSession.LeadingSilenceRmsFloor.
+/// Deviation from batch (inherent to streaming): a fixed absolute threshold
+/// replaces batch's utterance-adaptive
+/// min(max(3*noiseFloor, 0.002), 0.15*speechLevel). Batch's speech-level cap
+/// pulls the threshold BELOW 0.002 for quiet recordings so trimming cannot eat
+/// quiet speech; the streaming analogue of that guard here is total
+/// suppression: while 0.002 > 0.15 * the running MAX frame RMS observed since
+/// onset, below-floor frames are passed straight through and no run is ever
+/// dropped. The running max over ALL frames is the estimator because a quiet
+/// talker's speech frames classify as "silent" under the fixed floor (an
+/// estimator over speech-classified frames would barely see the quiet-talker
+/// regime); max is an upper bound on batch's 90th-percentile speech level, so
+/// suppression engages in a subset of the recordings where batch caps.
+/// Residual deviation: a single loud transient in an otherwise quiet capture
+/// lifts the max above 0.002/0.15 and re-enables dropping at 0.002 where batch
+/// would cap below it. Runs at or below 2*keepEdge are kept whole (batch
+/// parity).
 /// NOT used for the AssemblyAI realtime path: that endpoint expects continuous
 /// mic audio with interior silence (vendor-side endpointing).
 /// </summary>
 public sealed class InteriorSilenceSkipper
 {
+    /// <summary>Duplicated from SilenceTrimmer.SpeechCapFactor (see class doc).</summary>
+    private const double SpeechCapFactor = 0.15;
+
     private readonly Action<ReadOnlyMemory<float>> _emit;
     private readonly double _rmsFloor;
+
+    // Running speech-level estimate: max frame RMS over ALL frames since onset.
+    // Never decreases, so suppression (floor > 0.15 * max) can only turn OFF,
+    // and only on a frame loud enough to be speech-classified — which resolves
+    // any pending run first. Hence a buffered run's suppression state is
+    // constant for its whole lifetime and no re-check is needed at resolve.
+    private double _maxFrameRms;
     private readonly int _frameSamples;
     private readonly int _frameMs;
     private readonly int _keepFrames;
@@ -119,8 +143,25 @@ public sealed class InteriorSilenceSkipper
 
     private void Classify(ReadOnlyMemory<float> frame)
     {
-        if (Rms(frame.Span) < _rmsFloor)
+        var rms = Rms(frame.Span);
+        if (rms > _maxFrameRms) _maxFrameRms = rms;
+
+        if (rms < _rmsFloor)
         {
+            if (_rmsFloor > SpeechCapFactor * _maxFrameRms)
+            {
+                // Quiet-recording guard (streaming analogue of SilenceTrimmer's
+                // speech-level cap, SilenceTrimmer.cs:96-101): the loudest frame
+                // seen so far is so low that 0.002 cannot be trusted to separate
+                // silence from quiet speech. Keep the frame — pass it straight
+                // through (order-preserving; equivalent to resolving the run as
+                // within budget) and count nothing as skipped. Reaching the
+                // buffering path below therefore implies suppression is off, and
+                // since _maxFrameRms never decreases it stays off for the rest
+                // of that run — no re-check needed at resolve or Flush.
+                _emit(frame);
+                return;
+            }
             _runBuffer.Add(frame.ToArray()); // copy: caller may reuse the memory
             _runFrames++;
             if (!_leadingEdgeEmitted && _runFrames > _keepFrames)

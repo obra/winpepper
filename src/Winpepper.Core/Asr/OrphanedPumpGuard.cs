@@ -43,7 +43,11 @@ public sealed class OrphanedPumpGuard
     /// (regardless of success/fault/cancel). Never blocks. Exceptions from a
     /// DEFERRED dispose are routed to the constructor's error callback, never
     /// left unobserved; an INLINE dispose throw propagates to the caller,
-    /// matching a direct <c>Dispose()</c> call.</summary>
+    /// matching a direct <c>Dispose()</c> call. Caller-side invariant: a pump
+    /// must be <see cref="Register"/>ed BEFORE any dispose of the session it
+    /// holds is routed through this method — the snapshot only covers
+    /// already-registered pumps, so a later-registered pump does not gate an
+    /// earlier dispose.</summary>
     public void RunOrDefer(Action dispose)
     {
         Task[] live;

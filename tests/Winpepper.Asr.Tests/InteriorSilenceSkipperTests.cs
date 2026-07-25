@@ -140,6 +140,54 @@ public class InteriorSilenceSkipperTests
     }
 
     [Fact]
+    public void QuietSpeech_UnderTheFloor_SuppressesRunDropping()
+    {
+        var (skipper, output) = NewSkipper();
+        // Quiet-talker regime: one gate-opening frame at 0.003 RMS (the leading
+        // gate guarantees at least one frame >= 0.002 opened the stream), then
+        // sustained speech at ~0.001 RMS - below the 0.002 fixed floor, so every
+        // such frame classifies as "silent". The running max is 0.003 and
+        // 0.002 > 0.15 * 0.003, so the speech cap suppresses ALL dropping: the
+        // long run of true zeros must survive whole.
+        var opener = ConstantFrames(1, 0.003f);
+        var quiet = ConstantFrames(5, 0.001f);
+        var input = Concat(opener, quiet, Silence(Frame * 10 * KeepFrames), quiet);
+
+        skipper.Push(input);
+        skipper.Flush();
+
+        output.ToArray().ShouldBe(input); // sample-identical: nothing dropped
+        skipper.SkippedMs.ShouldBe(0);
+        skipper.RunsSkipped.ShouldBe(0);
+    }
+
+    [Fact]
+    public void NormalSpeech_StillDropsLongRuns()
+    {
+        var (skipper, output) = NewSkipper();
+        // 0.02 RMS is modest but above the suppression boundary
+        // (0.15 * 0.02 = 0.003 > 0.002), so dropping stays enabled even with
+        // the speech cap in place.
+        var speech = ConstantFrames(2, 0.02f);
+        var run = MarkedSilence(5 * KeepFrames); // 10 frames, budget is 4
+        skipper.Push(Concat(speech, run, speech));
+        skipper.Flush();
+
+        var expected = Concat(speech, FramesOf(run, 0, 1, 8, 9), speech);
+        output.ToArray().ShouldBe(expected);
+        skipper.SkippedMs.ShouldBe(3 * KeepMs); // 10 - 4 = 6 frames = 120 ms
+        skipper.RunsSkipped.ShouldBe(1);
+    }
+
+    /// <summary>Whole analysis frames filled with a constant, so frame RMS equals it.</summary>
+    private static float[] ConstantFrames(int frames, float value)
+    {
+        var a = new float[frames * Frame];
+        Array.Fill(a, value);
+        return a;
+    }
+
+    [Fact]
     public void PartialAnalysisFrame_SpansPushes_AndFlushEmitsRemainder()
     {
         var (skipper, output) = NewSkipper();

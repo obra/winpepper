@@ -75,7 +75,7 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     /// Keys the null-return contract (FinishAsync returned null because the drain
     /// deadline expired, not because no transcriber materialized) and logging.
     /// The abandon path may have ORPHANED a pump still executing inside a native
-    /// call on the shared ParakeetSession \u2014 callers coordinate any dispose of
+    /// call on the shared ParakeetSession — callers coordinate any dispose of
     /// that shared resource via <see cref="PumpCompletion"/>.</summary>
     public bool DrainTimedOut { get; private set; }
 

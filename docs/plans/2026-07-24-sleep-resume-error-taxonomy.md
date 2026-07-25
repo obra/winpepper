@@ -674,8 +674,32 @@ public class SessionViewModelErrorLifecycleTests
 
         delays.FireAll();
 
-        vm.Stage.ShouldBe(SessionStage.Idle);
-        vm.StatusText.ShouldBe("Ready");
+        // RESYNC, not a hard reset: the engine is still Recording, so the pill
+        // goes back to Recording - NOT to Idle/"Ready" (which would hide the
+        // pill mid-dictation and kill the voice meter for the rest of the
+        // session, since ReportAudioFrame only accepts frames while
+        // _stage == Recording).
+        vm.Stage.ShouldBe(SessionStage.Recording);
+        vm.StatusText.ShouldBe("Recording...");
+    }
+
+    [Fact]
+    public void SelfClear_MidDictation_Restores_The_Live_Voice_Meter()
+    {
+        // DISCRIMINATING: this is the test that fails if the self-clear hard
+        // resets to Idle. ReportAudioFrame (SessionViewModel.cs:170-174)
+        // early-returns unless _stage == Recording, and the engine does NOT
+        // re-raise Recording, so an Idle reset silences the meter permanently.
+        var (vm, engine, bus, delays) = NewVm();
+        StartDictation(engine);
+        bus.Report(ErrorStage.Cleanup, new InvalidOperationException("boom"), Guid.NewGuid());
+        vm.Stage.ShouldBe(SessionStage.Error);
+
+        delays.FireAll();
+
+        vm.Stage.ShouldBe(SessionStage.Recording);
+        vm.ReportAudioFrame(new float[] { 0.5f, -0.5f, 0.5f, -0.5f });
+        vm.InputLevel.ShouldBeGreaterThan(0.0);
     }
 
     [Fact]
@@ -694,8 +718,10 @@ public class SessionViewModelErrorLifecycleTests
 
         delays.FireAll(); // fires BOTH timers; only the newest may clear
 
-        vm.Stage.ShouldBe(SessionStage.Idle);
-        vm.StatusText.ShouldBe("Ready");
+        // The stale token's callback must not release the pill early; the
+        // newest one then resyncs to the still-live engine state.
+        vm.Stage.ShouldBe(SessionStage.Recording);
+        vm.StatusText.ShouldBe("Recording...");
     }
 
     [Fact]
@@ -718,8 +744,10 @@ public class SessionViewModelErrorLifecycleTests
     [Fact]
     public void NotifyError_Also_Self_Clears()
     {
-        var (vm, engine, _, delays) = NewVm();
-        StartDictation(engine);
+        // The real call site is PipelineHost AFTER SessionEvent.Failed, i.e.
+        // with the engine already back at Idle - so the resync lands on Idle
+        // here, and the pre-existing NotifyError contract is unchanged.
+        var (vm, _, _, delays) = NewVm();
 
         vm.NotifyError("pipeline blew up");
 
@@ -956,20 +984,63 @@ Edit `src/Winpepper.Core/ViewModels/SessionViewModel.cs`.
         var token = ++_presentationGeneration;
         _delays.Schedule(
             TimeSpan.FromMilliseconds(EventErrorHoldMs),
-            () => _ui.Post(() => ReturnToIdleIfUnchanged(token)));
+            () => _ui.Post(() => ReleasePillIfUnchanged(token)));
     }
 
     /// <summary>
-    /// Return the pill to Idle unless something newer owns it. NEVER clears a
-    /// CONDITION - conditions live on the tray until a recovery success.
+    /// Release the pill from an error presentation unless something newer owns
+    /// it. It RESYNCS to the live engine state - it does NOT hard-reset to
+    /// Idle. That distinction is load-bearing: an EVENT error only ever takes
+    /// the pill while a dictation is IN FLIGHT, so when its hold expires the
+    /// normal case is that we are STILL Recording/Transcribing/Injecting. The
+    /// generation token only guards against a state change that happens AFTER
+    /// the error took the pill; when the engine was already in flight and did
+    /// not transition during the hold, nothing else restores the stage. A hard
+    /// "Idle / Ready" there would:
+    ///   * hide the pill mid-dictation (StatusPillWindow.xaml.cs:148-155 - the
+    ///     Idle arm clears _visible and starts the auto-hide timer),
+    ///   * make the tray read "Winpepper - Ready" while recording, and
+    ///   * kill the voice meter for the rest of the session (ReportAudioFrame,
+    ///     SessionViewModel.cs:170-174, early-returns unless
+    ///     _stage == Recording, and the engine never re-raises Recording).
+    /// NEVER clears a CONDITION - conditions live on the tray until a recovery
+    /// success.
     /// </summary>
-    private void ReturnToIdleIfUnchanged(int token)
+    private void ReleasePillIfUnchanged(int token)
     {
         if (token != _presentationGeneration) return; // newer state took the pill
         if (_pending.HasPending) return;              // click-to-paste wins
         if (_stage != SessionStage.Error) return;     // stage already moved on
-        Stage = SessionStage.Idle;
-        StatusText = "Ready";
+        ResyncPillToEngineState();
+    }
+
+    /// <summary>
+    /// Put the pill back in step with the ENGINE - the single source of truth
+    /// for "what is this session actually doing right now?". Mirrors the
+    /// OnEngineStateChanged switch (minus its stopwatch/pending side effects,
+    /// which belong to real transitions); keep the two in step.
+    /// </summary>
+    private void ResyncPillToEngineState()
+    {
+        switch (_engineState)
+        {
+            case SessionState.Recording:
+                Stage = SessionStage.Recording;
+                StatusText = "Recording...";
+                break;
+            case SessionState.Transcribing:
+                Stage = SessionStage.Transcribing;
+                StatusText = "Transcribing...";
+                break;
+            case SessionState.Injecting:
+                Stage = SessionStage.Injecting;
+                StatusText = "Inserting...";
+                break;
+            default:
+                Stage = SessionStage.Idle;
+                StatusText = "Ready";
+                break;
+        }
     }
 ```
 
@@ -1090,8 +1161,8 @@ git commit -m "fix(core): scope EVENT errors to live dictations and self-clear t
 
 **Interfaces:**
 - Consumes: `ErrorKind`, `ErrorClassifier` (Task 1); `SessionStages`,
-  `IDelayScheduler`, `_presentationGeneration`, `ReturnToIdleIfUnchanged`
-  (Task 2).
+  `IDelayScheduler`, `_presentationGeneration`, `ReleasePillIfUnchanged`,
+  `ResyncPillToEngineState` (Task 2).
 - Produces:
   - `public const int SessionViewModel.ConditionPillHoldMs = 10000;`
   - `public ErrorStage? SessionViewModel.ActiveConditionStage { get; }`
@@ -1187,6 +1258,34 @@ Append to
 
         vm.HasActiveCondition.ShouldBeTrue();
         vm.ActiveConditionStage.ShouldBe(ErrorStage.Audio);
+    }
+
+    [Fact]
+    public void RecoverySuccess_Does_Not_Wipe_A_Newer_Unrelated_Error_Off_The_Pill()
+    {
+        // DISCRIMINATING: reachable for real. The mic condition retires to the
+        // tray; the user then starts dictating and an Injection EVENT error
+        // takes the pill; capture frames resume and the host calls
+        // NotifyConditionRecovered(Audio). Without the condition-ownership
+        // stamp, the recovery sees _stage == Error and blows away an unrelated
+        // error the user has not read yet (and its scheduled self-clear).
+        var (vm, engine, bus, delays) = NewVm();
+        ReportMicCondition(bus);
+        delays.FireAll();                      // condition pill retires to the tray
+        StartDictation(engine);
+        bus.Report(ErrorStage.Injection, new InvalidOperationException("SendInput refused"), Guid.NewGuid());
+        vm.StatusText.ShouldBe("Error (Injection): SendInput refused");
+
+        vm.NotifyConditionRecovered(ErrorStage.Audio);
+
+        vm.HasActiveCondition.ShouldBeFalse();                 // the condition IS cleared
+        vm.Stage.ShouldBe(SessionStage.Error);                 // ...but the EVENT error keeps the pill
+        vm.StatusText.ShouldBe("Error (Injection): SendInput refused");
+
+        delays.FireAll();                      // the EVENT error's own hold expires
+
+        vm.Stage.ShouldBe(SessionStage.Recording);
+        vm.StatusText.ShouldBe("Recording...");
     }
 
     [Fact]
@@ -1306,6 +1405,19 @@ would let one stage's recovery silently erase a still-true condition:
     private readonly Dictionary<ErrorStage, string> _activeConditions = new();
 
     /// <summary>
+    /// The _presentationGeneration stamp of the CONDITION that most recently
+    /// grabbed the pill, or 0 if none has. NotifyConditionRecovered releases
+    /// the pill ONLY when this still equals _presentationGeneration - i.e.
+    /// only when a condition is what is actually on screen. Without it, a
+    /// recovery would wipe an UNRELATED newer EVENT error off the pill (mic
+    /// condition retires to the tray -> an Injection EVENT error takes the
+    /// pill mid-dictation -> frames resume -> NotifyConditionRecovered sees
+    /// _stage == Error and blows away the injection error the user has not
+    /// seen yet, along with its own scheduled self-clear).
+    /// </summary>
+    private int _conditionPresentationGeneration;
+
+    /// <summary>
     /// How long a CONDITION grabs the pill before retiring to the tray. The
     /// condition itself is NOT cleared by this timer - only the pill is.
     /// </summary>
@@ -1370,8 +1482,11 @@ with a call to the new method:
         Stage = SessionStage.Error;
         StatusText = $"Error ({stage}): {message}";
         var token = ++_presentationGeneration;
+        // Stamp the pill as CONDITION-owned so a later recovery can tell
+        // "my condition is on screen" from "something newer replaced it".
+        _conditionPresentationGeneration = token;
         _delays.Schedule(TimeSpan.FromMilliseconds(ConditionPillHoldMs),
-            () => _ui.Post(() => ReturnToIdleIfUnchanged(token)));
+            () => _ui.Post(() => ReleasePillIfUnchanged(token)));
     }
 
     /// <summary>
@@ -1387,13 +1502,21 @@ with a call to the new method:
     {
         if (!_activeConditions.Remove(stage)) return;
         Raise(nameof(ActiveConditionStage)); Raise(nameof(ActiveConditionMessage)); Raise(nameof(HasActiveCondition));
-        // Drop the pill back to Idle only when NO condition remains - a
-        // remaining condition keeps the surface (pill and tray text).
+        // Release the pill only when NO condition remains - a remaining
+        // condition keeps the surface (pill and tray text).
         if (_activeConditions.Count > 0) return;
         if (_pending.HasPending) return;
         if (_stage != SessionStage.Error) return;
-        Stage = SessionStage.Idle;
-        StatusText = "Ready";
+        // ...and only when a CONDITION is what is actually on the pill. If a
+        // newer EVENT error took it (bumping _presentationGeneration past the
+        // condition's stamp), that error owns the pill and has its own
+        // self-clear scheduled; clearing it here would hide an unrelated error
+        // the user has not seen yet.
+        if (_conditionPresentationGeneration != _presentationGeneration) return;
+        // RESYNC, never a hard reset - see ReleasePillIfUnchanged for why
+        // "Idle / Ready" mid-dictation hides the pill, lies on the tray, and
+        // kills the voice meter.
+        ResyncPillToEngineState();
     });
 ```
 
@@ -1405,9 +1528,9 @@ with a call to the new method:
      tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll
 ```
 
-Expected: `Failed: 0`, including the 10 new condition tests (the original 8
-plus the two discriminating tests: condition coexistence and no-pill-regrab
-under re-reports).
+Expected: `Failed: 0`, including the 11 new condition tests (the original 8
+plus the three discriminating tests: condition coexistence, no-pill-regrab
+under re-reports, and recovery not wiping a newer unrelated error off the pill).
 
 - [ ] **Step 5: Commit**
 
@@ -2203,7 +2326,11 @@ namespace Winpepper.Audio;
 /// CONTRACT: IMMNotificationClient callbacks arrive on COM/MTA threads and
 /// must never block. Rebuilding capture takes a lock and can dispose a source
 /// (which joins a capture thread), so the handler is ALWAYS marshalled onto the
-/// thread pool and the callback thread returns immediately. NOTE: the hand-off
+/// thread pool and the callback thread returns immediately. This includes
+/// resolving an endpoint's DataFlow (IMMDeviceEnumerator::GetDevice +
+/// IMMEndpoint::GetDataFlow are blocking COM round-trips, and the field
+/// enumerator's RCW has UI-thread affinity) - NO COM call is made on the
+/// callback thread, and no MMDevice is disposed inside one. NOTE: the hand-off
 /// DE-serializes the callbacks - several handlers can run concurrently, which
 /// is why every recovery decision lives behind CaptureRecoveryPolicy's lock.
 /// No decision logic lives here - see <see cref="CaptureRecoveryPolicy"/>.
@@ -2255,18 +2382,20 @@ public sealed class AudioEndpointWatcher : IMMNotificationClient, IDisposable
         // This callback carries NO DataFlow, so it fires for RENDER endpoints
         // too (Bluetooth headphones, monitor speakers going Active). Signaling
         // on those would drive a spurious rebuild attempt on every unrelated
-        // audio device connect/disconnect. Resolve the device's flow first and
-        // signal only for capture endpoints.
-        try
-        {
-            using var device = _enumerator.GetDevice(deviceId);
-            if (device.DataFlow == DataFlow.Capture) Signal();
-        }
-        catch (Exception ex)
-        {
-            // The device can vanish again mid-churn; content-free.
-            _log?.LogDebug(ex, "could not resolve data flow for a state-changed device");
-        }
+        // audio device connect/disconnect - so the flow must be resolved.
+        //
+        // BUT NOT HERE. Resolving it means IMMDeviceEnumerator::GetDevice +
+        // IMMEndpoint::GetDataFlow, i.e. blocking COM round-trips, and
+        // MS's IMMNotificationClient guidance is explicit that the client must
+        // not block in a callback and must not release the last reference to
+        // an MMDevice API object inside one. Worse, `_enumerator` is created
+        // in the WarmWasapiRecorder constructor, which PipelineHost.TryStartCore
+        // (PipelineHost.cs:262-267) runs on the app's STA/UI thread: calling it
+        // from this MTA callback thread marshals back through the UI thread's
+        // pump, blocking the endpoint notification thread on the very UI thread
+        // the Task 9 smoke claims we are immune to. Hand off FIRST; resolve on
+        // the thread pool with a thread-local enumerator.
+        SignalIfCapture(deviceId);
     }
 
     public void OnDeviceAdded(string pwstrDeviceId)
@@ -2282,6 +2411,40 @@ public sealed class AudioEndpointWatcher : IMMNotificationClient, IDisposable
         if (Volatile.Read(ref _disposed) != 0) return;
         ThreadPool.QueueUserWorkItem(_ =>
         {
+            try { _onCaptureEndpointChanged(); }
+            catch (Exception ex) { _log?.LogWarning(ex, "audio endpoint change handler failed"); }
+        });
+    }
+
+    /// <summary>
+    /// Hand off FIRST, then resolve the endpoint's data flow on the thread
+    /// pool - NEVER on the IMMNotificationClient callback thread. Uses a
+    /// SHORT-LIVED, locally-created enumerator rather than the field: the
+    /// field's RCW was created on the app's STA/UI thread, so calling it from
+    /// here would marshal back through that thread's message pump. A local
+    /// enumerator created on this MTA pool thread has no such affinity, and
+    /// disposing the MMDevice here is outside any COM callback.
+    /// </summary>
+    private void SignalIfCapture(string deviceId)
+    {
+        if (Volatile.Read(ref _disposed) != 0) return;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            if (Volatile.Read(ref _disposed) != 0) return;
+            try
+            {
+                using var enumerator = new MMDeviceEnumerator();
+                using var device = enumerator.GetDevice(deviceId);
+                if (device.DataFlow != DataFlow.Capture) return;
+            }
+            catch (Exception ex)
+            {
+                // The device can vanish again mid-churn; content-free. Bail
+                // rather than guess - OnDefaultDeviceChanged still covers the
+                // incident's actual signature (a capture default reappearing).
+                _log?.LogDebug(ex, "could not resolve data flow for a state-changed device");
+                return;
+            }
             try { _onCaptureEndpointChanged(); }
             catch (Exception ex) { _log?.LogWarning(ex, "audio endpoint change handler failed"); }
         });
@@ -2821,10 +2984,14 @@ task does NOT cover:
 
 We KEEP reinstall-on-resume: it heals the incident's most probable case cheaply,
 and `RequestHookReinstall` is already safe from any thread. The heartbeat
-telemetry (Step 4f) exists so every uncovered death becomes log evidence — it
-is the ready-made health predicate for a future reinstall trigger through the
-SAME `RequestHookReinstall` path (no new concurrency model needed) if the
-Task 9 ordering probe fails.
+telemetry (Step 4f) exists so an uncovered death leaves a TIMELINE in the log
+("the hook went quiet at T") instead of the total silence the 2026-07-24
+incident produced. It is deliberately NOT a health predicate: Win32 exposes no
+"time of last KEYBOARD input" (`GetLastInputInfo` is system-wide and counts
+mouse), so no verdict can be derived from it. A future automatic reinstall
+trigger would still route through the SAME `RequestHookReinstall` path (no new
+concurrency model needed), but it needs a genuinely keyboard-specific liveness
+source first — out of scope here.
 
 **Known gaps (recorded, not fixed here):** `ReinstallOnHookThread` has NO retry
 if `SetWindowsHookExW` fails (one WRN line, then dead until the next resume),
@@ -3309,15 +3476,27 @@ Second, add the heartbeat method next to `RegisterPowerNotifications`:
 
 ```csharp
     /// <summary>
-    /// TELEMETRY ONLY (deliberately not a reinstall trigger yet): every 30 s,
-    /// compare system-wide input recency (GetLastInputInfo) against the last
-    /// time the OS actually called our hook. "The system saw keyboard input
-    /// but our callback stayed silent" is the signature of a silently-removed
-    /// hook - from ANY cause (>=1000 ms callback timeout under load/GC), not
-    /// only sleep/resume. This WRN line turns every uncovered hook death into
-    /// evidence, and it is the ready-made health predicate for a future
-    /// trigger through the existing RequestHookReinstall path (no new
-    /// concurrency model needed) if the Task 9 ordering probe fails.
+    /// TELEMETRY ONLY - an unconditional, non-judging evidence line, NOT a
+    /// health verdict and NOT a reinstall trigger. Every 30 s it records two
+    /// ages: how long since the OS last called our low-level keyboard hook,
+    /// and how long since the system last saw ANY user input. Post-incident,
+    /// this gives a timeline ("the hook went quiet at T, input continued
+    /// past T") that today's logs cannot provide at all.
+    ///
+    /// WHY IT DOES NOT DECIDE: there is no Win32 API for "time of last
+    /// KEYBOARD input". GetLastInputInfo is system-wide and is updated by
+    /// MOUSE input too, so "input recent AND hook silent" is satisfied by
+    /// ordinary mouse-only use (reading, scrolling) on a perfectly healthy
+    /// hook. Emitting a WRN on that conjunction would fire routinely on
+    /// healthy systems and drown the content-free log the incident response
+    /// depends on. Two ages at DEBUG are honest; a warning would not be.
+    ///
+    /// Consequently this is NOT the detector for a silently-removed hook -
+    /// the Task 9 R14-2 gate is a direct functional check (press the hotkey;
+    /// does a dictation start?), and these lines are corroborating timeline
+    /// evidence for it. Promoting this to a trigger requires a genuinely
+    /// keyboard-specific liveness signal first (e.g. a WM_INPUT raw-input
+    /// keyboard sink independent of the hook), which is out of scope here.
     /// </summary>
     private void StartHeartbeat()
     {
@@ -3326,30 +3505,27 @@ Second, add the heartbeat method next to `RegisterPowerNotifications`:
         {
             try
             {
-                var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
-                if (!GetLastInputInfo(ref info)) return;
-                // GetLastInputInfo reports 32-bit ticks; compare in 32-bit space.
-                var sinceInputMs = unchecked(Environment.TickCount - (int)info.dwTime);
                 var sinceCallbackMs = Environment.TickCount64 - Volatile.Read(ref _lastHookCallbackTick);
-                if (sinceInputMs >= 0 && sinceInputMs < HeartbeatSilenceMs
-                    && sinceCallbackMs > HeartbeatSilenceMs)
-                    _log.LogWarning(
-                        "System saw keyboard input but the hook callback has been silent for {Secs}s",
-                        sinceCallbackMs / 1000);
+                long? sinceInputMs = null;
+                var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
+                if (GetLastInputInfo(ref info))
+                {
+                    // GetLastInputInfo reports 32-bit ticks; compare in 32-bit space.
+                    var delta = unchecked(Environment.TickCount - (int)info.dwTime);
+                    if (delta >= 0) sinceInputMs = delta;
+                }
+                // DEBUG, unconditional, no verdict: system-wide input includes
+                // MOUSE, so these two ages diverging is NORMAL, not a fault.
+                _log.LogDebug(
+                    "Hook heartbeat: lastCallbackAgeMs={CallbackAge} lastAnyInputAgeMs={InputAge} (input age is system-wide and includes mouse)",
+                    sinceCallbackMs, sinceInputMs?.ToString() ?? "unknown");
             }
             catch { /* telemetry must never take the app down */ }
         }, null, HeartbeatPeriod, HeartbeatPeriod);
     }
 
     private static readonly TimeSpan HeartbeatPeriod = TimeSpan.FromSeconds(30);
-    private const long HeartbeatSilenceMs = 10_000;
 ```
-
-(Mouse input also updates `GetLastInputInfo`, so this WRN can only fire while
-the user is actually producing input within the last 10 s AND the keyboard
-hook has been silent for longer — mouse-only sessions may delay the signal but
-cannot false-positive a healthy hook into a WRN storm: the line fires at most
-once per 30 s tick and only under that conjunction.)
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -3406,14 +3582,19 @@ for proj in Winpepper.Asr.Tests Winpepper.Audio.Tests Winpepper.Cleanup.Tests \
   $DOTNET build "tests/$proj/$proj.csproj" -c Release -f net9.0 >/dev/null 2>&1 \
     || { echo "BUILD FAIL $proj"; fail=1; continue; }
   echo "== $proj"
-  $DOTNET exec "tests/$proj/bin/Release/net9.0/$proj.dll" | tail -3 \
+  # Redirect to a log and check the RUNNER's exit status, then tail. Piping
+  # straight into `tail` would make the pipeline's status `tail`'s (always 0)
+  # unless `set -o pipefail` is on, so `fail` could never be set and this
+  # release gate would pass vacuously. Task 7 Step 5 uses this same shape.
+  $DOTNET exec "tests/$proj/bin/Release/net9.0/$proj.dll" >"/tmp/$proj.log" 2>&1 \
     || { echo "TEST FAIL $proj"; fail=1; }
+  tail -3 "/tmp/$proj.log"
 done
 echo "fail=$fail"
 ```
 
-Expected: `fail=0`; total passing >= the 845 baseline plus the ~59 tests this
-plan adds (16 classifier + 6 event-lifecycle + 10 condition-lifecycle + 4 tray +
+Expected: `fail=0`; total passing >= the 845 baseline plus the ~61 tests this
+plan adds (16 classifier + 7 event-lifecycle + 11 condition-lifecycle + 4 tray +
 14 recovery-policy + 9 hook/power; one pre-existing pending-paste test is
 rewritten in place, not added); `Failed: 0` everywhere.
 
@@ -3511,7 +3692,12 @@ Hotkey survival:
       the owner). R14-2 — resume under memory pressure and type continuously
       for ~10 s, then verify hotkeys still work 5 minutes later (probes the
       "freshly reinstalled hook removed by the first paged-out keypress"
-      ordering gap; the heartbeat WRN line is the detector).
+      ordering gap). THE GATE IS THE DIRECT FUNCTIONAL CHECK: press the
+      dictation hotkey and confirm a dictation actually starts. The DEBUG
+      `Hook heartbeat: lastCallbackAgeMs=... lastAnyInputAgeMs=...` lines are
+      corroborating TIMELINE evidence only — they carry no verdict, because
+      the input age is system-wide (mouse included) and cannot by itself
+      distinguish a dead keyboard hook from ordinary mouse-only use.
 
 Mid-dictation event error:
 - [ ] Force an injection failure mid-dictation (e.g. dictate into a window that
@@ -3567,7 +3753,7 @@ re-run Steps 1-4.
 | CHANGE 1: EVENT reports flip the pill only when a dictation is in flight; keep the `HasPendingPaste` guard; at idle record `LastErrorStage`/`LastErrorMessage` only | Task 2 (`OnBusReport` + `SessionStages.IsDictationInFlight(SessionState)` keyed on the `_engineState` mirror — the presentation stage reads Error while an error shows and cannot answer the question; pending guard preserved verbatim). The ONE pre-existing test that encoded the removed idle behavior is rewritten mid-dictation in Step 4a (exhaustively verified to be the only breaker). |
 | CHANGE 1: unit-test all paths | Tasks 1-3 (`ErrorClassifierTests`, `SessionViewModelErrorLifecycleTests`) |
 | CHANGE 2: condition shows on the pill immediately | Task 3 (`EnterCondition`) |
-| CHANGE 2: pill retires after ~10 s with a generation token guarding against clobbering newer states | Task 3 (`ConditionPillHoldMs`, `ReturnToIdleIfUnchanged(token)`) + Task 2 (token bumped in the `Stage` setter) |
+| CHANGE 2: pill retires after ~10 s with a generation token guarding against clobbering newer states | Task 3 (`ConditionPillHoldMs`, `ReleasePillIfUnchanged(token)` → `ResyncPillToEngineState()`) + Task 2 (token bumped in the `Stage` setter). Retiring RESYNCS to the engine state, so retiring mid-dictation restores Recording rather than hiding the pill. |
 | CHANGE 2: persistent tray error state; tooltip carries the condition text | Task 4 (mapper arm + `TrayIconHost` wiring) |
 | CHANGE 2: condition clears everywhere the moment recovery succeeds, never by a timer | Task 3 (`NotifyConditionRecovered`, plus `Condition_Is_Never_Cleared_By_A_Timer`) |
 | CHANGE 2: EVENT errors shown mid-dictation self-clear after ~6 s with the same no-clobber guard | Task 2 (`ShowTransientError` + `EventErrorHoldMs`; two no-clobber tests) |
@@ -3580,7 +3766,7 @@ re-run Steps 1-4.
 | CHANGE 3: pure decision logic unit-testable; COM subscription stays thin | Task 5 (14 tests) + Task 6 (watcher has zero decision logic) |
 | CHANGE 3: do not regress the device-drift check or dispose discipline; keep the 5000-iteration hammer green | Task 6 (`RebuildIfDefaultChanged` unchanged; coordinator unchanged except the ONE additive `FrameObserved` event, with `OnSourceStopped`'s pinned unconditional raise explicitly protected) + Tasks 5/9 (hammer runs in every Audio test run) |
 | CHANGE 4: `PowerRegisterSuspendResumeNotification` with `DEVICE_NOTIFY_CALLBACK`; no window reliance | Task 8 (`PowerNotificationNative`, with the corrected caveat: MESSAGE-ONLY windows miss `WM_POWERBROADCAST`, a hidden TOP-LEVEL window is the documented fallback) |
-| CHANGE 4: on `PBT_APMRESUMESUSPEND`/`PBT_APMRESUMEAUTOMATIC`, marshal onto the hook thread and reinstall (unhook logging its result + `SetWindowsHookEx`) | Task 8 (`PowerResumeDecision`, `RequestHookReinstall` → `WM_WINPEPPER_REINSTALL_HOOK` → `ReinstallOnHookThread`). The trigger is explicitly documented as necessary-but-NOT-sufficient; the heartbeat telemetry (Step 4f) makes uncovered hook deaths visible. |
+| CHANGE 4: on `PBT_APMRESUMESUSPEND`/`PBT_APMRESUMEAUTOMATIC`, marshal onto the hook thread and reinstall (unhook logging its result + `SetWindowsHookEx`) | Task 8 (`PowerResumeDecision`, `RequestHookReinstall` → `WM_WINPEPPER_REINSTALL_HOOK` → `ReinstallOnHookThread`). The trigger is explicitly documented as necessary-but-NOT-sufficient; the heartbeat telemetry (Step 4f) leaves a DEBUG timeline (last-callback age vs last-any-input age) so an uncovered hook death is reconstructable after the fact instead of leaving no trace. It carries no verdict — `GetLastInputInfo` is system-wide and counts mouse, so it cannot discriminate a dead hook on its own. |
 | CHANGE 4: reset per-chord tracking so a half-tracked chord can't fire | Task 8 (`ResetTrackingState`, proven by two discriminating tests; the A15 raw-capture narrowing is recorded with a candidate test) |
 | CHANGE 4: exact log lines | Task 8 (`"System resumed; reinstalling keyboard hook"`, `"Keyboard hook reinstalled"` + thread id, the unhook-result line, the dequeue-latency line, the Debug per-notification line, WRN with the Win32 error) |
 | CHANGE 4: unregister on dispose | Task 8 Step 4e |
@@ -3614,8 +3800,10 @@ provider, synthetic URL, TODO, or "seam" for behavior the spec requires:
   is proven by the Task 9 checklist.
 - **Limitations are explicit, not silent.** (a) The resume notification is a
   necessary-but-NOT-sufficient reinstall trigger (Task 8's "Trigger honesty"
-  note); the two uncovered cases are named and instrumented by the heartbeat
-  WRN telemetry rather than papered over. (b) The natural mid-resume
+  note); the two uncovered cases are named, and the heartbeat DEBUG telemetry
+  leaves a reconstructable timeline for them rather than papering them over —
+  it is explicitly NOT a detector (no keyboard-specific liveness API exists),
+  so the Task 9 R14-2 gate is a direct functional hotkey check. (b) The natural mid-resume
   no-endpoint race is verified by inspection + the deterministic
   `Disable-PnpDevice` equivalent + decision-point logging, confirmed
   opportunistically in the field — Task 9 records this classification
@@ -3654,8 +3842,12 @@ command and the expected output.
   used in Tasks 2 and 3.
 - `SessionViewModel.EventErrorHoldMs` (Task 2) and `ConditionPillHoldMs`
   (Task 3) — both `public const int`, referenced by the tests in their own task.
-- `ReturnToIdleIfUnchanged(int token)` and `_presentationGeneration` — defined
-  in Task 2, reused unchanged by Task 3's `EnterCondition`.
+- `ReleasePillIfUnchanged(int token)`, `ResyncPillToEngineState()` and
+  `_presentationGeneration` — defined in Task 2, reused unchanged by Task 3's
+  `EnterCondition` / `NotifyConditionRecovered`. Both release paths RESYNC to
+  `_engineState` rather than hard-resetting to Idle; Task 3 additionally
+  stamps `_conditionPresentationGeneration` so a recovery can only release a
+  pill that a CONDITION actually owns.
 - `NotifyConditionRecovered(ErrorStage)` — defined in Task 3, called in Task 7
   Steps 2 and 3 with `ErrorStage.Audio` and `ErrorStage.Asr`.
 - The Task 3 condition model is a `Dictionary<ErrorStage, string>`; the

@@ -57,6 +57,10 @@ public sealed class WarmCaptureCoordinator : IDisposable
     /// <summary>Raised when capture faults or fails to (re)start (Bug 3).</summary>
     public event Action<Exception>? CaptureFaulted;
 
+    /// <summary>Raised for every non-empty frame ingested from the LIVE source
+    /// (epoch-guarded). Proof that the WASAPI pump is delivering audio end-to-end.</summary>
+    public event Action? FrameObserved;
+
     public bool IsRunning => Volatile.Read(ref _current) is not null;
     public string? ActiveDeviceId { get { lock (_lock) return _activeDeviceId; } }
 
@@ -155,6 +159,7 @@ public sealed class WarmCaptureCoordinator : IDisposable
         // (possibly disposed) source object here, only the frame payload.
         if (!ReferenceEquals(source, Volatile.Read(ref _current))) return;
         _buffer.Ingest(frame.Span);
+        if (!frame.IsEmpty) FrameObserved?.Invoke();
         if (_buffer.IsSessionActive) FramesAvailable?.Invoke(frame);
     }
 

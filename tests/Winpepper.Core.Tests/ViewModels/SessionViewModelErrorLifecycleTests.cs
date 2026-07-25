@@ -311,6 +311,40 @@ public class SessionViewModelErrorLifecycleTests
     }
 
     [Fact]
+    public void A_Stale_Event_Timer_Does_Not_Wipe_A_Condition_That_Took_The_Pill()
+    {
+        // DISCRIMINATING for the UNCONDITIONAL generation bump in EnterCondition.
+        // When the condition arrives, Stage is ALREADY Error (the EVENT error
+        // holds the pill), so the Stage setter early-returns WITHOUT bumping
+        // _presentationGeneration - only EnterCondition's own unconditional
+        // `++_presentationGeneration` invalidates the EVENT's pending 6 s
+        // self-clear token. If that bump is ever made conditional again (e.g.
+        // moved back into the setter, or gated on a stage transition), the
+        // stale EVENT timer keeps a live token and wipes the condition's text
+        // off the pill. FireAll() cannot construct this scenario: it fires the
+        // condition's own 10 s timer too, so the pill legitimately retires and
+        // the wipe is indistinguishable from normal retirement. Only
+        // FireNext() - firing the OLDEST timer alone - isolates the stale
+        // EVENT timer while the condition is still inside its hold window.
+        var (vm, engine, bus, delays) = NewVm();
+        StartDictation(engine);
+
+        bus.Report(ErrorStage.Cleanup, new InvalidOperationException("cleanup fell back"), Guid.NewGuid()); // EVENT, timer A (6 s)
+        vm.Stage.ShouldBe(SessionStage.Error);
+        vm.StatusText.ShouldBe("Error (Cleanup): cleanup fell back");
+
+        ReportMicCondition(bus); // CONDITION, timer B (10 s); Stage setter no-ops (already Error)
+        vm.StatusText.ShouldBe("Error (Audio): Element not found.");
+        delays.PendingCount.ShouldBe(2);
+
+        delays.FireNext(); // fire ONLY the EVENT's stale timer A; condition's timer B stays pending
+
+        vm.Stage.ShouldBe(SessionStage.Error);
+        vm.StatusText.ShouldBe("Error (Audio): Element not found.");
+        delays.PendingCount.ShouldBe(1);
+    }
+
+    [Fact]
     public void MissingSpeechModel_Is_Surfaced_As_A_Condition_While_Idle()
     {
         var (vm, _, bus, delays) = NewVm();

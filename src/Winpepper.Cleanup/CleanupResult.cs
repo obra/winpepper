@@ -19,4 +19,5 @@ public enum CleanupPath
     FallbackImplausible,  // The LLM output echoed prompt scaffolding or blew past plausible length.
     BypassShort,          // Raw transcript under 4 words; LLM skipped, deterministic path taken.
     BypassProvider, // cloud provider already formatted server-side; corrections only
+    BypassDisabled, // user turned the cleanup LLM off; corrections only
 }

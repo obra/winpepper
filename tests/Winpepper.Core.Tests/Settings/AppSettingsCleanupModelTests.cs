@@ -19,4 +19,18 @@ public class AppSettingsCleanupModelTests
         var s = new AppSettings() with { CleanupModelName = "custom-model" };
         s.CleanupModelName.ShouldBe("custom-model");
     }
+
+    /// <summary>Defaults mirror CleanupSettingsContract.Defaults() so a fresh
+    /// install behaves exactly as the Cleanup tab presents it.</summary>
+    [Fact]
+    public void Defaults_Include_Cleanup_Llm_Settings()
+    {
+        var s = new AppSettings();
+        s.CleanupEnabled.ShouldBeTrue();
+        s.CleanupWindowContextEnabled.ShouldBeFalse();
+        s.CleanupProfile.ShouldBe("Ordinary");
+        s.CleanupCustomPrompt.ShouldBe("");
+        s.CleanupMaxNewTokens.ShouldBe(512);
+        s.CleanupTimeoutMs.ShouldBe(15000);
+    }
 }

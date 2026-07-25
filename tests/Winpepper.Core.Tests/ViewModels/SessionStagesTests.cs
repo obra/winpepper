@@ -39,6 +39,7 @@ public class SessionStagesTests
     [Theory]
     [InlineData(SessionState.Recording, true)]
     [InlineData(SessionState.Transcribing, true)]
+    [InlineData(SessionState.CleaningUp, true)]
     [InlineData(SessionState.Injecting, true)]
     [InlineData(SessionState.Idle, false)]
     public void Engine_Truth_Form_Covers_Every_State(SessionState state, bool expected)

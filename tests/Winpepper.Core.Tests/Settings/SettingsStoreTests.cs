@@ -131,6 +131,55 @@ public class SettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void Load_PreUpgradeFile_Without_Cleanup_Keys_Gets_Cleanup_Defaults()
+    {
+        // UPGRADE PATH: a settings.json written by a build BEFORE the cleanup
+        // settings existed (real old-shape serialized output — camelCase, no
+        // cleanup* keys). Loading it must fill all six cleanup fields with
+        // their defaults, not throw and not zero them out.
+        File.WriteAllText(_path, """
+            {
+              "schema": 1,
+              "micDeviceId": "{abc-123}",
+              "asrModelName": "parakeet-tdt-0.6b-v3",
+              "asrProvider": "local",
+              "assemblyAiModel": "universal-3-5-pro",
+              "assemblyAiDeleteAfterTranscribe": true,
+              "assemblyAiCloudDeadlineSeconds": 10,
+              "assemblyAiKeytermsEnabled": false,
+              "cleanupModelName": "qwen2.5-0.5b-instruct-q4_k_m",
+              "holdHotkey": "RightCtrl+RightShift",
+              "toggleHotkey": "Ctrl+Shift+Space",
+              "playSounds": false,
+              "autostartEnabled": false,
+              "onboardingCompleted": true,
+              "speakerFilterEnabled": false,
+              "postPasteLearningEnabled": false,
+              "prewarmMicEnabled": true,
+              "lastVersionSeen": "0.4.0",
+              "windowWidth": null,
+              "windowHeight": null
+            }
+            """, System.Text.Encoding.UTF8);
+
+        var s = new SettingsStore(_path).Load();
+
+        s.CleanupEnabled.ShouldBeTrue();
+        s.CleanupWindowContextEnabled.ShouldBeFalse();
+        s.CleanupProfile.ShouldBe("Ordinary");
+        s.CleanupCustomPrompt.ShouldBe("");
+        s.CleanupMaxNewTokens.ShouldBe(512);
+        s.CleanupTimeoutMs.ShouldBe(15000);
+
+        // The old file's own values still load — proof this exercised the real
+        // deserializer, not a defaults fallback from a rejected file.
+        s.MicDeviceId.ShouldBe("{abc-123}");
+        s.OnboardingCompleted.ShouldBeTrue();
+        s.PlaySounds.ShouldBeFalse();
+        s.LastVersionSeen.ShouldBe("0.4.0");
+    }
+
+    [Fact]
     public void PostPasteLearning_Defaults_Off_And_RoundTrips()
     {
         new SettingsStore(_path).Load().PostPasteLearningEnabled.ShouldBeFalse();

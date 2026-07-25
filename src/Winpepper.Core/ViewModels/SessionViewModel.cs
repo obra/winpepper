@@ -346,6 +346,10 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 Stage = SessionStage.Transcribing;
                 StatusText = "Transcribing...";
                 break;
+            case SessionState.CleaningUp:
+                Stage = SessionStage.CleaningUp;
+                StatusText = "Cleaning up...";
+                break;
             case SessionState.Injecting:
                 Stage = SessionStage.Injecting;
                 StatusText = "Inserting...";
@@ -356,13 +360,6 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 break;
         }
     }
-
-    /// <summary>Called by pipeline glue when the cleanup worker starts.</summary>
-    public void MarkCleaningUp() => _ui.Post(() =>
-    {
-        Stage = SessionStage.CleaningUp;
-        StatusText = "Cleaning up...";
-    });
 
     /// <summary>
     /// A per-dictation pipeline failure reported directly by the host (not via
@@ -421,6 +418,14 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 case SessionState.Transcribing:
                     Stage = SessionStage.Transcribing;
                     StatusText = "Transcribing...";
+                    break;
+                case SessionState.CleaningUp:
+                    // A REAL engine state (not a presentation overlay): entered
+                    // only when the cleanup LLM actually runs (Preflight true),
+                    // and exited to Injecting when the runner finishes, so
+                    // "Inserting..." is reachable again after cleanup.
+                    Stage = SessionStage.CleaningUp;
+                    StatusText = "Cleaning up...";
                     break;
                 case SessionState.Injecting:
                     Stage = SessionStage.Injecting;

@@ -21,6 +21,22 @@ public sealed class CleanupRunner
         _log = log;
     }
 
+    /// <summary>
+    /// Single home for the "will the cleanup LLM actually run?" policy:
+    ///  * the user's Enabled toggle (read live per dictation),
+    ///  * cloud transcripts (already server-side punctuated/formatted),
+    ///  * the short-transcript bypass (a 0.5B model has nothing useful to do
+    ///    with a 1-3 word utterance and most often hallucinates there).
+    /// <see cref="RunAsync"/> uses it for its bypass behavior; PipelineHost uses
+    /// it only to pick which engine event to fire (a dictation enters the
+    /// CleaningUp state exactly when this returns true). Deterministic
+    /// corrections run on every path regardless of this predicate.
+    /// </summary>
+    public static bool Preflight(string rawTranscript, CleanupOptions options, bool cloudTranscript) =>
+        options.Enabled
+        && !cloudTranscript
+        && TranscriptSimilarity.WordCount(rawTranscript) >= 4;
+
     public async Task<CleanupResult> RunAsync(
         string rawTranscript,
         CorrectionsData corrections,
@@ -31,21 +47,22 @@ public sealed class CleanupRunner
     {
         var sw = Stopwatch.StartNew();
 
-        if (skipLlm)
+        // 0) Bypass decision — the SAME predicate PipelineHost consults to pick
+        //    the engine event, so pill state and runner behavior cannot diverge.
+        //    Every bypass takes the deterministic correction-only path.
+        //    Precedence (spec-owner ruling): the user's Enabled toggle outranks
+        //    everything — when it is off, history/logs must say "disabled" even
+        //    for cloud or short transcripts, so the user can SEE their switch
+        //    working. Then cloud, then the short-transcript bypass.
+        if (!Preflight(rawTranscript, options, cloudTranscript: skipLlm))
         {
-            // Cloud text is already server-side punctuated/formatted; run only the
-            // deterministic correction post-pass (no LLM). Mirrors the BypassShort call.
-            return Finalize(rawTranscript, "", corrections, assembledPrompt: "", CleanupPath.BypassProvider, sw);
-        }
-
-        // 0) Short-transcript bypass (spec fix-(iii)). A 0.5B model has nothing
-        //    useful to do with a 1-3 word utterance and is where it most often
-        //    hallucinates a whole sentence; skip it and take the deterministic
-        //    correction-only path.
-        if (TranscriptSimilarity.WordCount(rawTranscript) < 4)
-        {
-            _log.LogDebug("Transcript has fewer than 4 words; bypassing LLM cleanup");
-            return Finalize(rawTranscript, "", corrections, assembledPrompt: "", CleanupPath.BypassShort, sw);
+            var path = !options.Enabled
+                ? CleanupPath.BypassDisabled     // user turned the cleanup LLM off
+                : skipLlm
+                    ? CleanupPath.BypassProvider // cloud text arrives formatted; corrections only
+                    : CleanupPath.BypassShort;   // 1-3 word utterance (spec fix-(iii))
+            _log.LogDebug("Bypassing LLM cleanup ({Path})", path);
+            return Finalize(rawTranscript, "", corrections, assembledPrompt: "", path, sw);
         }
 
         // 1) Resolve window context with a bounded wait.

@@ -55,6 +55,29 @@ public class SessionViewModelTests
         vm.Stage.ShouldBe(SessionStage.Idle);
     }
 
+    /// <summary>The CleaningUp phase is engine-driven (no presentation overlay):
+    /// it shows its own label while the LLM runs and yields to "Inserting..."
+    /// when the runner finishes — the pill sequence the user watches.</summary>
+    [Fact]
+    public void Stages_Cycle_Through_Pipeline_With_Cleanup()
+    {
+        var engine = new SessionEngine();
+        var vm = new SessionViewModel(engine, new SynchronousUiThread());
+        engine.Apply(SessionEvent.StartRequested);
+        engine.Apply(SessionEvent.StopRequested);
+        vm.Stage.ShouldBe(SessionStage.Transcribing);
+        vm.StatusText.ShouldBe("Transcribing...");
+        engine.Apply(SessionEvent.CleanupStarted);
+        vm.Stage.ShouldBe(SessionStage.CleaningUp);
+        vm.StatusText.ShouldBe("Cleaning up...");
+        engine.Apply(SessionEvent.CleanupCompleted);
+        vm.Stage.ShouldBe(SessionStage.Injecting);
+        vm.StatusText.ShouldBe("Inserting...");
+        engine.Apply(SessionEvent.InjectionCompleted);
+        vm.Stage.ShouldBe(SessionStage.Idle);
+        vm.StatusText.ShouldBe("Ready");
+    }
+
     [Fact]
     public void NotifyError_Sets_ErrorStage_With_Message()
     {

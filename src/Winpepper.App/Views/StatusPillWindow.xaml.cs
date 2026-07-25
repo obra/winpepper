@@ -172,7 +172,9 @@ public sealed partial class StatusPillWindow : Window
             {
                 SessionStage.Recording   => Microsoft.UI.Colors.Red,
                 SessionStage.Transcribing => Microsoft.UI.Colors.Orange,
-                SessionStage.CleaningUp  => Microsoft.UI.Colors.Orange,
+                // Distinct from Transcribing's orange so the labeled
+                // "Cleaning up..." phase is visually tellable at a glance.
+                SessionStage.CleaningUp  => Microsoft.UI.Colors.MediumPurple,
                 SessionStage.Injecting   => Microsoft.UI.Colors.LimeGreen,
                 _ => Microsoft.UI.Colors.Gray,
             });

@@ -45,16 +45,80 @@ public class SessionEngineTests
         e.State.ShouldBe(SessionState.Idle);
     }
 
+    [Fact]
+    public void Transcribing_CleanupStarted_GoesToCleaningUp()
+    {
+        var e = new SessionEngine();
+        e.Apply(SessionEvent.StartRequested);
+        e.Apply(SessionEvent.StopRequested);
+        e.Apply(SessionEvent.CleanupStarted);
+        e.State.ShouldBe(SessionState.CleaningUp);
+    }
+
+    [Fact]
+    public void CleaningUp_CleanupCompleted_GoesToInjecting()
+    {
+        var e = new SessionEngine();
+        e.Apply(SessionEvent.StartRequested);
+        e.Apply(SessionEvent.StopRequested);
+        e.Apply(SessionEvent.CleanupStarted);
+        e.Apply(SessionEvent.CleanupCompleted);
+        e.State.ShouldBe(SessionState.Injecting);
+    }
+
+    [Fact]
+    public void FullCycle_WithCleanup_ReturnsToIdle()
+    {
+        var e = new SessionEngine();
+        e.Apply(SessionEvent.StartRequested);
+        e.Apply(SessionEvent.StopRequested);
+        e.Apply(SessionEvent.CleanupStarted);
+        e.Apply(SessionEvent.CleanupCompleted);
+        e.Apply(SessionEvent.InjectionCompleted);
+        e.State.ShouldBe(SessionState.Idle);
+    }
+
+    [Fact]
+    public void CleaningUp_Failed_GoesToIdle()
+    {
+        var e = new SessionEngine();
+        e.Apply(SessionEvent.StartRequested);
+        e.Apply(SessionEvent.StopRequested);
+        e.Apply(SessionEvent.CleanupStarted);
+        e.Apply(SessionEvent.Failed);
+        e.State.ShouldBe(SessionState.Idle);
+    }
+
+    /// <summary>CleanupStarted is only meaningful from Transcribing — the point
+    /// where PipelineHost decides whether the LLM will run. Anywhere else it is
+    /// a no-op, like every other out-of-place event.</summary>
+    [Theory]
+    [InlineData(SessionState.Idle)]
+    [InlineData(SessionState.Recording)]
+    public void CleanupStarted_OutsideTranscribing_IsIgnored(SessionState start)
+    {
+        var e = new SessionEngine();
+        if (start == SessionState.Recording)
+            e.Apply(SessionEvent.StartRequested);
+
+        e.State.ShouldBe(start);
+        e.Apply(SessionEvent.CleanupStarted);
+        e.State.ShouldBe(start);
+    }
+
     [Theory]
     [InlineData(SessionState.Recording)]
     [InlineData(SessionState.Transcribing)]
+    [InlineData(SessionState.CleaningUp)]
     [InlineData(SessionState.Injecting)]
     public void Cancel_FromAnyActiveState_GoesToIdle(SessionState start)
     {
         var e = new SessionEngine();
         e.Apply(SessionEvent.StartRequested);
-        if (start == SessionState.Transcribing || start == SessionState.Injecting)
+        if (start is SessionState.Transcribing or SessionState.CleaningUp or SessionState.Injecting)
             e.Apply(SessionEvent.StopRequested);
+        if (start == SessionState.CleaningUp)
+            e.Apply(SessionEvent.CleanupStarted);
         if (start == SessionState.Injecting)
             e.Apply(SessionEvent.TranscriptReady);
 

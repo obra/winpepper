@@ -125,8 +125,12 @@ public sealed class AppShell : IDisposable
         });
         var hotkeyValidator = new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator();
         var recordingVm = new RecordingSettingsViewModel(settings, writer, hotkeyValidator);
-        var cleanupContract = CleanupSettingsContract.Defaults();
-        var cleanupVm = new CleanupSettingsViewModel(cleanupContract, _ => { /* Plan 2 wires real persistence */ });
+        // Cleanup settings persist into AppSettings (Cleanup* properties) and are
+        // read LIVE per dictation by PipelineHost, so a Cleanup-tab change (incl.
+        // the Enabled toggle) takes effect on the very next dictation.
+        var cleanupContract = CleanupSettingsContract.FromSettings(settings);
+        var cleanupVm = new CleanupSettingsViewModel(cleanupContract,
+            c => _ = writer.QueueAndFlushAsync(c.ApplyTo));
 
         // Plan 2 normally provides initial corrections; until then, empty.
         var correctionsVm = new CorrectionsViewModel(
@@ -194,17 +198,10 @@ public sealed class AppShell : IDisposable
                 "WindowContextPrefetch unavailable; cleanup will run without window context.");
         }
 
-        // Build CleanupOptions from current cleanup settings (Plan 3 keeps these in
-        // the CleanupSettingsViewModel; here we read once at boot and re-read in
-        // Plan 4's settings-reactive wiring).
-        var cleanupOptions = new Winpepper.Cleanup.CleanupOptions
-        {
-            Profile = ParseProfile(cleanupContract.Profile),
-            CustomBasePrompt = cleanupContract.CustomPrompt,
-            Timeout = TimeSpan.FromMilliseconds(cleanupContract.TimeoutMs),
-            WindowContextEnabled = cleanupContract.WindowContextEnabled,
-            MaxNewTokensCap = cleanupContract.MaxNewTokens,
-        };
+        // NOTE: no boot-time CleanupOptions snapshot here. PipelineHost builds
+        // CleanupOptions per dictation from the settings provider
+        // (Winpepper.Cleanup.CleanupOptionsFactory.FromSettings), so Cleanup-tab
+        // changes are live.
 
         var historyServices = new Winpepper.App.Services.HistoryServices(AppPaths.HistoryRoot);
         var cleanupModelName = settings.CleanupModelName;
@@ -287,7 +284,7 @@ public sealed class AppShell : IDisposable
                                          (local, loadedModelName, s, onFallback) => AppShell.BuildTranscriber(
                                              local, loadedModelName, s, onFallback, aaiClient, aaiKeyStore, aaiOptions,
                                              correctionStore, errorBus, factory),
-                                         cleanup, correctionStore, windowContext, cleanupOptions,
+                                         cleanup, correctionStore, windowContext,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
                                          postPasteLearningEnabled: settings.PostPasteLearningEnabled,
                                          prewarmMicEnabled: settings.PrewarmMicEnabled);
@@ -406,14 +403,6 @@ public sealed class AppShell : IDisposable
         Dispose();
         Application.Current.Exit();
     }
-
-    private static Winpepper.Cleanup.CleanupProfile ParseProfile(string s) => s switch
-    {
-        "Ordinary" => Winpepper.Cleanup.CleanupProfile.Ordinary,
-        "Literal"  => Winpepper.Cleanup.CleanupProfile.Literal,
-        "Custom"   => Winpepper.Cleanup.CleanupProfile.Custom,
-        _          => Winpepper.Cleanup.CleanupProfile.Ordinary,
-    };
 
     /// <summary>
     /// Builds the transcriber for a dictation. When AssemblyAI is selected the

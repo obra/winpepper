@@ -320,6 +320,104 @@ public class CleanupRunnerTests
     }
 
     [Fact]
+    public async Task Run_Disabled_BypassesLlm_AndStillAppliesCorrections()
+    {
+        // The user's Enabled toggle, read live per dictation: LLM never called,
+        // deterministic corrections still run.
+        var backend = new FakeLlamaCleanupBackend { Output = "ignored" };
+        var runner = NewRunner(backend);
+        var corrections = new CorrectionsData
+        {
+            Replacements = new Dictionary<string, string>(StringComparer.Ordinal) { ["chat gbt"] = "ChatGPT" },
+        };
+        var opts = DefaultOptions() with { Enabled = false };
+
+        var result = await runner.RunAsync("we tested chat gbt today", corrections, null, opts, CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.BypassDisabled);
+        result.CleanedText.ShouldBe("we tested ChatGPT today");
+        backend.CallCount.ShouldBe(0); // LLM never called
+    }
+
+    [Fact]
+    public async Task Run_Disabled_And_Cloud_ReportsDisabledBypass()
+    {
+        // Precedence pin (spec-owner ruling): the user's Enabled toggle outranks
+        // everything — even a cloud transcript reports BypassDisabled when the
+        // toggle is off, so the history/log label reflects the user's switch.
+        var backend = new FakeLlamaCleanupBackend { Output = "ignored" };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with { Enabled = false };
+
+        var result = await runner.RunAsync("hello world okay then", CorrectionsData.Empty, null, opts,
+            CancellationToken.None, skipLlm: true);
+
+        result.Path.ShouldBe(CleanupPath.BypassDisabled);
+        backend.CallCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task Run_Disabled_And_Short_ReportsDisabledBypass()
+    {
+        // Same ruling for the short-transcript bypass: disabled outranks short.
+        var backend = new FakeLlamaCleanupBackend { Output = "ignored" };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with { Enabled = false };
+
+        var result = await runner.RunAsync("Right.", CorrectionsData.Empty, null, opts, CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.BypassDisabled);
+        backend.CallCount.ShouldBe(0);
+    }
+
+    // Preflight is the SINGLE policy home shared by RunAsync (bypass behavior)
+    // and PipelineHost (which engine event to fire — whether the pill shows a
+    // "Cleaning up..." phase). These pin the three bypass reasons and the run case.
+
+    [Fact]
+    public void Preflight_Disabled_IsFalse()
+    {
+        var opts = DefaultOptions() with { Enabled = false };
+        CleanupRunner.Preflight("clean up this sentence", opts, cloudTranscript: false).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Preflight_CloudTranscript_IsFalse()
+    {
+        CleanupRunner.Preflight("clean up this sentence", DefaultOptions(), cloudTranscript: true).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Preflight_ShortTranscript_IsFalse()
+    {
+        CleanupRunner.Preflight("Right.", DefaultOptions(), cloudTranscript: false).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Preflight_EnabledLocalFourWords_IsTrue()
+    {
+        CleanupRunner.Preflight("clean up this sentence", DefaultOptions(), cloudTranscript: false).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Preflight_True_Implies_BackendIsCalled_And_False_Implies_NotCalled()
+    {
+        // The contract PipelineHost relies on: when Preflight says the LLM will
+        // run, RunAsync calls the backend; when it says no, it never does.
+        var backend = new FakeLlamaCleanupBackend { Output = "Cleaned sentence here now." };
+        var runner = NewRunner(backend);
+
+        CleanupRunner.Preflight("clean up this sentence", DefaultOptions(), false).ShouldBeTrue();
+        await runner.RunAsync("clean up this sentence", CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+        backend.CallCount.ShouldBe(1);
+
+        var disabled = DefaultOptions() with { Enabled = false };
+        CleanupRunner.Preflight("clean up this sentence", disabled, false).ShouldBeFalse();
+        await runner.RunAsync("clean up this sentence", CorrectionsData.Empty, null, disabled, CancellationToken.None);
+        backend.CallCount.ShouldBe(1); // unchanged
+    }
+
+    [Fact]
     public async Task SkipLlm_RunsDeterministicOnly_NoBackendCall()
     {
         // A backend whose call count we assert stays zero -- proves the LLM path is skipped.

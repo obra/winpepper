@@ -84,6 +84,28 @@ public class SessionViewModelErrorLifecycleTests
     }
 
     [Fact]
+    public void SelfClear_During_CleaningUp_Resyncs_To_CleaningUp()
+    {
+        // CleaningUp is a REAL engine state now: when an EVENT error's hold
+        // expires while the cleanup LLM is still running, the pill must resync
+        // to "Cleaning up..." — not to Idle (hides the pill mid-dictation) and
+        // not to Injecting (lies about the phase).
+        var (vm, engine, bus, delays) = NewVm();
+        engine.Apply(SessionEvent.StartRequested);
+        engine.Apply(SessionEvent.StopRequested);
+        engine.Apply(SessionEvent.CleanupStarted);
+        vm.Stage.ShouldBe(SessionStage.CleaningUp);
+
+        bus.Report(ErrorStage.Injection, new InvalidOperationException("SendInput refused"), Guid.NewGuid());
+        vm.Stage.ShouldBe(SessionStage.Error);
+
+        delays.FireAll();
+
+        vm.Stage.ShouldBe(SessionStage.CleaningUp);
+        vm.StatusText.ShouldBe("Cleaning up...");
+    }
+
+    [Fact]
     public void SelfClear_Is_A_NoOp_When_A_Newer_State_Took_The_Pill()
     {
         var (vm, engine, bus, delays) = NewVm();

@@ -19,10 +19,13 @@ public sealed class SessionEngine
         (SessionState.Idle,         SessionEvent.StartRequested)       => SessionState.Recording,
         (SessionState.Recording,    SessionEvent.StopRequested)        => SessionState.Transcribing,
         (SessionState.Transcribing, SessionEvent.TranscriptReady)      => SessionState.Injecting,
+        (SessionState.Transcribing, SessionEvent.CleanupStarted)       => SessionState.CleaningUp,
+        (SessionState.CleaningUp,   SessionEvent.CleanupCompleted)     => SessionState.Injecting,
         (SessionState.Injecting,    SessionEvent.InjectionCompleted)   => SessionState.Idle,
 
         (SessionState.Recording,    SessionEvent.CancelRequested)      => SessionState.Idle,
         (SessionState.Transcribing, SessionEvent.CancelRequested)      => SessionState.Idle,
+        (SessionState.CleaningUp,   SessionEvent.CancelRequested)      => SessionState.Idle,
         (SessionState.Injecting,    SessionEvent.CancelRequested)      => SessionState.Idle,
 
         (_,                         SessionEvent.Failed)               => SessionState.Idle,

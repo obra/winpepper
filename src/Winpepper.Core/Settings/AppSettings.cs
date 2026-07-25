@@ -43,6 +43,16 @@ public record AppSettings
     // Cleanup model selection. Bound to Winpepper.Models.ModelRegistry.DefaultCleanupName.
     public string CleanupModelName { get; init; } = "qwen2.5-0.5b-instruct-q4_k_m";
 
+    // Cleanup LLM settings (Cleanup tab). Persisted here and read LIVE per
+    // dictation by PipelineHost, so a toggle flip takes effect on the very next
+    // dictation. Defaults mirror CleanupSettingsContract.Defaults().
+    public bool CleanupEnabled { get; init; } = true;
+    public bool CleanupWindowContextEnabled { get; init; } = false;
+    public string CleanupProfile { get; init; } = "Ordinary"; // "Ordinary" | "Literal" | "Custom"
+    public string CleanupCustomPrompt { get; init; } = "";
+    public int CleanupMaxNewTokens { get; init; } = 512;
+    public int CleanupTimeoutMs { get; init; } = 15000;
+
     // Hotkeys (Plan 1 defaults; persisted as raw VK codes + modifier flags
     // — full chord recording UI comes in Plan 3)
     public string HoldHotkey { get; init; } = "RightCtrl+RightShift";

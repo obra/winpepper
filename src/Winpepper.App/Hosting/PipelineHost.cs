@@ -44,7 +44,9 @@ public sealed class PipelineHost : IDisposable
     private Action<ReadOnlyMemory<float>>? _frameHandler;
 
     private readonly Winpepper.Cleanup.CleanupRunner? _cleanup;        // PLAN2-TYPE
-    private readonly Winpepper.Cleanup.CleanupOptions _cleanupOptions; // PLAN2-TYPE
+    // NOTE: no CleanupOptions field. Options are built PER DICTATION from the
+    // settings provider (CleanupOptionsFactory.FromSettings) so Cleanup-tab
+    // changes — including the Enabled toggle — take effect immediately.
     private readonly Winpepper.Corrections.CorrectionStore? _corrections; // PLAN2-TYPE
     private readonly Winpepper.Platform.WindowContext.WindowContextPrefetch? _windowContext; // PLAN2-TYPE
     private Task<Winpepper.Platform.WindowContext.WindowContextResult>? _ctxPrefetchTask;    // PLAN2-TYPE
@@ -85,7 +87,6 @@ public sealed class PipelineHost : IDisposable
         Winpepper.Cleanup.CleanupRunner? cleanup = null,                       // PLAN2-TYPE
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
-        Winpepper.Cleanup.CleanupOptions? cleanupOptions = null,               // PLAN2-TYPE
         Winpepper.Core.Learning.PostPasteWatcher? postPaste = null,
         Winpepper.Platform.Learning.FocusedElementCapturer? focusedCapturer = null,
         bool postPasteLearningEnabled = false,
@@ -113,7 +114,6 @@ public sealed class PipelineHost : IDisposable
         _cleanup = cleanup;
         _corrections = corrections;
         _windowContext = windowContext;
-        _cleanupOptions = cleanupOptions ?? new Winpepper.Cleanup.CleanupOptions();
         _clipboardFallback = clipboardFallback;
         _toasts = toasts;
         _settingsProvider = settingsProvider;
@@ -409,9 +409,15 @@ public sealed class PipelineHost : IDisposable
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 _targetAtStart = CaptureTarget();
 
-                // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
+                // PLAN2-TYPE — start window-context prefetch in parallel with audio
+                // capture. Gated on LIVE settings (not a boot snapshot) so a
+                // Cleanup-tab change applies to this dictation; prefetch is only
+                // useful when the cleanup LLM is enabled at all.
                 _ctxPrefetchTask = null;
-                if (_windowContext is not null && _cleanupOptions.WindowContextEnabled)
+                var settingsAtStart = _settingsProvider();
+                if (_windowContext is not null
+                    && settingsAtStart.CleanupEnabled
+                    && settingsAtStart.CleanupWindowContextEnabled)
                 {
                     var hwnd = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
                     _ctxPrefetchTask = _windowContext.StartAsync(hwnd, ct);
@@ -493,7 +499,6 @@ public sealed class PipelineHost : IDisposable
                         TimeSpan.FromSeconds(6)));
                 var transcription = await transcriber.TranscribeAsync(trimmed, ct);
                 transcribeSw.Stop();
-                _engine.Apply(SessionEvent.TranscriptReady);
 
                 string final = transcription.Text;
                 var producedModelName = transcription.ProviderModelName;
@@ -501,10 +506,22 @@ public sealed class PipelineHost : IDisposable
                 var cleanupUsedModel = "";
                 var windowContextUsed = false;
 
+                // Live per-dictation cleanup settings: the Cleanup tab persists into
+                // AppSettings, so building options HERE (not at boot) makes the
+                // Enabled toggle and every other cleanup setting take effect on
+                // this very dictation.
+                var cleanupOptions = Winpepper.Cleanup.CleanupOptionsFactory.FromSettings(settingsNow);
+                var skipLlm = Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName);
+                // Single policy home (CleanupRunner.Preflight) decides whether the
+                // LLM will actually run. The engine enters CleaningUp exactly for
+                // those dictations — so the pill's "Cleaning up..." phase is
+                // truthful and "Inserting..." remains reachable afterwards.
+                var llmWillRun = !string.IsNullOrWhiteSpace(final) && _cleanup is not null
+                    && Winpepper.Cleanup.CleanupRunner.Preflight(final, cleanupOptions, skipLlm);
+                _engine.Apply(llmWillRun ? SessionEvent.CleanupStarted : SessionEvent.TranscriptReady);
+
                 if (!string.IsNullOrWhiteSpace(final) && _cleanup is not null)
                 {
-                    _vm.MarkCleaningUp();
-
                     // Plan 2's CleanupRunner.RunAsync expects a Task<string?>? for the
                     // window context. Adapt our Task<WindowContextResult> by projecting
                     // .Text out (or null on failure). This mirrors Plan 2 Cli/Pipeline.cs
@@ -528,16 +545,19 @@ public sealed class PipelineHost : IDisposable
                             rawTranscript: final,
                             corrections: correctionsData,
                             windowContextTask: ctxTextTask,
-                            options: _cleanupOptions,
+                            options: cleanupOptions,
                             ct: ct,
-                            skipLlm: Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName));
+                            skipLlm: skipLlm);
                         cleanupSw.Stop();
                         _log.LogInformation("Cleanup path={Path}, {ElapsedMs}ms",
                             result.Path, (int)result.Elapsed.TotalMilliseconds);
                         final = result.CleanedText;
-                        cleanupUsedModel = result.Path == Winpepper.Cleanup.CleanupPath.BypassProvider
-                            ? "none (cloud, corrections-only)"
-                            : _cleanupModelName;
+                        cleanupUsedModel = result.Path switch
+                        {
+                            Winpepper.Cleanup.CleanupPath.BypassProvider => "none (cloud, corrections-only)",
+                            Winpepper.Cleanup.CleanupPath.BypassDisabled => "none (disabled, corrections-only)",
+                            _ => _cleanupModelName,
+                        };
                         windowContextUsed = ctxTextTask is not null
                                             && result.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
                     }
@@ -547,6 +567,10 @@ public sealed class PipelineHost : IDisposable
                         _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
                         _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Cleanup, ex, _currentSessionId);
                     }
+
+                    // Exit CleaningUp whether the runner succeeded or threw — the
+                    // engine must reach Injecting either way.
+                    if (llmWillRun) _engine.Apply(SessionEvent.CleanupCompleted);
                 }
 
                 var injectSw = System.Diagnostics.Stopwatch.StartNew();
@@ -660,9 +684,15 @@ public sealed class PipelineHost : IDisposable
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                     _targetAtStart = CaptureTarget();
 
-                    // PLAN2-TYPE — start window-context prefetch in parallel with audio capture.
+                    // PLAN2-TYPE — start window-context prefetch in parallel with audio
+                    // capture. Gated on LIVE settings (not a boot snapshot) so a
+                    // Cleanup-tab change applies to this dictation; prefetch is only
+                    // useful when the cleanup LLM is enabled at all.
                     _ctxPrefetchTask = null;
-                    if (_windowContext is not null && _cleanupOptions.WindowContextEnabled)
+                    var settingsAtStart2 = _settingsProvider();
+                    if (_windowContext is not null
+                        && settingsAtStart2.CleanupEnabled
+                        && settingsAtStart2.CleanupWindowContextEnabled)
                     {
                         var hwnd = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
                         _ctxPrefetchTask = _windowContext.StartAsync(hwnd, ct);
@@ -737,7 +767,6 @@ public sealed class PipelineHost : IDisposable
                             TimeSpan.FromSeconds(6)));
                     var transcription2 = await transcriber2.TranscribeAsync(trimmed2, ct);
                     transcribeSw2.Stop();
-                    _engine.Apply(SessionEvent.TranscriptReady);
 
                     string final2 = transcription2.Text;
                     var producedModelName2 = transcription2.ProviderModelName;
@@ -745,10 +774,22 @@ public sealed class PipelineHost : IDisposable
                     var cleanupUsedModel2 = "";
                     var windowContextUsed2 = false;
 
+                    // Live per-dictation cleanup settings: the Cleanup tab persists into
+                    // AppSettings, so building options HERE (not at boot) makes the
+                    // Enabled toggle and every other cleanup setting take effect on
+                    // this very dictation.
+                    var cleanupOptions2 = Winpepper.Cleanup.CleanupOptionsFactory.FromSettings(settingsNow2);
+                    var skipLlm2 = Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName2);
+                    // Single policy home (CleanupRunner.Preflight) decides whether the
+                    // LLM will actually run. The engine enters CleaningUp exactly for
+                    // those dictations — so the pill's "Cleaning up..." phase is
+                    // truthful and "Inserting..." remains reachable afterwards.
+                    var llmWillRun2 = !string.IsNullOrWhiteSpace(final2) && _cleanup is not null
+                        && Winpepper.Cleanup.CleanupRunner.Preflight(final2, cleanupOptions2, skipLlm2);
+                    _engine.Apply(llmWillRun2 ? SessionEvent.CleanupStarted : SessionEvent.TranscriptReady);
+
                     if (!string.IsNullOrWhiteSpace(final2) && _cleanup is not null)
                     {
-                        _vm.MarkCleaningUp();
-
                         // Plan 2's CleanupRunner.RunAsync expects a Task<string?>? for the
                         // window context. Adapt our Task<WindowContextResult> by projecting
                         // .Text out (or null on failure). This mirrors Plan 2 Cli/Pipeline.cs
@@ -772,16 +813,19 @@ public sealed class PipelineHost : IDisposable
                                 rawTranscript: final2,
                                 corrections: correctionsData2,
                                 windowContextTask: ctxTextTask2,
-                                options: _cleanupOptions,
+                                options: cleanupOptions2,
                                 ct: ct,
-                                skipLlm: Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName2));
+                                skipLlm: skipLlm2);
                             cleanupSw2.Stop();
                             _log.LogInformation("Cleanup path={Path}, {ElapsedMs}ms",
                                 result2.Path, (int)result2.Elapsed.TotalMilliseconds);
                             final2 = result2.CleanedText;
-                            cleanupUsedModel2 = result2.Path == Winpepper.Cleanup.CleanupPath.BypassProvider
-                                ? "none (cloud, corrections-only)"
-                                : _cleanupModelName;
+                            cleanupUsedModel2 = result2.Path switch
+                            {
+                                Winpepper.Cleanup.CleanupPath.BypassProvider => "none (cloud, corrections-only)",
+                                Winpepper.Cleanup.CleanupPath.BypassDisabled => "none (disabled, corrections-only)",
+                                _ => _cleanupModelName,
+                            };
                             windowContextUsed2 = ctxTextTask2 is not null
                                                 && result2.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
                         }
@@ -791,6 +835,10 @@ public sealed class PipelineHost : IDisposable
                             _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
                             _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Cleanup, ex, _currentSessionId);
                         }
+
+                        // Exit CleaningUp whether the runner succeeded or threw — the
+                        // engine must reach Injecting either way.
+                        if (llmWillRun2) _engine.Apply(SessionEvent.CleanupCompleted);
                     }
 
                     var injectSw2 = System.Diagnostics.Stopwatch.StartNew();

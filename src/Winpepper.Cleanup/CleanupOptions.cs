@@ -5,6 +5,13 @@ namespace Winpepper.Cleanup;
 /// </summary>
 public sealed record CleanupOptions
 {
+    /// <summary>
+    /// Whether the cleanup LLM runs at all. When false the runner takes the
+    /// deterministic corrections-only path (<see cref="CleanupPath.BypassDisabled"/>).
+    /// Read live per dictation from <c>AppSettings.CleanupEnabled</c>.
+    /// </summary>
+    public bool Enabled { get; init; } = true;
+
     public CleanupProfile Profile { get; init; } = CleanupProfile.Ordinary;
 
     /// <summary>Custom base prompt; only used when <see cref="Profile"/> is Custom.</summary>

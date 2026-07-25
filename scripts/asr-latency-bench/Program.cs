@@ -8,6 +8,7 @@
 // API and run only when ASSEMBLYAI_API_KEY is set.
 using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
+using Winpepper.Asr;
 using Winpepper.Asr.Transcription;
 
 const int AudioSeconds = 10;
@@ -15,7 +16,12 @@ const double LocalRtf = 0.30;              // assumed local realtime factor (doc
 var uploadTime = TimeSpan.FromMilliseconds(400);   // ~320 KB WAV upload assumption
 var processingTime = TimeSpan.FromSeconds(3.0);    // cloud batch processing for a 10 s clip
 
-var requested = args.Length > 0 ? args : new[] { "sim-local-batch", "sim-remote-batch", "real-remote-batch" };
+var requested = args.Length > 0 ? args : new[]
+{
+    "sim-local-batch", "sim-local-stream",
+    "sim-remote-batch", "sim-remote-stream",
+    "real-remote-batch", "real-remote-stream",
+};
 var rows = new List<(string Scenario, string Kind, long PostStopMs)>();
 
 foreach (var scenario in requested)
@@ -66,6 +72,53 @@ foreach (var scenario in requested)
             Console.WriteLine($"  (transcript: \"{result.Text}\")");
             break;
         }
+        case "sim-local-stream":
+        {
+            // REAL production pipeline (StreamingDictationSession +
+            // ParakeetStreamingTranscriber + chunked mel/decode) with the ONNX
+            // encoder edge replaced by the same RTF delay model as sim-local-batch.
+            var audio = SynthesizeAudio(AudioSeconds);
+            var backend = new PacedParakeetBackend(LocalRtf);
+            var batch = new PacedTranscriber("parakeet-sim", TimeSpan.FromSeconds(AudioSeconds * LocalRtf));
+            var streaming = new ParakeetStreamingTranscriber(
+                backend, batch, "parakeet-sim", PreprocessorConfig.ParakeetTdtV3);
+            rows.Add((scenario, "simulated", await MeasureStreaming(streaming, audio)));
+            break;
+        }
+        case "sim-remote-stream":
+        {
+            // REAL AssemblyAiStreamingTranscriber/session over a paced fake socket
+            // (final turn ~300 ms after Terminate — measured Universal-Streaming
+            // immediate-finalization order of magnitude).
+            var audio = SynthesizeAudio(AudioSeconds);
+            var streaming = new AssemblyAiStreamingTranscriber(
+                () => new PacedFakeSocket(finalizeDelay: TimeSpan.FromMilliseconds(300)),
+                // Zero-pushed REST batch fallback (Task 7 / A9) — never used here:
+                // MeasureStreaming pushes frames at realtime, so _pushedSamples > 0.
+                new PacedTranscriber("assemblyai-batch-sim", TimeSpan.Zero),
+                new BenchKeyStore("sim-key"), new AssemblyAiOptions(),
+                NullLogger<AssemblyAiStreamingTranscriber>.Instance);
+            rows.Add((scenario, "simulated", await MeasureStreaming(streaming, audio)));
+            break;
+        }
+        case "real-remote-stream":
+        {
+            var key = Environment.GetEnvironmentVariable("ASSEMBLYAI_API_KEY");
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                Console.WriteLine($"{scenario}: SKIPPED (ASSEMBLYAI_API_KEY not set)");
+                break;
+            }
+            var audio = SynthesizeAudio(AudioSeconds);
+            var streaming = new AssemblyAiStreamingTranscriber(
+                () => new ClientStreamingWebSocket(),
+                // Zero-pushed REST batch fallback — never used (realtime pacing).
+                new PacedTranscriber("assemblyai-batch-sim", TimeSpan.Zero),
+                new BenchKeyStore(key), new AssemblyAiOptions(),
+                NullLogger<AssemblyAiStreamingTranscriber>.Instance);
+            rows.Add((scenario, "REAL network", await MeasureStreaming(streaming, audio)));
+            break;
+        }
         default:
             Console.WriteLine($"{scenario}: unknown scenario");
             break;
@@ -78,7 +131,7 @@ Console.WriteLine("|---|---|---|---|");
 foreach (var (s, kind, ms) in rows)
     Console.WriteLine($"| {s} | {kind} | {AudioSeconds} s | {ms} |");
 
-// --- helpers -------------------------------------------------------------
+// --- helper functions and classes ---
 
 static float[] SynthesizeAudio(int seconds)
 {
@@ -95,6 +148,26 @@ static float[] SynthesizeAudio(int seconds)
                            + 0.05 * (rng.NextDouble() * 2 - 1));
     }
     return audio;
+}
+
+// Simulates a live dictation: frames pushed in real time (50 ms cadence) through
+// the REAL coordinator, then measures stop -> final transcript.
+static async Task<long> MeasureStreaming(IStreamingTranscriber transcriber, float[] audio)
+{
+    var session = StreamingDictationSession.Start(
+        _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+        NullLogger.Instance, CancellationToken.None);
+    const int frame = 800; // 50 ms
+    for (var i = 0; i < audio.Length; i += frame)
+    {
+        session.OnFrame(audio.AsMemory(i, Math.Min(frame, audio.Length - i)));
+        await Task.Delay(50);
+    }
+    var sw = Stopwatch.StartNew();
+    var result = await session.FinishAsync(audio, CancellationToken.None);
+    var ms = sw.ElapsedMilliseconds;
+    if (result is null) throw new InvalidOperationException("no transcriber materialized");
+    return ms;
 }
 
 sealed class PacedTranscriber : ITranscriber
@@ -136,4 +209,61 @@ sealed class BenchKeyStore : IAssemblyAiKeyStore
     public void Save(string apiKey) { }
     public string? Load() => _key;
     public void Clear() { }
+}
+
+/// <summary>IParakeetBackend whose Encode costs rtf x chunk-audio-seconds (the
+/// same realtime-factor assumption as sim-local-batch); decode steps are free.</summary>
+sealed class PacedParakeetBackend : IParakeetBackend
+{
+    private readonly double _rtf;
+    public PacedParakeetBackend(double rtf) => _rtf = rtf;
+    public int VocabSize => 8;
+    public int BlankId => 7;
+    public int DecoderHiddenLayers => 2;
+    public int DecoderHiddenDim => 4;
+
+    public EncoderOutput Encode(float[,] melFrames)
+    {
+        var tIn = melFrames.GetLength(0);
+        Thread.Sleep(TimeSpan.FromSeconds(_rtf * tIn / 100.0)); // 100 mel frames per audio second
+        // MUST be the exact output-length function floor((T-1)/8)+1 that
+        // ParakeetStreamingSession.EncodeAndDecode asserts on every encode
+        // (a proportional tIn/8 diverges on the second chunk: T=300 -> 37 vs 38,
+        // silently corrupting the session and falling back to the 3 s batch fake).
+        var tOut = (tIn - 1) / 8 + 1;
+        return new EncoderOutput(new float[2 * tOut], tOut, 2, tOut);
+    }
+
+    public DecoderJointResult DecodeJoint(float[] encoderFrame, int lastToken, float[] stateH, float[] stateC)
+    {
+        var logits = new float[8 + 5];
+        logits[BlankId] = 10f;
+        logits[8 + 1] = 10f;
+        return new DecoderJointResult(logits, stateH, stateC);
+    }
+
+    public string DecodeTokens(IEnumerable<int> tokenIds) => "simulated transcript";
+}
+
+/// <summary>Paced fake AssemblyAI streaming socket: replies with a final Turn +
+/// Termination <c>finalizeDelay</c> after the Terminate message arrives.</summary>
+sealed class PacedFakeSocket : IStreamingWebSocket
+{
+    private readonly TimeSpan _finalizeDelay;
+    private readonly System.Threading.Channels.Channel<string?> _incoming =
+        System.Threading.Channels.Channel.CreateUnbounded<string?>();
+    public PacedFakeSocket(TimeSpan finalizeDelay) => _finalizeDelay = finalizeDelay;
+    public Task ConnectAsync(Uri uri, string apiKey, CancellationToken ct) => Task.CompletedTask;
+    public Task SendBinaryAsync(ReadOnlyMemory<byte> audio, CancellationToken ct) => Task.CompletedTask;
+    public async Task SendTextAsync(string json, CancellationToken ct)
+    {
+        if (json.Contains("Terminate"))
+        {
+            await Task.Delay(_finalizeDelay, ct);
+            _incoming.Writer.TryWrite("{\"type\":\"Turn\",\"turn_order\":0,\"end_of_turn\":true,\"transcript\":\"simulated transcript\"}");
+            _incoming.Writer.TryWrite("{\"type\":\"Termination\"}");
+        }
+    }
+    public async Task<string?> ReceiveTextAsync(CancellationToken ct) => await _incoming.Reader.ReadAsync(ct);
+    public ValueTask DisposeAsync() { _incoming.Writer.TryWrite(null); return ValueTask.CompletedTask; }
 }

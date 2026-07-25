@@ -20,6 +20,24 @@ delay models; `real-*` rows hit the real AssemblyAI API (run when
 | sim-remote-batch | simulated | 10 s | 4196 |
 | real-remote-batch | REAL network | 10 s | SKIPPED — no API key |
 
-## AFTER (streaming architecture)
+## AFTER (streaming architecture) — recorded 2026-07-25
 
-_To be recorded by the final task of this plan._
+| scenario | kind | audio | post-stop latency (ms) |
+|---|---|---|---|
+| sim-local-batch | simulated | 10 s | 3004 |
+| sim-local-stream | simulated | 10 s | 912 |
+| sim-remote-batch | simulated | 10 s | 4181 |
+| sim-remote-stream | simulated | 10 s | 312 |
+| real-remote-batch | REAL network | 10 s | SKIPPED — no API key |
+| real-remote-stream | REAL network | 10 s | SKIPPED — no API key |
+
+## Comparison (perceived transcription time, 10 s dictation)
+
+| path | BEFORE (batch) | AFTER (streaming) | reduction |
+|---|---|---|---|
+| local | 3004 ms | 912 ms | 70% |
+| remote | 4181 ms | 312 ms | 93% |
+
+On Windows, production `HistoryTimings.TranscribeMs` (history archive) measures
+this same post-stop window around the new FinishAsync call, so the improvement
+is directly observable in real dictations after merge.

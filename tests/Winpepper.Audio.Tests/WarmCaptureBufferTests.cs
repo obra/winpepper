@@ -156,4 +156,33 @@ public class WarmCaptureBufferTests
         buf.StopSession();
         buf.SessionWasSilent.ShouldBeFalse();
     }
+
+    [Fact]
+    public void StartSession_ReturnsTheSeededPreroll()
+    {
+        var buf = new WarmCaptureBuffer(ringCapacitySamples: 10);
+        buf.Ingest(Ramp(0, 15)); // ring keeps 5..14
+
+        var preroll = buf.StartSession(prerollSamples: 10);
+
+        preroll.ShouldBe(Ramp(5, 10)); // exactly what StopSession will lead with
+        buf.StopSession().ShouldBe(Ramp(5, 10));
+    }
+
+    [Fact]
+    public void StartSession_NoRingHistory_ReturnsEmptyPreroll()
+    {
+        var buf = new WarmCaptureBuffer(ringCapacitySamples: 10);
+        var preroll = buf.StartSession(prerollSamples: 10);
+        preroll.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void StartSession_ZeroPrerollRequested_ReturnsEmpty()
+    {
+        var buf = new WarmCaptureBuffer(ringCapacitySamples: 10);
+        buf.Ingest(Ramp(0, 5));
+        var preroll = buf.StartSession(prerollSamples: 0);
+        preroll.ShouldBeEmpty();
+    }
 }

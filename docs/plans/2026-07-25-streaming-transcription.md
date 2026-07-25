@@ -3518,7 +3518,11 @@ sealed class PacedParakeetBackend : Winpepper.Asr.IParakeetBackend
     {
         var tIn = melFrames.GetLength(0);
         Thread.Sleep(TimeSpan.FromSeconds(_rtf * tIn / 100.0)); // 100 mel frames per audio second
-        var tOut = Math.Max(1, tIn / 8);
+        // MUST be the exact output-length function floor((T-1)/8)+1 that
+        // ParakeetStreamingSession.EncodeAndDecode asserts on every encode
+        // (a proportional tIn/8 diverges on the second chunk: T=300 -> 37 vs 38,
+        // silently corrupting the session and falling back to the 3 s batch fake).
+        var tOut = (tIn - 1) / 8 + 1;
         return new Winpepper.Asr.EncoderOutput(new float[2 * tOut], tOut, 2, tOut);
     }
 

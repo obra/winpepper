@@ -38,13 +38,7 @@ public static class PcmWavEncoder
         w.Write(Encoding.ASCII.GetBytes("data"));
         w.Write(dataBytes);
         foreach (var s in samples)
-        {
-            var clamped = Math.Clamp(s, -1.0f, 1.0f);
-            short pcm;
-            if (clamped >= 0f) pcm = (short)Math.Round(clamped * short.MaxValue);
-            else pcm = (short)Math.Round(clamped * -(double)short.MinValue);
-            w.Write(pcm);
-        }
+            w.Write(Pcm16.SampleToPcm16(s)); // BinaryWriter is little-endian, same as Pcm16.FromFloats
 
         w.Flush();
         return ms.ToArray();

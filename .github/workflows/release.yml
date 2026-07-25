@@ -181,3 +181,32 @@ jobs:
             artifacts/install.log
             artifacts/uninstall.log
           if-no-files-found: ignore
+
+  # Submits the just-published release to microsoft/winget-pkgs.
+  #
+  # Deliberately a job here rather than a `release:`-triggered workflow:
+  # the release above is created with the default GITHUB_TOKEN, and events
+  # created by GITHUB_TOKEN do not trigger other workflows.
+  #
+  # Skipped until the repo variable WINGET_AUTOSUBMIT is set to 'true'
+  # (one-time setup: WINGET_TOKEN secret + winget-pkgs fork + first manual
+  # submission — see docs/release.md). winget-releaser can only UPDATE a
+  # package that already exists in winget-pkgs.
+  #
+  # Pin note: @v2 verified 2026-07-25 (inputs identifier/release-tag/
+  # installers-regex/token; runs on any OS with cargo on PATH — preinstalled
+  # on windows-latest). The v2 tag is a frozen 2024-11 snapshot behind main;
+  # revisit the pin if ever moving off windows-latest (ubuntu-slim breaks
+  # under @v2's `cargo binstall` invocation).
+  winget:
+    needs: release-msi
+    if: vars.WINGET_AUTOSUBMIT == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Submit obra.Winpepper to microsoft/winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: obra.Winpepper
+          release-tag: ${{ github.ref_name }}
+          installers-regex: '\.msi$'
+          token: ${{ secrets.WINGET_TOKEN }}

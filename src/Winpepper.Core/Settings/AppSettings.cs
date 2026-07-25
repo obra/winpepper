@@ -40,6 +40,15 @@ public record AppSettings
     // (safe on all tiers) regardless of this flag.
     public bool AssemblyAiKeytermsEnabled { get; init; } = false;
 
+    // Streaming transcription: transcribe audio while you speak so the text is
+    // (nearly) ready the moment you stop. Applies to BOTH providers (local
+    // Parakeet and AssemblyAI cloud). Read LIVE per dictation by PipelineHost,
+    // so a flip takes effect on the very next dictation. Off = pre-streaming
+    // behavior: a single batch transcription after stop. Streaming failures
+    // already fall back to batch silently, so this switch is a user preference
+    // (and a diagnostic lever), not a safety requirement. On by default.
+    public bool StreamingEnabled { get; init; } = true;
+
     // Cleanup model selection. Bound to Winpepper.Models.ModelRegistry.DefaultCleanupName.
     public string CleanupModelName { get; init; } = "qwen2.5-0.5b-instruct-q4_k_m";
 

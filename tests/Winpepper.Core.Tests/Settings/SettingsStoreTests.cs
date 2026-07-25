@@ -180,6 +180,54 @@ public class SettingsStoreTests : IDisposable
     }
 
     [Fact]
+    public void StreamingEnabled_RoundTrips_ThroughStore()
+    {
+        var store = new SettingsStore(_path);
+        store.Save(store.Load() with { StreamingEnabled = false });
+        new SettingsStore(_path).Load().StreamingEnabled.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void StreamingEnabled_MissingFromOlderFile_DefaultsTrue()
+    {
+        // UPGRADE PATH: a settings.json written by a build BEFORE StreamingEnabled
+        // existed (real old-shape serialized output — camelCase, no streamingEnabled
+        // key). Loading it must fill the default (true), not throw and not zero it.
+        File.WriteAllText(_path, """
+            {
+              "schema": 1,
+              "micDeviceId": "{abc-123}",
+              "asrModelName": "parakeet-tdt-0.6b-v3",
+              "asrProvider": "assemblyai",
+              "assemblyAiModel": "universal-3-5-pro",
+              "assemblyAiDeleteAfterTranscribe": true,
+              "assemblyAiCloudDeadlineSeconds": 10,
+              "assemblyAiKeytermsEnabled": false,
+              "cleanupModelName": "qwen2.5-0.5b-instruct-q4_k_m",
+              "holdHotkey": "RightCtrl+RightShift",
+              "toggleHotkey": "Ctrl+Shift+Space",
+              "playSounds": false,
+              "autostartEnabled": false,
+              "onboardingCompleted": true,
+              "speakerFilterEnabled": false,
+              "postPasteLearningEnabled": false,
+              "prewarmMicEnabled": true,
+              "lastVersionSeen": "0.4.0"
+            }
+            """, System.Text.Encoding.UTF8);
+
+        var s = new SettingsStore(_path).Load();
+
+        s.StreamingEnabled.ShouldBeTrue();
+
+        // The old file's own values still load — proof this exercised the real
+        // deserializer, not a defaults fallback from a rejected file.
+        s.MicDeviceId.ShouldBe("{abc-123}");
+        s.AsrProvider.ShouldBe("assemblyai");
+        s.PlaySounds.ShouldBeFalse();
+    }
+
+    [Fact]
     public void PostPasteLearning_Defaults_Off_And_RoundTrips()
     {
         new SettingsStore(_path).Load().PostPasteLearningEnabled.ShouldBeFalse();

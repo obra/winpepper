@@ -421,21 +421,28 @@ public sealed class PipelineHost : IDisposable
                 // model ensure is silent here (reportErrors: false) — the stop
                 // arm's late path re-runs the check with today's exact error UX.
                 var settingsForStream = _settingsProvider();
-                _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
-                    ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
-                    {
-                        var cloudSel = string.Equals(settingsForStream.AsrProvider, "assemblyai",
-                            StringComparison.OrdinalIgnoreCase);
-                        var ready = TryEnsureAsrModel(reportErrors: false);
-                        if ((!ready && !cloudSel) || _asr is null) return null;
-                        return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream, notice =>
-                            _ = _toasts.ShowAsync(
-                                "Winpepper",
-                                "Cloud transcription unavailable — used local speech recognition instead.",
-                                Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                                TimeSpan.FromSeconds(6)));
-                    }, ct2),
-                    _log, ct);
+                if (settingsForStream.StreamingEnabled)
+                {
+                    _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                        ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                        {
+                            var cloudSel = string.Equals(settingsForStream.AsrProvider, "assemblyai",
+                                StringComparison.OrdinalIgnoreCase);
+                            var ready = TryEnsureAsrModel(reportErrors: false);
+                            if ((!ready && !cloudSel) || _asr is null) return null;
+                            return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream, notice =>
+                                _ = _toasts.ShowAsync(
+                                    "Winpepper",
+                                    "Cloud transcription unavailable — used local speech recognition instead.",
+                                    Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                    TimeSpan.FromSeconds(6)));
+                        }, ct2),
+                        _log, ct);
+                }
+                else
+                {
+                    _log.LogDebug("streaming disabled by settings; batch transcription will run at stop");
+                }
                 _warmRecorder!.StartSession(includePrerollMs: 500);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 _targetAtStart = CaptureTarget();
@@ -794,21 +801,28 @@ public sealed class PipelineHost : IDisposable
                     // (same comment as the HoldDown arm: create BEFORE StartSession
                     // so the synchronously-raised pre-roll is not dropped)
                     var settingsForStream2 = _settingsProvider();
-                    _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
-                        ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
-                        {
-                            var cloudSel2 = string.Equals(settingsForStream2.AsrProvider, "assemblyai",
-                                StringComparison.OrdinalIgnoreCase);
-                            var ready2 = TryEnsureAsrModel(reportErrors: false);
-                            if ((!ready2 && !cloudSel2) || _asr is null) return null;
-                            return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream2, notice =>
-                                _ = _toasts.ShowAsync(
-                                    "Winpepper",
-                                    "Cloud transcription unavailable — used local speech recognition instead.",
-                                    Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                                    TimeSpan.FromSeconds(6)));
-                        }, ct2),
-                        _log, ct);
+                    if (settingsForStream2.StreamingEnabled)
+                    {
+                        _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                            ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                            {
+                                var cloudSel2 = string.Equals(settingsForStream2.AsrProvider, "assemblyai",
+                                    StringComparison.OrdinalIgnoreCase);
+                                var ready2 = TryEnsureAsrModel(reportErrors: false);
+                                if ((!ready2 && !cloudSel2) || _asr is null) return null;
+                                return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream2, notice =>
+                                    _ = _toasts.ShowAsync(
+                                        "Winpepper",
+                                        "Cloud transcription unavailable — used local speech recognition instead.",
+                                        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                        TimeSpan.FromSeconds(6)));
+                            }, ct2),
+                            _log, ct);
+                    }
+                    else
+                    {
+                        _log.LogDebug("streaming disabled by settings; batch transcription will run at stop");
+                    }
                     _warmRecorder!.StartSession(includePrerollMs: 500);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                     _targetAtStart = CaptureTarget();

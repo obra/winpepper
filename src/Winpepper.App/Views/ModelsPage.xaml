@@ -34,6 +34,15 @@
                         <RadioButton Content="AssemblyAI (cloud)" Tag="assemblyai" />
                     </RadioButtons>
 
+                    <!-- Streaming applies to BOTH providers, so it sits above the
+                         provider-specific AssemblyAI panel. -->
+                    <ToggleSwitch x:Name="StreamingToggle" Header="Transcribe while you speak"
+                                  AutomationProperties.AutomationId="StreamingEnabledToggle" />
+                    <TextBlock Text="Transcribes audio during your dictation so the text is ready almost as soon as you stop. Works with both providers. Turn off to transcribe everything in one pass after you stop."
+                               TextWrapping="Wrap"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               Style="{ThemeResource CaptionTextBlockStyle}" />
+
                     <!-- AssemblyAI cloud config: key + model + test + privacy + retention.
                          Collapsed unless the AssemblyAI provider is selected. -->
                     <StackPanel x:Name="AssemblyAiPanel" Spacing="8" Margin="0,4,0,0">

@@ -28,4 +28,11 @@ public sealed class AppSettingsDefaultsTests
         s.AssemblyAiCloudDeadlineSeconds.ShouldBe(10);        // single owned budget
         s.AssemblyAiKeytermsEnabled.ShouldBeFalse();          // opt-in, may cost extra
     }
+
+    [Fact]
+    public void Defaults_StreamingEnabled_IsTrue()
+    {
+        var s = new AppSettings();
+        s.StreamingEnabled.ShouldBeTrue(); // streaming is the default experience
+    }
 }

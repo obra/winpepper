@@ -17,7 +17,7 @@
 - ASR provider setting values are exactly `"local"` and `"assemblyai"` (`AppSettings.AsrProvider`, `src/Winpepper.Core/Settings/AppSettings.cs:18`).
 - Cloud result model names MUST keep the `"assemblyai/"` prefix — `CloudProvider.IsCloud` (`src/Winpepper.Asr/Transcription/CloudProvider.cs`) gates the cleanup-LLM skip on it.
 - AssemblyAI streaming endpoint: `wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true`; auth is the raw API key in the `Authorization` header (no `Bearer` prefix). Audio messages are binary PCM16LE, minimum 50 ms (800 samples / 1600 bytes) per message, maximum 1000 ms.
-- Cloud deadline default 10 s, user-clamped to [5, 30] (`AssemblyAiOptions.ClampDeadline`). The deadline budget covers the **post-stop** cloud wait, exactly as `FallbackTranscriber` owns it today.
+- Cloud deadline default 10 s, user-clamped to [5, 30] (`AssemblyAiOptions.ClampDeadline`). The deadline budget covers the **post-stop** cloud wait, exactly as `FallbackTranscriber` owns it today. The segment BEFORE that deadline can start — the coordinator's post-stop pump drain — is bounded separately by `StreamingDictationSession`'s drain deadline (default 10 s, Task 9): a wedged socket send HANGS rather than throws, so no exception-based fallback can fire; on drain timeout the coordinator abandons + disposes the session (aborting the socket unblocks the pump) and returns null, routing the caller to the bounded batch late path. The total post-stop wait is therefore always bounded.
 - **Never log the API key.**
 - **Testing on Linux (this environment):** provision via `export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"`. Build each test project with `dotnet build tests/<P>/<P>.csproj -c Release -f net9.0` and run with `dotnet exec tests/<P>/bin/Release/net9.0/<P>.dll`. **NEVER use `dotnet test`. NEVER build `winpepper.sln` on Linux.** All tests green before every commit; the full 9-project suite before finishing a task.
 - **FULL SUITE GATE** (run from the worktree root; check the runner's exit status, never pipe to `tail` directly):
@@ -2836,6 +2836,8 @@ Per-dictation glue between the recorder's `FramesAvailable` event and a streamin
 
 Pump behavior note (A4/N6): the frame channel is unbounded and the pump applies no backpressure, so a slower-than-realtime encoder (local RTF ≥ 1 on very weak hardware) degrades post-stop latency — frames queue and the tail grows — but never correctness: the batch fallback fires only on exceptions, and `FinishAsync(fullAudio)` remains authoritative. Post-merge, production `TranscribeMs` makes any such slowness directly observable.
 
+Drain deadline note (A10 — reliability bound): the cloud deadline inside `FallbackStreamingTranscriber.Session.FinishAsync` fires only AFTER the coordinator's pump has drained, and a wedged push (half-dead TCP connection, slow uplink — a `ClientWebSocket.SendAsync` that hangs rather than throws) never raises the exception the fallback wrapper converts to `_failure`. Without a bound here the post-stop wait is unbounded and, because hotkey dispatch is serial, a hung `FinishAsync` also blocks Cancel. So `FinishAsync` bounds the pump drain with a drain deadline (default 10 s): on timeout it logs, disposes the session (aborting the socket is what unblocks the wedged pump), and returns null — the caller's existing late path (ensure + batch-equivalent transcription of `fullAudio`, itself deadline-bounded) takes over, preserving today's bounded-fallback guarantee. `DisposeAsync` uses the same dispose-session-before-awaiting-the-pump order (then re-disposes after the pump exits, covering the session-assigned-late race) so the abandon path can never hang on a wedged send either.
+
 **Files:**
 - Create: `src/Winpepper.Asr/Transcription/StreamingDictationSession.cs`
 - Test: `tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs`
@@ -2843,9 +2845,9 @@ Pump behavior note (A4/N6): the frame channel is unbounded and the pump applies 
 **Interfaces:**
 - Consumes: `IStreamingTranscriber`/`IStreamingTranscriptionSession`, `TranscriptionResult`, `FakeStreamingTranscriber` (Task 8's double), `System.Threading.Channels`.
 - Produces (used by Tasks 10, 11):
-  - `static StreamingDictationSession Start(Func<CancellationToken, Task<IStreamingTranscriber?>> transcriberFactory, ILogger log, CancellationToken ct)`
+  - `static StreamingDictationSession Start(Func<CancellationToken, Task<IStreamingTranscriber?>> transcriberFactory, ILogger log, CancellationToken ct, TimeSpan? drainDeadline = null)` — `drainDeadline` defaults to 10 s; Tasks 10/11 use the default
   - `void OnFrame(ReadOnlyMemory<float> frame)` — capture-thread-safe, copies, never blocks
-  - `Task<TranscriptionResult?> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)` — null when the factory returned null (no provider); rethrows unrecovered pump errors (parity with batch `TranscribeAsync` exceptions)
+  - `Task<TranscriptionResult?> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)` — null when the factory returned null (no provider) OR when the drain deadline expired (wedged connection; session already disposed) — either way the caller's late batch path takes over; rethrows unrecovered pump errors (parity with batch `TranscribeAsync` exceptions)
   - `ValueTask DisposeAsync()` — abandon path (silence-drop / cancel); never throws
 
 - [ ] **Step 1: Write the failing tests**
@@ -2972,6 +2974,52 @@ public class StreamingDictationSessionTests
         await session.FinishAsync(new float[1], TestContext.Current.CancellationToken);
         session.OnFrame(new float[5]); // must not throw
     }
+
+    private sealed class WedgedStreamingTranscriber : IStreamingTranscriber
+    {
+        public string ModelName => "wedged";
+        public WedgedSession Session { get; } = new();
+        public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
+            => Task.FromResult<IStreamingTranscriptionSession>(Session);
+
+        // PushAsync HANGS instead of throwing (a half-dead socket send);
+        // DisposeAsync aborts it, exactly like ClientWebSocket abort unblocks
+        // a pending SendAsync.
+        public sealed class WedgedSession : IStreamingTranscriptionSession
+        {
+            private readonly TaskCompletionSource _wedge = new();
+            public bool Disposed { get; private set; }
+
+            public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
+                => await _wedge.Task;
+
+            public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
+                => throw new InvalidOperationException("FinishAsync must not run on a wedged session");
+
+            public ValueTask DisposeAsync()
+            {
+                Disposed = true;
+                _wedge.TrySetException(new ObjectDisposedException(nameof(WedgedSession)));
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task WedgedPush_DrainDeadlineExpires_ReturnsNullAndDisposesTheSession()
+    {
+        var transcriber = new WedgedStreamingTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromMilliseconds(200));
+        session.OnFrame(new float[800]); // the pump wedges on this push
+
+        var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull(); // caller's late batch path takes over (bounded)
+        transcriber.Session.Disposed.ShouldBeTrue();
+    }
 }
 ```
 
@@ -3001,20 +3049,29 @@ namespace Winpepper.Asr.Transcription;
 /// (model ensure + build) runs concurrently on the pump — so frames queue until
 /// it is ready. FinishAsync completes the pump and returns the final transcript,
 /// or null when no transcriber materialized (caller uses the batch-adapter path).
+/// The pump drain is bounded by a drain deadline (default 10 s): a wedged push
+/// (half-dead socket) HANGS rather than throws, so on timeout FinishAsync
+/// abandons + disposes the session and returns null (A10 — the whole post-stop
+/// wait stays bounded; the caller's batch path takes over).
 /// </summary>
 public sealed class StreamingDictationSession : IAsyncDisposable
 {
     private readonly Channel<float[]> _frames = Channel.CreateUnbounded<float[]>(
         new UnboundedChannelOptions { SingleReader = true });
     private readonly Task _pump;
+    private readonly ILogger _log;
+    private readonly TimeSpan _drainDeadline;
     private IStreamingTranscriptionSession? _session;
     private Exception? _pumpError;
 
     private StreamingDictationSession(
         Func<CancellationToken, Task<IStreamingTranscriber?>> transcriberFactory,
         ILogger log,
-        CancellationToken ct)
+        CancellationToken ct,
+        TimeSpan? drainDeadline)
     {
+        _log = log;
+        _drainDeadline = drainDeadline ?? TimeSpan.FromSeconds(10);
         _pump = Task.Run(async () =>
         {
             try
@@ -3042,8 +3099,9 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     public static StreamingDictationSession Start(
         Func<CancellationToken, Task<IStreamingTranscriber?>> transcriberFactory,
         ILogger log,
-        CancellationToken ct)
-        => new(transcriberFactory, log, ct);
+        CancellationToken ct,
+        TimeSpan? drainDeadline = null)
+        => new(transcriberFactory, log, ct, drainDeadline);
 
     /// <summary>Called from the recorder's FramesAvailable event. Copies the frame
     /// (the recorder may reuse its buffer) and never blocks the capture thread.</summary>
@@ -3051,12 +3109,32 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         => _frames.Writer.TryWrite(frame.ToArray()); // TryWrite is false after completion — silent drop
 
     /// <summary>Stop pumping and get the final transcript. Null when no transcriber
-    /// materialized. Rethrows an unrecovered pump failure — parity with today, where
-    /// a batch TranscribeAsync exception also propagates to the pipeline.</summary>
+    /// materialized, or when the drain deadline expired (session abandoned +
+    /// disposed — the caller's late batch path takes over). Rethrows an unrecovered
+    /// pump failure — parity with today, where a batch TranscribeAsync exception
+    /// also propagates to the pipeline.</summary>
     public async Task<TranscriptionResult?> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
     {
         _frames.Writer.TryComplete();
-        await _pump.WaitAsync(ct);
+        try
+        {
+            await _pump.WaitAsync(_drainDeadline, ct); // TimeoutException on a wedged drain
+        }
+        catch (TimeoutException)
+        {
+            // A wedged push (half-dead socket) HANGS rather than throws, so no
+            // exception-based fallback inside the session/wrapper can fire and
+            // the cloud deadline (scheduled inside the wrapper's FinishAsync)
+            // never starts. Bound the whole post-stop wait HERE: abandon the
+            // session — disposing it aborts the socket, which is what unblocks
+            // the pump — and return null so the caller's late path transcribes
+            // fullAudio (bounded, batch).
+            _log.LogWarning(
+                "streaming drain exceeded {DrainDeadline}; abandoning streaming session, batch path takes over",
+                _drainDeadline);
+            await DisposeAsync();
+            return null;
+        }
         if (_pumpError is not null) throw _pumpError;
         if (_session is null) return null;
         var result = await _session.FinishAsync(fullAudio, ct);
@@ -3065,17 +3143,27 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         return result;
     }
 
-    /// <summary>Abandon the dictation (silence-drop / cancel): stop the pump and
-    /// dispose the session without transcribing. Never throws.</summary>
+    /// <summary>Abandon the dictation (silence-drop / cancel / drain timeout): stop
+    /// the pump and dispose the session without transcribing. Never throws. Disposes
+    /// the session BEFORE awaiting the pump — a wedged push never completes on its
+    /// own; aborting the session is what unblocks it — then re-disposes after the
+    /// pump exits, covering the pump-assigned-the-session-late race.</summary>
     public async ValueTask DisposeAsync()
     {
         _frames.Writer.TryComplete();
-        try { await _pump; } catch { /* abandoned */ }
-        if (_session is not null)
-        {
-            try { await _session.DisposeAsync(); } catch { /* abandoned */ }
-            _session = null;
-        }
+        await DisposeSessionAsync();
+        // Bounded: never let a pathologically hung pump (e.g. a hanging factory)
+        // block the serial hotkey loop; orphaning the pump task is the lesser evil.
+        try { await _pump.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* abandoned */ }
+        await DisposeSessionAsync();
+    }
+
+    private async ValueTask DisposeSessionAsync()
+    {
+        var session = _session;
+        if (session is null) return;
+        _session = null;
+        try { await session.DisposeAsync(); } catch { /* abandoned */ }
     }
 }
 ```
@@ -3087,7 +3175,7 @@ dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f 
 dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "Winpepper.Asr.Tests.StreamingDictationSessionTests"
 ```
 
-Expected: PASS (6 tests).
+Expected: PASS (7 tests).
 
 - [ ] **Step 5: Full suite gate + commit**
 
@@ -3319,10 +3407,12 @@ IMPORTANT: if `TryEnsureAsrModel` is not safe to call off the hotkey thread (che
                     maybeTranscription = await streaming.FinishAsync(trimmed, ct);
                 if (maybeTranscription is null)
                 {
-                    // Late path: no streaming session materialized, or its factory
-                    // returned null (no provider at start). Run today's ensure +
-                    // error UX, then the batch-equivalent path via the streaming
-                    // seam — behavior identical to today.
+                    // Late path: no streaming session materialized, its factory
+                    // returned null (no provider at start), or the drain deadline
+                    // expired on a wedged connection (session already abandoned +
+                    // disposed inside FinishAsync). Run today's ensure + error UX,
+                    // then the batch-equivalent path via the streaming seam —
+                    // behavior identical to today, and still deadline-bounded.
                     // Provider-aware (req 6): a failed LOCAL swap never skips or
                     // aborts a CLOUD dictation; soften its error surface.
                     var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);

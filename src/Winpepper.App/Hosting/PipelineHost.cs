@@ -1217,12 +1217,23 @@ public sealed class PipelineHost : IDisposable
             }
             if (_warmRecorder is not null)
             {
-                // Bug 8 (hygiene): unhook the meter + fault handlers before teardown.
+                // Bug 8 (hygiene): unhook the meter + streaming-tee + fault
+                // handlers before teardown.
                 if (_frameHandler is not null) _warmRecorder.FramesAvailable -= _frameHandler;
+                if (_streamFrameHandler is not null) _warmRecorder.FramesAvailable -= _streamFrameHandler;
                 if (_captureFaultHandler is not null) _warmRecorder.CaptureFaulted -= _captureFaultHandler;
                 if (_captureRecoveredHandler is not null) _warmRecorder.CaptureRecovered -= _captureRecoveredHandler;
                 _warmRecorder.Dispose();
             }
+            // An in-flight streaming session (app shut down mid-dictation) holds a
+            // live pump + inner socket; dispose it here or it leaks at teardown.
+            // DisposeAsync never throws and is internally bounded, but mirror the
+            // file's bounded-wait convention (_runTask above) anyway; Task.Run
+            // avoids blocking on continuations posted to this (possibly UI) thread.
+            var streamingAtTeardown = _streamingSession;
+            _streamingSession = null;
+            if (streamingAtTeardown is not null)
+                try { Task.Run(() => streamingAtTeardown.DisposeAsync().AsTask()).Wait(TimeSpan.FromSeconds(2)); } catch { }
         });
     }
 }

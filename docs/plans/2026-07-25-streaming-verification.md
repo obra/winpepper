@@ -981,7 +981,17 @@ sealed class CollectingLogger : Microsoft.Extensions.Logging.ILogger
 export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"
 dotnet build scripts/asr-latency-bench/AsrLatencyBench.csproj -c Release
 dotnet exec scripts/asr-latency-bench/bin/Release/net9.0/AsrLatencyBench.dll real-local
-dotnet exec scripts/asr-latency-bench/bin/Release/net9.0/AsrLatencyBench.dll real-local --model-dir /nonexistent --wav /tmp/nope.wav
+# Create a real throwaway WAV first: the Step 1 shared-audio hoist eagerly reads
+# wavPaths[0] BEFORE any scenario runs, so a nonexistent --wav path would crash
+# with FileNotFoundException before the model-dir skip path is ever reached.
+python3 - <<'EOF'
+import wave
+w = wave.open('/tmp/winpepper-smoke.wav', 'wb')
+w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000)
+w.writeframes(b'\x00\x00' * 16000)  # 1 s of mono 16 kHz PCM silence
+w.close()
+EOF
+dotnet exec scripts/asr-latency-bench/bin/Release/net9.0/AsrLatencyBench.dll real-local --model-dir /nonexistent --wav /tmp/winpepper-smoke.wav
 dotnet exec scripts/asr-latency-bench/bin/Release/net9.0/AsrLatencyBench.dll sim-local-batch
 ```
 Expected, in order: `real-local: SKIPPED (requires --model-dir and at least one --wav)`; `real-local: SKIPPED (model files not found in /nonexistent)`; the sim scenario prints its table with `| sim-local-batch | simulated | 10.0 s | ~3000 |` (audio column now shows a computed duration).

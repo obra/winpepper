@@ -60,7 +60,7 @@ internal static partial class KeyboardHookNative
     [LibraryImport("kernel32.dll")]
     public static partial uint GetCurrentThreadId();
 
-    [LibraryImport("user32.dll")]
+    [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool PostThreadMessageW(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
 

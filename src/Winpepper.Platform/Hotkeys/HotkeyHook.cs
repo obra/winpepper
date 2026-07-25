@@ -50,7 +50,7 @@ public sealed class HotkeyHook : IDisposable
     private long _reinstallRequestedTick;
     // Heartbeat TELEMETRY (Step 4f): tick of the last time the OS actually
     // called the hook. NOT a trigger - it turns uncovered hook deaths (any
-    // >=1000 ms callback timeout, not only sleep/resume) into WRN evidence.
+    // >=1000 ms callback timeout, not only sleep/resume) into log evidence.
     private long _lastHookCallbackTick = Environment.TickCount64;
     private Timer? _heartbeatTimer;
     private Modifier _modifiers;

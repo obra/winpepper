@@ -196,10 +196,14 @@ verbatim, so Diagnostics text is unchanged).
   (which, as amended, includes the observability-only heartbeat telemetry —
   one additive tick-write at `HookCallback` entry, Task 8 Step 4f). Every
   existing behavior (chord tracking, injected-event handling, swallow rules,
-  capture suspend/resume for chord recording) stays byte-identical. One honest
-  narrowing is recorded in Task 8's A15 note: `ResetTrackingState` clears
+  capture suspend/resume for chord recording) stays byte-identical. TWO honest
+  narrowings are recorded in Task 8: (A15) `ResetTrackingState` clears
   `_captureKeysDown` and cancels `_spaceHold`, so a reinstall DURING raw
-  capture / drain is behavior the tests do not pin.
+  capture / drain is behavior the tests do not pin; and (A15b) a reinstall that
+  interrupts an ACTIVE hold deliberately EMITS the terminating `HoldUp` it just
+  dropped, because silently clearing `_holding` would strand `SessionEngine` in
+  `Recording` forever. That emission is a required behavior change, pinned by a
+  discriminating test.
 - **The coordinator is unchanged except for ONE additive `FrameObserved` event
   on the existing lock-free callback path** (Task 6 Step 1a). Its
   lock/epoch-guard/dispose-scheduler discipline, the session-start
@@ -2217,14 +2221,33 @@ Linux verification for this task is that `Winpepper.Audio` and its tests still
 build and pass on `net9.0`, including the 5000-iteration concurrency hammer,
 which exercises the edited frame-ingest path.
 
-**Implementer note (explicit sign-off wanted):** an endpoint-driven `Rebuild()`
-during an ACTIVE session clears the ring (`_buffer.Clear()`,
-`WarmCaptureCoordinator.cs:88`) and would destroy live dictation audio. With
-frames-driven clearing the false arming that made this likely is gone (a
-self-healed stream clears `IsFailing` within ~50 ms), but the session-active
-case is still reachable in principle — a guard (skip endpoint-driven rebuilds
-while `_buffer.IsSessionActive`) or an explicit owner decision to accept it is
-worth recording before this ships.
+**DECIDED — was an open sign-off, now a REQUIRED guard (implemented in Step 3's
+`AttemptRebuild`).** An endpoint-driven `Rebuild()` is unsafe in exactly two
+states, so it is SKIPPED in both:
+
+1. **A dictation is in flight** (`_buffer.IsSessionActive`). `Rebuild()` calls
+   `_buffer.Clear()` (`WarmCaptureCoordinator.cs:88`), which would destroy the
+   audio the user is speaking right now. Frames-driven clearing removed the
+   false arming that made this likely, but the case is still reachable, and
+   silently eating a live dictation is not an acceptable recovery. The
+   pre-existing in-lock fault retry (`OnSourceStopped` → `StartLocked`,
+   `:161-199`) deliberately does NOT clear the ring; this guard keeps the new
+   path consistent with it.
+2. **Prewarm is OFF** (`_prewarm == false` — the user turned the warm mic off in
+   Settings; `AppSettings.PrewarmMicEnabled`). `Rebuild()` unconditionally
+   `StartLocked()`s a source, so at idle it would OPEN the microphone — and
+   light the OS mic-in-use indicator — for a user who explicitly asked for
+   capture only during a dictation, and leave it open until the next
+   `StopSession` (`StopCapture` only runs there). In cold mode nothing is
+   running at idle, so there is nothing for an endpoint event to recover.
+
+Skipping DEFERS recovery, it does not abandon it: the next `StartSession` runs
+`EnsureStarted(force: true)` — which bypasses the fault backoff precisely
+because the user asked to record — and the first non-empty frame clears the
+condition via `OnFrameObserved`. The skip deliberately does NOT consume retry
+budget (nothing was attempted), so a later endpoint event can still act once the
+state is safe. This file is Windows-only, so the guard is verified by the two
+new Task 9 smoke items (prewarm-off idle, and an endpoint event mid-dictation).
 
 - [ ] **Step 1: Add the recovery signal to the recorder contract**
 
@@ -2600,7 +2623,9 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
     /// CONCURRENTLY, which is why every decision is behind the policy's lock.
     /// Only acts when capture is known to be failing: a healthy warm stream
     /// keeps running, and the existing session-start drift check still follows
-    /// the default device.
+    /// the default device. AttemptRebuild applies two further guards (live
+    /// dictation, prewarm off) that defer the rebuild rather than destroy audio
+    /// or open the mic at idle.
     /// </summary>
     private void OnCaptureEndpointChanged()
     {
@@ -2625,6 +2650,38 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
     /// </summary>
     private void AttemptRebuild(string trigger)
     {
+        // Two states in which a rebuild would do more harm than the fault it is
+        // healing. Checked on EVERY attempt, not just the first: the scheduled
+        // retry lands hundreds of ms later, when either can have become true.
+        //
+        //   1. A dictation is in flight. Rebuild() calls _buffer.Clear()
+        //      (WarmCaptureCoordinator.cs:88), which would destroy the audio
+        //      the user is speaking right now.
+        //   2. Prewarm is off. Rebuild() unconditionally StartLocked()s a
+        //      source, so in cold mode it would open the microphone at idle -
+        //      lighting the OS mic-in-use indicator for a user who turned the
+        //      warm mic OFF - and leave it open until the next StopSession.
+        //      Nothing is running at idle in cold mode, so there is also
+        //      nothing here to recover.
+        //
+        // Recovery is DEFERRED, not abandoned: the next StartSession runs
+        // EnsureStarted(force: true) and the first non-empty frame clears the
+        // condition via OnFrameObserved. Deliberately does NOT consume retry
+        // budget (nothing was attempted) and does NOT clear anything.
+        if (_buffer.IsSessionActive)
+        {
+            _log?.LogDebug(
+                "Microphone rebuild ({Trigger}) deferred: a dictation is in flight", trigger);
+            return;
+        }
+        if (!_prewarm)
+        {
+            _log?.LogDebug(
+                "Microphone rebuild ({Trigger}) deferred: prewarm is off, so no capture runs at idle",
+                trigger);
+            return;
+        }
+
         _coordinator.Rebuild();
         if (_coordinator.IsRunning)
         {
@@ -3006,6 +3063,28 @@ is behavior no existing test pins. Flagged as a candidate discriminating test
 (reinstall mid-capture, assert the recording flow survives or restarts
 cleanly), not a blocker.
 
+**A15b - the one place a reinstall EMITS an event (read with Step 4d).** The
+reset also drops `_holding`, and that one alone would be a regression, not a
+fix: `TryProcessKey` emits `HoldUp` only while `_holding` is true
+(`HotkeyHook.cs:295`), so a silent clear would swallow the terminating event of
+a dictation that was in flight across the suspend. `SessionEngine` would sit in
+`Recording` forever - mic open, `WarmCaptureBuffer` growing unbounded, and every
+later `HoldDown` dropped by `if (_engine.State != SessionState.Idle) return;`
+(`PipelineHost.cs:376`), i.e. the hotkey looks dead again, which is the very
+symptom this task fixes. So `ResetTrackingState` EMITS the terminating `HoldUp`
+onto the existing event channel when it clears an active hold (Step 4d), and
+the later physical key-up produces nothing. This is the sole deliberate
+behavioral addition in this task; everything else in `TryProcessKey` stays
+byte-identical.
+
+The accepted cost: on a PRECAUTIONARY reinstall taken while the user is still
+physically holding the key, the dictation ends early and the user must press
+again. We do NOT try to keep such a hold alive (e.g. by probing
+`keyPhysicallyDown` for the hold chord) because the failure modes are not
+symmetric - ending a dictation early is recoverable in one keypress, while
+guessing wrong in the other direction reinstates exactly the stranded-`Recording`
+wedge this guard exists to prevent.
+
 - [ ] **Step 1: Write the failing tests**
 
 Create `tests/Winpepper.Platform.Tests/Hotkeys/PowerResumeDecisionTests.cs`:
@@ -3061,6 +3140,11 @@ namespace Winpepper.Platform.Tests.Hotkeys;
 /// the low-level hook across suspend/resume, so the transitions that would have
 /// closed a chord (the key-ups) are simply never delivered; without a reset the
 /// hook would think a chord is still held.
+/// <para>
+/// One case is NOT a silent drop: an ACTIVE hold owns an in-flight dictation,
+/// so the reset must emit the terminating HoldUp itself - otherwise the session
+/// never stops and every later press is swallowed by the engine's Idle guard.
+/// </para>
 /// </summary>
 public class HotkeyHookReinstallTests
 {
@@ -3074,16 +3158,26 @@ public class HotkeyHookReinstallTests
                keyPhysicallyDown: _ => true);
 
     [Fact]
-    public void Reinstall_Drops_A_HalfTracked_Hold_So_No_Phantom_HoldUp()
+    public void Reinstall_During_A_Hold_Emits_Exactly_One_Terminating_HoldUp()
     {
         var hook = NewHook(hold: "F24");
         hook.TryProcessKey(F24, true, out var down).ShouldBeTrue();
         down!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
 
-        hook.RequestHookReinstall(); // system resumed
+        hook.RequestHookReinstall(); // system resumed mid-dictation
 
-        hook.TryProcessKey(F24, false, out var up).ShouldBeFalse(); // no longer swallowed
-        up.ShouldBeNull();                                          // no phantom HoldUp
+        // The reset MUST close the hold itself. The physical key-up that would
+        // have ended this dictation was eaten by the suspend, so without this
+        // event SessionEngine stays in Recording forever - mic open, buffer
+        // growing, every later HoldDown dropped by the State != Idle guard.
+        hook.Events.TryRead(out var terminating).ShouldBeTrue();
+        terminating!.Kind.ShouldBe(HotkeyEventKind.HoldUp);
+
+        // ...and exactly once: a late physical up finds no tracked hold, so it
+        // is neither swallowed nor turned into a second HoldUp.
+        hook.TryProcessKey(F24, false, out var up).ShouldBeFalse();
+        up.ShouldBeNull();
+        hook.Events.TryRead(out _).ShouldBeFalse();
     }
 
     [Fact]
@@ -3107,6 +3201,10 @@ public class HotkeyHookReinstallTests
         var hook = NewHook(hold: "F24", toggle: "F23");
 
         hook.RequestHookReinstall();
+
+        // Nothing was held, so the reset must emit NOTHING: the terminating
+        // HoldUp is for an interrupted hold only, never a blanket stop event.
+        hook.Events.TryRead(out _).ShouldBeFalse();
 
         hook.TryProcessKey(F24, true, out var down).ShouldBeTrue();
         down!.Kind.ShouldBe(HotkeyEventKind.HoldDown);
@@ -3375,6 +3473,23 @@ with:
     /// key-ups that would have closed it were never delivered. Deliberately
     /// does NOT touch the raw-capture lease or the suspend-for-capture flag - a
     /// settings chord recording in progress stays in progress.
+    /// <para>
+    /// Clearing <c>_holding</c> is NOT enough on its own: <c>TryProcessKey</c>
+    /// only emits <c>HoldUp</c> when <c>_holding</c> is true (`HotkeyHook.cs:295`),
+    /// so a silent clear would swallow the terminating event of a dictation
+    /// that was in flight across the suspend - `PipelineHost.HandleHotkey`
+    /// would never run the HoldUp branch (`PipelineHost.cs:394-396`), leaving
+    /// `SessionEngine` stuck in `Recording` FOREVER: the mic stays open, the
+    /// unbounded session buffer keeps growing (`WarmCaptureBuffer.Ingest`), and
+    /// every later HoldDown is dropped by the `State != Idle` guard
+    /// (`PipelineHost.cs:376`) - i.e. the hotkey looks dead again, the exact
+    /// symptom this task exists to fix. So we EMIT the terminating HoldUp
+    /// ourselves and then forget the hold. The subsequent physical key-up (if
+    /// one is ever delivered) finds `_holding == false` and produces nothing,
+    /// so the session sees exactly one HoldUp. If no session was running the
+    /// event is a harmless no-op: the HoldUp branch returns immediately unless
+    /// the engine is `Recording`.
+    /// </para>
     /// </summary>
     internal void ResetTrackingState()
     {
@@ -3383,8 +3498,17 @@ with:
         _captureKeysDown.Clear();
         _observedCancelKeys.Clear();
         _modifiers = Modifier.None;
-        _holding = false;
         _spaceHold.Cancel();
+        if (_holding)
+        {
+            _holding = false;
+            // Unbounded channel with SingleWriter:false - safe to write from
+            // the hook thread (the normal path) or the caller's thread (the
+            // never-started path in RequestHookReinstall).
+            _log.LogInformation(
+                "Reinstall interrupted an in-flight hold; emitting the terminating HoldUp so the dictation ends");
+            _events.Writer.TryWrite(new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow));
+        }
     }
 
     private void RegisterPowerNotifications()
@@ -3652,6 +3776,21 @@ disables S3/S4, and CI runners cannot sleep or manipulate endpoints):
       contains `Microphone capture recovered (frames observed)`, the tray
       returns to `Winpepper - Ready`, and **no app restart was needed**.
 - [ ] REQUIRED: dictate immediately after that → it works.
+- [ ] REQUIRED (rebuild guard 1 — no mic at idle with prewarm OFF): turn
+      **Prewarm mic** OFF in Settings, then run the same disable/enable device
+      sequence with NO dictation in progress. On enable the log shows
+      `Microphone rebuild (device change) deferred: prewarm is off, ...` and
+      the Windows mic-in-use indicator does **NOT** light while idle. Then
+      dictate → capture starts, the log shows
+      `Microphone capture recovered (frames observed)`, and the tray returns to
+      `Winpepper - Ready` (recovery deferred to session start, not lost).
+- [ ] REQUIRED (rebuild guard 2 — a live dictation is never truncated): with
+      prewarm ON and capture in a failing state, start a dictation and, while
+      still speaking, generate an endpoint event (connect/disconnect a
+      Bluetooth headset or re-enable the device). The log shows
+      `Microphone rebuild (device change) deferred: a dictation is in flight`
+      and the resulting transcript still contains the words spoken BEFORE the
+      event — the ring was not cleared mid-sentence.
 - [ ] OPPORTUNISTIC (separately, NOT gating): repeat the sequence via a real
       sleep/resume; if the no-endpoint window happens to occur (the endpoint
       log lines show a `<none>` default device), confirm the same transcript.
@@ -3671,8 +3810,13 @@ Hotkey survival:
 - [ ] Press the hold hotkey after resume → a dictation starts (log shows
       `Session started (hold)`), proving the hook is live.
 - [ ] Hold the hotkey down THROUGH a sleep/resume (press, sleep, resume,
-      release) → no phantom dictation starts or hangs; the next fresh press
-      works normally.
+      release) → the interrupted dictation ENDS at resume rather than hanging:
+      the log shows `Reinstall interrupted an in-flight hold; emitting the
+      terminating HoldUp ...` and the normal stop path runs (stop sound,
+      transcription attempt or a silent-recording drop). Releasing the key
+      afterwards starts nothing. Then confirm the session really did return to
+      idle by pressing the hotkey again → a NEW dictation starts and completes
+      normally (a stranded `Recording` state would silently swallow this press).
 - [ ] A2 residuals (registration + delivery): the
       `Registered for suspend/resume notifications (handle 0x...)` line is
       present at startup; the Debug `Power notification: type=0x{Type:X}`
@@ -3767,7 +3911,7 @@ re-run Steps 1-4.
 | CHANGE 3: do not regress the device-drift check or dispose discipline; keep the 5000-iteration hammer green | Task 6 (`RebuildIfDefaultChanged` unchanged; coordinator unchanged except the ONE additive `FrameObserved` event, with `OnSourceStopped`'s pinned unconditional raise explicitly protected) + Tasks 5/9 (hammer runs in every Audio test run) |
 | CHANGE 4: `PowerRegisterSuspendResumeNotification` with `DEVICE_NOTIFY_CALLBACK`; no window reliance | Task 8 (`PowerNotificationNative`, with the corrected caveat: MESSAGE-ONLY windows miss `WM_POWERBROADCAST`, a hidden TOP-LEVEL window is the documented fallback) |
 | CHANGE 4: on `PBT_APMRESUMESUSPEND`/`PBT_APMRESUMEAUTOMATIC`, marshal onto the hook thread and reinstall (unhook logging its result + `SetWindowsHookEx`) | Task 8 (`PowerResumeDecision`, `RequestHookReinstall` → `WM_WINPEPPER_REINSTALL_HOOK` → `ReinstallOnHookThread`). The trigger is explicitly documented as necessary-but-NOT-sufficient; the heartbeat telemetry (Step 4f) leaves a DEBUG timeline (last-callback age vs last-any-input age) so an uncovered hook death is reconstructable after the fact instead of leaving no trace. It carries no verdict — `GetLastInputInfo` is system-wide and counts mouse, so it cannot discriminate a dead hook on its own. |
-| CHANGE 4: reset per-chord tracking so a half-tracked chord can't fire | Task 8 (`ResetTrackingState`, proven by two discriminating tests; the A15 raw-capture narrowing is recorded with a candidate test) |
+| CHANGE 4: reset per-chord tracking so a half-tracked chord can't fire | Task 8 (`ResetTrackingState`, proven by two discriminating tests; the A15 raw-capture narrowing is recorded with a candidate test). An interrupted ACTIVE hold is closed with an emitted terminating `HoldUp` (A15b) rather than silently dropped, so the in-flight dictation ends instead of stranding `SessionEngine` in `Recording`. |
 | CHANGE 4: exact log lines | Task 8 (`"System resumed; reinstalling keyboard hook"`, `"Keyboard hook reinstalled"` + thread id, the unhook-result line, the dequeue-latency line, the Debug per-notification line, WRN with the Win32 error) |
 | CHANGE 4: unregister on dispose | Task 8 Step 4e |
 | CHANGE 4: every existing hook behavior byte-identical | Task 8 (`TryProcessKey` untouched; Step 5 requires all pre-existing hotkey tests green) |

@@ -154,9 +154,14 @@ static float[] SynthesizeAudio(int seconds)
 // the REAL coordinator, then measures stop -> final transcript.
 static async Task<long> MeasureStreaming(IStreamingTranscriber transcriber, float[] audio)
 {
-    var session = StreamingDictationSession.Start(
+    // Explicit drain deadline (same value as the coordinator's default) so the
+    // bound on the REAL network scenario is visible in bench output instead of
+    // silently in play — a wedged drain caps the measured post-stop wait here.
+    var drainDeadline = TimeSpan.FromSeconds(10);
+    Console.WriteLine($"  (drain deadline: {drainDeadline.TotalSeconds:0} s)");
+    await using var session = StreamingDictationSession.Start(
         _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
-        NullLogger.Instance, CancellationToken.None);
+        NullLogger.Instance, CancellationToken.None, drainDeadline);
     const int frame = 800; // 50 ms
     for (var i = 0; i < audio.Length; i += frame)
     {
@@ -166,7 +171,9 @@ static async Task<long> MeasureStreaming(IStreamingTranscriber transcriber, floa
     var sw = Stopwatch.StartNew();
     var result = await session.FinishAsync(audio, CancellationToken.None);
     var ms = sw.ElapsedMilliseconds;
-    if (result is null) throw new InvalidOperationException("no transcriber materialized");
+    if (result is null)
+        throw new InvalidOperationException(
+            $"no transcript (no transcriber materialized, or the {drainDeadline.TotalSeconds:0} s drain deadline expired)");
     return ms;
 }
 

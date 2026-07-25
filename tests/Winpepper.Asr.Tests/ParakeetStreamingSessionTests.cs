@@ -106,6 +106,47 @@ public class ParakeetStreamingSessionTests
     }
 
     [Fact]
+    public async Task InteriorSilence_LongRun_NotFedToTheEncoder()
+    {
+        var backend = new FakeParakeetBackend();
+        var session = NewSession(backend, chunk: 50, context: 20);
+
+        // Speech, then ~4 s of interior silence (past the 1200 ms keep budget),
+        // then speech. The skipper keeps 600 ms per edge (Hop*60 samples each)
+        // and drops the 2800 ms middle before the mel extractor.
+        await session.PushAsync(Audio(Hop * 60), TestContext.Current.CancellationToken);
+        await session.PushAsync(new float[Hop * 400], TestContext.Current.CancellationToken);
+        await session.PushAsync(Audio(Hop * 60), TestContext.Current.CancellationToken);
+        await session.FinishAsync(Audio(Hop * 520), TestContext.Current.CancellationToken);
+
+        // NEW mel frames encoded (subtract the 20 re-encoded context frames per
+        // follow-up encode): kept audio is Hop*240 samples -> 241 frames, far
+        // below the ungated Hop*520 -> ~521.
+        var newFrames = backend.EncodeMelFrameCounts[0]
+            + backend.EncodeMelFrameCounts.Skip(1).Sum(c => c - 20);
+        newFrames.ShouldBe(Hop * 240 / Hop + 1); // 241
+        newFrames.ShouldBeLessThan(300);
+    }
+
+    [Fact]
+    public async Task InteriorSilence_ShortRun_IsKeptAndEncoded()
+    {
+        var backend = new FakeParakeetBackend();
+        var session = NewSession(backend, chunk: 50, context: 20);
+
+        // 1 s of interior silence is under the 1200 ms keep budget: kept whole,
+        // so the encoder sees exactly the ungated frame count.
+        await session.PushAsync(Audio(Hop * 60), TestContext.Current.CancellationToken);
+        await session.PushAsync(new float[Hop * 100], TestContext.Current.CancellationToken);
+        await session.PushAsync(Audio(Hop * 60), TestContext.Current.CancellationToken);
+        await session.FinishAsync(Audio(Hop * 220), TestContext.Current.CancellationToken);
+
+        var newFrames = backend.EncodeMelFrameCounts[0]
+            + backend.EncodeMelFrameCounts.Skip(1).Sum(c => c - 20);
+        newFrames.ShouldBe(221); // Hop*220 samples / Hop + 1: nothing was skipped
+    }
+
+    [Fact]
     public async Task MidStreamEncoderFailure_FallsBackToBatchAtFinish()
     {
         var calls = 0;

@@ -27,6 +27,7 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
     private readonly ILogger? _log;
 
     private readonly StreamingLogMelExtractor _mel;
+    private readonly InteriorSilenceSkipper _skipper;
     private readonly RunningMelNormalizer _normalizer;
     private readonly List<double[]> _pending = new(); // log-mel frames not yet encoded
     private readonly List<double[]> _context = new(); // trailing already-encoded frames
@@ -69,6 +70,7 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
         _leftContextMelFrames = leftContextMelFrames;
         _log = log;
         _mel = new StreamingLogMelExtractor(config);
+        _skipper = new InteriorSilenceSkipper(m => _mel.Push(m.Span));
         _normalizer = new RunningMelNormalizer(config.FeatureSize);
         _state = new TdtDecoderState(backend.DecoderHiddenLayers, backend.DecoderHiddenDim, backend.BlankId);
     }
@@ -86,7 +88,12 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
         }
         try
         {
-            _mel.Push(mono16k.Span);
+            // Interior-silence gate: the skipper drops long post-onset silence
+            // runs BEFORE the mel extractor. StreamingLogMelExtractor is exact
+            // over the same total audio regardless of chunking, so this is
+            // indistinguishable from batch-transcribing a shorter trimmed
+            // buffer; the chunk/frame math below is untouched.
+            _skipper.Push(mono16k);
             _mel.Drain(_pending);
             while (_pending.Count >= _chunkMelFrames)
             {
@@ -113,6 +120,7 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
         {
             return await Task.Run(() =>
             {
+                _skipper.Flush();
                 _mel.Finish();
                 _mel.Drain(_pending);
                 if (_pending.Count > 0)
@@ -121,7 +129,12 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
                     _pending.Clear();
                     EncodeAndDecode(tail);
                 }
-                return new TranscriptionResult(_backend.DecodeTokens(_tokens), _modelName);
+                var result = new TranscriptionResult(_backend.DecodeTokens(_tokens), _modelName);
+                if (_skipper.SkippedMs > 0)
+                    _log?.LogInformation(
+                        "streaming interior silence skipped: {Ms} ms across {Runs} runs",
+                        _skipper.SkippedMs, _skipper.RunsSkipped);
+                return result;
             }, ct);
         }
         catch (OperationCanceledException) { throw; }

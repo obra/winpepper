@@ -21,7 +21,22 @@
     <MediaTemplate EmbedCab="yes" />
 
     <!-- Spec §11: AllowDowngrades=no, Schedule=afterInstallInitialize. -->
+    <!-- AllowSameVersionUpgrades=yes: ProductVersion is the NBGV 4-part file
+         version (0.6.2.<height>), but FindRelatedProducts compares only the
+         first THREE fields of ProductVersion. Every 0.6.2.* dev build is
+         therefore "equal", so the default earlier-versions-only Upgrade row
+         (VersionMax exclusive) never detected the previously installed build
+         and products accumulated side-by-side in ARP (22 stale records were
+         observed on a dev machine). Setting this makes the VersionMax bound
+         inclusive so an equal x.y.z triplet is removed by the major upgrade.
+         This requires an auto-generated ProductCode, which holds here: Package
+         has no ProductCode attribute, and WiX v5 defaults it to "*" (fresh
+         GUID per build). Caveat: MSI still cannot order builds within the same
+         x.y.z triplet, so an older 0.6.2.* build can also "upgrade" a newer
+         one — acceptable for dev-height builds; real downgrades across x.y.z
+         are still blocked by AllowDowngrades=no. -->
     <MajorUpgrade AllowDowngrades="no"
+                  AllowSameVersionUpgrades="yes"
                   Schedule="afterInstallInitialize"
                   DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
 

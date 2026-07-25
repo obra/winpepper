@@ -30,7 +30,7 @@ rewrite for Windows.
 
 [parakeet]: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
 
-## Status: 0.6.0-alpha — agent-built, human-untested
+## Status: 0.6.2-alpha — agent-built, human-untested
 
 The full surface is **code-complete**: all six plans (foundation, cleanup pipeline,
 WinUI 3 shell, history + lab + models tab, post-paste learning + diagnostics + crash
@@ -55,26 +55,78 @@ If you install the MSI, **you are the first human to do any of this.** Expect ro
 edges. The Diagnostics tab's "Copy diagnostics bundle" button zips logs + system
 info (never audio, never transcripts) into a file that's safe to send back.
 
-## Install (MSI)
+## Install
 
-Download `winpepper-<version>-x64.msi` from the [Releases page](../../releases) and
-run it.
+Three ways to get Winpepper, in recommended order.
 
-Requirements:
+### Option 1: winget
+
+> **Availability note:** this works once `obra.Winpepper` is accepted into
+> [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs) — the first
+> submission needs moderator review. Until then, use Option 2 below.
+
+```powershell
+winget install obra.Winpepper
+```
+
+Don't have `winget`? It ships with modern Windows 11 as part of **App
+Installer**. If the command isn't recognized, install or update "App Installer"
+from the Microsoft Store, or grab the latest release from
+[microsoft/winget-cli](https://github.com/microsoft/winget-cli/releases).
+
+### Option 2: MSI from GitHub Releases
+
+Download `winpepper-<version>-x64.msi` from the [Releases page](../../releases)
+and run it.
+
+**Verify the download (recommended):** each release also ships a
+`winpepper-<version>-x64.msi.sha256` file containing the expected hash. Compare
+(case-insensitive) against your download with either:
+
+```powershell
+certutil -hashfile winpepper-<version>-x64.msi SHA256
+# or
+Get-FileHash winpepper-<version>-x64.msi -Algorithm SHA256
+```
+
+The MSI is **unsigned** — a deliberate decision for now (the
+`packaging/sign.ps1` scaffolding exists if that ever changes). Windows will
+show a SmartScreen warning on first launch — click "More info" → "Run anyway".
+
+### Option 3: Try it in Windows Sandbox first
+
+Want to kick the tires without installing anything on your machine?
+[`scripts/windows-sandbox/`](scripts/windows-sandbox/) launches a disposable
+Windows Sandbox, auto-installs the MSI, runs the self-test, and evaporates when
+you close the window. See
+[`scripts/windows-sandbox/README.md`](scripts/windows-sandbox/README.md).
+
+### Requirements
+
 - Windows 11 22H2 or newer (build 22621+), x64
 - ~700 MB free disk for the install
-- Another ~1.2 GB for the ASR + cleanup models (downloaded on first run from the
-  Models tab)
+- Another ~1.2 GB for the ASR + cleanup models (see first-run step below)
 - DirectX 12 GPU (recommended for ASR; the model will fall back to CPU otherwise)
 
-The MSI is currently **unsigned.** Windows will throw a SmartScreen warning on first
-launch — click "More info" → "Run anyway". A signed build is on the roadmap; the
-`packaging/sign.ps1` wrapper just needs a code-signing certificate wired in.
+### First run: download the models (~1.2 GB)
+
+Winpepper cannot dictate until its two local models are downloaded — expect
+this one-time step on first launch:
+
+1. Launch Winpepper (Start Menu; it also starts hidden in the tray on logon).
+2. The onboarding wizard offers a "Download models" step — or open the
+   **Models** tab and click **Download Missing Models**.
+3. ~1.2 GB downloads from HuggingFace (resumable, SHA-256 verified) into
+   `%LOCALAPPDATA%\winpepper\models\`.
+
+Until then, dictation reports "Speech model not installed. Open the Models tab
+to download it."
+
+### After install
 
 Winpepper installs **per-user** — no administrator rights and **no UAC prompt**
 for install, upgrade, or uninstall.
 
-After install:
 - Files land in `%LOCALAPPDATA%\Programs\Winpepper\` (per-user; not `Program Files`)
 - User data (settings, corrections, downloaded models, audio history) lives in
   `%LOCALAPPDATA%\winpepper\` — a separate folder that survives reinstalls and
@@ -82,8 +134,9 @@ After install:
 - Autostart is enabled: `HKCU\…\Run\Winpepper` runs the app hidden in the tray on
   logon
 
-To uninstall: standard Add/Remove Programs entry (no elevation needed). User data
-is preserved; delete `%LOCALAPPDATA%\winpepper\` yourself if you want a fully
+To uninstall: standard Add/Remove Programs entry (no elevation needed), or
+`winget uninstall obra.Winpepper` if you installed via winget. User data is
+preserved; delete `%LOCALAPPDATA%\winpepper\` yourself if you want a fully
 clean slate.
 
 > **Migrating from an older per-machine build?** Earlier releases installed to

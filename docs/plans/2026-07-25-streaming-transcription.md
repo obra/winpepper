@@ -1403,6 +1403,7 @@ git commit -m "refactor(asr): extract IParakeetBackend seam and pure TDT greedy 
 Behavioral contract (documented deviations from batch, inherent to any streaming ASR):
 - features normalized with RUNNING stats (batch uses whole-utterance stats);
 - the encoder sees `leftContextMelFrames` of re-encoded left context and no right context;
+- LEADING SILENCE IS GATED: pushed frames before the first frame whose RMS crosses the batch trimmer's absolute silence floor are skipped (never fed to the mel extractor). Parakeet-TDT deterministically deletes tokens around silence (NeMo-Speech #15757: 400 ms of trailing zeros → empty transcript; FluidAudio #746: 0.4–0.6 s leading silence → zero tokens), and the 500 ms pre-roll is mostly silence; the batch path trims first (`PipelineHost.TrimForTranscription` → `Winpepper.Audio.SilenceTrimmer.Trim`, PipelineHost.cs ~line 952) but the streaming tee otherwise would not. The residual trailing-silence risk is covered by the batch-fallback contract plus the mandatory Windows post-merge batch-vs-streamed comparison (Task 10);
 - dictations shorter than one chunk never stream — `FinishAsync` takes the exact batch path, bit-identical to today;
 - any streaming failure (mid-stream or at finish) falls back to the batch path over `fullAudio` — reliability never regresses.
 
@@ -1504,6 +1505,21 @@ public class ParakeetStreamingSessionTests
     }
 
     [Fact]
+    public async Task LeadingSilence_IsGated_NotFedToTheEncoder()
+    {
+        var backend = new FakeParakeetBackend();
+        var session = NewSession(backend, chunk: 50, context: 20);
+
+        // ~60 mel frames of pure silence, then ~60 frames of speech-level audio.
+        await session.PushAsync(new float[Hop * 60], TestContext.Current.CancellationToken);
+        await session.PushAsync(Audio(Hop * 60), TestContext.Current.CancellationToken);
+
+        // Ungated, ~120 frames would have produced two 50-frame chunk encodes;
+        // gated, only the ~60 post-onset frames exist -> exactly one encode.
+        backend.EncodeMelFrameCounts.Count.ShouldBe(1);
+    }
+
+    [Fact]
     public async Task MidStreamEncoderFailure_FallsBackToBatchAtFinish()
     {
         var calls = 0;
@@ -1584,8 +1600,22 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
     private readonly List<int> _frameIndices = new();
     private readonly List<int> _durations = new();
     private int _globalEncFrames;
+    private int? _subsamplingFactor; // derived from the first encode's actual output
+    private bool _speechSeen;        // leading-silence gate latch
     private bool _streamed;
     private bool _corrupt;
+
+    /// <summary>
+    /// Frame-RMS floor for the leading-silence gate. Mirrors the batch trimmer's
+    /// absolute silence floor (Winpepper.Audio.SilenceTrimmer.ThresholdAbsFloor,
+    /// 0.002 — duplicated here because Winpepper.Asr does not reference
+    /// Winpepper.Audio). The batch path trims silence before ASR
+    /// (PipelineHost.TrimForTranscription → SilenceTrimmer.Trim); the streaming
+    /// path must gate leading silence too, because Parakeet-TDT deterministically
+    /// deletes tokens around silence (NeMo-Speech #15757; FluidAudio #746) and
+    /// the 500 ms pre-roll is mostly silence.
+    /// </summary>
+    private const double LeadingSilenceRmsFloor = 0.002;
 
     public ParakeetStreamingSession(
         IParakeetBackend backend,
@@ -1613,6 +1643,14 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
     public ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
     {
         if (_corrupt) return ValueTask.CompletedTask;
+        if (!_speechSeen)
+        {
+            // Leading-silence gate: skip whole pushed frames (never fed to the
+            // mel extractor — they would also pollute the running normalizer's
+            // stats) until the first frame with speech-level energy.
+            if (Rms(mono16k.Span) < LeadingSilenceRmsFloor) return ValueTask.CompletedTask;
+            _speechSeen = true;
+        }
         try
         {
             _mel.Push(mono16k.Span);
@@ -1671,10 +1709,20 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
         var features = _normalizer.Normalize(withContext); // [ctx+chunk, FeatureSize]
         var enc = _backend.Encode(features);
 
-        // Discard the context's encoder frames. The subsampling factor is derived
-        // from the actual output length so the model's 8x is never hardcoded.
-        var discard = _context.Count == 0 ? 0
-            : (int)Math.Round((double)_context.Count * enc.Frames / withContext.Count);
+        // Discard the context's encoder frames using the encoder's EXACT
+        // output-length function: for input length T this export family produces
+        // floor((T-1)/F) + 1 frames (F = subsampling factor; 8 for Parakeet-TDT,
+        // per onnx-asr's nemo.py). F is derived once from the first encode's
+        // actual output — never hardcoded — and re-asserted on every encode.
+        // A proportional Math.Round diverges at banker's-rounding midpoints
+        // (e.g. ctx=100, tail=4: round(12.5) = 12 vs the exact 13), which would
+        // double-decode a boundary frame; the exact form eliminates the class.
+        _subsamplingFactor ??= (withContext.Count - 1) / Math.Max(1, enc.Frames - 1);
+        var factor = _subsamplingFactor.Value;
+        if ((withContext.Count - 1) / factor + 1 != enc.Frames)
+            throw new InvalidOperationException(
+                $"encoder output length {enc.Frames} != floor((T-1)/{factor})+1 for T={withContext.Count}");
+        var discard = _context.Count == 0 ? 0 : (_context.Count - 1) / factor + 1;
 
         TdtGreedyDecoder.Decode(_backend, enc, _state, _tokens, _frameIndices, _durations,
             startFrame: discard, frameIndexOffset: _globalEncFrames - discard);
@@ -1685,6 +1733,14 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
         if (_context.Count > _leftContextMelFrames)
             _context.RemoveRange(0, _context.Count - _leftContextMelFrames);
         if (_leftContextMelFrames == 0) _context.Clear();
+    }
+
+    private static double Rms(ReadOnlySpan<float> samples)
+    {
+        if (samples.IsEmpty) return 0.0;
+        var sum = 0.0;
+        foreach (var s in samples) sum += (double)s * s;
+        return Math.Sqrt(sum / samples.Length);
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
@@ -1738,7 +1794,7 @@ dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f 
 dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "Winpepper.Asr.Tests.ParakeetStreamingSessionTests"
 ```
 
-Expected: PASS (6 tests). If `LongDictation_...` sees a different chunk count, recompute: `Hop * 120` samples produce `120 + 1` mel frames total, but mid-stream only frames with full right context (~119) are drained during the push — two 50-frame chunks encode, ~19–21 frames remain for the tail.
+Expected: PASS (7 tests). If `LongDictation_...` sees a different chunk count, recompute: `Hop * 120` samples produce `120 + 1` mel frames total, but mid-stream only frames with full right context (~119) are drained during the push — two 50-frame chunks encode, ~19–21 frames remain for the tail. (The other tests' synthetic `Audio()` has speech-level energy from sample 0 — RMS ≈ 0.17, far above the 0.002 gate floor — so the leading-silence gate never triggers in them; only `LeadingSilence_IsGated_...` exercises it.)
 
 - [ ] **Step 5: Full suite gate + commit**
 
@@ -1765,17 +1821,21 @@ git commit -m "feat(asr): chunked streaming inference for the local Parakeet pat
 - Test: `tests/Winpepper.Asr.Tests/Pcm16Tests.cs`, `tests/Winpepper.Asr.Tests/AssemblyAiStreamingTests.cs`
 
 **Interfaces:**
-- Consumes: `IStreamingTranscriber`/`IStreamingTranscriptionSession` (Task 2), `IAssemblyAiKeyStore` (`HasKey`, `Load()`), `AssemblyAiOptions`, `AssemblyAiException`, `TranscriptionResult`.
+- Consumes: `IStreamingTranscriber`/`IStreamingTranscriptionSession` (Task 2), `ITranscriber` (the injected cloud REST batch fallback; `AssemblyAiTranscriber` in production, `FakeTranscriber` in tests), `IAssemblyAiKeyStore` (`HasKey`, `Load()`), `AssemblyAiOptions`, `AssemblyAiException`, `TranscriptionResult`.
 - Produces (used by Tasks 8, 10, 11):
   - `static class Pcm16 { static short SampleToPcm16(float sample); static byte[] FromFloats(ReadOnlySpan<float> samples); }`
   - `interface IStreamingWebSocket : IAsyncDisposable { Task ConnectAsync(Uri uri, string apiKey, CancellationToken ct); Task SendBinaryAsync(ReadOnlyMemory<byte> audio, CancellationToken ct); Task SendTextAsync(string json, CancellationToken ct); Task<string?> ReceiveTextAsync(CancellationToken ct); }`
   - `ClientStreamingWebSocket : IStreamingWebSocket`
-  - `AssemblyAiStreamingTranscriber(Func<IStreamingWebSocket> socketFactory, IAssemblyAiKeyStore keyStore, AssemblyAiOptions options, ILogger<AssemblyAiStreamingTranscriber> logger) : IStreamingTranscriber` with `ModelName == "assemblyai/universal-streaming"`
-  - `AssemblyAiStreamingSession(IStreamingWebSocket socket, string modelName, ILogger log) : IStreamingTranscriptionSession` (public ctor for tests)
+  - `AssemblyAiStreamingTranscriber(Func<IStreamingWebSocket> socketFactory, ITranscriber batchFallback, IAssemblyAiKeyStore keyStore, AssemblyAiOptions options, ILogger<AssemblyAiStreamingTranscriber> logger) : IStreamingTranscriber` with `ModelName == "assemblyai/universal-streaming"`. `batchFallback` is the existing cloud REST batch path (`AssemblyAiTranscriber` in production) used when a session finishes with ZERO pushed samples — see the A9 note in Protocol facts below.
+  - `AssemblyAiStreamingSession(IStreamingWebSocket socket, string modelName, Func<ReadOnlyMemory<float>, CancellationToken, Task<TranscriptionResult>> batchFallback, ILogger log) : IStreamingTranscriptionSession` (public ctor for tests)
   - `AssemblyAiOptions.StreamingBaseUrl` (default `"wss://streaming.assemblyai.com"`)
   - test double `FakeStreamingWebSocket`
 
-Protocol facts (AssemblyAI Universal-Streaming v3): connect to `{StreamingBaseUrl}/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true` with the raw API key in the `Authorization` header. Send binary PCM16LE messages of 50–1000 ms. Server sends JSON text messages: `{"type":"Begin",...}`, `{"type":"Turn","turn_order":N,"end_of_turn":bool,"turn_is_formatted":bool,"transcript":"..."}` (repeatedly, transcript grows; a formatted final Turn re-delivers the same `turn_order`), and after the client sends `{"type":"Terminate"}` the server flushes any pending audio (possibly one more Turn) then sends a termination message (`"Termination"`/`"SessionTerminated"`) and closes. Final transcript = the latest `transcript` per `turn_order`, joined in `turn_order` order. Errors arrive as `{"type":"Error","error":"..."}`. Note: batch-only request extras (`custom_spelling`, `keyterms_prompt`) do not exist on this API — user corrections still apply because the deterministic corrections pass in cleanup runs for cloud results (see `CloudProvider` doc).
+Protocol facts (AssemblyAI Universal-Streaming v3): connect to `{StreamingBaseUrl}/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true` with the raw API key in the `Authorization` header. Send binary PCM16LE messages of 50–1000 ms. Server sends JSON text messages: `{"type":"Begin",...}`, `{"type":"Turn","turn_order":N,"end_of_turn":bool,"turn_is_formatted":bool,"transcript":"..."}` (repeatedly, transcript grows; a formatted final Turn re-delivers the same `turn_order`), and after the client sends `{"type":"Terminate"}` the server flushes any pending audio (possibly one more Turn) then sends `{"type":"Termination"}` and closes (the receive loop also tolerates the legacy `"SessionTerminated"` name defensively). Final transcript = the latest `transcript` per `turn_order`, joined in `turn_order` order. Errors arrive as `{"type":"Error","error":"..."}`; a socket close WITHOUT a prior `Termination` or `Error` is abnormal and must be surfaced as an error too (so the fallback wrapper engages instead of returning a silently truncated transcript).
+
+A9 — the streaming socket is NOT a batch-equivalent path: the server throttles ingest to ~1.25× realtime and kills sessions with error `3007` once too much audio is buffered ahead of processing, so "burst the whole buffer then Terminate" is both slower than the REST batch API and not completeness-guaranteed. Terminate's tail flush of the ≤1 s in-flight remainder IS documented and is retained. Therefore `FinishAsync` with ZERO pushed samples (a session that only materialized at stop time) delegates to the injected cloud batch REST fallback (`AssemblyAiTranscriber`) — behavior identical to today for late-materialized sessions.
+
+Keyterms/corrections: `custom_spelling` is batch-only, but `keyterms_prompt` IS supported on Universal-Streaming v3 — as a connection query param whose value is a single JSON-encoded array, or mid-stream via an `UpdateConfiguration` message (≤100 terms, ≤50 chars each, extra cost ~$0.04/hr). DECISION: wiring keyterms into the streaming connect is DEFERRED — user corrections remain guaranteed by the deterministic corrections pass in cleanup for cloud results (see `CloudProvider` doc), and the zero-pushed REST fallback still applies them via its extras provider. Hazard for whoever picks it up: unrecognized/malformed query params are SILENTLY IGNORED by the server — verify the setting took via the `Begin` message's configuration echo. Also note: the user's `AssemblyAiModel` setting does not apply to v3 streaming (the model is fixed — universal-streaming); `speech_model`-style query support may be added later if the API offers it.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1899,8 +1959,11 @@ public class AssemblyAiStreamingTests
         public void Clear() { }
     }
 
-    private static AssemblyAiStreamingTranscriber NewTranscriber(FakeStreamingWebSocket socket, string? key = "k-123")
-        => new(() => socket, new StubKeyStore(key), new AssemblyAiOptions(),
+    private static AssemblyAiStreamingTranscriber NewTranscriber(
+        FakeStreamingWebSocket socket, string? key = "k-123", ITranscriber? batchFallback = null)
+        => new(() => socket,
+            batchFallback ?? FakeTranscriber.Returning("assemblyai/slam-1", "BATCH-REST"),
+            new StubKeyStore(key), new AssemblyAiOptions(),
             NullLogger<AssemblyAiStreamingTranscriber>.Instance);
 
     [Fact]
@@ -1955,16 +2018,49 @@ public class AssemblyAiStreamingTests
     }
 
     [Fact]
-    public async Task Finish_WithZeroPushedAudio_SendsTheFullBufferFirst()
+    public async Task Finish_WithZeroPushedAudio_DelegatesToTheBatchFallback()
+    {
+        // A9: bursting the buffer over the socket is throttled to ~1.25x realtime
+        // server-side (and can be killed with error 3007), so the zero-pushed
+        // path must delegate to the cloud batch REST transcriber instead.
+        ReadOnlyMemory<float> seen = default;
+        var fallback = new CapturingBatchTranscriber(m => seen = m);
+        var socket = new FakeStreamingWebSocket();
+        await using var session = await NewTranscriber(socket, batchFallback: fallback)
+            .StartSessionAsync(TestContext.Current.CancellationToken);
+
+        var result = await session.FinishAsync(new float[40000], TestContext.Current.CancellationToken); // 2.5 s
+
+        result.Text.ShouldBe("BATCH-REST");
+        seen.Length.ShouldBe(40000);            // the fallback got the whole buffer
+        fallback.Calls.ShouldBe(1);
+        socket.BinaryFrames.ShouldBeEmpty();    // nothing was burst over the socket
+    }
+
+    [Fact]
+    public async Task UnexpectedSocketClose_WithoutTermination_SurfacesAsErrorAtFinish()
     {
         var socket = new FakeStreamingWebSocket();
         await using var session = await NewTranscriber(socket).StartSessionAsync(TestContext.Current.CancellationToken);
+        await session.PushAsync(new float[800], TestContext.Current.CancellationToken);
 
-        socket.EnqueueServerMessage("{\"type\":\"Turn\",\"turn_order\":0,\"end_of_turn\":true,\"transcript\":\"late\"}");
-        await session.FinishAsync(new float[40000], TestContext.Current.CancellationToken); // 2.5 s
+        socket.CloseFromServer(); // closes WITHOUT a prior Termination or Error
 
-        socket.BinaryFrames.Sum(f => f.Length).ShouldBe(40000 * 2); // every sample was sent
-        socket.BinaryFrames.ShouldAllBe(f => f.Length >= 1600);      // each message >= 50 ms
+        // Give the receive loop a beat to consume the close, then finish.
+        await Task.Delay(50, TestContext.Current.CancellationToken);
+        await Should.ThrowAsync<AssemblyAiException>(
+            () => session.FinishAsync(new float[800], TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>Records the buffer handed to the batch fallback.</summary>
+    private sealed class CapturingBatchTranscriber : ITranscriber
+    {
+        private readonly Action<ReadOnlyMemory<float>> _capture;
+        public int Calls { get; private set; }
+        public CapturingBatchTranscriber(Action<ReadOnlyMemory<float>> capture) => _capture = capture;
+        public string ModelName => "assemblyai/slam-1";
+        public Task<TranscriptionResult> TranscribeAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
+        { Calls++; _capture(mono16k); return Task.FromResult(new TranscriptionResult("BATCH-REST", ModelName)); }
     }
 
     [Fact]
@@ -2127,24 +2223,31 @@ namespace Winpepper.Asr.Transcription;
 /// AssemblyAI Universal-Streaming (v3 WebSocket) transcriber. Audio streams as
 /// raw PCM16LE binary messages while the user is still speaking; on stop a
 /// Terminate message flushes the session and the final transcript is assembled
-/// from the latest transcript per turn_order. Never logs the API key.
-/// FallbackStreamingTranscriber (Task 8) owns retries/fallback — failures here
-/// throw AssemblyAiException.
+/// from the latest transcript per turn_order. A session that finishes with ZERO
+/// pushed samples delegates to <paramref name="batchFallback"/> (the cloud REST
+/// batch path) instead of bursting the buffer over the socket — the server
+/// throttles ingest to ~1.25x realtime and errors (3007) past a buffered
+/// backlog, so bursting is slower than REST and not completeness-guaranteed.
+/// Never logs the API key. FallbackStreamingTranscriber (Task 8) owns
+/// retries/local fallback — failures here throw AssemblyAiException.
 /// </summary>
 public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
 {
     private readonly Func<IStreamingWebSocket> _socketFactory;
+    private readonly ITranscriber _batchFallback; // cloud REST batch (AssemblyAiTranscriber)
     private readonly IAssemblyAiKeyStore _keyStore;
     private readonly AssemblyAiOptions _opts;
     private readonly ILogger _log;
 
     public AssemblyAiStreamingTranscriber(
         Func<IStreamingWebSocket> socketFactory,
+        ITranscriber batchFallback,
         IAssemblyAiKeyStore keyStore,
         AssemblyAiOptions options,
         ILogger<AssemblyAiStreamingTranscriber> logger)
     {
         _socketFactory = socketFactory;
+        _batchFallback = batchFallback;
         _keyStore = keyStore;
         _opts = options;
         _log = logger;
@@ -2163,17 +2266,20 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
         var uri = new Uri($"{_opts.StreamingBaseUrl}/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true");
         await socket.ConnectAsync(uri, key, ct);
         _log.LogInformation("AssemblyAI streaming session connected");
-        return new AssemblyAiStreamingSession(socket, ModelName, _log);
+        return new AssemblyAiStreamingSession(
+            socket, ModelName,
+            (audio, ct2) => _batchFallback.TranscribeAsync(audio, ct2),
+            _log);
     }
 }
 
 public sealed class AssemblyAiStreamingSession : IStreamingTranscriptionSession
 {
     private const int MinSendSamples = 800;      // 50 ms at 16 kHz — the API's minimum message
-    private const int FinishSliceSamples = 16000; // 1000 ms — the API's maximum message
 
     private readonly IStreamingWebSocket _socket;
     private readonly string _modelName;
+    private readonly Func<ReadOnlyMemory<float>, CancellationToken, Task<TranscriptionResult>> _batchFallback;
     private readonly ILogger _log;
     private readonly Task _receiveLoop;
     private readonly CancellationTokenSource _loopCts = new();
@@ -2182,12 +2288,18 @@ public sealed class AssemblyAiStreamingSession : IStreamingTranscriptionSession
     private readonly TaskCompletionSource _terminated = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly List<float> _sendBuffer = new();
     private long _pushedSamples;
+    private bool _sawTermination; // written only by the receive loop
     private volatile Exception? _serverError;
 
-    public AssemblyAiStreamingSession(IStreamingWebSocket socket, string modelName, ILogger log)
+    public AssemblyAiStreamingSession(
+        IStreamingWebSocket socket,
+        string modelName,
+        Func<ReadOnlyMemory<float>, CancellationToken, Task<TranscriptionResult>> batchFallback,
+        ILogger log)
     {
         _socket = socket;
         _modelName = modelName;
+        _batchFallback = batchFallback;
         _log = log;
         _receiveLoop = Task.Run(ReceiveLoopAsync);
     }
@@ -2199,7 +2311,16 @@ public sealed class AssemblyAiStreamingSession : IStreamingTranscriptionSession
             while (true)
             {
                 var json = await _socket.ReceiveTextAsync(_loopCts.Token);
-                if (json is null) return; // server closed
+                if (json is null)
+                {
+                    // Socket closed. Without a prior Termination (or Error) this
+                    // is an ABNORMAL close — surface it so the fallback wrapper
+                    // engages instead of returning a truncated transcript.
+                    if (!_sawTermination && _serverError is null)
+                        _serverError = new AssemblyAiException(
+                            "AssemblyAI streaming connection closed unexpectedly.");
+                    return;
+                }
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
                 var type = root.TryGetProperty("type", out var t) ? t.GetString() : null;
@@ -2214,7 +2335,8 @@ public sealed class AssemblyAiStreamingSession : IStreamingTranscriptionSession
                         break;
                     }
                     case "Termination":
-                    case "SessionTerminated":
+                    case "SessionTerminated": // legacy name, tolerated defensively
+                        _sawTermination = true;
                         return;
                     case "Error":
                     {
@@ -2261,18 +2383,19 @@ public sealed class AssemblyAiStreamingSession : IStreamingTranscriptionSession
 
         if (_pushedSamples == 0)
         {
-            // Session started at stop time (nothing streamed): send the whole
-            // buffer now in max-size slices — the server is faster than realtime.
-            var remaining = fullAudio;
-            while (remaining.Length > 0)
-            {
-                var take = Math.Min(FinishSliceSamples, remaining.Length);
-                await SendPadded(remaining[..take], ct);
-                remaining = remaining[take..];
-            }
+            // Session materialized only at stop time (nothing streamed). Bursting
+            // the whole buffer over the socket is NOT batch-equivalent: the server
+            // throttles ingest to ~1.25x realtime and errors (3007) past a
+            // buffered backlog, so it is both slower than REST and not
+            // completeness-guaranteed. Delegate to the cloud batch REST path —
+            // behavior identical to today for late-materialized sessions.
+            return await _batchFallback(fullAudio, ct);
         }
-        else if (_sendBuffer.Count > 0)
+
+        if (_sendBuffer.Count > 0)
         {
+            // Terminate's tail flush of the <=1 s in-flight remainder IS
+            // documented — only this residual is sent here.
             var tail = _sendBuffer.ToArray();
             _sendBuffer.Clear();
             await SendPadded(tail, ct);
@@ -2326,7 +2449,7 @@ dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll
   -class "Winpepper.Asr.Tests.Pcm16Tests" -class "Winpepper.Asr.Tests.AssemblyAiStreamingTests"
 ```
 
-Expected: PASS (9 tests). If `ServerError_...` is flaky, replace the `Task.Delay(50, ...)` with a poll loop waiting until the session observes the error (up to 2 s) — never leave a raw sleep race in place.
+Expected: PASS (11 tests). If `ServerError_...` or `UnexpectedSocketClose_...` is flaky, replace the `Task.Delay(50, ...)` with a poll loop waiting until the session observes the error (up to 2 s) — never leave a raw sleep race in place.
 
 - [ ] **Step 5: Full suite gate + commit**
 
@@ -2346,7 +2469,7 @@ git commit -m "feat(asr): AssemblyAI Universal-Streaming v3 websocket transcribe
 
 ### Task 8: FallbackStreamingTranscriber (cloud primary, local safety net)
 
-Streaming analog of `FallbackTranscriber` (`src/Winpepper.Asr/Transcription/FallbackTranscriber.cs`) with identical policy: user cancellation rethrows; ANY other failure (connect, mid-stream push, finish, or the owned cloud deadline on the post-stop wait) lands on local batch transcription of the full buffer; invalid-model 400s additionally raise the config error.
+Streaming analog of `FallbackTranscriber` (`src/Winpepper.Asr/Transcription/FallbackTranscriber.cs`) with identical policy: user cancellation rethrows; ANY other failure (connect, mid-stream push, finish, or the owned cloud deadline on the post-stop wait) lands on local batch transcription of the full buffer; invalid-model 400s additionally raise the config error. (Distinct from Task 7's zero-pushed cloud-REST delegation, which happens INSIDE `AssemblyAiStreamingSession.FinishAsync` under this wrapper's deadline — this wrapper's LOCAL safety-net policy is unchanged.)
 
 **Files:**
 - Create: `src/Winpepper.Asr/Transcription/FallbackStreamingTranscriber.cs`
@@ -2711,6 +2834,8 @@ git commit -m "feat(asr): streaming cloud transcription with local batch fallbac
 
 Per-dictation glue between the recorder's `FramesAvailable` event and a streaming session. Pure managed; keeps `PipelineHost`'s Windows-only edits (Task 10) to a handful of lines.
 
+Pump behavior note (A4/N6): the frame channel is unbounded and the pump applies no backpressure, so a slower-than-realtime encoder (local RTF ≥ 1 on very weak hardware) degrades post-stop latency — frames queue and the tail grows — but never correctness: the batch fallback fires only on exceptions, and `FinishAsync(fullAudio)` remains authoritative. Post-merge, production `TranscribeMs` makes any such slowness directly observable.
+
 **Files:**
 - Create: `src/Winpepper.Asr/Transcription/StreamingDictationSession.cs`
 - Test: `tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs`
@@ -2978,15 +3103,15 @@ git commit -m "feat(asr): per-dictation streaming coordinator between frame even
 
 ### Task 10: Pipeline wiring (AppShell + PipelineHost — Windows-only)
 
-Wire streaming into the app: build streaming transcribers, start a `StreamingDictationSession` at recording start, tee `FramesAvailable` into it, and replace the stop-time `TranscribeAsync` with `FinishAsync`. **This code is `#if WINDOWS`/WinUI and CANNOT be compiled on Linux** — copy patterns exactly, mirror every stop-arm edit in BOTH duplicated arms (HoldUp lines ~425–560 and Toggle-stop lines ~701–840), and re-read each edit against its sibling arm before committing. `HistoryTimings.TranscribeMs` (measured around the new `FinishAsync`) automatically becomes the post-stop perceived latency on Windows.
+Wire streaming into the app: build streaming transcribers, start a `StreamingDictationSession` at recording start, tee `FramesAvailable` into it, and replace the stop-time `TranscribeAsync` with `FinishAsync`. **This code is `#if WINDOWS`/WinUI and CANNOT be compiled on Linux** — copy patterns exactly, mirror every stop-arm edit in BOTH duplicated arms (HoldUp lines ~429–564 and Toggle-stop lines ~705–844), and re-read each edit against its sibling arm before committing. **Line anchors throughout this task are approximate (the file drifts between revisions); executors MUST key on the QUOTED code anchors, never on line numbers.** `HistoryTimings.TranscribeMs` (measured around the new `FinishAsync`) automatically becomes the post-stop perceived latency on Windows.
 
 **Files:**
-- Modify: `src/Winpepper.App/Hosting/AppShell.cs` (`BuildTranscriber` → `BuildStreamingTranscriber`, ~lines 416–464; PipelineHost construction lambda ~lines 273–280)
-- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` (field/ctor types lines 63/86; frame tee ~line 239; both start arms ~408–424 / ~683–700; both stop arms ~467–497 / ~741–764; both silent-drop paths; Cancel case ~line 931)
+- Modify: `src/Winpepper.App/Hosting/AppShell.cs` (`BuildTranscriber` → `BuildStreamingTranscriber`, ~lines 416–464; PipelineHost construction lambda ~lines 273–291, the transcriber lambda itself at ~284–286)
+- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` (field/ctor types lines ~63/~86; frame tee ~line 296; both start arms — insert BEFORE `_warmRecorder!.StartSession(...)` at ~408 / ~683; both stop arms ~471–501 / ~745–769; both silent-drop paths ~436–469 / ~711–743; Cancel case ~lines 670–673)
 
 **Interfaces:**
 - Consumes: `ParakeetStreamingTranscriber`, `AssemblyAiStreamingTranscriber`, `ClientStreamingWebSocket`, `FallbackStreamingTranscriber`, `StreamingDictationSession`, `IStreamingTranscriber` (Tasks 6–9); `ParakeetSession : IParakeetBackend` (Task 5); pre-roll frames (Task 3).
-- Produces: `AppShell.BuildStreamingTranscriber(ParakeetSession local, string loadedModelName, AppSettings settings, Action<string> onFallback, IAssemblyAiKeyStore keyStore, AssemblyAiOptions options, ErrorBus errorBus, ILoggerFactory loggerFactory) : IStreamingTranscriber`. The batch `IAssemblyAiClient` and `CorrectionStore` parameters are dropped (streaming has no `custom_spelling`/`keyterms_prompt`; corrections still apply via cleanup's deterministic corrections pass — see `CloudProvider` doc comment).
+- Produces: `AppShell.BuildStreamingTranscriber(ParakeetSession local, string loadedModelName, AppSettings settings, Action<string> onFallback, IAssemblyAiClient client, IAssemblyAiKeyStore keyStore, AssemblyAiOptions options, CorrectionStore? correctionStore, ErrorBus errorBus, ILoggerFactory loggerFactory) : IStreamingTranscriber` — the SAME parameter list as today's `BuildTranscriber`: the cloud REST batch transcriber (with its corrections/extras snapshot) is still constructed, because it is the streaming session's zero-pushed batch fallback (Task 7 / A9). Note the streaming connect itself sends no keyterms: `keyterms_prompt` DOES exist on v3 streaming but wiring it is deferred (see Task 7's Protocol facts); user corrections stay guaranteed by cleanup's deterministic corrections pass — see `CloudProvider` doc comment.
 
 - [ ] **Step 1: Replace `AppShell.BuildTranscriber` with `BuildStreamingTranscriber`**
 
@@ -3000,16 +3125,21 @@ In `src/Winpepper.App/Hosting/AppShell.cs`, replace the entire static `BuildTran
     /// session (batch). Otherwise the local chunked-streaming transcriber is
     /// used. Static, taking its dependencies explicitly, so the pipeline can
     /// invoke it through an injected delegate without holding an AppShell
-    /// instance. NOTE: the streaming API has no custom_spelling/keyterms_prompt;
-    /// user corrections still apply via cleanup's deterministic corrections pass.
+    /// instance. NOTE: the streaming connect sends no keyterms — v3 streaming
+    /// DOES support keyterms_prompt but wiring it is deferred (Task 7 Protocol
+    /// facts); custom_spelling is batch-only. User corrections still apply via
+    /// cleanup's deterministic corrections pass, and the cloud REST batch
+    /// transcriber built below (the zero-pushed fallback) keeps its extras.
     /// </summary>
     public static Winpepper.Asr.Transcription.IStreamingTranscriber BuildStreamingTranscriber(
         Winpepper.Asr.ParakeetSession local,
         string loadedModelName,
         AppSettings settings,
         Action<string> onFallback,
+        Winpepper.Asr.Transcription.IAssemblyAiClient client,
         Winpepper.Asr.Transcription.IAssemblyAiKeyStore keyStore,
         Winpepper.Asr.Transcription.AssemblyAiOptions options,
+        Winpepper.Corrections.CorrectionStore? correctionStore,
         Winpepper.Core.Errors.ErrorBus errorBus,
         ILoggerFactory loggerFactory)
     {
@@ -3022,9 +3152,23 @@ In `src/Winpepper.App/Hosting/AppShell.cs`, replace the entire static `BuildTran
         if (!string.Equals(settings.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase))
             return localStreaming;
 
+        // Snapshot corrections into request extras at build time; keyterms only
+        // when opted in — copied verbatim from today's BuildTranscriber. The REST
+        // batch transcriber is the streaming session's zero-pushed fallback (A9).
+        Winpepper.Asr.Transcription.AssemblyAiRequestExtras Extras()
+        {
+            var data = correctionStore?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
+            return Winpepper.Asr.Transcription.CorrectionSpellingMapper.ToExtras(data, options.KeytermsEnabled);
+        }
+
+        var cloudBatch = new Winpepper.Asr.Transcription.AssemblyAiTranscriber(
+            client, keyStore, options,
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiTranscriber>(),
+            extrasProvider: Extras);
+
         var cloud = new Winpepper.Asr.Transcription.AssemblyAiStreamingTranscriber(
             () => new Winpepper.Asr.Transcription.ClientStreamingWebSocket(),
-            keyStore, options,
+            cloudBatch, keyStore, options,
             loggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiStreamingTranscriber>());
 
         return new Winpepper.Asr.Transcription.FallbackStreamingTranscriber(
@@ -3048,12 +3192,12 @@ In `src/Winpepper.App/Hosting/AppShell.cs`, replace the entire static `BuildTran
     }
 ```
 
-Update the PipelineHost construction lambda (lines ~273–280):
+Update the PipelineHost construction lambda (~lines 284–286 — the `AppShell.BuildTranscriber` call inside the `new PipelineHost(...)` argument list; keep every argument, only the method name changes):
 
 ```csharp
                                          (local, loadedModelName, s, onFallback) => AppShell.BuildStreamingTranscriber(
-                                             local, loadedModelName, s, onFallback, aaiKeyStore, aaiOptions,
-                                             errorBus, factory),
+                                             local, loadedModelName, s, onFallback, aaiClient, aaiKeyStore, aaiOptions,
+                                             correctionStore, errorBus, factory),
 ```
 
 Verify no other caller remains: `grep -rn "BuildTranscriber" src/ tests/` must return nothing.
@@ -3081,7 +3225,7 @@ and the matching constructor parameter (line ~86):
     private Action<ReadOnlyMemory<float>>? _streamFrameHandler;
 ```
 
-(c) Frame tee — immediately after `recorder.FramesAvailable += _frameHandler;` (line ~239), add:
+(c) Frame tee — immediately after `recorder.FramesAvailable += _frameHandler;` (line ~296; the quoted line is unique in the file — anchor on it, not the number), add:
 
 ```csharp
                 // Streaming tee: a permanent handler that forwards frames to the
@@ -3093,14 +3237,18 @@ and the matching constructor parameter (line ~86):
 
 - [ ] **Step 3: PipelineHost — start streaming at recording start (BOTH start arms)**
 
-In the **HoldDown arm**, after the window-context prefetch block (right after the `if (_windowContext is not null && ...)` block closes, line ~423, where `settingsAtStart` is in scope), add:
+In the **HoldDown arm**, immediately BEFORE the line `_warmRecorder!.StartSession(includePrerollMs: 500);` (~line 408, right after `_sounds.PlayStart();`), add the block below. The session MUST exist before `StartSession` runs: `WarmWasapiRecorder.StartSession` raises the 500 ms pre-roll SYNCHRONOUSLY through `FramesAvailable` (Task 3), so with a null `_streamingSession` the tee's null-conditional silently drops it and the cloud stream permanently loses the dictation's first ~500 ms (a cloud session never re-sends earlier audio). Creating the session early is safe: frames queue in the coordinator's channel until the factory completes (Task 9). Note `settingsAtStart` is only captured LATER (in the prefetch block), so this block takes its OWN settings snapshot via `_settingsProvider()`:
 
 ```csharp
-                // Start the streaming dictation session. The factory runs on a
-                // background pump so recording start stays instant; model ensure
-                // is silent here (reportErrors: false) — the stop arm re-runs the
-                // check with today's exact error UX. Frames queue until ready.
-                var settingsForStream = settingsAtStart;
+                // Start the streaming dictation session BEFORE StartSession —
+                // StartSession raises the 500 ms pre-roll synchronously through
+                // FramesAvailable, so the session must already exist (frames
+                // queue in the coordinator until the factory completes) or the
+                // cloud stream permanently loses the first ~500 ms. The factory
+                // runs on a background pump so recording start stays instant;
+                // model ensure is silent here (reportErrors: false) — the stop
+                // arm's late path re-runs the check with today's exact error UX.
+                var settingsForStream = _settingsProvider();
                 _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
                     ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
                     {
@@ -3118,10 +3266,12 @@ In the **HoldDown arm**, after the window-context prefetch block (right after th
                     _log, ct);
 ```
 
-Mirror the same block in the **Toggle-start arm** (after its prefetch block, line ~699) using `settingsAtStart2`:
+Mirror the same block in the **Toggle-start arm** — immediately BEFORE its `_warmRecorder!.StartSession(includePrerollMs: 500);` line (~line 683, right after its `_sounds.PlayStart();`) — with `2`-suffixed names (its own snapshot, since `settingsAtStart2` is also only captured later):
 
 ```csharp
-                    var settingsForStream2 = settingsAtStart2;
+                    // (same comment as the HoldDown arm: create BEFORE StartSession
+                    // so the synchronously-raised pre-roll is not dropped)
+                    var settingsForStream2 = _settingsProvider();
                     _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
                         ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
                         {
@@ -3143,43 +3293,25 @@ IMPORTANT: if `TryEnsureAsrModel` is not safe to call off the hotkey thread (che
 
 - [ ] **Step 4: PipelineHost — finish streaming at stop (BOTH stop arms)**
 
-**HoldUp arm.** Replace lines ~467–497 (from `var transcribeSw = ...` through `transcribeSw.Stop();`) with:
+**HoldUp arm.** Replace lines ~471–501 (from `var transcribeSw = ...` through `transcribeSw.Stop();`) with the block below. ORDERING IS LOAD-BEARING (A5): when a streaming session exists, `streaming.FinishAsync(trimmed, ct)` runs FIRST, before ANY `TryEnsureAsrModel` call — the ensure's swap branch disposes the `ParakeetSession` the streaming transcriber still holds (`old?.Dispose()` at PipelineHost.cs:228–232, under `_startGate`; nothing gates swaps on engine state), so an ensure racing an in-flight session is a use-after-dispose on a live ONNX session. With this ordering the only ensure during a dictation is the start-arm factory's own, which completes BEFORE the session captures the model. `TryEnsureAsrModel` + the `_asr is null` guard + the failure early-exit run ONLY on the late path (no streaming session, or streaming returned null). Accepted consequence: a model selection changed mid-dictation takes effect on the NEXT dictation.
 
 ```csharp
                 var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
                 var settingsNow = _settingsProvider();
                 var cloudSelected = string.Equals(
                     settingsNow.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase);
-                // Provider-aware (req 6): a failed LOCAL swap never skips or
-                // aborts a CLOUD dictation; soften its error surface.
-                var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
-                if ((!localReady && !cloudSelected) || _asr is null)
-                {
-                    if (_streamingSession is not null)
-                    {
-                        await _streamingSession.DisposeAsync();
-                        _streamingSession = null;
-                    }
-                    // Terminal-state early-exit (S2): never bare-return — drive
-                    // the engine back so the next dictation can start.
-                    _engine.Apply(SessionEvent.Failed);
-                    if (cloudSelected && _asr is null)
-                    {
-                        // Cloud selected but no local session exists at all (the
-                        // fallback wrapper needs one): surface this rare case.
-                        _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                            new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
-                            Guid.Empty);
-                    }
-                    _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
-                    return;
-                }
                 Action<string> fallbackNotice = notice =>
                     _ = _toasts.ShowAsync(
                         "Winpepper",
                         "Cloud transcription unavailable — used local speech recognition instead.",
                         Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
                         TimeSpan.FromSeconds(6));
+                // Finish the streaming session FIRST — before ANY TryEnsureAsrModel
+                // call: the ensure's swap branch disposes the ParakeetSession the
+                // streaming transcriber still holds (no engine-state gating), so
+                // no ensure may run while a session is in flight. The factory's
+                // own ensure (start arm) ran before the session captured the
+                // model. A mid-dictation model change applies to the NEXT dictation.
                 var streaming = _streamingSession;
                 _streamingSession = null;
                 Winpepper.Asr.Transcription.TranscriptionResult? maybeTranscription = null;
@@ -3187,9 +3319,33 @@ IMPORTANT: if `TryEnsureAsrModel` is not safe to call off the hotkey thread (che
                     maybeTranscription = await streaming.FinishAsync(trimmed, ct);
                 if (maybeTranscription is null)
                 {
-                    // No streaming session materialized (e.g. the model only became
-                    // ready in the ensure above): batch-equivalent path via the
-                    // streaming seam — behavior identical to today.
+                    // Late path: no streaming session materialized, or its factory
+                    // returned null (no provider at start). Run today's ensure +
+                    // error UX, then the batch-equivalent path via the streaming
+                    // seam — behavior identical to today.
+                    // Provider-aware (req 6): a failed LOCAL swap never skips or
+                    // aborts a CLOUD dictation; soften its error surface.
+                    var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
+                    if ((!localReady && !cloudSelected) || _asr is null)
+                    {
+                        if (streaming is not null)
+                        {
+                            await streaming.DisposeAsync(); // no-op after FinishAsync; never throws
+                        }
+                        // Terminal-state early-exit (S2): never bare-return — drive
+                        // the engine back so the next dictation can start.
+                        _engine.Apply(SessionEvent.Failed);
+                        if (cloudSelected && _asr is null)
+                        {
+                            // Cloud selected but no local session exists at all (the
+                            // fallback wrapper needs one): surface this rare case.
+                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                                new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
+                                Guid.Empty);
+                        }
+                        _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
+                        return;
+                    }
                     var transcriber = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow, fallbackNotice);
                     await using var lateSession = await transcriber.StartSessionAsync(ct);
                     maybeTranscription = await lateSession.FinishAsync(trimmed, ct);
@@ -3198,11 +3354,11 @@ IMPORTANT: if `TryEnsureAsrModel` is not safe to call off the hotkey thread (che
                 transcribeSw.Stop();
 ```
 
-**Toggle-stop arm.** Apply the identical replacement to lines ~741–764 with the `2`-suffixed variables (`transcribeSw2`, `settingsNow2`, `cloudSelected2`, `localReady2`, `fallbackNotice2`, `streaming2`, `maybeTranscription2`, `lateSession2`, `trimmed2`, `transcription2`) — same logic, token-for-token, including the early-exit's streaming dispose.
+**Toggle-stop arm.** Apply the identical replacement to lines ~745–769 with the `2`-suffixed variables (`transcribeSw2`, `settingsNow2`, `cloudSelected2`, `fallbackNotice2`, `streaming2`, `maybeTranscription2`, `localReady2`, `lateSession2`, `trimmed2`, `transcription2`) — same logic, token-for-token, including the same FinishAsync-before-any-ensure ordering and the late-path early-exit's `streaming2` dispose.
 
 - [ ] **Step 5: PipelineHost — abandon paths (BOTH silent-drop paths + Cancel)**
 
-In BOTH silent-drop blocks (`if (trimmed is null) { ... }` at ~435–465 and `if (trimmed2 is null) { ... }` at ~710–739), immediately before the existing `_recordStopwatch = null; break;` lines, add:
+In BOTH silent-drop blocks (`if (trimmed is null) { ... }` at ~436–469 and `if (trimmed2 is null) { ... }` at ~711–743), immediately before the existing `_recordStopwatch = null; break;` lines, add:
 
 ```csharp
                     if (_streamingSession is not null)
@@ -3212,7 +3368,7 @@ In BOTH silent-drop blocks (`if (trimmed is null) { ... }` at ~435–465 and `if
                     }
 ```
 
-In the `HotkeyEventKind.Cancel` case (~line 929–932), extend to:
+In the `HotkeyEventKind.Cancel` case (~lines 670–673 — the ONLY `case HotkeyEventKind.Cancel:` in the file; anchor on the quoted body, not the number), extend to:
 
 ```csharp
             case HotkeyEventKind.Cancel:
@@ -3232,7 +3388,7 @@ In the `HotkeyEventKind.Cancel` case (~line 929–932), extend to:
 
 Run the FULL SUITE GATE block. Expected: `ALL GREEN`.
 
-Then re-read both PipelineHost arms side by side (`sed -n '396,560p'` and `sed -n '680,840p'` on the file) and confirm the two arms received token-equivalent edits. Also run `grep -n "_streamingSession" src/Winpepper.App/Hosting/PipelineHost.cs` — expected hits: 2 field/handler lines, 2 start-arm assignments, 2 stop-arm consume blocks (4 lines each), 2 silent-drop disposes, 1 cancel dispose.
+Then re-read both PipelineHost arms side by side (`sed -n '396,580p'` and `sed -n '680,860p'` on the file — adjust to the drifted line numbers) and confirm the two arms received token-equivalent edits, INCLUDING: the start-arm session creation sits BEFORE `_warmRecorder!.StartSession(...)` in both arms, and both stop arms call `streaming.FinishAsync(...)`/`streaming2.FinishAsync(...)` before any `TryEnsureAsrModel`. Also run `grep -n "_streamingSession" src/Winpepper.App/Hosting/PipelineHost.cs` — expected hits: 2 field/handler lines, 2 start-arm assignments, 4 stop-arm consume lines (`var streaming = _streamingSession;` + `_streamingSession = null;` per arm), 2 silent-drop dispose blocks (3 lines each), 1 cancel dispose block (3 lines).
 
 - [ ] **Step 7: Commit**
 
@@ -3241,7 +3397,11 @@ git add src/Winpepper.App/Hosting/AppShell.cs src/Winpepper.App/Hosting/Pipeline
 git commit -m "feat(app): stream dictation audio into the transcriber during recording"
 ```
 
-Note for the reviewer and the final report: these files are Windows-only; the Linux gate proves the rest of the tree, and a Windows build + the `ParakeetSessionIntegrationTests` + a manual dictation are the post-merge verification for this task (`TranscribeMs` in `%LOCALAPPDATA%\winpepper\history\index.json` shows the production post-stop latency).
+Note for the reviewer and the final report — the Windows verification is a HARD REQUIREMENT, not a nice-to-have. These files are Windows-only; the Linux gate proves the rest of the tree. Post-merge, on Windows, the following MUST be done:
+
+1. Windows build + `ParakeetSessionIntegrationTests` + a manual dictation (`TranscribeMs` in `%LOCALAPPDATA%\winpepper\history\index.json` shows the production post-stop latency).
+2. **Batch-vs-streamed transcript comparison on the real model** (the accepted mitigation for the unverifiable chunked-quality assumption, A1): run the SAME recordings (real archived dictations of varying lengths) through both the batch path and the streamed path and diff the transcripts. Investigate any material quality gap BEFORE enabling streaming by default — chunked no-right-context inference of this offline export has zero measured quality evidence, and this comparison is what stands in for it. It also covers the residual trailing-silence risk the leading-silence gate (Task 6) does not.
+3. Latency observability: a slower-than-realtime encoder degrades latency but never correctness (the fallback fires only on exceptions) — production `TranscribeMs` makes any such regression observable here.
 
 ---
 
@@ -3292,6 +3452,9 @@ Add the new cases to the `switch` (before `default:`):
             var audio = SynthesizeAudio(AudioSeconds);
             var streaming = new AssemblyAiStreamingTranscriber(
                 () => new PacedFakeSocket(finalizeDelay: TimeSpan.FromMilliseconds(300)),
+                // Zero-pushed REST batch fallback (Task 7 / A9) — never used here:
+                // MeasureStreaming pushes frames at realtime, so _pushedSamples > 0.
+                new PacedTranscriber("assemblyai-batch-sim", TimeSpan.Zero),
                 new BenchKeyStore("sim-key"), new AssemblyAiOptions(),
                 NullLogger<AssemblyAiStreamingTranscriber>.Instance);
             rows.Add((scenario, "simulated", await MeasureStreaming(streaming, audio)));
@@ -3308,6 +3471,8 @@ Add the new cases to the `switch` (before `default:`):
             var audio = SynthesizeAudio(AudioSeconds);
             var streaming = new AssemblyAiStreamingTranscriber(
                 () => new ClientStreamingWebSocket(),
+                // Zero-pushed REST batch fallback — never used (realtime pacing).
+                new PacedTranscriber("assemblyai-batch-sim", TimeSpan.Zero),
                 new BenchKeyStore(key), new AssemblyAiOptions(),
                 NullLogger<AssemblyAiStreamingTranscriber>.Instance);
             rows.Add((scenario, "REAL network", await MeasureStreaming(streaming, audio)));

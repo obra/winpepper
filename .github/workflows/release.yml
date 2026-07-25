@@ -60,7 +60,7 @@ jobs:
         id: version
         run: |
           # The built filename carries NBGV's 4-part version
-          # (winpepper-0.6.2.240-x64.msi) – glob it, then rename to the
+          # (winpepper-0.6.2.240-x64.msi) — glob it, then rename to the
           # tag-derived name (winpepper-0.6.2-alpha-x64.msi) so release asset
           # URLs are predictable for winget and for humans.
           $msi = Get-ChildItem -Path "artifacts" -Filter "winpepper-*-x64.msi" | Select-Object -First 1
@@ -147,7 +147,7 @@ jobs:
       - name: Generate SHA256 checksum
         id: checksum
         run: |
-          # Hash the exact bytes being uploaded (after the rename) – winget's
+          # Hash the exact bytes being uploaded (after the rename) — winget's
           # InstallerSha256 must match the published asset.
           $msi = "${{ steps.version.outputs.msi }}"
           $name = "${{ steps.version.outputs.name }}"

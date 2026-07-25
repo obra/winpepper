@@ -121,6 +121,54 @@ public class ParakeetStreamingSessionTests
     }
 
     [Fact]
+    public async Task FinishTimeEncoderFailure_AfterSuccessfulStreaming_FallsBackToBatchOverTheFullBuffer()
+    {
+        var calls = 0;
+        var backend = new FakeParakeetBackend
+        {
+            // Calls 1-2 are the push-time chunk encodes; call 3 is the tail encode
+            // inside FinishAsync's Task.Run.
+            OnEncode = _ => { if (++calls == 3) throw new InvalidOperationException("onnx died at finish"); },
+        };
+        ReadOnlyMemory<float> seen = default;
+        var session = NewSession(backend,
+            (audio, _) => { seen = audio; return Task.FromResult(new TranscriptionResult("BATCH", "parakeet-test")); },
+            chunk: 50, context: 0);
+        await session.PushAsync(Audio(Hop * 120), TestContext.Current.CancellationToken); // 2 chunks stream fine
+
+        var result = await session.FinishAsync(Audio(Hop * 120), TestContext.Current.CancellationToken);
+
+        calls.ShouldBe(3);                // streaming succeeded, then the tail encode was attempted
+        result.Text.ShouldBe("BATCH");    // finish-time catch landed on the batch fallback
+        seen.Length.ShouldBe(Hop * 120);  // the fallback received the FULL audio buffer
+    }
+
+    [Fact]
+    public async Task EncoderOutputLengthMismatch_TripsTheSubsamplingAssertion_AndFallsBackToBatch()
+    {
+        // With SubsamplingFactor 2 the fake returns T/2 frames: an even-length encode
+        // matches floor((T-1)/2)+1 exactly, an odd-length encode returns one frame
+        // fewer than the formula demands.
+        var backend = new FakeParakeetBackend { SubsamplingFactor = 2 };
+        ReadOnlyMemory<float> seen = default;
+        var session = NewSession(backend,
+            (audio, _) => { seen = audio; return Task.FromResult(new TranscriptionResult("BATCH", "parakeet-test")); },
+            chunk: 50, context: 21);
+        // Chunk 1 encodes T=50 (even: consistent, establishes F=2); chunk 2 encodes
+        // T=21+50=71 (odd: 35 frames returned, formula demands 36) -> the session's
+        // re-assertion throws inside PushAsync and latches the session corrupt.
+        await session.PushAsync(Audio(Hop * 120), TestContext.Current.CancellationToken);
+
+        var result = await session.FinishAsync(Audio(Hop * 120), TestContext.Current.CancellationToken);
+
+        backend.EncodeMelFrameCounts.Count.ShouldBe(2); // both encodes returned normally, no tail encode
+        backend.EncodeMelFrameCounts[0].ShouldBe(50);
+        backend.EncodeMelFrameCounts[1].ShouldBe(21 + 50);
+        result.Text.ShouldBe("BATCH");    // yet the session fell back: the assertion itself fired
+        seen.Length.ShouldBe(Hop * 120);  // over the full audio buffer
+    }
+
+    [Fact]
     public async Task Transcriber_StartsAFreshSessionPerDictation()
     {
         var backend = new FakeParakeetBackend();

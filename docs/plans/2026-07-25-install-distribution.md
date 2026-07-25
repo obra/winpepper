@@ -9,7 +9,7 @@
 
 **Architecture:** Pure CI/scripts/docs work — no .NET code changes. The new `release.yml` mirrors the nightly's proven publish → MSI → install → `--selftest` → uninstall steps as a release gate, then renames the MSI to a tag-derived name, hashes it, and publishes via `softprops/action-gh-release`. Winget submission runs as a second job in the same workflow (a separate `release:`-triggered workflow would never fire, because releases created with `GITHUB_TOKEN` do not trigger other workflows).
 
-**Tech Stack:** GitHub Actions (windows-latest), WiX v5 via `WixToolset.Sdk` (restored by `dotnet restore` — no explicit WiX install step exists or is needed), Nerdbank.GitVersioning, `softprops/action-gh-release@v2`, `vedantmgoyal9/winget-releaser@v2`, PowerShell.
+**Tech Stack:** GitHub Actions (windows-latest), WiX v5 via `WixToolset.Sdk` (restored by `dotnet restore` — no explicit WiX install step exists or is needed), Nerdbank.GitVersioning, `softprops/action-gh-release@v3` (v2 is the final, unmaintained v2 line on the deprecated Node 20 runtime; v3 has the same inputs), `vedantmgoyal9/winget-releaser@v2`, PowerShell.
 
 ## Global Constraints
 
@@ -230,7 +230,25 @@ jobs:
           $msi = Get-ChildItem -Path "artifacts" -Filter "winpepper-*-x64.msi" | Select-Object -First 1
           if (-not $msi) { Write-Error "No MSI produced."; exit 1 }
           Write-Host "Built MSI: $($msi.Name)"
+          # Guard 1: the versioned-output naming target (3b1903e) has never run
+          # in CI, and pre-3b1903e nightlies produced a degenerate
+          # 'winpepper--x64.msi' (empty version) that the loose glob would
+          # silently match. Require the 4-part-version form.
+          if ($msi.Name -notmatch '^winpepper-\d+\.\d+\.\d+\.\d+-x64\.msi$') {
+            Write-Error "Built MSI name '$($msi.Name)' is not the expected winpepper-<a.b.c.height>-x64.msi form."
+            exit 1
+          }
           $tagVersion = "$env:GITHUB_REF_NAME".TrimStart('v')
+          # Guard 2: the asset is named from the TAG while the MSI's internal/
+          # ARP version comes from version.json (NBGV). A mismatched tag (e.g.
+          # v0.7.0 on a 0.6.2 tree) would publish a mislabeled asset whose
+          # winget manifest and ARP DisplayVersion disagree. Require the tag's
+          # numeric prefix to match the built version's first three parts.
+          $tagNumeric = ($tagVersion -split '-')[0]
+          if ($msi.Name -notmatch ('^winpepper-' + [regex]::Escape($tagNumeric) + '\.\d+-x64\.msi$')) {
+            Write-Error "Tag $env:GITHUB_REF_NAME (numeric $tagNumeric) does not match built MSI '$($msi.Name)' - fix version.json or the tag before releasing."
+            exit 1
+          }
           $assetName = "winpepper-$tagVersion-x64.msi"
           $assetPath = Join-Path $msi.DirectoryName $assetName
           if ($msi.Name -ne $assetName) { Move-Item $msi.FullName $assetPath -Force }
@@ -305,7 +323,11 @@ jobs:
           "path=$checksumPath" >> $env:GITHUB_OUTPUT
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        # v3, not v2: v2.6.2 is the final v2 release, unmaintained and on the
+        # deprecated Node 20 runtime; v3 has the same inputs and defaults
+        # (draft: false, so the release is published - with assets already
+        # uploaded - before any needs:-dependent job starts).
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ steps.version.outputs.msi }}
@@ -411,6 +433,12 @@ Append to the end of `.github/workflows/release.yml` (top-level under `jobs:`, i
   # (one-time setup: WINGET_TOKEN secret + winget-pkgs fork + first manual
   # submission — see docs/release.md). winget-releaser can only UPDATE a
   # package that already exists in winget-pkgs.
+  #
+  # Pin note: @v2 verified 2026-07-25 (inputs identifier/release-tag/
+  # installers-regex/token; runs on any OS with cargo on PATH — preinstalled
+  # on windows-latest). The v2 tag is a frozen 2024-11 snapshot behind main;
+  # revisit the pin if ever moving off windows-latest (ubuntu-slim breaks
+  # under @v2's `cargo binstall` invocation).
   winget:
     needs: release-msi
     if: vars.WINGET_AUTOSUBMIT == 'true'
@@ -903,10 +931,16 @@ AppsAndFeaturesEntries:
 Notes:
 - winget accepts **unsigned** MSIs — installers are validated by the SHA256 in
   the manifest — though unsigned packages can attract extra moderator/Defender
-  scrutiny.
+  scrutiny (e.g. automated dynamic-scan stalls on the first PR that may need a
+  fix-up push or a polite moderator ping; typical new-package merge time is
+  about a week).
 - Known caveat: winget-releaser auto-updates URLs, hashes, and versions on each
   release, but it does **not** recompute `AppsAndFeaturesEntries.DisplayVersion`
-  — spot-check it on each auto-opened PR.
+  — spot-check it on each auto-opened PR. And because Winpepper's ARP
+  `DisplayVersion` (4-part build version) diverges from `PackageVersion`
+  (tag-derived), winget-pkgs authoring rules make `AppsAndFeaturesEntries`
+  **mandatory in every future manifest version** — never drop it, or installed
+  copies stop correlating and upgrades loop.
 - Prerelease-tagged releases are submitted too; if you want alphas kept off
   winget, set `WINGET_AUTOSUBMIT` to `false` before tagging and restore it after.
 
@@ -974,3 +1008,4 @@ retires the manual download-sign-upload flow; unsigned by decision."
 2. **No silent deferrals:** the only outcomes not provable from this machine are real Windows CI runs and the winget submission — inherent to the constraint "GitHub Actions workflows cannot be executed locally", which the spec explicitly acknowledges and asks to be reported, not tasked around. Everything implementable in-repo is implemented; the external one-time winget steps are documented precisely (spec's stated intent). No stubs or mocks anywhere.
 3. **Placeholder scan:** no TBD/TODO; every step carries exact code, exact commands, expected output.
 4. **Type/name consistency:** asset name `winpepper-<version>-x64.msi` + `.msi.sha256` consistent across Tasks 2/3/5/6; job id `release-msi` matches the winget job's `needs:`; `WINGET_TOKEN`/`WINGET_AUTOSUBMIT`/`obra.Winpepper` identical in Tasks 3/5/6; per-user path idiom identical in Tasks 1/2/4.
+5. **Load-bearing validation pass (2026-07-25):** 13 assumptions surfaced and validated (ledger: `.worktrees/.the-usual-logs/install-distribution/load-bearing-ledger.md`) — 10 verified, 0 falsified. Key confirmations: the nightly's failure is exactly the two stale path assertions (job-log evidence; install step succeeds), `vars` gating skips (never reds) the winget job, winget-releaser@v2's input contract and update-only behavior, unsigned + hyphenated-prerelease manifests accepted by winget-pkgs, NBGV on a simulated tag checkout yields PublicRelease=true and the 4-part MSI filename (empirically run), test suite green (965 tests, 0 failures). Plan updates from findings, re-reviewed against items 1–4: softprops pin `@v2`→`@v3` (v2 EOL on deprecated Node 20; identical inputs — Tech Stack + Task 2 YAML, names still consistent); Task 2 locate step gains a strict 4-part-name guard (pre-3b1903e nightlies emitted degenerate `winpepper--x64.msi` the loose glob would match) and a tag↔version.json consistency guard (prevents publishing a mislabeled public asset); Task 3 records the validated-but-frozen winget-releaser `@v2` pin decision; Task 6 documents `AppsAndFeaturesEntries` as mandatory-forever once DisplayVersion diverges (winget-pkgs authoring rule) and the dynamic-scan/~1-week moderation reality. Verification steps in Tasks 2/3 still pass unchanged (guards live inside a `run:` block the YAML asserts don't inspect). Accepted residuals: first-submission moderation outcome (base-rate ~68% merged, median ~5.4 days — docs hedged accordingly) and the sandbox flow's real-Windows run (README keeps its "untested" caveat); a real CI run remains the only full proof of the per-user uninstall leg and is already the plan's stated post-push verification.

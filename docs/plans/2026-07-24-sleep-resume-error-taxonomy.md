@@ -1379,6 +1379,43 @@ Append to
         vm.HasActiveCondition.ShouldBeTrue();
         vm.ActiveConditionMessage.ShouldContain("retry");       // tray text still refreshes
     }
+
+    [Fact]
+    public void Recovery_Arriving_Before_Its_Condition_Does_Not_Strand_The_Condition()
+    {
+        var (vm, _, bus, delays) = NewVm();
+
+        // The capture thread self-healed and its first frame consumed the
+        // one-shot recovery signal BEFORE the fault report reached the VM
+        // (Task 6 documents the window). Clearing a condition that is not
+        // there must be a SILENT no-op that leaves no residue - no stage
+        // change, no scheduled delay, nothing that a later condition inherits.
+        vm.NotifyConditionRecovered(ErrorStage.Audio);
+
+        vm.HasActiveCondition.ShouldBeFalse();
+        vm.Stage.ShouldBe(SessionStage.Idle);
+        delays.PendingCount.ShouldBe(0);
+
+        // ...and only THEN does the fault report land and enter the condition.
+        ReportMicCondition(bus);
+        vm.HasActiveCondition.ShouldBeTrue();
+        vm.Stage.ShouldBe(SessionStage.Error);
+
+        // Task 6's recorder re-asserts the recovery once the report has been
+        // enqueued, precisely so this condition cannot outlive the fault.
+        // Without a working repeat clear, the tray would carry "microphone
+        // unavailable" forever on a healthy microphone.
+        vm.NotifyConditionRecovered(ErrorStage.Audio);
+
+        vm.HasActiveCondition.ShouldBeFalse();
+        vm.ActiveConditionStage.ShouldBeNull();
+        vm.ActiveConditionMessage.ShouldBe("");
+
+        // Idempotent: a duplicate recovery (both the frame path and the
+        // reconcile path can fire) is harmless.
+        vm.NotifyConditionRecovered(ErrorStage.Audio);
+        vm.HasActiveCondition.ShouldBeFalse();
+    }
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1501,6 +1538,13 @@ with a call to the new method:
     /// condition keeps the surface. Because the entry is removed, a genuine
     /// fault AFTER a recovery is a fresh condition and correctly grabs the
     /// pill again.
+    ///
+    /// IDEMPOTENT BY CONTRACT (load-bearing): clearing a stage that has no
+    /// active condition is a silent no-op, and clearing the SAME stage twice is
+    /// harmless. Task 6's recorder relies on both - it re-asserts the recovery
+    /// after reporting a fault so a frame that consumed the one-shot recovery
+    /// signal before the condition was recorded cannot strand it. Do not make
+    /// this method throw, log, or reset anything on the no-entry path.
     /// </summary>
     public void NotifyConditionRecovered(ErrorStage stage) => _ui.Post(() =>
     {
@@ -1532,9 +1576,10 @@ with a call to the new method:
      tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll
 ```
 
-Expected: `Failed: 0`, including the 11 new condition tests (the original 8
-plus the three discriminating tests: condition coexistence, no-pill-regrab
-under re-reports, and recovery not wiping a newer unrelated error off the pill).
+Expected: `Failed: 0`, including the 12 new condition tests (the original 8
+plus the four discriminating tests: condition coexistence, no-pill-regrab
+under re-reports, recovery not wiping a newer unrelated error off the pill, and
+a recovery that arrives BEFORE its condition not stranding it).
 
 - [ ] **Step 5: Commit**
 
@@ -2179,7 +2224,7 @@ public sealed class CaptureRecoveryPolicy
      tests/Winpepper.Audio.Tests/bin/Release/net9.0/Winpepper.Audio.Tests.dll
 ```
 
-Expected: `Failed: 0`, including the 14 new `CaptureRecoveryPolicyTests` and
+Expected: `Failed: 0`, including the 15 new `CaptureRecoveryPolicyTests` and
 the existing 5000-iteration
 `ConcurrencyHammer_RebuildVsFrames_NeverThrows`.
 
@@ -2220,6 +2265,25 @@ The coordinator edit (Step 1a) IS pure-managed and compiles on `net9.0`; the
 Linux verification for this task is that `Winpepper.Audio` and its tests still
 build and pass on `net9.0`, including the 5000-iteration concurrency hammer,
 which exercises the edited frame-ingest path.
+
+**ORDERING INVARIANT (Step 3's `CaptureFaulted` reconcile) — the one rule this
+Windows-only file must never break:** the recovery signal
+(`NoteFramesObserved()`) is ONE-SHOT per failing episode, but the condition it
+clears is recorded asynchronously on the UI thread. A frame from a self-healed
+stream can therefore consume the signal before the condition exists, and
+`NotifyConditionRecovered` on an empty map is a silent no-op — leaving a
+PERMANENT tray error on a healthy microphone. The invariant is: **every arming
+must be followed by at least one clearing opportunity that lands after the
+condition is recorded.** Step 3 satisfies it by re-reading `IsFailing` AFTER
+`CaptureFaulted?.Invoke(ex)` returns (the invoke is synchronous through
+`ErrorBus.Report` to the VM's `_ui.Post`, so the condition is enqueued by then)
+and re-raising `CaptureRecovered` when a frame already healed the stream. The
+two halves are verified separately: the VM half — that an early recovery is a
+no-op and a later one still clears — is a pure Linux test
+(`Recovery_Arriving_Before_Its_Condition_Does_Not_Strand_The_Condition`,
+Task 3); the recorder half is a Task 9 smoke item (self-healed fault leaves no
+stuck tray error). `NoteRebuildFailed()` in `AttemptRebuild` re-arms only after
+the same handler has already reported, so it inherits the invariant.
 
 **DECIDED — was an open sign-off, now a REQUIRED guard (implemented in Step 3's
 `AttemptRebuild`).** An endpoint-driven `Rebuild()` is unsafe in exactly two
@@ -2274,6 +2338,10 @@ public interface IWarmAudioRecorder : IDisposable
     /// Raised when capture is proven healthy again after a fault - i.e. a
     /// rebuild actually succeeded. This is the RECOVERY SUCCESS that clears the
     /// microphone CONDITION; nothing else may clear it, and never a timer.
+    /// MAY be raised more than once for a single failing episode (the frame
+    /// path and the fault-handler reconcile can both fire - see Task 6's
+    /// ordering invariant), so subscribers MUST be idempotent. Clearing an
+    /// already-cleared condition is a no-op at the view model.
     /// </summary>
     event Action? CaptureRecovered;
 
@@ -2562,6 +2630,39 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
             // within ~50 ms, before any endpoint event could act on it.
             _recovery.NoteFault();
             CaptureFaulted?.Invoke(ex);
+            // RECONCILE - closes the arm/report race, which is otherwise a
+            // PERMANENT tray error on a healthy microphone (the exact defect
+            // this plan exists to remove, relocated from the pill to the tray).
+            //
+            // The race: NoteFramesObserved() is one-shot per failing episode,
+            // and the live capture thread delivers a frame every ~50 ms. In the
+            // self-healed case a NEW source is already pumping when NoteFault()
+            // arms above, so a frame can consume the recovery signal WHILE the
+            // Invoke above is still walking _log.LogError + the ErrorBus's
+            // synchronous subscriber fan-out. That early recovery reaches an
+            // EMPTY condition map (NotifyConditionRecovered's
+            // `_activeConditions.Remove(stage)` returns false and it returns
+            // silently), and EnterCondition then records the condition with the
+            // policy already healthy - so no future frame can ever emit another
+            // recovery, and NOTHING else is allowed to clear a condition.
+            //
+            // Why re-reading the flag HERE is sufficient: the Invoke above is
+            // synchronous all the way to the VM's _ui.Post, so by the time it
+            // returns the EnterCondition callback is ENQUEUED. Anything we post
+            // now lands after it. Both interleavings are then covered, because
+            // _failing only ever goes true->false once per episode under the
+            // policy's lock:
+            //   frame BEFORE this read -> IsFailing is false -> we raise the
+            //     recovery here, enqueued after the entry -> condition clears.
+            //   frame AFTER this read  -> IsFailing is true, so that frame's
+            //     NoteFramesObserved() still returns true -> OnFrameObserved
+            //     raises, also after the entry -> condition clears.
+            // A duplicate CaptureRecovered is harmless: clearing an absent
+            // condition is a silent no-op at the VM (load-bearing - see Task 3).
+            // No log line here: OnFrameObserved already emitted the single
+            // "Microphone capture recovered (frames observed)" line for this
+            // episode, and Task 9's gate expects exactly that one line.
+            if (!_recovery.IsFailing) CaptureRecovered?.Invoke();
         };
 
         try
@@ -2607,7 +2708,10 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
     /// episode is the recovery: proof the WASAPI pump is delivering audio
     /// end-to-end, which neither IsRunning nor a validity probe can give.
     /// NoteFramesObserved is a cheap no-op (false) on every frame of a healthy
-    /// stream. This is the ONLY place CaptureRecovered is raised.
+    /// stream. This is the only place the recovery LOG LINE is emitted, and the
+    /// only place the one-shot signal is consumed; the CaptureFaulted handler
+    /// re-raises CaptureRecovered (without logging) when a frame consumed the
+    /// signal before the condition existed - see the ordering invariant there.
     /// </summary>
     private void OnFrameObserved()
     {
@@ -2899,11 +3003,13 @@ their selection (no Load/Swap ever runs again).
 
 ```csharp
                 _captureRecoveredHandler = () =>
-                    // The recorder raises CaptureRecovered only after observing
-                    // a non-empty frame from the live source - the one signal
-                    // that cannot lie (IsRunning after a rebuild can; a
-                    // validity probe can). This is the ONLY thing that clears
-                    // the microphone condition.
+                    // The recorder raises CaptureRecovered only after a
+                    // non-empty frame has been observed from the live source -
+                    // the one signal that cannot lie (IsRunning after a rebuild
+                    // can; a validity probe can). This is the ONLY thing that
+                    // clears the microphone condition. It can fire TWICE for
+                    // one episode (frame path + the fault handler's reconcile),
+                    // which is safe: NotifyConditionRecovered is idempotent.
                     _vm.NotifyConditionRecovered(Winpepper.Core.Errors.ErrorStage.Audio);
                 recorder.CaptureRecovered += _captureRecoveredHandler;
 ```
@@ -3717,9 +3823,9 @@ done
 echo "fail=$fail"
 ```
 
-Expected: `fail=0`; total passing >= the 845 baseline plus the ~61 tests this
-plan adds (16 classifier + 7 event-lifecycle + 11 condition-lifecycle + 4 tray +
-14 recovery-policy + 9 hook/power; one pre-existing pending-paste test is
+Expected: `fail=0`; total passing >= the 845 baseline plus the ~63 tests this
+plan adds (16 classifier + 7 event-lifecycle + 12 condition-lifecycle + 4 tray +
+15 recovery-policy + 9 hook/power; one pre-existing pending-paste test is
 rewritten in place, not added); `Failed: 0` everywhere.
 
 - [ ] **Step 2: Build the Windows solution on a Windows host**
@@ -3776,6 +3882,20 @@ disables S3/S4, and CI runners cannot sleep or manipulate endpoints):
       contains `Microphone capture recovered (frames observed)`, the tray
       returns to `Winpepper - Ready`, and **no app restart was needed**.
 - [ ] REQUIRED: dictate immediately after that → it works.
+- [ ] REQUIRED (recovery reconcile — a SELF-HEALED fault must not strand the
+      condition): with prewarm ON and NO dictation running, force a capture
+      fault that the coordinator's own in-lock retry heals immediately —
+      change the default capture device's format in Sound Control Panel →
+      device Properties → Advanced (this stops the WASAPI stream), or
+      unplug/replug a USB mic, or toggle a Bluetooth headset. The log shows
+      `microphone capture faulted` followed within ~1 s by
+      `Microphone capture recovered (frames observed)`. Then wait 60 s: the
+      tray MUST be back at `Winpepper - Ready` with no condition text.
+      **Repeat 5+ times** — this samples the arm/report race (a frame can
+      consume the one-shot recovery signal before the condition is recorded),
+      and a single occurrence of a tray that stays in the error state with a
+      healthy microphone is a FAIL of the Task 6 ordering invariant, not
+      flakiness.
 - [ ] REQUIRED (rebuild guard 1 — no mic at idle with prewarm OFF): turn
       **Prewarm mic** OFF in Settings, then run the same disable/enable device
       sequence with NO dictation in progress. On enable the log shows
@@ -3907,7 +4027,7 @@ re-run Steps 1-4.
 | CHANGE 3: on success emit a recovery signal that clears the Audio condition + log the exact line | Tasks 5/6 (frames-driven: `WarmCaptureCoordinator.FrameObserved` → `NoteFramesObserved()` → `CaptureRecovered` + `"Microphone capture recovered (frames observed)"`; `IsRunning` alone is NOT trusted — NAudio starts the pump asynchronously) + Task 7 Step 2 (host clears the condition) |
 | CHANGE 3: on failure the condition stays, content-free WRN, stay subscribed | Task 6 (`AttemptRebuild` failure branch: WRN + one-shot retry or budget-spent WRN; the watcher is never disposed on failure) |
 | CHANGE 3: keep the `StartSession` force-start path as the second seam | Task 6 (`StartSession` retains `RebuildIfDefaultChanged()` + `EnsureStarted(force: true)` exactly; the seam still DRIVES recovery — the first non-empty frame of the restarted stream claims it) |
-| CHANGE 3: pure decision logic unit-testable; COM subscription stays thin | Task 5 (14 tests) + Task 6 (watcher has zero decision logic) |
+| CHANGE 3: pure decision logic unit-testable; COM subscription stays thin | Task 5 (15 tests) + Task 6 (watcher has zero decision logic) |
 | CHANGE 3: do not regress the device-drift check or dispose discipline; keep the 5000-iteration hammer green | Task 6 (`RebuildIfDefaultChanged` unchanged; coordinator unchanged except the ONE additive `FrameObserved` event, with `OnSourceStopped`'s pinned unconditional raise explicitly protected) + Tasks 5/9 (hammer runs in every Audio test run) |
 | CHANGE 4: `PowerRegisterSuspendResumeNotification` with `DEVICE_NOTIFY_CALLBACK`; no window reliance | Task 8 (`PowerNotificationNative`, with the corrected caveat: MESSAGE-ONLY windows miss `WM_POWERBROADCAST`, a hidden TOP-LEVEL window is the documented fallback) |
 | CHANGE 4: on `PBT_APMRESUMESUSPEND`/`PBT_APMRESUMEAUTOMATIC`, marshal onto the hook thread and reinstall (unhook logging its result + `SetWindowsHookEx`) | Task 8 (`PowerResumeDecision`, `RequestHookReinstall` → `WM_WINPEPPER_REINSTALL_HOOK` → `ReinstallOnHookThread`). The trigger is explicitly documented as necessary-but-NOT-sufficient; the heartbeat telemetry (Step 4f) leaves a DEBUG timeline (last-callback age vs last-any-input age) so an uncovered hook death is reconstructable after the fact instead of leaving no trace. It carries no verdict — `GetLastInputInfo` is system-wide and counts mouse, so it cannot discriminate a dead hook on its own. |
@@ -4017,9 +4137,11 @@ command and the expected output.
   Step 1a, subscribed by `WarmWasapiRecorder`'s `OnFrameObserved` in Task 6
   Step 3.
 - `IWarmAudioRecorder.CaptureRecovered` (`event Action?`) — declared in Task 6,
-  implemented by `WarmWasapiRecorder` in Task 6 (raised only from
-  `OnFrameObserved`), subscribed/unsubscribed in Task 7 with a matching
-  `Action?` field.
+  implemented by `WarmWasapiRecorder` in Task 6 (raised from `OnFrameObserved`
+  and, for the arm/report race only, from the `CaptureFaulted` handler's
+  reconcile — so it is NOT once-per-episode and its subscriber must be
+  idempotent), subscribed/unsubscribed in Task 7 with a matching `Action?`
+  field.
 - `PowerResumeDecision.IsResume(uint)` plus the four `PBT_*` constants —
   defined in Task 8, used in Task 8's callback and tests.
 - `KeyboardHookNative.WM_WINPEPPER_REINSTALL_HOOK` (`uint`) — added in Task 8,

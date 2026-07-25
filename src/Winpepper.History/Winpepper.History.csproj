@@ -2,6 +2,8 @@
   <PropertyGroup>
     <RootNamespace>Winpepper.History</RootNamespace>
     <AssemblyName>Winpepper.History</AssemblyName>
+    <!-- keep win-x64 in restore assets so an RID-less restore (e.g. the MSI wixproj) doesn't clobber `dotnet publish -r win-x64` assets (NETSDK1047) -->
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
     <TargetFrameworks>net9.0;net9.0-windows10.0.19041.0</TargetFrameworks>
   </PropertyGroup>
   <PropertyGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">

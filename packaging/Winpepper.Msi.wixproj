@@ -18,6 +18,18 @@
     <IntermediateOutputPath>$(MSBuildThisFileDirectory)obj\$(Configuration)\</IntermediateOutputPath>
     <AppPublishDir Condition=" '$(AppPublishDir)' == '' ">$(MSBuildThisFileDirectory)..\src\Winpepper.App\bin\$(Configuration)\net9.0-windows10.0.19041.0\win-x64\publish</AppPublishDir>
   </PropertyGroup>
+  <!-- WSL builds (repo on a \\wsl.localhost UNC path): wix.exe drives msi.dll,
+       and the Windows Installer service cannot see the per-user 9p share, so
+       linking/validating an MSI on the UNC path fails with MsiException 1631.
+       Stage obj/bin on the local drive (stable, reused dir under %TEMP%) and
+       copy the final MSI back to artifacts\ (_WinpepperCopyMsiToArtifacts
+       below). Inert on normal C:\ checkouts / CI: the StartsWith('\\')
+       condition is false there. -->
+  <PropertyGroup Condition="$(MSBuildThisFileDirectory.StartsWith('\\'))">
+    <WinpepperUncStagingDir>$(TEMP)\winpepper-msi\</WinpepperUncStagingDir>
+    <OutputPath>$(WinpepperUncStagingDir)bin\</OutputPath>
+    <IntermediateOutputPath>$(WinpepperUncStagingDir)obj\$(Configuration)\</IntermediateOutputPath>
+  </PropertyGroup>
   <PropertyGroup>
     <D3D12ProbeExe>$(MSBuildThisFileDirectory)probes\bin\$(Configuration)\publish\Winpepper.D3D12Probe.exe</D3D12ProbeExe>
     <WinAppSdkBootstrapper Condition="'$(WinAppSdkBootstrapper)' == ''">$(MSBuildThisFileDirectory)bootstrapper\WindowsAppRuntimeInstall-x64.exe</WinAppSdkBootstrapper>
@@ -87,6 +99,41 @@
              Text="Pruning non-win-x64 runtime assets from publish output: @(_PruneRuntimeDir->'%(Filename)%(Extension)', ', ')" />
     <RemoveDir Directories="@(_PruneRuntimeDir)" />
   </Target>
+  <!-- Nerdbank.GitVersioning sets $(Version) in its GetBuildVersion target,
+       i.e. at build time; at evaluation time $(Version) is empty, so the
+       OutputName declared above expands with an empty version. Re-derive the
+       output name (and the file-name properties wix.targets froze from it at
+       evaluation) once the real version is known. $(BuildVersion) is NBGV's
+       4-part a.b.c.height version - the same value the wxs binds into
+       ProductVersion via !(bind.FileVersion.WinpepperExe) - so the filename
+       matches the MSI's internal version (winpepper-0.6.2.240-x64.msi style).
+       TargetPath itself is recomputed from these by wix.targets'
+       AssignTargetPaths, which this target runs before. -->
+  <Target Name="_WinpepperVersionedOutputName"
+          BeforeTargets="AssignTargetPaths"
+          DependsOnTargets="GetBuildVersion">
+    <PropertyGroup Condition="'$(BuildVersion)' != ''">
+      <OutputName>winpepper-$(BuildVersion)-x64</OutputName>
+      <TargetName>$(OutputName)</TargetName>
+      <TargetFileName>$(TargetName)$(TargetExt)</TargetFileName>
+      <TargetPdbFileName>$(TargetName).wixpdb</TargetPdbFileName>
+      <TargetPdbPath>$(TargetPdbDir)$(TargetPdbFileName)</TargetPdbPath>
+    </PropertyGroup>
+  </Target>
+  <!-- Fresh checkouts: packaging/bootstrapper/ is gitignored, but the wxs
+       binds WindowsAppRuntimeInstall-x64.exe into the Binary table. The
+       InstallWinAppSdk custom action is gated FALSE (self-contained publish
+       ships the runtime; see README "Known issues"), so a text stub satisfies
+       the bind without changing behavior - the same stub CI writes in
+       ci.yml/nightly.yml. Skipped whenever the file already exists (CI
+       creates it - real or stub - before building). -->
+  <Target Name="_WinpepperEnsureBootstrapperStub"
+          BeforeTargets="CoreCompile"
+          Condition="!Exists('$(WinAppSdkBootstrapper)')">
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(WinAppSdkBootstrapper)'))" />
+    <WriteLinesToFile File="$(WinAppSdkBootstrapper)" Lines="stub" Overwrite="true" Encoding="ASCII" />
+    <Message Importance="high" Text="packaging: WindowsAppRuntimeInstall-x64.exe not found; wrote text stub (InstallWinAppSdk custom action is gated FALSE)." />
+  </Target>
   <Target Name="SignArtifacts" AfterTargets="Build"
           Condition="'$(OS)' == 'Windows_NT' AND ('$(WinpepperSigningThumbprint)' != '' OR '$(WinpepperSigningPfx)' != '')">
     <PropertyGroup>
@@ -98,5 +145,17 @@
           Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(SignScript)&quot; -Thumbprint $(WinpepperSigningThumbprint) -InputFiles &quot;$(SignedExe)&quot; &quot;$(SignedMsi)&quot;" />
     <Exec Condition="'$(WinpepperSigningThumbprint)' == '' AND '$(WinpepperSigningPfx)' != ''"
           Command="pwsh -NoProfile -ExecutionPolicy Bypass -File &quot;$(SignScript)&quot; -PfxPath &quot;$(WinpepperSigningPfx)&quot; -PfxPassword $(WinpepperSigningPfxPassword) -InputFiles &quot;$(SignedExe)&quot; &quot;$(SignedMsi)&quot;" />
+  </Target>
+  <!-- Counterpart to the WinpepperUncStagingDir redirect above: after a WSL
+       (UNC) build, copy the linked (and possibly signed) MSI from the local
+       staging dir back to the repo's artifacts\ folder. Never runs on C:\
+       checkouts (WinpepperUncStagingDir is only set there when the project
+       lives on a UNC path). -->
+  <Target Name="_WinpepperCopyMsiToArtifacts"
+          AfterTargets="Build"
+          DependsOnTargets="SignArtifacts"
+          Condition="'$(WinpepperUncStagingDir)' != ''">
+    <Copy SourceFiles="$(TargetDir)$(TargetFileName)" DestinationFiles="$(MSBuildThisFileDirectory)..\artifacts\$(TargetFileName)" />
+    <Message Importance="high" Text="packaging: copied $(TargetFileName) from UNC staging to artifacts\" />
   </Target>
 </Project>

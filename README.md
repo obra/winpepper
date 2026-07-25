@@ -159,7 +159,12 @@ unwinds every stage.
 
 ## Building from source
 
-You need a Windows 11 host with .NET 9 SDK installed.
+You need a Windows 11 host with .NET 9 SDK installed. Building from a WSL2
+checkout (`\\wsl.localhost\...`) with the Windows `dotnet.exe` also works: the
+projects detect the UNC path and automatically stage the mt.exe manifest merge
+(`scripts/mt-unc-shim.ps1`) and the WiX link (`%TEMP%\winpepper-msi`, MSI
+copied back to `artifacts/`) on a local drive. Those conditionals are inert on
+normal `C:\` checkouts.
 
 ```powershell
 # Restore + build (the App project needs UseXamlCompilerExecutable=true on

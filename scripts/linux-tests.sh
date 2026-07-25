@@ -33,10 +33,10 @@ for proj in "${PROJECTS[@]}"; do
   rc=0
   out="$(dotnet exec "$HERE/tests/$proj/bin/Release/net9.0/$proj.dll" -notrait "Platform=Windows")" || rc=$?
   echo "$out" | tail -n 3
-  line="$(grep -E 'Total:.*Errors:.*Failed:' <<<\"$out\" | tail -1 || true)"
-  total="$(grep -oE 'Total: *[0-9]+' <<<\"$line\" | grep -oE '[0-9]+' || echo 0)"
+  line="$(grep -E 'Total:.*Errors:.*Failed:' <<<"$out" | tail -1 || true)"
+  total="$(grep -oE 'Total: *[0-9]+' <<<"$line" | grep -oE '[0-9]+' || echo 0)"
   grand_total=$((grand_total + total))
-  if [[ $rc -ne 0 ]] || ! grep -qE 'Errors: 0[^0-9]' <<<\"$line\" || ! grep -qE 'Failed: 0[^0-9]' <<<\"$line\"; then
+  if [[ $rc -ne 0 ]] || ! grep -qE 'Errors: 0[^0-9]' <<<"$line" || ! grep -qE 'Failed: 0[^0-9]' <<<"$line"; then
     echo "RED: $proj (exit $rc) ${line:-<no summary line>}"
     fail=1
   fi

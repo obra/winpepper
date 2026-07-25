@@ -32,6 +32,17 @@
 # transient CS0006 (missing obj/**/ref/*.dll), so every build below uses
 # --no-incremental. Never run linux-tests.sh concurrently with this gate.
 #
+# UNC visibility race (validated 2026-07-25, first gate run): even with
+# --no-incremental, multi-node MSBuild over \\wsl.localhost hits transient
+# CS0006 -- a ref assembly written by one Windows process (msbuild node /
+# VBCSCompiler) is not yet visible to another process's File.Exists over the
+# 9P share, so CSC in a sibling node fails on a file that demonstrably exists
+# moments later. Different projects fail on different runs. Fix: -m:1 plus
+# -p:UseSharedCompilation=false keeps every build-graph file write AND read in
+# ONE process, making the share's view coherent. Slower, but deterministic --
+# a re-run of a previously red build with these flags went green with zero
+# other changes.
+#
 # Expected skips: Windows runs may report Skipped > 0 (Llama cleanup tests
 # self-skip via Assert.SkipUnless when the qwen GGUF is absent on the host —
 # it currently is). Skips keep the gate green; record them honestly in the
@@ -107,7 +118,7 @@ echo "windows-gate: UNC root $UNC_ROOT"
 echo "=== [1/3] Build Winpepper.App (Release, XAML exe compiler) ==="
 app="$UNC_ROOT"'\src\Winpepper.App\Winpepper.App.csproj'
 if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/app-build.log" \
-     "dotnet build '$app' -c Release --no-incremental -p:UseXamlCompilerExecutable=true"; then
+     "dotnet build '$app' -c Release --no-incremental -m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true"; then
   summary+=("Winpepper.App build: OK")
 else
   rc=$?
@@ -119,7 +130,7 @@ fi
 echo "=== [2/3] Build the 9 test projects (Release, all TFMs) ==="
 for proj in "${PROJECTS[@]}"; do
   csproj="$UNC_ROOT"'\tests\'"$proj"'\'"$proj"'.csproj'
-  if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/build-$proj.log" "dotnet build '$csproj' -c Release --no-incremental"; then
+  if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/build-$proj.log" "dotnet build '$csproj' -c Release --no-incremental -m:1 -p:UseSharedCompilation=false"; then
     echo "  built $proj"
   else
     rc=$?

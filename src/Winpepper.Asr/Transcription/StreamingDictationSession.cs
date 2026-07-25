@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
@@ -105,7 +106,9 @@ public sealed class StreamingDictationSession : IAsyncDisposable
             await DisposeAsync();
             return null;
         }
-        if (_pumpError is not null) throw _pumpError;
+        // Captured on the pump task; rethrow via ExceptionDispatchInfo so the
+        // original stack trace survives this cross-thread rethrow.
+        if (_pumpError is not null) ExceptionDispatchInfo.Capture(_pumpError).Throw();
         if (_session is null) return null;
         var result = await _session.FinishAsync(fullAudio, ct);
         await _session.DisposeAsync();

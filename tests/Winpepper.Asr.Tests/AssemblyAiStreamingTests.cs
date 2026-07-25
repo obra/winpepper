@@ -45,6 +45,46 @@ public class AssemblyAiStreamingTests
     }
 
     [Fact]
+    public async Task Start_WhenConnectFails_DisposesTheSocket()
+    {
+        var socket = new FakeStreamingWebSocket { ThrowOnConnect = new InvalidOperationException("connect refused") };
+
+        await Should.ThrowAsync<InvalidOperationException>(
+            () => NewTranscriber(socket).StartSessionAsync(TestContext.Current.CancellationToken));
+
+        socket.Disposed.ShouldBeTrue(); // no leak: the underlying socket is torn down per failed connect
+    }
+
+    [Fact]
+    public async Task Push_SplitsAnOversizedBufferIntoAtMost1000MsMessages()
+    {
+        var socket = new FakeStreamingWebSocket();
+        await using var session = await NewTranscriber(socket).StartSessionAsync(TestContext.Current.CancellationToken);
+
+        await session.PushAsync(new float[40_000], TestContext.Current.CancellationToken); // 2.5 s in one push
+
+        socket.BinaryFrames.Count.ShouldBe(3); // 1000 ms + 1000 ms + 500 ms — never above the API max
+        socket.BinaryFrames[0].Length.ShouldBe(32_000); // 16000 samples (1000 ms) * 2 bytes
+        socket.BinaryFrames[1].Length.ShouldBe(32_000);
+        socket.BinaryFrames[2].Length.ShouldBe(16_000); // 8000-sample remainder (>= 50 ms, so it sends)
+    }
+
+    [Fact]
+    public async Task Push_KeepsASubMinimumResidualBufferedAfterAMaxSizeSend()
+    {
+        var socket = new FakeStreamingWebSocket();
+        await using var session = await NewTranscriber(socket).StartSessionAsync(TestContext.Current.CancellationToken);
+
+        await session.PushAsync(new float[16_400], TestContext.Current.CancellationToken); // 1000 ms + 25 ms
+        socket.BinaryFrames.Count.ShouldBe(1); // the 25 ms residual stays buffered (under the API minimum)
+        socket.BinaryFrames[0].Length.ShouldBe(32_000);
+
+        await session.PushAsync(new float[400], TestContext.Current.CancellationToken); // residual reaches 50 ms
+        socket.BinaryFrames.Count.ShouldBe(2);
+        socket.BinaryFrames[1].Length.ShouldBe(1_600); // 800 samples * 2 bytes
+    }
+
+    [Fact]
     public async Task Push_CoalescesToAtLeast50MsBinaryMessages()
     {
         var socket = new FakeStreamingWebSocket();

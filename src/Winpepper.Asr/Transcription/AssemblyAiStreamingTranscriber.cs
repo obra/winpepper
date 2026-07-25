@@ -1,3 +1,4 @@
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
@@ -48,7 +49,18 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
 
         var socket = _socketFactory();
         var uri = new Uri($"{_opts.StreamingBaseUrl}/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true");
-        await socket.ConnectAsync(uri, key, ct);
+        try
+        {
+            await socket.ConnectAsync(uri, key, ct);
+        }
+        catch
+        {
+            // Nobody owns the socket yet on a failed connect (throw or deadline
+            // cancel) — dispose it here or the underlying ClientWebSocket leaks
+            // once per failed attempt. Best-effort: the connect failure wins.
+            try { await socket.DisposeAsync(); } catch { /* best-effort */ }
+            throw;
+        }
         _log.LogInformation("AssemblyAI streaming session connected");
         return new AssemblyAiStreamingSession(
             socket, ModelName,
@@ -60,6 +72,7 @@ public sealed class AssemblyAiStreamingTranscriber : IStreamingTranscriber
 public sealed class AssemblyAiStreamingSession : IStreamingTranscriptionSession
 {
     private const int MinSendSamples = 800;      // 50 ms at 16 kHz — the API's minimum message
+    private const int MaxSendSamples = 16_000;   // 1000 ms at 16 kHz — the API's documented maximum
 
     private readonly IStreamingWebSocket _socket;
     private readonly string _modelName;
@@ -147,13 +160,26 @@ public sealed class AssemblyAiStreamingSession : IStreamingTranscriptionSession
 
     public ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
     {
-        if (_serverError is not null) return ValueTask.FromException(_serverError);
+        ThrowIfFailed();
         BufferSamples(mono16k.Span);
         _pushedSamples += mono16k.Length;
         if (_sendBuffer.Count < MinSendSamples) return ValueTask.CompletedTask;
-        var chunk = _sendBuffer.ToArray();
-        _sendBuffer.Clear();
-        return new ValueTask(_socket.SendBinaryAsync(Pcm16.FromFloats(chunk), ct));
+        return new ValueTask(FlushBufferedAsync(ct));
+    }
+
+    /// <summary>Drains the coalescing buffer as messages within the API's limits:
+    /// each send is at least 50 ms (MinSendSamples) and at most 1000 ms
+    /// (MaxSendSamples). A sub-minimum residual stays buffered for the next push
+    /// (or FinishAsync's padded tail flush).</summary>
+    private async Task FlushBufferedAsync(CancellationToken ct)
+    {
+        while (_sendBuffer.Count >= MinSendSamples)
+        {
+            var take = Math.Min(_sendBuffer.Count, MaxSendSamples);
+            var chunk = _sendBuffer.GetRange(0, take).ToArray();
+            _sendBuffer.RemoveRange(0, take);
+            await _socket.SendBinaryAsync(Pcm16.FromFloats(chunk), ct);
+        }
     }
 
     private void BufferSamples(ReadOnlySpan<float> samples)
@@ -212,7 +238,11 @@ public sealed class AssemblyAiStreamingSession : IStreamingTranscriptionSession
 
     private void ThrowIfFailed()
     {
-        if (_serverError is not null) throw _serverError;
+        // The cached exception was captured on the receive-loop thread; rethrow
+        // via ExceptionDispatchInfo so its original stack trace is preserved
+        // instead of being restamped at this cross-thread rethrow site.
+        if (_serverError is not null)
+            ExceptionDispatchInfo.Capture(_serverError).Throw();
     }
 
     public async ValueTask DisposeAsync()

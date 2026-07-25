@@ -14,6 +14,7 @@ public sealed class FakeStreamingWebSocket : IStreamingWebSocket
     public List<string> TextFrames { get; } = new();
     public Exception? ThrowOnConnect { get; set; }
     public Exception? ThrowOnSendBinary { get; set; }
+    public bool Disposed { get; private set; }
 
     /// <summary>When true (default), a Terminate send auto-queues the server's termination reply.</summary>
     public bool AutoTerminate { get; set; } = true;
@@ -49,6 +50,7 @@ public sealed class FakeStreamingWebSocket : IStreamingWebSocket
 
     public ValueTask DisposeAsync()
     {
+        Disposed = true;
         _incoming.Writer.TryWrite(null); // unblock a pending receive
         return ValueTask.CompletedTask;
     }

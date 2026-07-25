@@ -32,6 +32,10 @@ public sealed class PipelineHost : IDisposable
     private readonly Func<string?, string> _resolveAsrModelName;
     private readonly Func<string, bool> _isAsrModelReady;
     private readonly Winpepper.Core.Asr.AsrModelSwapState _asrSwap = new();
+    // Item B: a drain-timeout (or teardown) abandon can orphan a streaming pump
+    // still executing a native call on the shared ParakeetSession; every dispose
+    // of that session routes through this guard so it can never race a live pump.
+    private readonly Winpepper.Core.Asr.OrphanedPumpGuard _orphanGuard;
     private readonly SessionEngine _engine;
     private readonly SessionViewModel _vm;
     private readonly ISoundEffectPlayer _sounds;
@@ -95,6 +99,7 @@ public sealed class PipelineHost : IDisposable
         bool prewarmMicEnabled = true)
     {
         _log = factory.CreateLogger<PipelineHost>();
+        _orphanGuard = new(ex => _log.LogWarning(ex, "deferred ASR session dispose failed"));
         _errorBus = errorBus;
         _engine = engine;
         _vm = vm;
@@ -231,7 +236,11 @@ public sealed class PipelineHost : IDisposable
                         var old = _asr;
                         _asr = fresh;
                         _asrSwap.CommitLoad(desired);
-                        old?.Dispose(); // under _startGate; idempotent (Step 5)
+                        // Under _startGate; idempotent (Step 5). Routed through the
+                        // orphan guard: if an abandoned streaming pump may still be
+                        // executing a native call on the old session, the dispose is
+                        // deferred until that pump completes (RunOrDefer never blocks).
+                        if (old is not null) _orphanGuard.RunOrDefer(old.Dispose);
                         _log.LogInformation(
                             "ASR model loaded (swap #{Generation}): {Previous} -> {Model}",
                             _asrSwap.Generation, previousModel ?? "(none)", desired);
@@ -504,8 +513,10 @@ public sealed class PipelineHost : IDisposable
                     _ctxPrefetchTask = null;
                     if (_streamingSession is not null)
                     {
-                        await _streamingSession.DisposeAsync();
+                        var droppedStreaming = _streamingSession;
                         _streamingSession = null;
+                        await droppedStreaming.DisposeAsync();
+                        NoteStreamingReleased(droppedStreaming);
                     }
                     _recordStopwatch = null;
                     break;
@@ -545,6 +556,10 @@ public sealed class PipelineHost : IDisposable
                     finally
                     {
                         await streaming.DisposeAsync();
+                        // If the abandon left the pump orphaned (drain timeout /
+                        // bounded dispose wait expired), register it so no model
+                        // dispose can race the native call it may still be in.
+                        NoteStreamingReleased(streaming);
                     }
                 }
                 if (maybeTranscription is null)
@@ -560,32 +575,14 @@ public sealed class PipelineHost : IDisposable
                     // path cannot hang the serial hotkey loop.
                     // Provider-aware (req 6): a failed LOCAL swap never skips or
                     // aborts a CLOUD dictation; soften its error surface.
-                    // Drain-timeout abandon (A5 residual): the coordinator may
-                    // have ORPHANED a wedged pump — possibly still inside its
-                    // factory's own TryEnsureAsrModel doing a model swap — so
-                    // never RUN an ensure here (its swap branch disposes the
-                    // session a live pump may hold: native use-after-dispose).
-                    // Instead SNAPSHOT the session under _startGate: the lock
-                    // acquire serializes with any in-flight swap (blocks until
-                    // its load completes), disposes nothing, and yields the
-                    // post-swap session — so the batch transcription below runs
-                    // on a session no orphaned swap can dispose under it.
-                    Winpepper.Asr.ParakeetSession? asrNow;
-                    bool localReady;
-                    if (streaming is not null && streaming.DrainTimedOut)
-                    {
-                        lock (_startGate) { asrNow = _asr; }
-                        localReady = asrNow is not null;
-                    }
-                    else
-                    {
-                        // Normal late path, unchanged: run today's ensure, then
-                        // alias the field it just settled (identical to reading
-                        // _asr directly, as before — the ensure ran under the
-                        // gate and this serial loop is the only other mutator).
-                        localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
-                        asrNow = _asr;
-                    }
+                    // Drain-timeout abandon (A5 residual, Item B): running the
+                    // ensure here is safe even after a drain timeout — the
+                    // abandoned pump was registered with _orphanGuard above
+                    // (inside the FinishAsync finally), so the ensure's Swap
+                    // branch DEFERS the old session's dispose until that pump
+                    // completes instead of racing its in-flight native call.
+                    var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
+                    var asrNow = _asr;
                     if ((!localReady && !cloudSelected) || asrNow is null)
                     {
                         if (streaming is not null)
@@ -785,8 +782,10 @@ public sealed class PipelineHost : IDisposable
                 _ = _warmRecorder?.StopSession();
                 if (_streamingSession is not null)
                 {
-                    await _streamingSession.DisposeAsync();
+                    var cancelledStreaming = _streamingSession;
                     _streamingSession = null;
+                    await cancelledStreaming.DisposeAsync();
+                    NoteStreamingReleased(cancelledStreaming);
                 }
                 break;
             case HotkeyEventKind.Toggle:
@@ -883,8 +882,10 @@ public sealed class PipelineHost : IDisposable
                         _ctxPrefetchTask = null;
                         if (_streamingSession is not null)
                         {
-                            await _streamingSession.DisposeAsync();
+                            var droppedStreaming2 = _streamingSession;
                             _streamingSession = null;
+                            await droppedStreaming2.DisposeAsync();
+                            NoteStreamingReleased(droppedStreaming2);
                         }
                         _recordStopwatch = null;
                         break;
@@ -924,6 +925,10 @@ public sealed class PipelineHost : IDisposable
                         finally
                         {
                             await streaming2.DisposeAsync();
+                            // If the abandon left the pump orphaned (drain timeout /
+                            // bounded dispose wait expired), register it so no model
+                            // dispose can race the native call it may still be in.
+                            NoteStreamingReleased(streaming2);
                         }
                     }
                     if (maybeTranscription2 is null)
@@ -939,32 +944,14 @@ public sealed class PipelineHost : IDisposable
                         // path cannot hang the serial hotkey loop.
                         // Provider-aware (req 6): a failed LOCAL swap never skips or
                         // aborts a CLOUD dictation; soften its error surface.
-                        // Drain-timeout abandon (A5 residual): the coordinator may
-                        // have ORPHANED a wedged pump — possibly still inside its
-                        // factory's own TryEnsureAsrModel doing a model swap — so
-                        // never RUN an ensure here (its swap branch disposes the
-                        // session a live pump may hold: native use-after-dispose).
-                        // Instead SNAPSHOT the session under _startGate: the lock
-                        // acquire serializes with any in-flight swap (blocks until
-                        // its load completes), disposes nothing, and yields the
-                        // post-swap session — so the batch transcription below runs
-                        // on a session no orphaned swap can dispose under it.
-                        Winpepper.Asr.ParakeetSession? asrNow2;
-                        bool localReady2;
-                        if (streaming2 is not null && streaming2.DrainTimedOut)
-                        {
-                            lock (_startGate) { asrNow2 = _asr; }
-                            localReady2 = asrNow2 is not null;
-                        }
-                        else
-                        {
-                            // Normal late path, unchanged: run today's ensure, then
-                            // alias the field it just settled (identical to reading
-                            // _asr directly, as before — the ensure ran under the
-                            // gate and this serial loop is the only other mutator).
-                            localReady2 = TryEnsureAsrModel(reportErrors: !cloudSelected2);
-                            asrNow2 = _asr;
-                        }
+                        // Drain-timeout abandon (A5 residual, Item B): running the
+                        // ensure here is safe even after a drain timeout — the
+                        // abandoned pump was registered with _orphanGuard above
+                        // (inside the FinishAsync finally), so the ensure's Swap
+                        // branch DEFERS the old session's dispose until that pump
+                        // completes instead of racing its in-flight native call.
+                        var localReady2 = TryEnsureAsrModel(reportErrors: !cloudSelected2);
+                        var asrNow2 = _asr;
                         if ((!localReady2 && !cloudSelected2) || asrNow2 is null)
                         {
                             if (streaming2 is not null)
@@ -1161,6 +1148,13 @@ public sealed class PipelineHost : IDisposable
         }
     }
 
+    /// <summary>Call after permanently letting go of a streaming coordinator. If its
+    /// pump was abandoned still-running, register it so no model dispose can race it.</summary>
+    private void NoteStreamingReleased(Winpepper.Asr.Transcription.StreamingDictationSession s)
+    {
+        if (!s.PumpCompletion.IsCompleted) _orphanGuard.Register(s.PumpCompletion);
+    }
+
     /// <summary>
     /// Silence-trims the finished recording for TRANSCRIPTION ONLY. Returns the
     /// trimmed samples to send to ASR, or <c>null</c> when the recording has no
@@ -1224,10 +1218,26 @@ public sealed class PipelineHost : IDisposable
             _runCts?.Cancel();
             try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
             _hook.Dispose();
+            // An in-flight streaming session (app shut down mid-dictation) holds a
+            // live pump + inner socket; dispose it here or it leaks at teardown.
+            // DisposeAsync never throws and is internally bounded, but mirror the
+            // file's bounded-wait convention (_runTask above) anyway; Task.Run
+            // avoids blocking on continuations posted to this (possibly UI) thread.
+            // Runs BEFORE the _asr dispose below: if the bounded wait expires the
+            // pump is orphaned possibly mid-native-call on _asr, so it must be
+            // registered with the guard before any model dispose is routed.
+            var streamingAtTeardown = _streamingSession;
+            _streamingSession = null;
+            if (streamingAtTeardown is not null)
+            {
+                try { Task.Run(() => streamingAtTeardown.DisposeAsync().AsTask()).Wait(TimeSpan.FromSeconds(2)); } catch { }
+                NoteStreamingReleased(streamingAtTeardown);
+            }
             lock (_startGate)
             {
-                _asr?.Dispose();
+                var asrAtTeardown = _asr;
                 _asr = null;
+                if (asrAtTeardown is not null) _orphanGuard.RunOrDefer(asrAtTeardown.Dispose);
             }
             if (_warmRecorder is not null)
             {
@@ -1239,15 +1249,6 @@ public sealed class PipelineHost : IDisposable
                 if (_captureRecoveredHandler is not null) _warmRecorder.CaptureRecovered -= _captureRecoveredHandler;
                 _warmRecorder.Dispose();
             }
-            // An in-flight streaming session (app shut down mid-dictation) holds a
-            // live pump + inner socket; dispose it here or it leaks at teardown.
-            // DisposeAsync never throws and is internally bounded, but mirror the
-            // file's bounded-wait convention (_runTask above) anyway; Task.Run
-            // avoids blocking on continuations posted to this (possibly UI) thread.
-            var streamingAtTeardown = _streamingSession;
-            _streamingSession = null;
-            if (streamingAtTeardown is not null)
-                try { Task.Run(() => streamingAtTeardown.DisposeAsync().AsTask()).Wait(TimeSpan.FromSeconds(2)); } catch { }
         });
     }
 }

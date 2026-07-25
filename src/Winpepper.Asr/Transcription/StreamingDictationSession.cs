@@ -72,11 +72,18 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         => _frames.Writer.TryWrite(frame.ToArray()); // TryWrite is false after completion — silent drop
 
     /// <summary>True after FinishAsync abandoned the session on drain timeout.
-    /// The caller's late path keys its ensure-skip on this: the abandon path may
-    /// have ORPHANED a pump still executing inside a native call on the shared
-    /// ParakeetSession, so a model ensure (whose swap disposes that session)
-    /// must not run.</summary>
+    /// Keys the null-return contract (FinishAsync returned null because the drain
+    /// deadline expired, not because no transcriber materialized) and logging.
+    /// The abandon path may have ORPHANED a pump still executing inside a native
+    /// call on the shared ParakeetSession \u2014 callers coordinate any dispose of
+    /// that shared resource via <see cref="PumpCompletion"/>.</summary>
     public bool DrainTimedOut { get; private set; }
+
+    /// <summary>Completes when the background pump exits (success, fault, or after an
+    /// abandon finally unwedges). Callers that abandon this coordinator while this is
+    /// incomplete must not dispose shared native resources (the ParakeetSession) until
+    /// it completes.</summary>
+    public Task PumpCompletion => _pump;
 
     /// <summary>Stop pumping and get the final transcript. Null when no transcriber
     /// materialized, or when the drain deadline expired (session abandoned +

@@ -42,6 +42,8 @@ public sealed class PipelineHost : IDisposable
     private Action<Exception>? _captureFaultHandler;
     private Action? _captureRecoveredHandler;
     private Action<ReadOnlyMemory<float>>? _frameHandler;
+    private Winpepper.Asr.Transcription.StreamingDictationSession? _streamingSession;
+    private Action<ReadOnlyMemory<float>>? _streamFrameHandler;
 
     private readonly Winpepper.Cleanup.CleanupRunner? _cleanup;        // PLAN2-TYPE
     // NOTE: no CleanupOptions field. Options are built PER DICTATION from the
@@ -60,7 +62,7 @@ public sealed class PipelineHost : IDisposable
     private readonly Winpepper.Platform.Injection.ClipboardFallback _clipboardFallback;
     private readonly Winpepper.Core.Notifications.IToastService _toasts;
     private readonly Func<AppSettings> _settingsProvider;
-    private readonly Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> _buildTranscriber;
+    private readonly Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> _buildTranscriber;
     private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
     private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
     private InjectionTarget _targetAtStart = InjectionTarget.Empty;
@@ -83,7 +85,7 @@ public sealed class PipelineHost : IDisposable
         Winpepper.Platform.Injection.ClipboardFallback clipboardFallback,
         Winpepper.Core.Notifications.IToastService toasts,
         Func<AppSettings> settingsProvider,
-        Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> transcriberFactory,
+        Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> transcriberFactory,
         Winpepper.Cleanup.CleanupRunner? cleanup = null,                       // PLAN2-TYPE
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
@@ -294,6 +296,11 @@ public sealed class PipelineHost : IDisposable
                         _currentSessionId);
                 };
                 recorder.FramesAvailable += _frameHandler;
+                // Streaming tee: a permanent handler that forwards frames to the
+                // current dictation's streaming session (null outside dictations,
+                // so this is a no-op at idle). OnFrame copies and never blocks.
+                _streamFrameHandler = frame => _streamingSession?.OnFrame(frame);
+                recorder.FramesAvailable += _streamFrameHandler;
                 recorder.CaptureFaulted += _captureFaultHandler;
                 _captureRecoveredHandler = () =>
                     // The recorder raises CaptureRecovered only after a
@@ -405,6 +412,30 @@ public sealed class PipelineHost : IDisposable
                 _currentSessionId = Guid.NewGuid();
                 _log.LogInformation("Session started (hold) {SessionId}", _currentSessionId);
                 _sounds.PlayStart();
+                // Start the streaming dictation session BEFORE StartSession —
+                // StartSession raises the 500 ms pre-roll synchronously through
+                // FramesAvailable, so the session must already exist (frames
+                // queue in the coordinator until the factory completes) or the
+                // cloud stream permanently loses the first ~500 ms. The factory
+                // runs on a background pump so recording start stays instant;
+                // model ensure is silent here (reportErrors: false) — the stop
+                // arm's late path re-runs the check with today's exact error UX.
+                var settingsForStream = _settingsProvider();
+                _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                    ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                    {
+                        var cloudSel = string.Equals(settingsForStream.AsrProvider, "assemblyai",
+                            StringComparison.OrdinalIgnoreCase);
+                        var ready = TryEnsureAsrModel(reportErrors: false);
+                        if ((!ready && !cloudSel) || _asr is null) return null;
+                        return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream, notice =>
+                            _ = _toasts.ShowAsync(
+                                "Winpepper",
+                                "Cloud transcription unavailable — used local speech recognition instead.",
+                                Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                TimeSpan.FromSeconds(6)));
+                    }, ct2),
+                    _log, ct);
                 _warmRecorder!.StartSession(includePrerollMs: 500);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 _targetAtStart = CaptureTarget();
@@ -464,6 +495,11 @@ public sealed class PipelineHost : IDisposable
                     _engine.Apply(SessionEvent.TranscriptReady);
                     _engine.Apply(SessionEvent.InjectionCompleted);
                     _ctxPrefetchTask = null;
+                    if (_streamingSession is not null)
+                    {
+                        await _streamingSession.DisposeAsync();
+                        _streamingSession = null;
+                    }
                     _recordStopwatch = null;
                     break;
                 }
@@ -472,32 +508,70 @@ public sealed class PipelineHost : IDisposable
                 var settingsNow = _settingsProvider();
                 var cloudSelected = string.Equals(
                     settingsNow.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase);
-                // Provider-aware (req 6): a failed LOCAL swap never skips or
-                // aborts a CLOUD dictation; soften its error surface.
-                var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
-                if ((!localReady && !cloudSelected) || _asr is null)
-                {
-                    // Terminal-state early-exit (S2): never bare-return — drive
-                    // the engine back so the next dictation can start.
-                    _engine.Apply(SessionEvent.Failed);
-                    if (cloudSelected && _asr is null)
-                    {
-                        // Cloud selected but no local session exists at all (the
-                        // fallback wrapper needs one): surface this rare case.
-                        _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                            new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
-                            Guid.Empty);
-                    }
-                    _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
-                    return;
-                }
-                var transcriber = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow, notice =>
+                Action<string> fallbackNotice = notice =>
                     _ = _toasts.ShowAsync(
                         "Winpepper",
                         "Cloud transcription unavailable — used local speech recognition instead.",
                         Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                        TimeSpan.FromSeconds(6)));
-                var transcription = await transcriber.TranscribeAsync(trimmed, ct);
+                        TimeSpan.FromSeconds(6));
+                // Finish the streaming session FIRST — before ANY TryEnsureAsrModel
+                // call: the ensure's swap branch disposes the ParakeetSession the
+                // streaming transcriber still holds (no engine-state gating), so
+                // no ensure may run while a session is in flight. The factory's
+                // own ensure (start arm) ran before the session captured the
+                // model. A mid-dictation model change applies to the NEXT dictation.
+                var streaming = _streamingSession;
+                _streamingSession = null;
+                Winpepper.Asr.Transcription.TranscriptionResult? maybeTranscription = null;
+                if (streaming is not null)
+                    maybeTranscription = await streaming.FinishAsync(trimmed, ct);
+                if (maybeTranscription is null)
+                {
+                    // Late path: no streaming session materialized, its factory
+                    // returned null (no provider at start), or the drain deadline
+                    // expired on a wedged connection (session already abandoned +
+                    // disposed inside FinishAsync). Run today's ensure + error UX,
+                    // then the batch-equivalent path via the streaming seam. The
+                    // cloud wrapper bounds BOTH its connect (StartSessionAsync)
+                    // and its post-stop wait with the cloud deadline (Task 8), so
+                    // even on the wedged network that caused a drain timeout this
+                    // path cannot hang the serial hotkey loop.
+                    // Provider-aware (req 6): a failed LOCAL swap never skips or
+                    // aborts a CLOUD dictation; soften its error surface.
+                    // Drain-timeout abandon (A5 residual): the coordinator may
+                    // have ORPHANED a wedged pump still executing on the shared
+                    // ParakeetSession — never run an ensure then (its swap branch
+                    // disposes that very session: native use-after-dispose). A
+                    // session only materialized after the factory's own ensure,
+                    // so _asr is already loaded; use it as-is.
+                    var localReady = streaming is not null && streaming.DrainTimedOut
+                        ? _asr is not null
+                        : TryEnsureAsrModel(reportErrors: !cloudSelected);
+                    if ((!localReady && !cloudSelected) || _asr is null)
+                    {
+                        if (streaming is not null)
+                        {
+                            await streaming.DisposeAsync(); // no-op after FinishAsync; never throws
+                        }
+                        // Terminal-state early-exit (S2): never bare-return — drive
+                        // the engine back so the next dictation can start.
+                        _engine.Apply(SessionEvent.Failed);
+                        if (cloudSelected && _asr is null)
+                        {
+                            // Cloud selected but no local session exists at all (the
+                            // fallback wrapper needs one): surface this rare case.
+                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                                new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
+                                Guid.Empty);
+                        }
+                        _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
+                        return;
+                    }
+                    var transcriber = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow, fallbackNotice);
+                    await using var lateSession = await transcriber.StartSessionAsync(ct);
+                    maybeTranscription = await lateSession.FinishAsync(trimmed, ct);
+                }
+                var transcription = maybeTranscription;
                 transcribeSw.Stop();
 
                 string final = transcription.Text;
@@ -670,6 +744,11 @@ public sealed class PipelineHost : IDisposable
             case HotkeyEventKind.Cancel:
                 _engine.Apply(SessionEvent.CancelRequested);
                 _ = _warmRecorder?.StopSession();
+                if (_streamingSession is not null)
+                {
+                    await _streamingSession.DisposeAsync();
+                    _streamingSession = null;
+                }
                 break;
             case HotkeyEventKind.Toggle:
                 if (_engine.State == SessionState.Idle)
@@ -680,6 +759,24 @@ public sealed class PipelineHost : IDisposable
                     _currentSessionId = Guid.NewGuid();
                     _log.LogInformation("Session started (toggle) {SessionId}", _currentSessionId);
                     _sounds.PlayStart();
+                    // (same comment as the HoldDown arm: create BEFORE StartSession
+                    // so the synchronously-raised pre-roll is not dropped)
+                    var settingsForStream2 = _settingsProvider();
+                    _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                        ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                        {
+                            var cloudSel2 = string.Equals(settingsForStream2.AsrProvider, "assemblyai",
+                                StringComparison.OrdinalIgnoreCase);
+                            var ready2 = TryEnsureAsrModel(reportErrors: false);
+                            if ((!ready2 && !cloudSel2) || _asr is null) return null;
+                            return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream2, notice =>
+                                _ = _toasts.ShowAsync(
+                                    "Winpepper",
+                                    "Cloud transcription unavailable — used local speech recognition instead.",
+                                    Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                    TimeSpan.FromSeconds(6)));
+                        }, ct2),
+                        _log, ct);
                     _warmRecorder!.StartSession(includePrerollMs: 500);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                     _targetAtStart = CaptureTarget();
@@ -738,6 +835,11 @@ public sealed class PipelineHost : IDisposable
                         _engine.Apply(SessionEvent.TranscriptReady);
                         _engine.Apply(SessionEvent.InjectionCompleted);
                         _ctxPrefetchTask = null;
+                        if (_streamingSession is not null)
+                        {
+                            await _streamingSession.DisposeAsync();
+                            _streamingSession = null;
+                        }
                         _recordStopwatch = null;
                         break;
                     }
@@ -746,26 +848,70 @@ public sealed class PipelineHost : IDisposable
                     var settingsNow2 = _settingsProvider();
                     var cloudSelected2 = string.Equals(
                         settingsNow2.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase);
-                    var localReady2 = TryEnsureAsrModel(reportErrors: !cloudSelected2);
-                    if ((!localReady2 && !cloudSelected2) || _asr is null)
-                    {
-                        _engine.Apply(SessionEvent.Failed);
-                        if (cloudSelected2 && _asr is null)
-                        {
-                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                                new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
-                                Guid.Empty);
-                        }
-                        _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
-                        return;
-                    }
-                    var transcriber2 = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow2, notice =>
+                    Action<string> fallbackNotice2 = notice =>
                         _ = _toasts.ShowAsync(
                             "Winpepper",
                             "Cloud transcription unavailable — used local speech recognition instead.",
                             Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                            TimeSpan.FromSeconds(6)));
-                    var transcription2 = await transcriber2.TranscribeAsync(trimmed2, ct);
+                            TimeSpan.FromSeconds(6));
+                    // Finish the streaming session FIRST — before ANY TryEnsureAsrModel
+                    // call: the ensure's swap branch disposes the ParakeetSession the
+                    // streaming transcriber still holds (no engine-state gating), so
+                    // no ensure may run while a session is in flight. The factory's
+                    // own ensure (start arm) ran before the session captured the
+                    // model. A mid-dictation model change applies to the NEXT dictation.
+                    var streaming2 = _streamingSession;
+                    _streamingSession = null;
+                    Winpepper.Asr.Transcription.TranscriptionResult? maybeTranscription2 = null;
+                    if (streaming2 is not null)
+                        maybeTranscription2 = await streaming2.FinishAsync(trimmed2, ct);
+                    if (maybeTranscription2 is null)
+                    {
+                        // Late path: no streaming session materialized, its factory
+                        // returned null (no provider at start), or the drain deadline
+                        // expired on a wedged connection (session already abandoned +
+                        // disposed inside FinishAsync). Run today's ensure + error UX,
+                        // then the batch-equivalent path via the streaming seam. The
+                        // cloud wrapper bounds BOTH its connect (StartSessionAsync)
+                        // and its post-stop wait with the cloud deadline (Task 8), so
+                        // even on the wedged network that caused a drain timeout this
+                        // path cannot hang the serial hotkey loop.
+                        // Provider-aware (req 6): a failed LOCAL swap never skips or
+                        // aborts a CLOUD dictation; soften its error surface.
+                        // Drain-timeout abandon (A5 residual): the coordinator may
+                        // have ORPHANED a wedged pump still executing on the shared
+                        // ParakeetSession — never run an ensure then (its swap branch
+                        // disposes that very session: native use-after-dispose). A
+                        // session only materialized after the factory's own ensure,
+                        // so _asr is already loaded; use it as-is.
+                        var localReady2 = streaming2 is not null && streaming2.DrainTimedOut
+                            ? _asr is not null
+                            : TryEnsureAsrModel(reportErrors: !cloudSelected2);
+                        if ((!localReady2 && !cloudSelected2) || _asr is null)
+                        {
+                            if (streaming2 is not null)
+                            {
+                                await streaming2.DisposeAsync(); // no-op after FinishAsync; never throws
+                            }
+                            // Terminal-state early-exit (S2): never bare-return — drive
+                            // the engine back so the next dictation can start.
+                            _engine.Apply(SessionEvent.Failed);
+                            if (cloudSelected2 && _asr is null)
+                            {
+                                // Cloud selected but no local session exists at all (the
+                                // fallback wrapper needs one): surface this rare case.
+                                _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                                    new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
+                                    Guid.Empty);
+                            }
+                            _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
+                            return;
+                        }
+                        var transcriber2 = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow2, fallbackNotice2);
+                        await using var lateSession2 = await transcriber2.StartSessionAsync(ct);
+                        maybeTranscription2 = await lateSession2.FinishAsync(trimmed2, ct);
+                    }
+                    var transcription2 = maybeTranscription2;
                     transcribeSw2.Stop();
 
                     string final2 = transcription2.Text;

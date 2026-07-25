@@ -17,7 +17,8 @@
 - **Main checkout is off-limits for edits:** `/home/dan/code/winpepper` (branch `main`) has uncommitted user work-in-progress in `packaging/Winpepper.Msi.wixproj` and `packaging/winpepper.wxs` plus untracked `scripts/windows-sandbox/`. Never modify, stage, stash, or commit anything in that checkout. Read-only `git` commands there are fine.
 - **Windows host safety (the user's Winpepper app may be RUNNING):** never install the MSI, never launch or kill `Winpepper.exe`, never write to `C:\Users\dan\AppData\Local\winpepper` (read-only access to the models dir is allowed). Do not install anything on the Windows host beyond NuGet-restored build artifacts and `%TEMP%` files.
 - **Test method (AGENTS.md, verbatim rule):** build each project in `tests/` with `-c Release`, then execute via the xUnit v3 in-process runner (`dotnet exec <built test dll>`). **Never `dotnet test`** — the VSTest host is unreliable on some dev machines.
-- **Green-before-commit:** every commit must have a green Linux suite (`./scripts/linux-tests.sh` after Task 1 creates it; 0 failures, 0 errors). Branch Linux baseline: **1050 tests, 0 failures**. Windows expectation after merge: **12 project/TFM runs, ~1335+ tests** (per commit `3b1903e`'s verified numbers).
+- **Green-before-commit:** every commit must have a green Linux suite (`./scripts/linux-tests.sh` after Task 1 creates it; 0 failures, 0 errors). Branch Linux baseline: **1044 tests, 0 failures** (measured 2026-07-25 at `537be6b` via the exact Task 1 method; an earlier session's "1050" figure was wrong). Windows expectation after merge: **12 project/TFM runs, roughly ~1300+ tests** — record the actual number; 0 failures/0 errors is the gate, the count is a cross-check. Windows runs may legitimately report `Skipped: N > 0`: the Llama cleanup integration tests self-skip via `Assert.SkipUnless` when the qwen GGUF model is absent on the host (it currently is). Skips keep the gate green but must be recorded honestly in the evidence doc.
+- **Cross-OS build hygiene (validated 2026-07-25):** Windows-over-UNC and Linux builds share each project's `bin/`/`obj/`. Incremental Windows builds after a Linux build fail with transient `CS0006` (missing `obj/**/ref/*.dll`), one project per retry — so `windows-gate.sh` builds with `--no-incremental`. NEVER run `./scripts/linux-tests.sh` and `./scripts/windows-gate.sh` (or any other cross-OS build of this tree) concurrently.
 - **Linux SDK:** `export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"` (SDK 9.0.100; the worktree has no `.dotnet` of its own; `global.json` pins `9.0.100` + `latestFeature`).
 - **Windows interop facts (verified):** `powershell.exe` at `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`; Windows `dotnet` is on PATH for powershell (9.0.316); UNC path of a WSL file = `$(wslpath -w <path>)` → `\\wsl.localhost\Ubuntu\...`; building the WinUI app from UNC requires `-p:UseXamlCompilerExecutable=true` and the mt.exe UNC shim from commit `3b1903e`.
 - **QEMU audio VM is NOT provisioned** (no VM image, no PulseAudio under WSLg, no piper, no sshpass). Do not attempt to use or provision it. `scripts/winrun`/`winssh`/`sync-to-vm.sh` target that VM — do not use them.
@@ -42,6 +43,7 @@
 | `scripts/asr-latency-bench/Program.cs` (modify) | 6 | `--wav/--model-dir/--gain/--lead-silence-ms` options, `real-local` scenario (batch vs streamed real Parakeet), per-row audio duration, WAV-fed remote scenarios |
 | `scripts/generate-bench-wavs.ps1` (create) | 7 | Host-side TTS generation of the reference speech WAVs (System.Speech, 16 kHz mono 16-bit) |
 | `scripts/run-bench-windows.sh` (create) | 7 | Build bench with Windows dotnet, stage to `%TEMP%`, generate WAVs, run the 4 phrase categories (+ cloud if key present) |
+| `src/Winpepper.Asr/**` + `tests/Winpepper.Asr.Tests/**` (modify) | 7b | Root-cause & fix the real-model streaming truncation (only the first encoded chunk emits tokens — falsified by a 2026-07-25 validation probe), or land the loud-fallback + default-off safety valve |
 | `docs/plans/2026-07-25-streaming-verification-evidence.md` (create) | 8, 9 | The committed evidence report: real transcripts, latencies, diffs, gate summary, honest environment notes |
 | `docs/manual-test.md` (modify) | 10 | Supersede the stale Plan 3/4/5/6 "blocked/deferred" annotations |
 | `AGENTS.md` (modify) | 10 | Document the gate script + bench procedure as THE way to satisfy the Windows pre-push rule from WSL |
@@ -129,7 +131,7 @@ Run (allow ~10–20 minutes; the first build restores NuGet):
 ```bash
 ./scripts/linux-tests.sh
 ```
-Expected: `LINUX SUITE: GREEN` and `linux-tests grand total: 1050 tests` (the documented branch baseline). If the grand total differs from 1050, do NOT paper over it: re-check the per-project tails for skips/failures and record the actual number — 0 failures/errors is the hard gate, the count is the cross-check. **Record the exact grand total; Task 2 must reproduce it.**
+Expected: `LINUX SUITE: GREEN` and `linux-tests grand total: 1044 tests` (measured 2026-07-25 at `537be6b` via exactly this method — 0 failed / 0 errors / 0 skipped; per-project: Asr 161, Audio 62, Cleanup 85, Core 379, Corrections 23, History 45, Integration 1, Models 73, Platform 215). If the grand total differs from 1044, do NOT paper over it: re-check the per-project tails for skips/failures and record the actual number — 0 failures/errors is the hard gate, the count is the cross-check. Note: the summary lines carry leading ANSI color codes, which is why the script's greps are deliberately unanchored — keep them that way. **Record the exact grand total; Task 2 must reproduce it.**
 
 - [ ] **Step 4: Commit**
 
@@ -216,10 +218,28 @@ Create `scripts/windows-gate.sh` with exactly this content:
 #   - never writes to %LOCALAPPDATA%\winpepper (tests read the models dir only)
 #
 # Known caveat: Hook_Installs_And_DisposesCleanly (Winpepper.Platform.Tests,
-# windows TFM) hangs in headless sessions. The host desktop is interactive so
-# it should pass; the per-run timeout below surfaces a hang as TIMEOUT instead
-# of wedging the gate. After a timeout, check the host for orphaned
-# dotnet.exe processes (never kill Winpepper.exe).
+# windows TFM) hangs in headless sessions; it requires an interactive,
+# unlocked desktop (verified interactive 2026-07-25). The per-run timeout
+# below surfaces a hang as TIMEOUT instead of wedging the gate, and
+# kill_orphans then removes this tree's orphaned dotnet.exe processes
+# (validated: `timeout` kills only the interop proxy; Windows-side children
+# survive holding file locks unless killed). Never kill Winpepper.exe.
+#
+# Accepted risk (validated 2026-07-25): the hook test installs a REAL
+# WH_KEYBOARD_LL hook for ~200 ms whose test chord matches the app's toggle
+# side-agnostically; a user keystroke in that window can be swallowed once.
+# Kept anyway — it is the only real hook coverage; it changes no state.
+#
+# Cross-OS obj hygiene (validated 2026-07-25): Linux builds share bin/obj
+# with these UNC builds; incremental Windows builds after a Linux build hit
+# transient CS0006 (missing obj/**/ref/*.dll), so every build below uses
+# --no-incremental. Never run linux-tests.sh concurrently with this gate.
+#
+# Expected skips: Windows runs may report Skipped > 0 (Llama cleanup tests
+# self-skip via Assert.SkipUnless when the qwen GGUF is absent on the host —
+# it currently is). Skips keep the gate green; record them honestly in the
+# evidence doc. Note the gate is CPU/RAM heavy — run it when the user isn't
+# depending on a responsive host.
 #
 # Usage: ./scripts/windows-gate.sh
 # Exit:  0 and "GATE: GREEN" iff the app builds and all 12 runs are green.
@@ -240,6 +260,16 @@ run_ps() { # run_ps <timeout_s> <logfile> <ps-command>
   local t="$1" log="$2" cmd="$3"
   timeout --foreground "$t" "$PS" -NoProfile -ExecutionPolicy Bypass \
     -Command "$cmd; exit \$LASTEXITCODE" > "$log" 2>&1
+}
+
+# `timeout` kills only the WSL-side interop proxy; Windows-side children
+# survive and can hold file locks that wedge later stages (verified). After
+# any TIMEOUT, kill orphaned dotnet.exe processes whose command line points
+# at THIS checkout — never anything else, never Winpepper.exe.
+kill_orphans() {
+  "$PS" -NoProfile -Command \
+    "Get-CimInstance Win32_Process -Filter \"Name='dotnet.exe'\" | Where-Object { \$_.CommandLine -like '*streaming-verification*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
+    >/dev/null 2>&1 || true
 }
 
 PROJECTS=(
@@ -280,10 +310,11 @@ echo "windows-gate: UNC root $UNC_ROOT"
 echo "=== [1/3] Build Winpepper.App (Release, XAML exe compiler) ==="
 app="$UNC_ROOT"'\src\Winpepper.App\Winpepper.App.csproj'
 if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/app-build.log" \
-     "dotnet build '$app' -c Release -p:UseXamlCompilerExecutable=true"; then
+     "dotnet build '$app' -c Release --no-incremental -p:UseXamlCompilerExecutable=true"; then
   summary+=("Winpepper.App build: OK")
 else
   rc=$?
+  [[ $rc -eq 124 ]] && kill_orphans
   summary+=("Winpepper.App build: FAILED (exit $rc$([[ $rc -eq 124 ]] && echo ', TIMEOUT' || true)) -- $LOG_DIR/app-build.log")
   fail=1
 fi
@@ -291,10 +322,11 @@ fi
 echo "=== [2/3] Build the 9 test projects (Release, all TFMs) ==="
 for proj in "${PROJECTS[@]}"; do
   csproj="$UNC_ROOT"'\tests\'"$proj"'\'"$proj"'.csproj'
-  if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/build-$proj.log" "dotnet build '$csproj' -c Release"; then
+  if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/build-$proj.log" "dotnet build '$csproj' -c Release --no-incremental"; then
     echo "  built $proj"
   else
     rc=$?
+    [[ $rc -eq 124 ]] && kill_orphans
     summary+=("$proj build: FAILED (exit $rc) -- $LOG_DIR/build-$proj.log")
     fail=1
   fi
@@ -314,7 +346,8 @@ for entry in "${RUNS[@]}"; do
   total="$(grep -oE 'Total: *[0-9]+' <<<"$line" | grep -oE '[0-9]+' || echo 0)"
   grand_total=$((grand_total + total))
   if [[ $rc -eq 124 ]]; then
-    summary+=("$proj ($tfm): TIMEOUT after ${TEST_TIMEOUT}s (likely hang; Hook_Installs_And_DisposesCleanly needs an interactive desktop) -- $log")
+    kill_orphans
+    summary+=("$proj ($tfm): TIMEOUT after ${TEST_TIMEOUT}s (likely hang; Hook_Installs_And_DisposesCleanly needs an interactive desktop; orphaned dotnet.exe for this tree killed) -- $log")
     fail=1
   elif [[ $rc -ne 0 ]] || ! grep -qE 'Errors: 0[^0-9]' <<<"$line" || ! grep -qE 'Failed: 0[^0-9]' <<<"$line"; then
     summary+=("$proj ($tfm): FAILED (exit $rc) ${line:-<no summary line>} -- $log")
@@ -327,7 +360,7 @@ done
 echo
 echo "================ windows-gate summary ================"
 printf '%s\n' "${summary[@]}"
-echo "grand total tests: $grand_total (expected >= 1335 across 12 runs)"
+echo "grand total tests: $grand_total (cross-check only; roughly ~1300+ across 12 runs -- record the actual number)"
 if [[ $fail -ne 0 ]]; then
   echo "GATE: RED"
   exit 1
@@ -817,7 +850,7 @@ var requested = scenarioArgs.Count > 0 ? scenarioArgs.ToArray() : new[]
 };
 ```
 
-Then find where the shared audio buffer is created (`var audio = SynthesizeAudio(AudioSeconds);` — `SynthesizeAudio` is at ~line 136) and replace with:
+Then hoist a SHARED audio buffer. **Important (verified against the current source):** `Program.cs` does NOT have a single shared audio-buffer creation point — it calls `SynthesizeAudio(...)` separately inside each scenario (≥5 per-scenario call sites, around lines 33/44/63/80/93). Add ONE shared buffer right after the option parsing above:
 
 ```csharp
 var audio = wavPaths.Count > 0
@@ -825,6 +858,8 @@ var audio = wavPaths.Count > 0
     : SynthesizeAudio(AudioSeconds);
 var audioSeconds = audio.Length / 16000.0;
 ```
+
+then replace EVERY per-scenario `SynthesizeAudio(...)` call site with the shared `audio` variable (preserving any per-scenario handling around it). This is what makes the promised CLI contract true — "when `--wav` is provided, the FIRST wav also becomes the audio for the existing sim/remote scenarios" — so `real-remote-*` runs on real speech. Done naively (editing only one call site), the cloud rows would silently keep using tone-sweep audio and the evidence claim would be false.
 
 - [ ] **Step 2: Add real per-row audio duration to the results table**
 
@@ -970,7 +1005,7 @@ Expected: `LINUX SUITE: GREEN`.
 
 **Interfaces:**
 - Consumes: the bench CLI from Task 6; `powershell.exe` interop; System.Speech on the host.
-- Produces: `./scripts/run-bench-windows.sh` — builds the bench with the Windows dotnet, stages it to `%TEMP%\winpepper-bench`, generates `normal-10s.wav` + `pause-mid.wav` into `%TEMP%\winpepper-bench-wavs` via `scripts/generate-bench-wavs.ps1 -OutDir <dir>`, runs the four phrase categories (normal / pause-mid / quiet via `--gain 0.05` / leading-silence via `--lead-silence-ms 1500`), checks `ASSEMBLYAI_API_KEY` (Process/User/Machine scopes) and runs the cloud scenarios on real speech if present, and leaves per-category logs in `artifacts/bench/`. Task 8 runs it and harvests the logs.
+- Produces: `./scripts/run-bench-windows.sh` — builds the bench with the Windows dotnet, stages it to `%TEMP%\winpepper-bench`, generates `normal-10s.wav` + `pause-mid.wav` into `%TEMP%\winpepper-bench-wavs` via `scripts/generate-bench-wavs.ps1 -OutDir <dir>`, runs the four phrase categories (normal / pause-mid / quiet via `--gain 0.02` / leading-silence via `--lead-silence-ms 1500`), checks `ASSEMBLYAI_API_KEY` (Process/User/Machine scopes) and runs the cloud scenarios on real speech if present, and leaves per-category logs in `artifacts/bench/`. Task 8 runs it and harvests the logs.
 
 - [ ] **Step 1: Write the TTS generation script**
 
@@ -1090,7 +1125,7 @@ run_category() { # run_category <name> <wavfile> [extra bench args...]
 
 run_category normal        normal-10s.wav
 run_category pause-mid     pause-mid.wav
-run_category quiet         normal-10s.wav --gain 0.05
+run_category quiet         normal-10s.wav --gain 0.02
 run_category lead-silence  normal-10s.wav --lead-silence-ms 1500
 
 echo "=== Cloud (AssemblyAI) check ==="
@@ -1133,6 +1168,53 @@ Expected: `LINUX SUITE: GREEN`.
 
 ---
 
+### Task 7b: Root-cause and fix the real-model streaming truncation defect
+
+**Why this task exists (validation finding, 2026-07-25):** a pre-plan validation probe ran the production classes against the REAL int8 Parakeet model on the host and **falsified** the assumption that chunked streaming produces sensible transcripts. The graphs accept the chunked inputs (no ONNX Runtime errors, `fellBackToBatch=False`), but only the FIRST encoded chunk emits tokens — every subsequent encode decodes to 100% blanks, silently truncating ~75% of each utterance (e.g. normal-10s streamed to just "Please summarize the meeting notes from this."). The failure is deterministic, reproduced on BOTH DirectML and CPU EPs, with `leftContextMelFrames=0`, and with 600-frame chunks — so it is not the context-discard arithmetic, not chunk size, and not a DirectML quirk. Because no exception is thrown, `_corrupt` never sets and the batch fallback never triggers: **production dictation with `StreamingEnabled=true` truncates real dictations longer than ~2 s.** Full evidence and instrumentation data: the probe under `artifacts/v5-probe/` (gitignored — `Program.cs`, `run-temp-staged.log`, `run-diag.log`) and the validation report `../../../.the-usual-logs/streaming-verification/reports/V5.md`.
+
+Root-cause candidates (from the probe's instrumentation; start here):
+1. **Running-stats normalization mismatch** — chunk 1 is normalized by exactly its own stats (batch-like), later chunks by mixed running stats (`RunningMelNormalizer.cs:41–53`); the int8-quantized joint may be highly sensitive to that distribution shift.
+2. **Carried decoder LSTM state across the encoder context break** — the carried `TdtDecoderState` (LastToken + LSTM h/c, per `TdtGreedyDecoder.cs:38–96`) combined with a fresh chunk's encoder output argmaxes blank on every frame with large duration skips.
+3. Int8 quantization sensitivity amplifying either of the above.
+
+**Files:**
+- Modify: `src/Winpepper.Asr/**` (streaming path — likely `ParakeetStreamingSession.cs`, `RunningMelNormalizer.cs`, and/or decoder-state handling) + matching tests in `tests/Winpepper.Asr.Tests/`
+- Possibly modify: `src/Winpepper.Core/Settings/AppSettings.cs` (safety-valve path only — `StreamingEnabled` default)
+
+**Interfaces:**
+- Consumes: the Task 6 bench `real-local` scenario (the reproduction harness) + Task 7's WAV generation; the probe artifacts above.
+- Produces: a streaming path whose real-model transcripts reach word parity with batch (the precondition for Task 8's acceptance), OR the documented safety-valve state below.
+
+- [ ] **Step 1: Reproduce with the bench**
+
+Run `./scripts/run-bench-windows.sh` (or invoke the bench's `real-local` scenario directly on the normal-10s WAV) and confirm the truncation: stream transcript cut to ~first chunk, `fellBackToBatch=False`. This proves the harness sees the defect before you change anything.
+
+- [ ] **Step 2: Test the hypotheses cheaply, in order**
+
+Suggested experiments (each is a small, revertable change run against the bench):
+- Normalize each chunk window with batch-equivalent stats (or re-normalize the full accumulated audio per encode) to test hypothesis 1.
+- Reset (or re-prime) the decoder state at chunk boundaries to test hypothesis 2 — note this may harm cross-chunk continuity; measure with the word diff.
+Record per-experiment `# stream[...]` transcripts + non-blank emission counts. Keep experiments out of commits; only the chosen fix lands.
+
+- [ ] **Step 3: Implement the fix with tests**
+
+Land the minimal fix in `src/Winpepper.Asr` with unit tests that encode the failure shape (the fake backend can now be taught to reproduce "later chunks decode to blanks" at whatever seam the root cause reveals). `WarningsAsErrors=nullable` applies. Acceptance: bench `real-local` on normal-10s reaches `TrivialOnly` word parity (or clearly characterized near-parity) with `fellBackToBatch=False`.
+
+- [ ] **Step 4: Safety valve — only if the defect is not tractably fixable in this task**
+
+If root-causing shows the fix is research-grade (e.g. the chunked int8 approach fundamentally can't work), do NOT leave the silent truncation in place. Instead: (a) make the failure LOUD — detect pathological streams (e.g. zero non-blank emissions from any post-first encode while speech frames were fed) and set the corrupt/fallback path so `FinishAsync` returns the batch fallback result; (b) check `StreamingEnabled`'s default in `AppSettings` and, if it defaults on, flip the default to OFF with a comment citing this defect; (c) record the defect honestly in Task 8's evidence doc — the acceptance assessment must then say parity NOT met and latency numbers not citable.
+
+- [ ] **Step 5: Full Linux suite + commit**
+
+```bash
+./scripts/linux-tests.sh
+git add <changed files>
+git commit -m "fix(asr): <root cause> made real-model streaming truncate after the first chunk"
+```
+Expected: `LINUX SUITE: GREEN`. (Safety-valve path: commit message `fix(asr): fall back loudly when streaming decodes to blanks; default streaming off`.)
+
+---
+
 ### Task 8: Run the bench on the real host and write the evidence report
 
 This closes accepted risks A1 and A16 from the streaming-transcription work with REAL model evidence.
@@ -1141,7 +1223,7 @@ This closes accepted risks A1 and A16 from the streaming-transcription work with
 - Create: `docs/plans/2026-07-25-streaming-verification-evidence.md`
 
 **Interfaces:**
-- Consumes: `./scripts/run-bench-windows.sh` (Task 7); logs land in `artifacts/bench/*.log`.
+- Consumes: `./scripts/run-bench-windows.sh` (Task 7); Task 7b's streaming fix (or its documented safety-valve state); logs land in `artifacts/bench/*.log`.
 - Produces: the committed evidence report. Task 9 appends the final gate summary to it; Task 10's AGENTS.md entry links to it.
 
 - [ ] **Step 1: Run the bench end-to-end**
@@ -1155,7 +1237,7 @@ Expected: four `real-local` category logs in `artifacts/bench/`, each containing
 - [ ] **Step 2: Validate the runs are genuinely streaming and honestly quiet**
 
 Check each category log:
-- `fellBackToBatch=False` in every `# stream[...]` line. If `True` for **quiet**: the whole clip was likely below the leading-silence gate (frame RMS never reached 0.002). Re-run just that category with a higher gain, e.g. `--gain 0.08`, by editing the `run_category quiet ...` invocation temporarily or invoking the bench directly via powershell; the target window (printed as `maxFrameRms`) is `0.002 < maxFrameRms < 0.0133` — above the leading gate, below the quiet-talker guard threshold (`0.002 / 0.15`). Record the gain actually used. If `True` for **any other category**, read the `# log[...]` lines for the failure and fix the underlying issue before writing evidence — do not report fallen-back numbers as streaming numbers.
+- `fellBackToBatch=False` in every `# stream[...]` line. If `True` for **quiet**: the gain is outside the usable band. Measured facts (validated 2026-07-25 on these exact TTS clips): the target window (printed as `maxFrameRms`) is `0.002 < maxFrameRms < 0.0133` — above the leading gate, below the quiet-talker guard threshold (`0.002 / 0.15`); the feasible gain band is roughly **0.01–0.03** (`--gain 0.02` verified end-to-end: guard active, zero drops, streaming engaged). Do NOT raise the gain above ~0.04 — `0.05` already trips the guard boundary (effective maxFrameRms 0.01357 > 0.01333) and `0.08` is far outside the window. Adjust within 0.01–0.03 by editing the `run_category quiet ...` invocation temporarily or invoking the bench directly via powershell. Record the gain actually used. If `True` for **any other category**, read the `# log[...]` lines for the failure and fix the underlying issue before writing evidence — do not report fallen-back numbers as streaming numbers. (Exception: if Task 7b ended on the safety-valve path, `fellBackToBatch=True` is the DESIGNED outcome — record it as such, per the acceptance section.)
 - The **pause-mid** log's `# log[...]` lines should show `InteriorSilenceSkipper` skip stats (skipped ms > 0, runs skipped ≥ 1) — that proves the edge-keeping path ran.
 - The **lead-silence** run should still produce the full transcript (the leading gate drops silence frames entirely).
 
@@ -1195,6 +1277,11 @@ from that work's assumption ledger:
   `--lead-silence-ms 1500`.
 - Streaming honesty check: every streamed row below ran with
   `fellBackToBatch=False` (the bench flags silent batch fallback).
+- Streaming defect context: a 2026-07-25 validation probe falsified the
+  original streaming-parity assumption against the real model (only the
+  first encoded chunk emitted tokens; later encodes decoded to blanks).
+  Task 7b <fixed it via <root cause + fix> / applied the loud-fallback +
+  default-off safety valve>; the results below reflect that state.
 
 ## Results (REAL local Parakeet)
 
@@ -1231,7 +1318,13 @@ honestly: which words differ, and whether it is a real quality divergence>
   listed above and characterized honestly>.
 - Latency: streamed post-stop <ms> vs batch <ms> for the ~10 s phrase —
   <X>% reduction. Bar: "dramatically lower" (streamed well under half of
-  batch). <met/not met>.
+  batch). <met/not met>. NOTE: latency may only be cited as met if
+  transcript parity holds for that category — a truncated stream finishes
+  early, which makes its latency number meaningless.
+- If Task 7b ended on the safety-valve path (defect not fixed): state
+  explicitly that parity is NOT met, document the defect and the mitigation
+  (loud batch fallback; `StreamingEnabled` default off), and do not present
+  streamed latency as the before/after proof.
 
 ## Cloud (AssemblyAI)
 
@@ -1285,7 +1378,7 @@ Expected: `LINUX SUITE: GREEN`. The "Windows pre-push gate result" section still
 ```bash
 ./scripts/windows-gate.sh 2>&1 | tee artifacts/windows-gate/final-run.txt
 ```
-Expected: `GATE: GREEN`, 12 OK run lines, `grand total tests: >= 1335`. If RED (a bench/test change since Task 4 broke something), run this fix cycle until GREEN:
+Expected: `GATE: GREEN`, 12 OK run lines, grand total roughly ~1300+ (cross-check only — record the actual number; `Skipped > 0` from the Llama self-skips is expected and must be noted honestly). If RED (a bench/test change since Task 4 broke something), run this fix cycle until GREEN:
 ```bash
 # make the fix, then:
 ./scripts/linux-tests.sh          # must print LINUX SUITE: GREEN
@@ -1398,3 +1491,15 @@ git log --oneline main..HEAD | head -30
 - **No silent deferrals:** the only test doubles are the bench's pre-existing sim fakes (untouched); the new `real-local` path uses the production `ParakeetSession`/`ParakeetStreamingSession` directly, with an explicit `fellBackToBatch` honesty flag so a silent batch fallback cannot masquerade as streaming evidence (Task 8 Step 2 gates on it).
 - **Type consistency:** `BenchAudio.ReadMono16k/ApplyGain/PrependSilence/Prepare/Stats` and `TranscriptDiff.Normalize/Summarize` + `DiffSummary.Describe()` are used identically in Tasks 5, 6; the bench CLI flags (`--wav/--model-dir/--gain/--lead-silence-ms`, scenario `real-local`) match between Tasks 6, 7, 8; script names (`linux-tests.sh`, `windows-gate.sh`, `generate-bench-wavs.ps1`, `run-bench-windows.sh`) are consistent throughout.
 - **Known judgment calls (documented, not hidden):** quiet/lead-silence categories are deterministic transforms of the normal TTS phrase (explicitly allowed by the spec: "scale amplitude down in the bench or TTS volume"); helper unit tests are compiled into `Winpepper.Asr.Tests` via `<Compile Include>` (repo precedent) to preserve the 9-project/12-run gate contract; line numbers cited for `Program.cs`/`manual-test.md` are pre-edit anchors and each edit instruction also carries a text anchor.
+
+## Load-Bearing Validation Update (2026-07-25)
+
+Nineteen load-bearing assumptions were validated against the real environment before execution (ledger + full evidence: `.worktrees/.the-usual-logs/streaming-verification/load-bearing-ledger.md` and `reports/V1.md`–`V6.md` there; validator artifacts in the worktree's gitignored `artifacts/`). Plan changes applied:
+
+- **FALSIFIED — real-model streaming truncates (was: streaming parity assumed reachable):** only the first encoded chunk emits tokens against the real int8 graphs; silent (`fellBackToBatch=False`), EP-independent. Production `StreamingEnabled=true` truncates dictations >~2 s. → New **Task 7b** (root-cause & fix, with a loud-fallback + default-off safety valve); Task 8 method/acceptance reworked (latency citable only with parity).
+- **FALSIFIED — cross-OS incremental builds:** Windows-over-UNC builds after a Linux build hit transient `CS0006`. → gate builds use `--no-incremental`; new global constraint forbids concurrent cross-OS builds.
+- **FALSIFIED — timeout kills the Windows side:** interop children survive a WSL `timeout`, holding locks. → gate gained `kill_orphans` (kills only this tree's dotnet.exe orphans) after any TIMEOUT.
+- **FALSIFIED — single shared audio buffer in bench Program.cs:** audio is synthesized per scenario (≥5 call sites). → Task 6 Step 1 rewritten to hoist a shared buffer and update every call site.
+- **Corrected numbers:** Linux baseline is **1044** (not 1050), measured via the exact Task 1 method; Windows totals are a cross-check ("~1300+, record actual"); quiet-category gain is **0.02** (0.05 trips the guard boundary; 0.08 guidance was the wrong direction).
+- **Verified (now facts, not assumptions):** worktree-UNC builds (incl. dual-TFM test projects, no shim needed), UNC in-place `dotnet exec` incl. onnxruntime native load, %TEMP% staging self-containment, model shared-read while Winpepper.exe runs, TTS WAV format/quality (batch Parakeet transcribes it near-perfectly), 2 s AppendBreak → real InteriorSilenceSkipper skips, session reuse pattern, desktop currently interactive.
+- **Accepted residual risks (documented in the gate script):** the hook test's ~200 ms real WH_KEYBOARD_LL window (kept — only real hook coverage; worst case one swallowed keystroke, no state change); Llama tests self-skip (qwen GGUF absent — record `Skipped > 0` honestly); desktop interactivity is a runtime precondition surfaced by the per-run timeout.

@@ -27,21 +27,21 @@
 # side-agnostically; a user keystroke in that window can be swallowed once.
 # Kept anyway — it is the only real hook coverage; it changes no state.
 #
-# Cross-OS obj hygiene (validated 2026-07-25): Linux builds share bin/obj
-# with these UNC builds; incremental Windows builds after a Linux build hit
-# transient CS0006 (missing obj/**/ref/*.dll), so every build below uses
-# --no-incremental. Never run linux-tests.sh concurrently with this gate.
-#
-# UNC visibility race (validated 2026-07-25, first gate run): even with
-# --no-incremental, multi-node MSBuild over \\wsl.localhost hits transient
-# CS0006 -- a ref assembly written by one Windows process (msbuild node /
-# VBCSCompiler) is not yet visible to another process's File.Exists over the
-# 9P share, so CSC in a sibling node fails on a file that demonstrably exists
-# moments later. Different projects fail on different runs. Fix: -m:1 plus
-# -p:UseSharedCompilation=false keeps every build-graph file write AND read in
-# ONE process, making the share's view coherent. Slower, but deterministic --
-# a re-run of a previously red build with these flags went green with zero
-# other changes.
+# Cross-OS obj hygiene (validated 2026-07-25, first two gate runs): Linux
+# builds share bin/obj with these UNC builds, and Windows builds against that
+# stale state hit CS0006 (missing obj/**/ref/*.dll). --no-incremental does
+# NOT fix it -- it maps to MSBuild's Rebuild, whose Clean transitively cleans
+# referenced projects (CleanReferencedProjects), and across the gate's ten
+# sequential entry builds a reference's ref assembly gets cleaned out from
+# under consumers whose builds are then skipped as cached/up-to-date; the
+# same project set failed identically on a multi-node run and a -m:1 run.
+# Fix: delete the cross-OS src/**/{bin,obj} and tests/**/{bin,obj} up front
+# (WSL side), then build plainly (no Rebuild): every project compiles exactly
+# once from a clean slate and later stages reuse earlier outputs. Builds stay
+# single-process (-m:1 -p:UseSharedCompilation=false) so every build-graph
+# write and read happens in one process over the 9P share (conservatism, not
+# a proven necessity). Never run linux-tests.sh concurrently with this gate;
+# the pre-clean also means the next linux-tests.sh run rebuilds from scratch.
 #
 # Expected skips: Windows runs may report Skipped > 0 (Llama cleanup tests
 # self-skip via Assert.SkipUnless when the qwen GGUF is absent on the host —
@@ -60,6 +60,12 @@ PS="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 UNC_ROOT="$(wslpath -w "$HERE")"
 LOG_DIR="$HERE/artifacts/windows-gate"
 mkdir -p "$LOG_DIR"
+
+# Cross-OS hygiene pre-clean (see header): remove Linux-built intermediates so
+# every Windows build below starts from a clean slate and compiles each
+# project exactly once. rm -f tolerates non-matching globs.
+echo "windows-gate: pre-clean src/**/{bin,obj} and tests/**/{bin,obj}"
+rm -rf "$HERE"/src/*/bin "$HERE"/src/*/obj "$HERE"/tests/*/bin "$HERE"/tests/*/obj
 
 BUILD_TIMEOUT=2400   # 40 min (first run restores NuGet over UNC)
 TEST_TIMEOUT=1200    # 20 min per test run (hang guard)
@@ -118,7 +124,7 @@ echo "windows-gate: UNC root $UNC_ROOT"
 echo "=== [1/3] Build Winpepper.App (Release, XAML exe compiler) ==="
 app="$UNC_ROOT"'\src\Winpepper.App\Winpepper.App.csproj'
 if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/app-build.log" \
-     "dotnet build '$app' -c Release --no-incremental -m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true"; then
+     "dotnet build '$app' -c Release -m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true"; then
   summary+=("Winpepper.App build: OK")
 else
   rc=$?
@@ -130,7 +136,7 @@ fi
 echo "=== [2/3] Build the 9 test projects (Release, all TFMs) ==="
 for proj in "${PROJECTS[@]}"; do
   csproj="$UNC_ROOT"'\tests\'"$proj"'\'"$proj"'.csproj'
-  if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/build-$proj.log" "dotnet build '$csproj' -c Release --no-incremental -m:1 -p:UseSharedCompilation=false"; then
+  if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/build-$proj.log" "dotnet build '$csproj' -c Release -m:1 -p:UseSharedCompilation=false"; then
     echo "  built $proj"
   else
     rc=$?

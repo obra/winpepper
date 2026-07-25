@@ -39,7 +39,20 @@ public sealed class HotkeyHook : IDisposable
     private Thread? _hookThread;
     private uint _hookThreadId;
     private IntPtr _hookHandle;
+    private IntPtr _powerRegistration;
+    // Held for the lifetime of the registration: the OS keeps a raw function
+    // pointer to it, so letting the delegate be collected would crash on resume.
+    private PowerNotificationNative.DeviceNotifyCallbackRoutine? _powerCallback;
     private LowLevelKeyboardProc? _callback;
+    // Tick when the resume callback posted the reinstall message: a post that
+    // is never followed by execution is the wedged-hook-thread signature, so
+    // the dequeue latency is logged (Step 4d).
+    private long _reinstallRequestedTick;
+    // Heartbeat TELEMETRY (Step 4f): tick of the last time the OS actually
+    // called the hook. NOT a trigger - it turns uncovered hook deaths (any
+    // >=1000 ms callback timeout, not only sleep/resume) into WRN evidence.
+    private long _lastHookCallbackTick = Environment.TickCount64;
+    private Timer? _heartbeatTimer;
     private Modifier _modifiers;
     private bool _holding;
     // vk -> timestamp the swallow was last observed. Entries self-heal (drop)
@@ -437,6 +450,8 @@ public sealed class HotkeyHook : IDisposable
         _hookThread.Start();
         if (!_ready.Wait(TimeSpan.FromSeconds(5)))
             throw new InvalidOperationException("Hotkey hook failed to install within 5s.");
+        RegisterPowerNotifications();
+        StartHeartbeat();
     }
 
     private void HookThread()
@@ -455,6 +470,15 @@ public sealed class HotkeyHook : IDisposable
 
         while (GetMessageW(out var msg, IntPtr.Zero, 0, 0) > 0)
         {
+            // Thread messages carry no window, so handle ours here rather than
+            // dispatching. Running the reinstall on THIS thread is the point:
+            // it is the only thread that touches the hook handle and the
+            // per-chord tracking dictionaries, so no locking is introduced.
+            if (msg.Message == WM_WINPEPPER_REINSTALL_HOOK)
+            {
+                ReinstallOnHookThread();
+                continue;
+            }
             TranslateMessage(msg);
             DispatchMessageW(msg);
         }
@@ -466,6 +490,7 @@ public sealed class HotkeyHook : IDisposable
 
     private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
+        Volatile.Write(ref _lastHookCallbackTick, Environment.TickCount64);
         if (nCode != 0) return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
 
         var data = Marshal.PtrToStructure<KBDLLHOOKSTRUCT>(lParam);
@@ -486,6 +511,215 @@ public sealed class HotkeyHook : IDisposable
 
         return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
     }
+
+    /// <summary>
+    /// Ask the hook thread to reinstall WH_KEYBOARD_LL. Safe to call from any
+    /// thread: the unhook/hook and the tracking-state reset run ON the hook
+    /// thread via its message loop, so they never race the hook callback.
+    /// </summary>
+    public void RequestHookReinstall()
+    {
+        Volatile.Write(ref _reinstallRequestedTick, Environment.TickCount64);
+        if (_hookThread is null)
+        {
+            // Never started (unit tests, or before Start): there is no hook to
+            // reinstall and no other thread touching tracking state.
+            ReinstallOnHookThread();
+            return;
+        }
+        if (!PostThreadMessageW(_hookThreadId, WM_WINPEPPER_REINSTALL_HOOK, IntPtr.Zero, IntPtr.Zero))
+            // Known gap (recorded above): a lost post is never retried.
+            _log.LogWarning("Failed to post hook reinstall to the hook thread: 0x{Err:X}",
+                Marshal.GetLastWin32Error());
+    }
+
+    /// <summary>
+    /// Runs on the hook thread. Resets per-chord tracking, then swaps the hook.
+    /// Every branch logs: these lines are what turns the next field incident
+    /// into evidence instead of guesswork.
+    /// </summary>
+    private void ReinstallOnHookThread()
+    {
+        _log.LogInformation("System resumed; reinstalling keyboard hook");
+        // A post that executes late points at a busy-but-alive hook thread; a
+        // post that NEVER executes (no line at all) is the wedged-thread
+        // signature.
+        _log.LogInformation("reinstall executed {Ms} ms after resume callback",
+            Environment.TickCount64 - Volatile.Read(ref _reinstallRequestedTick));
+        ResetTrackingState();
+        if (_hookThread is null || _callback is null) return; // no live hook to reinstall
+
+        if (_hookHandle != IntPtr.Zero)
+        {
+            // Do NOT discard the result: false means the OS had ALREADY removed
+            // the hook (the case we are healing); true means the hook was still
+            // installed and this resume-reinstall was precautionary.
+            var unhooked = UnhookWindowsHookEx(_hookHandle);
+            _log.LogInformation(
+                "Stale hook unhook returned {Result} (false = OS had already removed the hook)",
+                unhooked);
+            _hookHandle = IntPtr.Zero;
+        }
+        _hookHandle = SetWindowsHookExW(WH_KEYBOARD_LL, _callback, GetModuleHandleW(null), 0);
+        if (_hookHandle == IntPtr.Zero)
+            // Known gap (recorded above): no retry here - dead until next resume.
+            _log.LogWarning("Keyboard hook reinstall failed: 0x{Err:X}", Marshal.GetLastWin32Error());
+        else
+            _log.LogInformation("Keyboard hook reinstalled (thread {ThreadId})",
+                Environment.CurrentManagedThreadId);
+    }
+
+    /// <summary>
+    /// Drops every per-chord tracking entry so a chord that was half-tracked
+    /// across a suspend cannot fire (or stay swallowed) after resume: the
+    /// key-ups that would have closed it were never delivered. Deliberately
+    /// does NOT touch the raw-capture lease or the suspend-for-capture flag - a
+    /// settings chord recording in progress stays in progress.
+    /// <para>
+    /// Clearing <c>_holding</c> is NOT enough on its own: <c>TryProcessKey</c>
+    /// only emits <c>HoldUp</c> when <c>_holding</c> is true (`HotkeyHook.cs:295`),
+    /// so a silent clear would swallow the terminating event of a dictation
+    /// that was in flight across the suspend - `PipelineHost.HandleHotkey`
+    /// would never run the HoldUp branch (`PipelineHost.cs:394-396`), leaving
+    /// `SessionEngine` stuck in `Recording` FOREVER: the mic stays open, the
+    /// unbounded session buffer keeps growing (`WarmCaptureBuffer.Ingest`), and
+    /// every later HoldDown is dropped by the `State != Idle` guard
+    /// (`PipelineHost.cs:376`) - i.e. the hotkey looks dead again, the exact
+    /// symptom this task exists to fix. So we EMIT the terminating HoldUp
+    /// ourselves and then forget the hold. The subsequent physical key-up (if
+    /// one is ever delivered) finds `_holding == false` and produces nothing,
+    /// so the session sees exactly one HoldUp. If no session was running the
+    /// event is a harmless no-op: the HoldUp branch returns immediately unless
+    /// the engine is `Recording`.
+    /// </para>
+    /// </summary>
+    internal void ResetTrackingState()
+    {
+        _swallowedKeys.Clear();
+        _passedThroughKeys.Clear();
+        _captureKeysDown.Clear();
+        _observedCancelKeys.Clear();
+        _modifiers = Modifier.None;
+        _spaceHold.Cancel();
+        if (_holding)
+        {
+            _holding = false;
+            // Unbounded channel with SingleWriter:false - safe to write from
+            // the hook thread (the normal path) or the caller's thread (the
+            // never-started path in RequestHookReinstall).
+            _log.LogInformation(
+                "Reinstall interrupted an in-flight hold; emitting the terminating HoldUp so the dictation ends");
+            _events.Writer.TryWrite(new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow));
+        }
+    }
+
+    private void RegisterPowerNotifications()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        try
+        {
+            _powerCallback = OnPowerNotification;
+            var parameters = new PowerNotificationNative.DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS
+            {
+                Callback = Marshal.GetFunctionPointerForDelegate(_powerCallback),
+                Context = IntPtr.Zero,
+            };
+            var rc = PowerNotificationNative.PowerRegisterSuspendResumeNotification(
+                PowerNotificationNative.DEVICE_NOTIFY_CALLBACK, ref parameters, out var handle);
+            if (rc == PowerNotificationNative.ERROR_SUCCESS)
+            {
+                _powerRegistration = handle;
+                _log.LogInformation("Registered for suspend/resume notifications (handle 0x{Handle:X})",
+                    handle.ToInt64());
+            }
+            else
+            {
+                _powerCallback = null;
+                _log.LogWarning("PowerRegisterSuspendResumeNotification failed: 0x{Err:X}", rc);
+            }
+        }
+        catch (Exception ex)
+        {
+            _powerCallback = null;
+            _log.LogWarning(ex, "suspend/resume notifications unavailable; hotkeys will not self-heal after resume");
+        }
+    }
+
+    /// <summary>
+    /// Runs on a system callback thread: decide, post, return. Never block here.
+    /// The Debug line lets the smoke distinguish "registered but nothing
+    /// delivered" from "resume classified wrong" (raw PBT_* type included).
+    /// </summary>
+    private uint OnPowerNotification(IntPtr context, uint type, IntPtr setting)
+    {
+        _log.LogDebug("Power notification: type=0x{Type:X}", type);
+        if (PowerResumeDecision.IsResume(type)) RequestHookReinstall();
+        return PowerNotificationNative.ERROR_SUCCESS;
+    }
+
+    private void UnregisterPowerNotifications()
+    {
+        var handle = _powerRegistration;
+        _powerRegistration = IntPtr.Zero;
+        if (handle != IntPtr.Zero && OperatingSystem.IsWindows())
+        {
+            try { _ = PowerNotificationNative.PowerUnregisterSuspendResumeNotification(handle); }
+            catch (Exception ex) { _log.LogDebug(ex, "PowerUnregisterSuspendResumeNotification failed"); }
+        }
+        // Only after the OS can no longer call it.
+        _powerCallback = null;
+    }
+
+    /// <summary>
+    /// TELEMETRY ONLY - an unconditional, non-judging evidence line, NOT a
+    /// health verdict and NOT a reinstall trigger. Every 30 s it records two
+    /// ages: how long since the OS last called our low-level keyboard hook,
+    /// and how long since the system last saw ANY user input. Post-incident,
+    /// this gives a timeline ("the hook went quiet at T, input continued
+    /// past T") that today's logs cannot provide at all.
+    ///
+    /// WHY IT DOES NOT DECIDE: there is no Win32 API for "time of last
+    /// KEYBOARD input". GetLastInputInfo is system-wide and is updated by
+    /// MOUSE input too, so "input recent AND hook silent" is satisfied by
+    /// ordinary mouse-only use (reading, scrolling) on a perfectly healthy
+    /// hook. Emitting a WRN on that conjunction would fire routinely on
+    /// healthy systems and drown the content-free log the incident response
+    /// depends on. Two ages at DEBUG are honest; a warning would not be.
+    ///
+    /// Consequently this is NOT the detector for a silently-removed hook -
+    /// the Task 9 R14-2 gate is a direct functional check (press the hotkey;
+    /// does a dictation start?), and these lines are corroborating timeline
+    /// evidence for it. Promoting this to a trigger requires a genuinely
+    /// keyboard-specific liveness signal first (e.g. a WM_INPUT raw-input
+    /// keyboard sink independent of the hook), which is out of scope here.
+    /// </summary>
+    private void StartHeartbeat()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        _heartbeatTimer = new Timer(_ =>
+        {
+            try
+            {
+                var sinceCallbackMs = Environment.TickCount64 - Volatile.Read(ref _lastHookCallbackTick);
+                long? sinceInputMs = null;
+                var info = new LASTINPUTINFO { cbSize = (uint)Marshal.SizeOf<LASTINPUTINFO>() };
+                if (GetLastInputInfo(ref info))
+                {
+                    // GetLastInputInfo reports 32-bit ticks; compare in 32-bit space.
+                    var delta = unchecked(Environment.TickCount - (int)info.dwTime);
+                    if (delta >= 0) sinceInputMs = delta;
+                }
+                // DEBUG, unconditional, no verdict: system-wide input includes
+                // MOUSE, so these two ages diverging is NORMAL, not a fault.
+                _log.LogDebug(
+                    "Hook heartbeat: lastCallbackAgeMs={CallbackAge} lastAnyInputAgeMs={InputAge} (input age is system-wide and includes mouse)",
+                    sinceCallbackMs, sinceInputMs?.ToString() ?? "unknown");
+            }
+            catch { /* telemetry must never take the app down */ }
+        }, null, HeartbeatPeriod, HeartbeatPeriod);
+    }
+
+    private static readonly TimeSpan HeartbeatPeriod = TimeSpan.FromSeconds(30);
 
     private void UpdateModifierState(int vk, bool down)
     {
@@ -586,6 +820,9 @@ public sealed class HotkeyHook : IDisposable
 
     public void Dispose()
     {
+        UnregisterPowerNotifications(); // stop resume callbacks before teardown
+        _heartbeatTimer?.Dispose();
+        _heartbeatTimer = null;
         _spaceHold.Dispose();
         lock (_captureGate) Volatile.Write(ref _rawCapture, null);
         if (_hookThread is null) return;

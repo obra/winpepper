@@ -19,6 +19,18 @@
     <Nullable>enable</Nullable>
     <DefineConstants>$(DefineConstants);WINDOWS;DISABLE_XAML_GENERATED_MAIN</DefineConstants>
   </PropertyGroup>
+  <!-- WSL builds (project dir on a \\wsl.localhost UNC path): mt.exe from
+       Microsoft.Windows.SDK.BuildTools cannot open UNC manifests (error
+       c1010070, exit 31), which breaks the WindowsAppSDK self-contained
+       manifest merge (CreateWinRTRegistration). Route the merge through a
+       shim that stages the files on a local drive. ApplicationManifest is
+       made absolute so the shim receives a resolvable path (the Exec's UNC
+       working directory is not preserved by cmd.exe). Inert on normal C:\
+       checkouts: the StartsWith('\\') condition is false there. -->
+  <PropertyGroup Condition="$(MSBuildProjectDirectory.StartsWith('\\'))">
+    <ManifestTool>$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '..', '..', 'scripts', 'mt-unc-shim.cmd'))</ManifestTool>
+    <ApplicationManifest>$(MSBuildProjectDirectory)\app.manifest</ApplicationManifest>
+  </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" />
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" />

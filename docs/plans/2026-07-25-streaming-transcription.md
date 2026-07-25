@@ -17,7 +17,7 @@
 - ASR provider setting values are exactly `"local"` and `"assemblyai"` (`AppSettings.AsrProvider`, `src/Winpepper.Core/Settings/AppSettings.cs:18`).
 - Cloud result model names MUST keep the `"assemblyai/"` prefix — `CloudProvider.IsCloud` (`src/Winpepper.Asr/Transcription/CloudProvider.cs`) gates the cleanup-LLM skip on it.
 - AssemblyAI streaming endpoint: `wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&encoding=pcm_s16le&format_turns=true`; auth is the raw API key in the `Authorization` header (no `Bearer` prefix). Audio messages are binary PCM16LE, minimum 50 ms (800 samples / 1600 bytes) per message, maximum 1000 ms.
-- Cloud deadline default 10 s, user-clamped to [5, 30] (`AssemblyAiOptions.ClampDeadline`). The deadline budget covers the **post-stop** cloud wait, exactly as `FallbackTranscriber` owns it today. The segment BEFORE that deadline can start — the coordinator's post-stop pump drain — is bounded separately by `StreamingDictationSession`'s drain deadline (default 10 s, Task 9): a wedged socket send HANGS rather than throws, so no exception-based fallback can fire; on drain timeout the coordinator abandons + disposes the session (aborting the socket unblocks the pump) and returns null, routing the caller to the bounded batch late path. The total post-stop wait is therefore always bounded.
+- Cloud deadline default 10 s, user-clamped to [5, 30] (`AssemblyAiOptions.ClampDeadline`). The deadline budget covers the **post-stop** cloud wait, exactly as `FallbackTranscriber` owns it today. The segment BEFORE that deadline can start — the coordinator's post-stop pump drain — is bounded separately by `StreamingDictationSession`'s drain deadline (default 10 s, Task 9): a wedged socket send HANGS rather than throws, so no exception-based fallback can fire; on drain timeout the coordinator abandons + disposes the session (aborting the socket unblocks the pump) and returns null, routing the caller to the batch late path. The late path stays bounded too because `FallbackStreamingTranscriber` bounds its CONNECT (`StartSessionAsync`) with the same cloud deadline (Task 8) — a wedged network makes `ConnectAsync` hang rather than throw, and the late path re-enters the connect on exactly that network, so an unbounded connect would reopen the hole. The total post-stop wait is therefore always bounded.
 - **Never log the API key.**
 - **Testing on Linux (this environment):** provision via `export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"`. Build each test project with `dotnet build tests/<P>/<P>.csproj -c Release -f net9.0` and run with `dotnet exec tests/<P>/bin/Release/net9.0/<P>.dll`. **NEVER use `dotnet test`. NEVER build `winpepper.sln` on Linux.** All tests green before every commit; the full 9-project suite before finishing a task.
 - **FULL SUITE GATE** (run from the worktree root; check the runner's exit status, never pipe to `tail` directly):
@@ -2469,7 +2469,7 @@ git commit -m "feat(asr): AssemblyAI Universal-Streaming v3 websocket transcribe
 
 ### Task 8: FallbackStreamingTranscriber (cloud primary, local safety net)
 
-Streaming analog of `FallbackTranscriber` (`src/Winpepper.Asr/Transcription/FallbackTranscriber.cs`) with identical policy: user cancellation rethrows; ANY other failure (connect, mid-stream push, finish, or the owned cloud deadline on the post-stop wait) lands on local batch transcription of the full buffer; invalid-model 400s additionally raise the config error. (Distinct from Task 7's zero-pushed cloud-REST delegation, which happens INSIDE `AssemblyAiStreamingSession.FinishAsync` under this wrapper's deadline — this wrapper's LOCAL safety-net policy is unchanged.)
+Streaming analog of `FallbackTranscriber` (`src/Winpepper.Asr/Transcription/FallbackTranscriber.cs`) with identical policy: user cancellation rethrows; ANY other failure (connect, mid-stream push, finish, or the owned cloud deadline on the post-stop wait) lands on local batch transcription of the full buffer; invalid-model 400s additionally raise the config error. The connect itself is bounded by the same cloud deadline: a wedged network makes `ClientWebSocket.ConnectAsync` HANG rather than throw, and PipelineHost's late batch path (Task 10) re-enters `StartSessionAsync` on exactly that wedged network, so an unbounded connect would block the serial hotkey loop for OS-level TCP/TLS timeouts — today's batch `FallbackTranscriber.TranscribeAsync` puts the whole cloud attempt under `CancelAfter(cloudDeadline)` and this wrapper must preserve that bound on every phase. (Distinct from Task 7's zero-pushed cloud-REST delegation, which happens INSIDE `AssemblyAiStreamingSession.FinishAsync` under this wrapper's deadline — this wrapper's LOCAL safety-net policy is unchanged.)
 
 **Files:**
 - Create: `src/Winpepper.Asr/Transcription/FallbackStreamingTranscriber.cs`
@@ -2579,6 +2579,36 @@ public class FallbackStreamingTranscriberTests
         var f = Wrap(primary, local, onFallback: n => notice = n);
 
         await using var session = await f.StartSessionAsync(TestContext.Current.CancellationToken); // must NOT throw
+        var result = await session.FinishAsync(new float[100], TestContext.Current.CancellationToken);
+
+        result.Text.ShouldBe("LOCAL");
+        local.Calls.ShouldBe(1);
+        notice.ShouldNotBeNull();
+    }
+
+    private sealed class HangingStartTranscriber : IStreamingTranscriber
+    {
+        public string ModelName => "cloud";
+        public async Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
+        {
+            await Task.Delay(Timeout.Infinite, ct); // a wedged ConnectAsync HANGS, honoring only ct
+            throw new UnreachableException();
+        }
+    }
+
+    [Fact]
+    public async Task StartHang_IsBoundedByTheConnectDeadline_ThenLocalRunsAtFinish()
+    {
+        string? notice = null;
+        var local = FakeTranscriber.Returning("local", "LOCAL");
+        var f = new FallbackStreamingTranscriber(
+            new HangingStartTranscriber(), local, NullLogger<FallbackStreamingTranscriber>.Instance,
+            onFallback: n => notice = n, cloudDeadline: TimeSpan.FromSeconds(10),
+            scheduleDeadline: (cts, _) => cts.Cancel()); // connect deadline fires immediately
+
+        // Must NOT hang and must NOT throw: the connect deadline (not the user
+        // token) cancelled the connect, so this degrades to a failed-mode session.
+        await using var session = await f.StartSessionAsync(TestContext.Current.CancellationToken);
         var result = await session.FinishAsync(new float[100], TestContext.Current.CancellationToken);
 
         result.Text.ShouldBe("LOCAL");
@@ -2719,9 +2749,15 @@ public sealed class FallbackStreamingTranscriber : IStreamingTranscriber
     {
         IStreamingTranscriptionSession? inner = null;
         Exception? startError = null;
+        // Bound the connect with the same cloud deadline that bounds the
+        // post-stop wait: on a wedged network ConnectAsync HANGS rather than
+        // throws, and PipelineHost's late batch path re-enters here on exactly
+        // that network — an unbounded connect would block the serial hotkey loop.
+        using var connectCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _scheduleDeadline(connectCts, _cloudDeadline);
         try
         {
-            inner = await _primary.StartSessionAsync(ct);
+            inner = await _primary.StartSessionAsync(connectCts.Token);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -2729,8 +2765,8 @@ public sealed class FallbackStreamingTranscriber : IStreamingTranscriber
         }
         catch (Exception ex)
         {
-            startError = ex;
-            _log.LogWarning(ex, "Cloud streaming session failed to start; local fallback will run at stop");
+            startError = ex; // includes the connect deadline (connectCts, not ct)
+            _log.LogWarning(ex, "Cloud streaming session failed to start or timed out connecting; local fallback will run at stop");
         }
         return new Session(this, inner, startError);
     }
@@ -2815,7 +2851,7 @@ dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f 
 dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "Winpepper.Asr.Tests.FallbackStreamingTranscriberTests"
 ```
 
-Expected: PASS (7 tests).
+Expected: PASS (8 tests).
 
 - [ ] **Step 5: Full suite gate + commit**
 
@@ -2836,7 +2872,7 @@ Per-dictation glue between the recorder's `FramesAvailable` event and a streamin
 
 Pump behavior note (A4/N6): the frame channel is unbounded and the pump applies no backpressure, so a slower-than-realtime encoder (local RTF ≥ 1 on very weak hardware) degrades post-stop latency — frames queue and the tail grows — but never correctness: the batch fallback fires only on exceptions, and `FinishAsync(fullAudio)` remains authoritative. Post-merge, production `TranscribeMs` makes any such slowness directly observable.
 
-Drain deadline note (A10 — reliability bound): the cloud deadline inside `FallbackStreamingTranscriber.Session.FinishAsync` fires only AFTER the coordinator's pump has drained, and a wedged push (half-dead TCP connection, slow uplink — a `ClientWebSocket.SendAsync` that hangs rather than throws) never raises the exception the fallback wrapper converts to `_failure`. Without a bound here the post-stop wait is unbounded and, because hotkey dispatch is serial, a hung `FinishAsync` also blocks Cancel. So `FinishAsync` bounds the pump drain with a drain deadline (default 10 s): on timeout it logs, disposes the session (aborting the socket is what unblocks the wedged pump), and returns null — the caller's existing late path (ensure + batch-equivalent transcription of `fullAudio`, itself deadline-bounded) takes over, preserving today's bounded-fallback guarantee. `DisposeAsync` uses the same dispose-session-before-awaiting-the-pump order (then re-disposes after the pump exits, covering the session-assigned-late race) so the abandon path can never hang on a wedged send either.
+Drain deadline note (A10 — reliability bound): the cloud deadline inside `FallbackStreamingTranscriber.Session.FinishAsync` fires only AFTER the coordinator's pump has drained, and a wedged push (half-dead TCP connection, slow uplink — a `ClientWebSocket.SendAsync` that hangs rather than throws) never raises the exception the fallback wrapper converts to `_failure`. Without a bound here the post-stop wait is unbounded and, because hotkey dispatch is serial, a hung `FinishAsync` also blocks Cancel. So `FinishAsync` bounds the pump drain with a drain deadline (default 10 s): on timeout it logs, records `DrainTimedOut = true`, disposes the session (aborting the socket is what unblocks the wedged pump), and returns null — the caller's late path (batch-equivalent transcription of `fullAudio` — deadline-bounded end to end, including the cloud CONNECT, per Task 8; the ensure is SKIPPED on the drain-timeout path, see Task 10's A5 note) takes over, preserving today's bounded-fallback guarantee. `DisposeAsync` uses the same dispose-session-before-awaiting-the-pump order (then re-disposes after the pump exits, covering the session-assigned-late race) so the abandon path can never hang on a wedged send either.
 
 **Files:**
 - Create: `src/Winpepper.Asr/Transcription/StreamingDictationSession.cs`
@@ -2848,6 +2884,7 @@ Drain deadline note (A10 — reliability bound): the cloud deadline inside `Fall
   - `static StreamingDictationSession Start(Func<CancellationToken, Task<IStreamingTranscriber?>> transcriberFactory, ILogger log, CancellationToken ct, TimeSpan? drainDeadline = null)` — `drainDeadline` defaults to 10 s; Tasks 10/11 use the default
   - `void OnFrame(ReadOnlyMemory<float> frame)` — capture-thread-safe, copies, never blocks
   - `Task<TranscriptionResult?> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)` — null when the factory returned null (no provider) OR when the drain deadline expired (wedged connection; session already disposed) — either way the caller's late batch path takes over; rethrows unrecovered pump errors (parity with batch `TranscribeAsync` exceptions)
+  - `bool DrainTimedOut { get; }` — true after `FinishAsync` abandoned the session on drain timeout. Task 10's late path keys its ensure-skip on this: on the abandon path the pump may have been ORPHANED mid-native-call on the shared `ParakeetSession`, so running `TryEnsureAsrModel` (whose swap branch disposes that session) would be a use-after-dispose
   - `ValueTask DisposeAsync()` — abandon path (silence-drop / cancel); never throws
 
 - [ ] **Step 1: Write the failing tests**
@@ -3019,6 +3056,7 @@ public class StreamingDictationSessionTests
 
         result.ShouldBeNull(); // caller's late batch path takes over (bounded)
         transcriber.Session.Disposed.ShouldBeTrue();
+        session.DrainTimedOut.ShouldBeTrue(); // late path keys its ensure-skip on this
     }
 }
 ```
@@ -3108,6 +3146,13 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     public void OnFrame(ReadOnlyMemory<float> frame)
         => _frames.Writer.TryWrite(frame.ToArray()); // TryWrite is false after completion — silent drop
 
+    /// <summary>True after FinishAsync abandoned the session on drain timeout.
+    /// The caller's late path keys its ensure-skip on this: the abandon path may
+    /// have ORPHANED a pump still executing inside a native call on the shared
+    /// ParakeetSession, so a model ensure (whose swap disposes that session)
+    /// must not run.</summary>
+    public bool DrainTimedOut { get; private set; }
+
     /// <summary>Stop pumping and get the final transcript. Null when no transcriber
     /// materialized, or when the drain deadline expired (session abandoned +
     /// disposed — the caller's late batch path takes over). Rethrows an unrecovered
@@ -3129,6 +3174,7 @@ public sealed class StreamingDictationSession : IAsyncDisposable
             // session — disposing it aborts the socket, which is what unblocks
             // the pump — and return null so the caller's late path transcribes
             // fullAudio (bounded, batch).
+            DrainTimedOut = true; // late path must NOT ensure (orphaned-pump risk)
             _log.LogWarning(
                 "streaming drain exceeded {DrainDeadline}; abandoning streaming session, batch path takes over",
                 _drainDeadline);
@@ -3381,7 +3427,7 @@ IMPORTANT: if `TryEnsureAsrModel` is not safe to call off the hotkey thread (che
 
 - [ ] **Step 4: PipelineHost — finish streaming at stop (BOTH stop arms)**
 
-**HoldUp arm.** Replace lines ~471–501 (from `var transcribeSw = ...` through `transcribeSw.Stop();`) with the block below. ORDERING IS LOAD-BEARING (A5): when a streaming session exists, `streaming.FinishAsync(trimmed, ct)` runs FIRST, before ANY `TryEnsureAsrModel` call — the ensure's swap branch disposes the `ParakeetSession` the streaming transcriber still holds (`old?.Dispose()` at PipelineHost.cs:228–232, under `_startGate`; nothing gates swaps on engine state), so an ensure racing an in-flight session is a use-after-dispose on a live ONNX session. With this ordering the only ensure during a dictation is the start-arm factory's own, which completes BEFORE the session captures the model. `TryEnsureAsrModel` + the `_asr is null` guard + the failure early-exit run ONLY on the late path (no streaming session, or streaming returned null). Accepted consequence: a model selection changed mid-dictation takes effect on the NEXT dictation.
+**HoldUp arm.** Replace lines ~471–501 (from `var transcribeSw = ...` through `transcribeSw.Stop();`) with the block below. ORDERING IS LOAD-BEARING (A5): when a streaming session exists, `streaming.FinishAsync(trimmed, ct)` runs FIRST, before ANY `TryEnsureAsrModel` call — the ensure's swap branch disposes the `ParakeetSession` the streaming transcriber still holds (`old?.Dispose()` at PipelineHost.cs:228–232, under `_startGate`; nothing gates swaps on engine state), so an ensure racing an in-flight session is a use-after-dispose on a live ONNX session. With this ordering the only ensure during a dictation is the start-arm factory's own, which completes BEFORE the session captures the model. `TryEnsureAsrModel` + the `_asr is null` guard + the failure early-exit run ONLY on the late path (no streaming session, or streaming returned null) — AND the late path itself must skip the ensure when `streaming.DrainTimedOut` is true: on a drain-timeout abandon the coordinator may have ORPHANED a pump still executing a native ONNX call on the shared `ParakeetSession` (`ParakeetStreamingSession.DisposeAsync` is a no-op; nothing can interrupt a native `Encode`), so an ensure's swap `old?.Dispose()` would still be a use-after-dispose. A session only materializes after the factory's own ensure, so `_asr` is already loaded on that path and is used as-is (concurrent `Run` on one ONNX session is thread-safe; `Dispose` during `Run` is the crash). Accepted consequence: a model selection changed mid-dictation takes effect on the NEXT dictation.
 
 ```csharp
                 var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
@@ -3411,11 +3457,22 @@ IMPORTANT: if `TryEnsureAsrModel` is not safe to call off the hotkey thread (che
                     // returned null (no provider at start), or the drain deadline
                     // expired on a wedged connection (session already abandoned +
                     // disposed inside FinishAsync). Run today's ensure + error UX,
-                    // then the batch-equivalent path via the streaming seam —
-                    // behavior identical to today, and still deadline-bounded.
+                    // then the batch-equivalent path via the streaming seam. The
+                    // cloud wrapper bounds BOTH its connect (StartSessionAsync)
+                    // and its post-stop wait with the cloud deadline (Task 8), so
+                    // even on the wedged network that caused a drain timeout this
+                    // path cannot hang the serial hotkey loop.
                     // Provider-aware (req 6): a failed LOCAL swap never skips or
                     // aborts a CLOUD dictation; soften its error surface.
-                    var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
+                    // Drain-timeout abandon (A5 residual): the coordinator may
+                    // have ORPHANED a wedged pump still executing on the shared
+                    // ParakeetSession — never run an ensure then (its swap branch
+                    // disposes that very session: native use-after-dispose). A
+                    // session only materialized after the factory's own ensure,
+                    // so _asr is already loaded; use it as-is.
+                    var localReady = streaming is not null && streaming.DrainTimedOut
+                        ? _asr is not null
+                        : TryEnsureAsrModel(reportErrors: !cloudSelected);
                     if ((!localReady && !cloudSelected) || _asr is null)
                     {
                         if (streaming is not null)
@@ -3444,7 +3501,7 @@ IMPORTANT: if `TryEnsureAsrModel` is not safe to call off the hotkey thread (che
                 transcribeSw.Stop();
 ```
 
-**Toggle-stop arm.** Apply the identical replacement to lines ~745–769 with the `2`-suffixed variables (`transcribeSw2`, `settingsNow2`, `cloudSelected2`, `fallbackNotice2`, `streaming2`, `maybeTranscription2`, `localReady2`, `lateSession2`, `trimmed2`, `transcription2`) — same logic, token-for-token, including the same FinishAsync-before-any-ensure ordering and the late-path early-exit's `streaming2` dispose.
+**Toggle-stop arm.** Apply the identical replacement to lines ~745–769 with the `2`-suffixed variables (`transcribeSw2`, `settingsNow2`, `cloudSelected2`, `fallbackNotice2`, `streaming2`, `maybeTranscription2`, `localReady2`, `lateSession2`, `trimmed2`, `transcription2`) — same logic, token-for-token, including the same FinishAsync-before-any-ensure ordering, the same `streaming2.DrainTimedOut` ensure-skip, and the late-path early-exit's `streaming2` dispose.
 
 - [ ] **Step 5: PipelineHost — abandon paths (BOTH silent-drop paths + Cancel)**
 
@@ -3487,11 +3544,11 @@ git add src/Winpepper.App/Hosting/AppShell.cs src/Winpepper.App/Hosting/Pipeline
 git commit -m "feat(app): stream dictation audio into the transcriber during recording"
 ```
 
-Note for the reviewer and the final report — the Windows verification is a HARD REQUIREMENT, not a nice-to-have. These files are Windows-only; the Linux gate proves the rest of the tree. Post-merge, on Windows, the following MUST be done:
+Note for the reviewer and the final report — Windows verification is a HARD **PRE-PUSH GATE**, not a post-merge nice-to-have: AGENTS.md requires Windows-only changes to be Windows-verified BEFORE pushing, and the FULL suite to pass on a Windows host before push. The Linux FULL SUITE GATE proves every other project but CANNOT compile `Winpepper.App`, so this task's code first compiles on Windows. Therefore:
 
-1. Windows build + `ParakeetSessionIntegrationTests` + a manual dictation (`TranscribeMs` in `%LOCALAPPDATA%\winpepper\history\index.json` shows the production post-stop latency).
-2. **Batch-vs-streamed transcript comparison on the real model** (the accepted mitigation for the unverifiable chunked-quality assumption, A1): run the SAME recordings (real archived dictations of varying lengths) through both the batch path and the streamed path and diff the transcripts. Investigate any material quality gap BEFORE enabling streaming by default — chunked no-right-context inference of this offline export has zero measured quality evidence, and this comparison is what stands in for it. It also covers the residual trailing-silence risk the leading-silence gate (Task 6) does not.
-3. Latency observability: a slower-than-realtime encoder degrades latency but never correctness (the fallback fires only on exceptions) — production `TranscribeMs` makes any such regression observable here.
+1. **BLOCKING — before this branch is pushed or merged:** on a Windows host, build `winpepper.sln`, run the full Windows test suite including `ParakeetSessionIntegrationTests`, and perform a manual dictation (`TranscribeMs` in `%LOCALAPPDATA%\winpepper\history\index.json` shows the production post-stop latency). This workflow runs on Linux and cannot execute this step itself — so the workflow MUST stop at "committed on the branch, NOT pushed/merged" and the final report MUST hand these steps to the user as the explicit blocking checklist. Pushing or merging this branch without them violates the repo gate.
+2. **Post-merge, before enabling streaming by default in any release: batch-vs-streamed transcript comparison on the real model** (the accepted mitigation for the unverifiable chunked-quality assumption, A1): run the SAME recordings (real archived dictations of varying lengths) through both the batch path and the streamed path and diff the transcripts. Investigate any material quality gap BEFORE enabling streaming by default — chunked no-right-context inference of this offline export has zero measured quality evidence, and this comparison is what stands in for it. It also covers the residual trailing-silence risk the leading-silence gate (Task 6) does not.
+3. Latency observability: a slower-than-realtime encoder degrades latency but never correctness (the fallback fires only on exceptions) — production `TranscribeMs` makes any such regression observable post-merge.
 
 ---
 

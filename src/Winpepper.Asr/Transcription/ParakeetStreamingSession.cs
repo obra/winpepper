@@ -32,8 +32,6 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
     private readonly List<double[]> _context = new(); // trailing already-encoded frames
     private readonly TdtDecoderState _state;
     private readonly List<int> _tokens = new();
-    private readonly List<int> _frameIndices = new();
-    private readonly List<int> _durations = new();
     private int _globalEncFrames;
     private int? _subsamplingFactor; // derived from the first encode's actual output
     private bool _speechSeen;        // leading-silence gate latch
@@ -152,14 +150,24 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
         // A proportional Math.Round diverges at banker's-rounding midpoints
         // (e.g. ctx=100, tail=4: round(12.5) = 12 vs the exact 13), which would
         // double-decode a boundary frame; the exact form eliminates the class.
-        _subsamplingFactor ??= (withContext.Count - 1) / Math.Max(1, enc.Frames - 1);
+        // Guard: a single-frame first encode gives no baseline to derive F from
+        // (the derivation degenerates to T-1). Unreachable with the default
+        // 200-mel-frame chunks (>= 25 output frames), but if it ever happens,
+        // fall back to the known Parakeet-TDT factor of 8 — the assertion below
+        // still validates it against this and every subsequent encode.
+        _subsamplingFactor ??= enc.Frames > 1
+            ? (withContext.Count - 1) / (enc.Frames - 1)
+            : 8;
         var factor = _subsamplingFactor.Value;
         if ((withContext.Count - 1) / factor + 1 != enc.Frames)
             throw new InvalidOperationException(
                 $"encoder output length {enc.Frames} != floor((T-1)/{factor})+1 for T={withContext.Count}");
         var discard = _context.Count == 0 ? 0 : (_context.Count - 1) / factor + 1;
 
-        TdtGreedyDecoder.Decode(_backend, enc, _state, _tokens, _frameIndices, _durations,
+        // Token timings are unused on the streaming path (only the token ids feed
+        // DecodeTokens at finish), so hand the decoder throwaway lists instead of
+        // accumulating them for the whole dictation.
+        TdtGreedyDecoder.Decode(_backend, enc, _state, _tokens, new List<int>(), new List<int>(),
             startFrame: discard, frameIndexOffset: _globalEncFrames - discard);
         _globalEncFrames += enc.Frames - discard;
         _streamed = true;

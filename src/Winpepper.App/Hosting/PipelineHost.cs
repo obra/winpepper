@@ -554,15 +554,32 @@ public sealed class PipelineHost : IDisposable
                     // Provider-aware (req 6): a failed LOCAL swap never skips or
                     // aborts a CLOUD dictation; soften its error surface.
                     // Drain-timeout abandon (A5 residual): the coordinator may
-                    // have ORPHANED a wedged pump still executing on the shared
-                    // ParakeetSession — never run an ensure then (its swap branch
-                    // disposes that very session: native use-after-dispose). A
-                    // session only materialized after the factory's own ensure,
-                    // so _asr is already loaded; use it as-is.
-                    var localReady = streaming is not null && streaming.DrainTimedOut
-                        ? _asr is not null
-                        : TryEnsureAsrModel(reportErrors: !cloudSelected);
-                    if ((!localReady && !cloudSelected) || _asr is null)
+                    // have ORPHANED a wedged pump — possibly still inside its
+                    // factory's own TryEnsureAsrModel doing a model swap — so
+                    // never RUN an ensure here (its swap branch disposes the
+                    // session a live pump may hold: native use-after-dispose).
+                    // Instead SNAPSHOT the session under _startGate: the lock
+                    // acquire serializes with any in-flight swap (blocks until
+                    // its load completes), disposes nothing, and yields the
+                    // post-swap session — so the batch transcription below runs
+                    // on a session no orphaned swap can dispose under it.
+                    Winpepper.Asr.ParakeetSession? asrNow;
+                    bool localReady;
+                    if (streaming is not null && streaming.DrainTimedOut)
+                    {
+                        lock (_startGate) { asrNow = _asr; }
+                        localReady = asrNow is not null;
+                    }
+                    else
+                    {
+                        // Normal late path, unchanged: run today's ensure, then
+                        // alias the field it just settled (identical to reading
+                        // _asr directly, as before — the ensure ran under the
+                        // gate and this serial loop is the only other mutator).
+                        localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
+                        asrNow = _asr;
+                    }
+                    if ((!localReady && !cloudSelected) || asrNow is null)
                     {
                         if (streaming is not null)
                         {
@@ -571,7 +588,7 @@ public sealed class PipelineHost : IDisposable
                         // Terminal-state early-exit (S2): never bare-return — drive
                         // the engine back so the next dictation can start.
                         _engine.Apply(SessionEvent.Failed);
-                        if (cloudSelected && _asr is null)
+                        if (cloudSelected && asrNow is null)
                         {
                             // Cloud selected but no local session exists at all (the
                             // fallback wrapper needs one): surface this rare case.
@@ -582,7 +599,7 @@ public sealed class PipelineHost : IDisposable
                         _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
                         return;
                     }
-                    var transcriber = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow, fallbackNotice);
+                    var transcriber = _buildTranscriber(asrNow, _asrSwap.LoadedModelName!, settingsNow, fallbackNotice);
                     await using var lateSession = await transcriber.StartSessionAsync(ct);
                     maybeTranscription = await lateSession.FinishAsync(trimmed, ct);
                 }
@@ -909,15 +926,32 @@ public sealed class PipelineHost : IDisposable
                         // Provider-aware (req 6): a failed LOCAL swap never skips or
                         // aborts a CLOUD dictation; soften its error surface.
                         // Drain-timeout abandon (A5 residual): the coordinator may
-                        // have ORPHANED a wedged pump still executing on the shared
-                        // ParakeetSession — never run an ensure then (its swap branch
-                        // disposes that very session: native use-after-dispose). A
-                        // session only materialized after the factory's own ensure,
-                        // so _asr is already loaded; use it as-is.
-                        var localReady2 = streaming2 is not null && streaming2.DrainTimedOut
-                            ? _asr is not null
-                            : TryEnsureAsrModel(reportErrors: !cloudSelected2);
-                        if ((!localReady2 && !cloudSelected2) || _asr is null)
+                        // have ORPHANED a wedged pump — possibly still inside its
+                        // factory's own TryEnsureAsrModel doing a model swap — so
+                        // never RUN an ensure here (its swap branch disposes the
+                        // session a live pump may hold: native use-after-dispose).
+                        // Instead SNAPSHOT the session under _startGate: the lock
+                        // acquire serializes with any in-flight swap (blocks until
+                        // its load completes), disposes nothing, and yields the
+                        // post-swap session — so the batch transcription below runs
+                        // on a session no orphaned swap can dispose under it.
+                        Winpepper.Asr.ParakeetSession? asrNow2;
+                        bool localReady2;
+                        if (streaming2 is not null && streaming2.DrainTimedOut)
+                        {
+                            lock (_startGate) { asrNow2 = _asr; }
+                            localReady2 = asrNow2 is not null;
+                        }
+                        else
+                        {
+                            // Normal late path, unchanged: run today's ensure, then
+                            // alias the field it just settled (identical to reading
+                            // _asr directly, as before — the ensure ran under the
+                            // gate and this serial loop is the only other mutator).
+                            localReady2 = TryEnsureAsrModel(reportErrors: !cloudSelected2);
+                            asrNow2 = _asr;
+                        }
+                        if ((!localReady2 && !cloudSelected2) || asrNow2 is null)
                         {
                             if (streaming2 is not null)
                             {
@@ -926,7 +960,7 @@ public sealed class PipelineHost : IDisposable
                             // Terminal-state early-exit (S2): never bare-return — drive
                             // the engine back so the next dictation can start.
                             _engine.Apply(SessionEvent.Failed);
-                            if (cloudSelected2 && _asr is null)
+                            if (cloudSelected2 && asrNow2 is null)
                             {
                                 // Cloud selected but no local session exists at all (the
                                 // fallback wrapper needs one): surface this rare case.
@@ -937,7 +971,7 @@ public sealed class PipelineHost : IDisposable
                             _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
                             return;
                         }
-                        var transcriber2 = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow2, fallbackNotice2);
+                        var transcriber2 = _buildTranscriber(asrNow2, _asrSwap.LoadedModelName!, settingsNow2, fallbackNotice2);
                         await using var lateSession2 = await transcriber2.StartSessionAsync(ct);
                         maybeTranscription2 = await lateSession2.FinishAsync(trimmed2, ct);
                     }

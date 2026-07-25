@@ -169,6 +169,36 @@ public class ParakeetStreamingSessionTests
     }
 
     [Fact]
+    public async Task SubsamplingFactorAboveOne_ContextDiscardMath_DecodesEveryEncoderFrameExactlyOnce()
+    {
+        // The fake returns T/2 encoder frames at factor 2; every encode below has
+        // even T, where T/2 == floor((T-1)/2)+1, so the exact-form assertion holds
+        // throughout and the session streams to completion.
+        var backend = new FakeParakeetBackend { SubsamplingFactor = 2 };
+        var fallbackCalled = false;
+        var session = NewSession(backend,
+            (_, _) => { fallbackCalled = true; return Task.FromResult(new TranscriptionResult("BATCH", "parakeet-test")); },
+            chunk: 50, context: 20);
+
+        // Hop*119 samples -> 120 mel frames total: chunks T=50 and T=20+50=70
+        // encode during push, and the T=20+20=40 tail encodes at finish.
+        await session.PushAsync(Audio(Hop * 119), TestContext.Current.CancellationToken);
+        var result = await session.FinishAsync(Audio(Hop * 119), TestContext.Current.CancellationToken);
+
+        fallbackCalled.ShouldBeFalse();  // consistent factor-2 encodes pass the re-assertion
+        result.Text.ShouldBe("");        // STREAMED transcript: default joint emits only blanks
+        result.ProviderModelName.ShouldBe("parakeet-test");
+        backend.EncodeMelFrameCounts.ShouldBe(new[] { 50, 20 + 50, 20 + 20 });
+        // Discard math observably correct: encode 1 decodes frames 0..24 (no context,
+        // discard 0); encodes 2 and 3 each discard (20-1)/2+1 = 10 context encoder
+        // frames, decoding 35-10=25 and 20-10=10. 25+25+10 = 60 = 120/2 joint calls:
+        // every global encoder frame decoded exactly once. Discard 0 on the
+        // context-bearing encodes would give 80 (double-decoded context); an
+        // over-discard would give fewer than 60 (skipped frames).
+        backend.JointCalls.Count.ShouldBe(60);
+    }
+
+    [Fact]
     public async Task Transcriber_StartsAFreshSessionPerDictation()
     {
         var backend = new FakeParakeetBackend();

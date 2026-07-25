@@ -123,6 +123,34 @@ public class SessionViewModelErrorLifecycleTests
     }
 
     [Fact]
+    public void A_Stale_SelfClear_Timer_Does_Not_Release_A_Newer_Error()
+    {
+        // DISCRIMINATING for the generation token: BOTH presentations here are
+        // Stage == Error, so the `_stage != SessionStage.Error` guard cannot
+        // tell the stale timer from the fresh one - only the token can. The
+        // neighbouring tests use FireAll(), which fires both timers together
+        // and can never leave a stale timer racing a newer error still inside
+        // its own hold window.
+        var (vm, engine, bus, delays) = NewVm();
+        StartDictation(engine);
+
+        bus.Report(ErrorStage.Cleanup, new InvalidOperationException("older"), Guid.NewGuid()); // timer A
+        vm.StatusText.ShouldBe("Error (Cleanup): older");
+
+        bus.Report(ErrorStage.Injection, new InvalidOperationException("newer"), Guid.NewGuid()); // timer B
+        vm.StatusText.ShouldBe("Error (Injection): newer");
+        delays.PendingCount.ShouldBe(2);
+
+        delays.FireNext(); // fire ONLY the stale timer A; timer B stays pending
+
+        // The newer error is still inside its own hold window: the stale timer
+        // must not release the pill back to the engine state (Recording).
+        vm.Stage.ShouldBe(SessionStage.Error);
+        vm.StatusText.ShouldBe("Error (Injection): newer");
+        delays.PendingCount.ShouldBe(1);
+    }
+
+    [Fact]
     public void NotifyError_Also_Self_Clears()
     {
         // The real call site is PipelineHost AFTER SessionEvent.Failed, i.e.

@@ -25,4 +25,18 @@ public sealed class ManualDelayScheduler : IDelayScheduler
         _pending.Clear();
         foreach (var (_, action) in due) action();
     }
+
+    /// <summary>
+    /// Fire ONLY the oldest pending callback, leaving later ones pending.
+    /// Lets a test run a STALE timer against a newer one that is still inside
+    /// its own window - a scenario <see cref="FireAll"/> cannot construct
+    /// because it fires both together. No-op when nothing is pending.
+    /// </summary>
+    public void FireNext()
+    {
+        if (_pending.Count == 0) return;
+        var (_, action) = _pending[0];
+        _pending.RemoveAt(0);
+        action();
+    }
 }

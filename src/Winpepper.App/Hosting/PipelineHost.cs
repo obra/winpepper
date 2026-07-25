@@ -524,7 +524,22 @@ public sealed class PipelineHost : IDisposable
                 _streamingSession = null;
                 Winpepper.Asr.Transcription.TranscriptionResult? maybeTranscription = null;
                 if (streaming is not null)
-                    maybeTranscription = await streaming.FinishAsync(trimmed, ct);
+                {
+                    // Dispose the coordinator on ALL paths — including a FinishAsync
+                    // throw (pump-error rethrow, inner-session throw, ct cancel):
+                    // otherwise the inner streaming session (e.g. cloud websocket)
+                    // leaks. DisposeAsync is idempotent, never throws, and is a
+                    // near-no-op after a successful FinishAsync or a drain-timeout
+                    // (both already disposed the inner session internally).
+                    try
+                    {
+                        maybeTranscription = await streaming.FinishAsync(trimmed, ct);
+                    }
+                    finally
+                    {
+                        await streaming.DisposeAsync();
+                    }
+                }
                 if (maybeTranscription is null)
                 {
                     // Late path: no streaming session materialized, its factory
@@ -864,7 +879,22 @@ public sealed class PipelineHost : IDisposable
                     _streamingSession = null;
                     Winpepper.Asr.Transcription.TranscriptionResult? maybeTranscription2 = null;
                     if (streaming2 is not null)
-                        maybeTranscription2 = await streaming2.FinishAsync(trimmed2, ct);
+                    {
+                        // Dispose the coordinator on ALL paths — including a FinishAsync
+                        // throw (pump-error rethrow, inner-session throw, ct cancel):
+                        // otherwise the inner streaming session (e.g. cloud websocket)
+                        // leaks. DisposeAsync is idempotent, never throws, and is a
+                        // near-no-op after a successful FinishAsync or a drain-timeout
+                        // (both already disposed the inner session internally).
+                        try
+                        {
+                            maybeTranscription2 = await streaming2.FinishAsync(trimmed2, ct);
+                        }
+                        finally
+                        {
+                            await streaming2.DisposeAsync();
+                        }
+                    }
                     if (maybeTranscription2 is null)
                     {
                         // Late path: no streaming session materialized, its factory

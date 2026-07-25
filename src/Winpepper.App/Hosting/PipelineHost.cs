@@ -40,6 +40,7 @@ public sealed class PipelineHost : IDisposable
     private Task? _runTask;
     private readonly object _startGate = new();
     private Action<Exception>? _captureFaultHandler;
+    private Action? _captureRecoveredHandler;
     private Action<ReadOnlyMemory<float>>? _frameHandler;
 
     private readonly Winpepper.Cleanup.CleanupRunner? _cleanup;        // PLAN2-TYPE
@@ -232,6 +233,10 @@ public sealed class PipelineHost : IDisposable
                         _log.LogInformation(
                             "ASR model loaded (swap #{Generation}): {Previous} -> {Model}",
                             _asrSwap.Generation, previousModel ?? "(none)", desired);
+                        // Recovery success for the Asr CONDITION ("no usable
+                        // speech model"): a model that loads is proof the
+                        // condition is over.
+                        _vm.NotifyConditionRecovered(Winpepper.Core.Errors.ErrorStage.Asr);
                         return true;
                     }
                     catch (Exception ex)
@@ -239,8 +244,10 @@ public sealed class PipelineHost : IDisposable
                         _log.LogError(ex,
                             "Failed to load ASR model {Model} from {ModelDir}; keeping previous session",
                             desired, desiredDir);
-                        if (reportErrors)
+                        if (reportErrors && _asr is null)   // no usable session at all -> the ongoing condition
                             _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
+                        else if (reportErrors)              // kept the old working model -> per-attempt failure
+                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
                         return _asr is not null; // keep-old-on-failure
                     }
 
@@ -269,17 +276,35 @@ public sealed class PipelineHost : IDisposable
                 _captureFaultHandler = ex =>
                 {
                     // Capture faults are logged and recorded for Diagnostics but
-                    // show NO toast: recovery is automatic (rebuild-on-fault +
-                    // session-start rebuild), so there is nothing for the user
-                    // to act on. The actionable failure — a dictation that
-                    // captured no audio — has its own toast at session end
+                    // show NO toast: recovery is automatic (endpoint-driven
+                    // rebuild + session-start rebuild), so there is nothing for
+                    // the user to act on. The actionable failure - a dictation
+                    // that captured no audio - has its own toast at session end
                     // (WarnIfSessionSilent). Consumer toast policy: see
                     // ErrorToastPolicy (Audio stage is silent on the bus too).
+                    //
+                    // Wrapped in MicrophoneUnavailableException so the taxonomy
+                    // can tell this ONGOING condition apart from the
+                    // per-dictation "no audio detected" EVENT, which arrives at
+                    // the same stage. The inner message is preserved verbatim.
                     _log.LogError(ex, "microphone capture faulted");
-                    _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Audio, ex, _currentSessionId);
+                    _errorBus.Report(
+                        Winpepper.Core.Errors.ErrorStage.Audio,
+                        new Winpepper.Core.Errors.MicrophoneUnavailableException(ex),
+                        _currentSessionId);
                 };
                 recorder.FramesAvailable += _frameHandler;
                 recorder.CaptureFaulted += _captureFaultHandler;
+                _captureRecoveredHandler = () =>
+                    // The recorder raises CaptureRecovered only after a
+                    // non-empty frame has been observed from the live source -
+                    // the one signal that cannot lie (IsRunning after a rebuild
+                    // can; a validity probe can). This is the ONLY thing that
+                    // clears the microphone condition. It can fire TWICE for
+                    // one episode (frame path + the fault handler's reconcile),
+                    // which is safe: NotifyConditionRecovered is idempotent.
+                    _vm.NotifyConditionRecovered(Winpepper.Core.Errors.ErrorStage.Audio);
+                recorder.CaptureRecovered += _captureRecoveredHandler;
                 _warmRecorder = recorder;
             }
             // NOTE: the hook + event loop are started by EnsureHotkeyLoopStarted()
@@ -378,6 +403,7 @@ public sealed class PipelineHost : IDisposable
                     _log.LogInformation("Pending paste discarded unpasted");
                 _engine.Apply(SessionEvent.StartRequested);
                 _currentSessionId = Guid.NewGuid();
+                _log.LogInformation("Session started (hold) {SessionId}", _currentSessionId);
                 _sounds.PlayStart();
                 _warmRecorder!.StartSession(includePrerollMs: 500);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -628,6 +654,7 @@ public sealed class PipelineHost : IDisposable
                         _log.LogInformation("Pending paste discarded unpasted");
                     _engine.Apply(SessionEvent.StartRequested);
                     _currentSessionId = Guid.NewGuid();
+                    _log.LogInformation("Session started (toggle) {SessionId}", _currentSessionId);
                     _sounds.PlayStart();
                     _warmRecorder!.StartSession(includePrerollMs: 500);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -935,6 +962,7 @@ public sealed class PipelineHost : IDisposable
                 // Bug 8 (hygiene): unhook the meter + fault handlers before teardown.
                 if (_frameHandler is not null) _warmRecorder.FramesAvailable -= _frameHandler;
                 if (_captureFaultHandler is not null) _warmRecorder.CaptureFaulted -= _captureFaultHandler;
+                if (_captureRecoveredHandler is not null) _warmRecorder.CaptureRecovered -= _captureRecoveredHandler;
                 _warmRecorder.Dispose();
             }
         });

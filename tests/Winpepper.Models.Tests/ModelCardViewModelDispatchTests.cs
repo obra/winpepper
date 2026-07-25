@@ -329,7 +329,12 @@ public class ModelCardViewModelDispatchTests
 
         public async Task RunUntilAsync(Func<bool> done)
         {
-            for (var attempt = 0; attempt < 100_000; attempt++)
+            // Wall-clock bound, not attempt bound: 100k Task.Yield iterations
+            // burn in ~100 ms, which a busy host (e.g. right after the Windows
+            // gate's builds) can exceed before the bridge's thread-pool
+            // continuation is ever scheduled (observed 2026-07-25).
+            var deadline = Environment.TickCount64 + 30_000;
+            while (Environment.TickCount64 < deadline)
             {
                 if (done()) return;
 
@@ -372,7 +377,11 @@ public class ModelCardViewModelDispatchTests
 
         public async Task WaitUntilPendingAsync()
         {
-            for (var attempt = 0; attempt < 100_000; attempt++)
+            // Wall-clock bound for the same reason as
+            // ManualDispatcher.RunUntilAsync: attempt-bounded yielding expires
+            // in ~100 ms on a busy host before the bridge gets scheduled.
+            var deadline = Environment.TickCount64 + 30_000;
+            while (Environment.TickCount64 < deadline)
             {
                 lock (_gate)
                 {

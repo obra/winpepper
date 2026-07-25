@@ -31,9 +31,32 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     // this, not _stage: once an error takes the pill _stage reads Error, which
     // would wrongly report "not in flight" while the engine is still Recording.
     private SessionState _engineState = SessionState.Idle;
+    // ONE entry per stage with a currently-true CONDITION. A map, not a single
+    // slot: two conditions can be true at once and each clears independently
+    // on ITS recovery.
+    private readonly Dictionary<ErrorStage, string> _activeConditions = new();
+
+    /// <summary>
+    /// The _presentationGeneration stamp of the CONDITION that most recently
+    /// grabbed the pill, or 0 if none has. NotifyConditionRecovered releases
+    /// the pill ONLY when this still equals _presentationGeneration - i.e.
+    /// only when a condition is what is actually on screen. Without it, a
+    /// recovery would wipe an UNRELATED newer EVENT error off the pill (mic
+    /// condition retires to the tray -> an Injection EVENT error takes the
+    /// pill mid-dictation -> frames resume -> NotifyConditionRecovered sees
+    /// _stage == Error and blows away the injection error the user has not
+    /// seen yet, along with its own scheduled self-clear).
+    /// </summary>
+    private int _conditionPresentationGeneration;
 
     /// <summary>How long an EVENT error holds the pill before it self-clears.</summary>
     public const int EventErrorHoldMs = 6000;
+
+    /// <summary>
+    /// How long a CONDITION grabs the pill before retiring to the tray. The
+    /// condition itself is NOT cleared by this timer - only the pill is.
+    /// </summary>
+    public const int ConditionPillHoldMs = 10000;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -102,6 +125,19 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set { if (_lastErrorMessage == value) return; _lastErrorMessage = value; Raise(nameof(LastErrorMessage)); }
     }
 
+    /// <summary>Stage of the most relevant active CONDITION (null when none).
+    /// More than one condition can be true at once (e.g. mic unavailable AND a
+    /// speech-model load failure); each clears independently on ITS recovery.</summary>
+    public ErrorStage? ActiveConditionStage =>
+        _activeConditions.Count == 0 ? null : _activeConditions.Keys.Last();
+
+    /// <summary>User-facing text of ALL active conditions ("" when none).</summary>
+    public string ActiveConditionMessage =>
+        _activeConditions.Count == 0 ? "" : string.Join(" | ", _activeConditions.Values);
+
+    /// <summary>True while any ongoing condition is unresolved (drives the tray).</summary>
+    public bool HasActiveCondition => _activeConditions.Count > 0;
+
     /// <summary>True while a pending paste is held in memory awaiting a pill click.</summary>
     public bool HasPendingPaste => _pending.HasPending;
 
@@ -164,10 +200,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
         if (ErrorClassifier.Classify(rec) == ErrorKind.Condition)
         {
-            // While a pending paste is held, the clickable PENDING pill wins.
-            if (_pending.HasPending) return;
-            Stage = SessionStage.Error;
-            StatusText = $"Error ({rec.Stage}): {rec.Message}";
+            EnterCondition(rec.Stage, rec.Message);
             return;
         }
 
@@ -198,6 +231,75 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             TimeSpan.FromMilliseconds(EventErrorHoldMs),
             () => _ui.Post(() => ReleasePillIfUnchanged(token)));
     }
+
+    /// <summary>
+    /// Enter (or refresh) an ongoing CONDITION. A NEW condition grabs the pill
+    /// for <see cref="ConditionPillHoldMs"/> as an attention grab, then the
+    /// pill retires and the condition lives on the persistent surface (tray)
+    /// until a RECOVERY SUCCESS clears it. Retiring the pill does NOT clear
+    /// the condition - that is the whole point of the taxonomy.
+    /// </summary>
+    private void EnterCondition(ErrorStage stage, string message)
+    {
+        var isRefresh = _activeConditions.ContainsKey(stage);
+        _activeConditions[stage] = message;
+        Raise(nameof(ActiveConditionStage)); Raise(nameof(ActiveConditionMessage)); Raise(nameof(HasActiveCondition));
+
+        // Re-reports of an ALREADY-SURFACED condition (each failed endpoint-driven
+        // rebuild re-raises CaptureFaulted) update the tray text but do NOT
+        // re-grab the pill: under device churn an enter-or-refresh grab would
+        // keep the pill on screen indefinitely - the original defect, softened.
+        if (isRefresh) return;
+
+        // A held pending paste owns the pill; the condition is already on the
+        // tray, which is where a long-lived condition belongs anyway.
+        if (_pending.HasPending) return;
+        Stage = SessionStage.Error;
+        StatusText = $"Error ({stage}): {message}";
+        var token = ++_presentationGeneration;
+        // Stamp the pill as CONDITION-owned so a later recovery can tell
+        // "my condition is on screen" from "something newer replaced it".
+        _conditionPresentationGeneration = token;
+        _delays.Schedule(TimeSpan.FromMilliseconds(ConditionPillHoldMs),
+            () => _ui.Post(() => ReleasePillIfUnchanged(token)));
+    }
+
+    /// <summary>
+    /// A recovery SUCCESS for <paramref name="stage"/> - the ONLY thing that
+    /// clears a condition. Called by the host when the warm microphone stream
+    /// is proven delivering frames again, or when a speech model actually
+    /// loads. Recovery removes only ITS stage's entry: another still-true
+    /// condition keeps the surface. Because the entry is removed, a genuine
+    /// fault AFTER a recovery is a fresh condition and correctly grabs the
+    /// pill again.
+    ///
+    /// IDEMPOTENT BY CONTRACT (load-bearing): clearing a stage that has no
+    /// active condition is a silent no-op, and clearing the SAME stage twice is
+    /// harmless. Task 6's recorder relies on both - it re-asserts the recovery
+    /// after reporting a fault so a frame that consumed the one-shot recovery
+    /// signal before the condition was recorded cannot strand it. Do not make
+    /// this method throw, log, or reset anything on the no-entry path.
+    /// </summary>
+    public void NotifyConditionRecovered(ErrorStage stage) => _ui.Post(() =>
+    {
+        if (!_activeConditions.Remove(stage)) return;
+        Raise(nameof(ActiveConditionStage)); Raise(nameof(ActiveConditionMessage)); Raise(nameof(HasActiveCondition));
+        // Release the pill only when NO condition remains - a remaining
+        // condition keeps the surface (pill and tray text).
+        if (_activeConditions.Count > 0) return;
+        if (_pending.HasPending) return;
+        if (_stage != SessionStage.Error) return;
+        // ...and only when a CONDITION is what is actually on the pill. If a
+        // newer EVENT error took it (bumping _presentationGeneration past the
+        // condition's stamp), that error owns the pill and has its own
+        // self-clear scheduled; clearing it here would hide an unrelated error
+        // the user has not seen yet.
+        if (_conditionPresentationGeneration != _presentationGeneration) return;
+        // RESYNC, never a hard reset - see ReleasePillIfUnchanged for why
+        // "Idle / Ready" mid-dictation hides the pill, lies on the tray, and
+        // kills the voice meter.
+        ResyncPillToEngineState();
+    });
 
     /// <summary>
     /// Release the pill from an error presentation unless something newer owns

@@ -60,14 +60,33 @@ internal static partial class KeyboardHookNative
     [LibraryImport("kernel32.dll")]
     public static partial uint GetCurrentThreadId();
 
-    [LibraryImport("user32.dll")]
+    [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static partial bool PostThreadMessageW(uint idThread, uint Msg, IntPtr wParam, IntPtr lParam);
 
     [LibraryImport("user32.dll")]
     public static partial short GetAsyncKeyState(int vKey);
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LASTINPUTINFO
+    {
+        public uint cbSize;
+        /// <summary>32-bit tick count of the last system-wide input event.</summary>
+        public uint dwTime;
+    }
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
     public const uint WM_QUIT = 0x0012;
+
+    /// <summary>
+    /// Private thread message asking the hook thread to reinstall the low-level
+    /// hook (posted from the suspend/resume callback thread). WM_USER+1: the
+    /// hook thread owns no window class, so any WM_USER-range value is free.
+    /// </summary>
+    public const uint WM_WINPEPPER_REINSTALL_HOOK = 0x0401;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct MSG

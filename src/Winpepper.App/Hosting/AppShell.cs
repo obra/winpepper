@@ -460,7 +460,15 @@ public sealed class AppShell : IDisposable
             onFallback: onFallback,
             cloudDeadline: options.CloudDeadline,
             onConfigError: msg => errorBus.Report(
-                Winpepper.Core.Errors.ErrorStage.Asr,
+                // Models, NOT Asr: this fires per dictation attempt and the
+                // dictation then SUCCEEDS via local fallback, so it is a
+                // per-attempt EVENT. At Asr it would classify as a CONDITION
+                // whose only clearing seam (local model Load/Swap success)
+                // never runs for a cloud user - a permanent tray error while
+                // every dictation works. Behavior is otherwise identical:
+                // ErrorDeepLink maps Asr and Models both to "models"/"Open
+                // Models tab" and ErrorToastPolicy toasts both.
+                Winpepper.Core.Errors.ErrorStage.Models,
                 new InvalidOperationException(
                     $"AssemblyAI model rejected ({settings.AssemblyAiModel}). Check the model setting. {msg}"),
                 Guid.Empty)); // config-level error, not tied to a capture session

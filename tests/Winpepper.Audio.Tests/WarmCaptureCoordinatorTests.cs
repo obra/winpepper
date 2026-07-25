@@ -252,6 +252,60 @@ public class WarmCaptureCoordinatorTests
     }
 
     [Fact]
+    public void FrameObserved_RaisedPerNonEmptyFrame_EvenAtIdle()
+    {
+        // FrameObserved is the recovery proof signal (Task 6): it must fire for
+        // every non-empty live frame regardless of session state, unlike
+        // FramesAvailable which is session-gated.
+        FakeCaptureSource? src = null;
+        var c = NewCoordinator(() => src = new FakeCaptureSource(), out var buffer);
+        var observed = 0;
+        c.FrameObserved += () => observed++;
+
+        c.EnsureStarted();
+        src!.RaiseFrame(new float[] { 1, 2 }); // idle: no session, still observed
+        buffer.StartSession(prerollSamples: 0);
+        src!.RaiseFrame(new float[] { 3 });    // active: also observed
+        buffer.StopSession();
+
+        observed.ShouldBe(2);
+    }
+
+    [Fact]
+    public void FrameObserved_NotRaised_ForEmptyFrames()
+    {
+        // NAudio raises DataAvailable even with 0 bytes; a wedged-but-polling
+        // stream must never look like it is delivering audio.
+        FakeCaptureSource? src = null;
+        var c = NewCoordinator(() => src = new FakeCaptureSource(), out _);
+        var observed = 0;
+        c.FrameObserved += () => observed++;
+
+        c.EnsureStarted();
+        src!.RaiseFrame(Array.Empty<float>());
+
+        observed.ShouldBe(0);
+    }
+
+    [Fact]
+    public void FrameObserved_NotRaised_ForStaleEpochFrames()
+    {
+        // A late frame from a swapped-out source must never falsely prove
+        // recovery: the raise sits AFTER the epoch guard.
+        var made = new List<FakeCaptureSource>();
+        var c = NewCoordinator(() => { var s = new FakeCaptureSource(); made.Add(s); return s; }, out _);
+        var observed = 0;
+        c.FrameObserved += () => observed++;
+
+        c.EnsureStarted();
+        var old = made[0];
+        c.Rebuild();
+        old.RaiseFrame(new float[] { 5 }); // stale source: dropped by the epoch guard
+
+        observed.ShouldBe(0);
+    }
+
+    [Fact]
     public void Dispose_FromCaptureThread_SchedulesOffThread_NoInlineSelfJoin()
     {
         var source = new FakeCaptureSource();

@@ -75,11 +75,17 @@ public class SessionViewModelPendingTests
     }
 
     [Fact]
-    public void ErrorReport_WithoutPending_StillFlipsToError()
+    public void ErrorReport_WithoutPending_MidDictation_StillFlipsToError()
     {
-        var (vm, _) = NewVm();
+        // Contrast with ErrorReport_WhilePending_KeepsPendingClickable: it is
+        // the pending slot, not the error, that keeps the pill clickable. With
+        // no pending slot, an EVENT error DOES take the pill - but only inside
+        // a live dictation (idle EVENT errors are recorded only; see
+        // SessionViewModelErrorLifecycleTests).
+        var (vm, engine) = NewVm();
         var bus = new ErrorBus();
         vm.AttachErrorBus(bus);
+        engine.Apply(SessionEvent.StartRequested); // Recording: in flight
 
         bus.Report(ErrorStage.Injection, new InvalidOperationException("boom"), Guid.NewGuid());
 

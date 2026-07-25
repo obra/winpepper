@@ -14,6 +14,17 @@ public interface IWarmAudioRecorder : IDisposable
     /// the host can log it and surface a user-facing signal (Bug 3).</summary>
     event Action<Exception>? CaptureFaulted;
 
+    /// <summary>
+    /// Raised when capture is proven healthy again after a fault - i.e. a
+    /// rebuild actually succeeded. This is the RECOVERY SUCCESS that clears the
+    /// microphone CONDITION; nothing else may clear it, and never a timer.
+    /// MAY be raised more than once for a single failing episode (the frame
+    /// path and the fault-handler reconcile can both fire - see Task 6's
+    /// ordering invariant), so subscribers MUST be idempotent. Clearing an
+    /// already-cleared condition is a no-op at the view model.
+    /// </summary>
+    event Action? CaptureRecovered;
+
     /// <summary>Begin a session, seeding up to <paramref name="includePrerollMs"/>
     /// milliseconds of already-captured audio.</summary>
     void StartSession(int includePrerollMs);

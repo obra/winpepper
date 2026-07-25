@@ -40,6 +40,7 @@ public sealed class PipelineHost : IDisposable
     private Task? _runTask;
     private readonly object _startGate = new();
     private Action<Exception>? _captureFaultHandler;
+    private Action? _captureRecoveredHandler;
     private Action<ReadOnlyMemory<float>>? _frameHandler;
 
     private readonly Winpepper.Cleanup.CleanupRunner? _cleanup;        // PLAN2-TYPE
@@ -232,6 +233,10 @@ public sealed class PipelineHost : IDisposable
                         _log.LogInformation(
                             "ASR model loaded (swap #{Generation}): {Previous} -> {Model}",
                             _asrSwap.Generation, previousModel ?? "(none)", desired);
+                        // Recovery success for the Asr CONDITION ("no usable
+                        // speech model"): a model that loads is proof the
+                        // condition is over.
+                        _vm.NotifyConditionRecovered(Winpepper.Core.Errors.ErrorStage.Asr);
                         return true;
                     }
                     catch (Exception ex)
@@ -239,8 +244,10 @@ public sealed class PipelineHost : IDisposable
                         _log.LogError(ex,
                             "Failed to load ASR model {Model} from {ModelDir}; keeping previous session",
                             desired, desiredDir);
-                        if (reportErrors)
+                        if (reportErrors && _asr is null)   // no usable session at all -> the ongoing condition
                             _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
+                        else if (reportErrors)              // kept the old working model -> per-attempt failure
+                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
                         return _asr is not null; // keep-old-on-failure
                     }
 
@@ -269,17 +276,35 @@ public sealed class PipelineHost : IDisposable
                 _captureFaultHandler = ex =>
                 {
                     // Capture faults are logged and recorded for Diagnostics but
-                    // show NO toast: recovery is automatic (rebuild-on-fault +
-                    // session-start rebuild), so there is nothing for the user
-                    // to act on. The actionable failure — a dictation that
-                    // captured no audio — has its own toast at session end
+                    // show NO toast: recovery is automatic (endpoint-driven
+                    // rebuild + session-start rebuild), so there is nothing for
+                    // the user to act on. The actionable failure - a dictation
+                    // that captured no audio - has its own toast at session end
                     // (WarnIfSessionSilent). Consumer toast policy: see
                     // ErrorToastPolicy (Audio stage is silent on the bus too).
+                    //
+                    // Wrapped in MicrophoneUnavailableException so the taxonomy
+                    // can tell this ONGOING condition apart from the
+                    // per-dictation "no audio detected" EVENT, which arrives at
+                    // the same stage. The inner message is preserved verbatim.
                     _log.LogError(ex, "microphone capture faulted");
-                    _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Audio, ex, _currentSessionId);
+                    _errorBus.Report(
+                        Winpepper.Core.Errors.ErrorStage.Audio,
+                        new Winpepper.Core.Errors.MicrophoneUnavailableException(ex),
+                        _currentSessionId);
                 };
                 recorder.FramesAvailable += _frameHandler;
                 recorder.CaptureFaulted += _captureFaultHandler;
+                _captureRecoveredHandler = () =>
+                    // The recorder raises CaptureRecovered only after a
+                    // non-empty frame has been observed from the live source -
+                    // the one signal that cannot lie (IsRunning after a rebuild
+                    // can; a validity probe can). This is the ONLY thing that
+                    // clears the microphone condition. It can fire TWICE for
+                    // one episode (frame path + the fault handler's reconcile),
+                    // which is safe: NotifyConditionRecovered is idempotent.
+                    _vm.NotifyConditionRecovered(Winpepper.Core.Errors.ErrorStage.Audio);
+                recorder.CaptureRecovered += _captureRecoveredHandler;
                 _warmRecorder = recorder;
             }
             // NOTE: the hook + event loop are started by EnsureHotkeyLoopStarted()
@@ -378,6 +403,7 @@ public sealed class PipelineHost : IDisposable
                     _log.LogInformation("Pending paste discarded unpasted");
                 _engine.Apply(SessionEvent.StartRequested);
                 _currentSessionId = Guid.NewGuid();
+                _log.LogInformation("Session started (hold) {SessionId}", _currentSessionId);
                 _sounds.PlayStart();
                 _warmRecorder!.StartSession(includePrerollMs: 500);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -399,6 +425,42 @@ public sealed class PipelineHost : IDisposable
                 var samples = _warmRecorder!.StopSession();
                 WarnIfSessionSilent(samples, _currentSessionId);
                 _sounds.PlayStop();
+
+                var trimmed = TrimForTranscription(samples, _currentSessionId);
+                if (trimmed is null)
+                {
+                    // Live-mic silence: skip transcription + injection (the ASR-saving
+                    // point of the feature) but STILL archive the ORIGINAL buffer,
+                    // exactly like an empty-final-text dictation does today. This keeps
+                    // the drop non-destructive: a mis-classified real dictation stays
+                    // recoverable in history. Then complete like an empty-final-text
+                    // dictation (Transcribing -> Injecting -> Idle) so the pill returns
+                    // to idle. No cleanup, no injection, no toast.
+                    _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                    {
+                        Samples16k = samples,
+                        RawTranscript = "",
+                        CleanedText = "",
+                        AsrModelName = "",
+                        CleanupModelName = "",
+                        WindowContextUsed = false,
+                        WindowTitleAtStart = "",
+                        WindowTitleAtInject = "",
+                        Timings = new Winpepper.History.HistoryTimings
+                        {
+                            RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                            TranscribeMs = 0,
+                            CleanupMs = 0,
+                            InjectMs = 0,
+                            TotalMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                        },
+                    });
+                    _engine.Apply(SessionEvent.TranscriptReady);
+                    _engine.Apply(SessionEvent.InjectionCompleted);
+                    _ctxPrefetchTask = null;
+                    _recordStopwatch = null;
+                    break;
+                }
 
                 var transcribeSw = System.Diagnostics.Stopwatch.StartNew();
                 var settingsNow = _settingsProvider();
@@ -429,7 +491,7 @@ public sealed class PipelineHost : IDisposable
                         "Cloud transcription unavailable — used local speech recognition instead.",
                         Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
                         TimeSpan.FromSeconds(6)));
-                var transcription = await transcriber.TranscribeAsync(samples, ct);
+                var transcription = await transcriber.TranscribeAsync(trimmed, ct);
                 transcribeSw.Stop();
                 _engine.Apply(SessionEvent.TranscriptReady);
 
@@ -592,6 +654,7 @@ public sealed class PipelineHost : IDisposable
                         _log.LogInformation("Pending paste discarded unpasted");
                     _engine.Apply(SessionEvent.StartRequested);
                     _currentSessionId = Guid.NewGuid();
+                    _log.LogInformation("Session started (toggle) {SessionId}", _currentSessionId);
                     _sounds.PlayStart();
                     _warmRecorder!.StartSession(includePrerollMs: 500);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
@@ -613,6 +676,41 @@ public sealed class PipelineHost : IDisposable
                     var samples2 = _warmRecorder!.StopSession();
                     WarnIfSessionSilent(samples2, _currentSessionId);
                     _sounds.PlayStop();
+
+                    var trimmed2 = TrimForTranscription(samples2, _currentSessionId);
+                    if (trimmed2 is null)
+                    {
+                        // Live-mic silence: skip transcription + injection but STILL
+                        // archive the ORIGINAL buffer (empty transcript), exactly like
+                        // an empty-final-text dictation does today, so the drop is
+                        // non-destructive. Then complete like an empty-final-text
+                        // dictation (Transcribing -> Injecting -> Idle). No cleanup,
+                        // no injection, no toast. See the HoldUp block for details.
+                        _archiver.Archive(new Winpepper.History.HistoryArchiveInput
+                        {
+                            Samples16k = samples2,
+                            RawTranscript = "",
+                            CleanedText = "",
+                            AsrModelName = "",
+                            CleanupModelName = "",
+                            WindowContextUsed = false,
+                            WindowTitleAtStart = "",
+                            WindowTitleAtInject = "",
+                            Timings = new Winpepper.History.HistoryTimings
+                            {
+                                RecordMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                                TranscribeMs = 0,
+                                CleanupMs = 0,
+                                InjectMs = 0,
+                                TotalMs = (int)(_recordStopwatch?.ElapsedMilliseconds ?? 0),
+                            },
+                        });
+                        _engine.Apply(SessionEvent.TranscriptReady);
+                        _engine.Apply(SessionEvent.InjectionCompleted);
+                        _ctxPrefetchTask = null;
+                        _recordStopwatch = null;
+                        break;
+                    }
 
                     var transcribeSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var settingsNow2 = _settingsProvider();
@@ -637,7 +735,7 @@ public sealed class PipelineHost : IDisposable
                             "Cloud transcription unavailable — used local speech recognition instead.",
                             Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
                             TimeSpan.FromSeconds(6)));
-                    var transcription2 = await transcriber2.TranscribeAsync(samples2, ct);
+                    var transcription2 = await transcriber2.TranscribeAsync(trimmed2, ct);
                     transcribeSw2.Stop();
                     _engine.Apply(SessionEvent.TranscriptReady);
 
@@ -792,6 +890,34 @@ public sealed class PipelineHost : IDisposable
     }
 
     /// <summary>
+    /// Silence-trims the finished recording for TRANSCRIPTION ONLY. Returns the
+    /// trimmed samples to send to ASR, or <c>null</c> when the recording has no
+    /// speech (live mic, nobody spoke) and the caller should DROP the dictation.
+    /// Logs a content-free info line for either outcome. The ORIGINAL buffer is
+    /// still archived by the caller — only the transcription input is trimmed.
+    /// Runs AFTER WarnIfSessionSilent, so a dead-mic session has already toasted
+    /// (actionable); the quiet drop below adds no toast (consumer policy: a
+    /// live-mic-nobody-spoke drop is not actionable).
+    /// </summary>
+    private float[]? TrimForTranscription(float[] samples, Guid sessionId)
+    {
+        var result = Winpepper.Audio.SilenceTrimmer.Trim(samples);
+        if (result.IsSilent)
+        {
+            var ms = (int)((long)samples.Length * 1000 / 16000);
+            _log.LogInformation("dropped silent recording, {Ms} ms", ms);
+            return null;
+        }
+
+        if (result.RemovedMs > 0)
+            _log.LogInformation(
+                "trimmed silence: {Ms} ms across {Runs} runs",
+                result.RemovedMs, result.RunsTrimmed);
+
+        return result.Trimmed;
+    }
+
+    /// <summary>
     /// Bug 2: if a whole session captured essentially zero energy (OS mic mute,
     /// privacy toggle, Bluetooth hiccup), the transcript will be empty for a
     /// reason the user cannot see. Surface it via the ErrorBus + a toast. Never
@@ -836,6 +962,7 @@ public sealed class PipelineHost : IDisposable
                 // Bug 8 (hygiene): unhook the meter + fault handlers before teardown.
                 if (_frameHandler is not null) _warmRecorder.FramesAvailable -= _frameHandler;
                 if (_captureFaultHandler is not null) _warmRecorder.CaptureFaulted -= _captureFaultHandler;
+                if (_captureRecoveredHandler is not null) _warmRecorder.CaptureRecovered -= _captureRecoveredHandler;
                 _warmRecorder.Dispose();
             }
         });

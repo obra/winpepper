@@ -84,20 +84,24 @@ public sealed class TrayIconHost : IDisposable
     {
         if (e.PropertyName is nameof(SessionViewModel.Stage)
                            or nameof(SessionViewModel.StatusText)
-                           or nameof(SessionViewModel.LastErrorMessage))
+                           or nameof(SessionViewModel.LastErrorMessage)
+                           or nameof(SessionViewModel.ActiveConditionMessage))
             UpdateFromSession();
     }
 
     private void UpdateFromSession()
     {
+        // The tray is the persistent surface for an ongoing CONDITION: the pill
+        // retires after its attention-grab window, the tray keeps it until a
+        // recovery success clears it.
         var state = Winpepper.Core.Tray.TrayIconStateMapper.Map(
-            _session.Stage, _session.LastErrorMessage, _paused);
+            _session.Stage, _session.LastErrorMessage, _paused, _session.ActiveConditionMessage);
         var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", state.IconName);
         if (File.Exists(iconPath))
             _icon.IconSource = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri(iconPath));
         _menu.StatusItemControl.Text = _paused ? "Paused" : _session.StatusText;
         _icon.ToolTipText = state.Tooltip;
-        // Tray progress indicator dropped — MenuFlyout doesn't accept ProgressBar
+        // Tray progress indicator dropped - MenuFlyout doesn't accept ProgressBar
         // children. Live progress is shown by the status pill instead.
     }
 

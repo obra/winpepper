@@ -35,8 +35,10 @@ delay models; `real-*` rows hit the real AssemblyAI API (run when
 
 | path | BEFORE (batch) | AFTER (streaming) | reduction |
 |---|---|---|---|
-| local | 3004 ms | 912 ms | 70% |
-| remote | 4181 ms | 312 ms | 93% |
+| local | 3001 ms | 912 ms | 70% |
+| remote | 4196 ms | 312 ms | 93% |
+
+(The AFTER run also re-measured the batch scenarios — 3004 / 4181 ms — consistent with the recorded baseline.)
 
 On Windows, production `HistoryTimings.TranscribeMs` (history archive) measures
 this same post-stop window around the new FinishAsync call, so the improvement

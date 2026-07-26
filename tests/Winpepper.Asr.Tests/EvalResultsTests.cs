@@ -8,10 +8,12 @@ public sealed class EvalResultsTests
 {
     private static ClipResult Clip(
         string id, double? wer = null, double? cer = null, bool? silentPass = null,
-        bool expectedSilent = false, long[]? runsMs = null, bool fellBack = false, bool truncated = false) =>
+        bool expectedSilent = false, long[]? runsMs = null, bool fellBack = false,
+        int? fellBackCount = null, bool truncated = false) =>
         new(id, 3.0, expectedSilent, HasReference: wer is not null,
             Reference: "secret reference words", StreamText: "secret stream words", BatchText: "secret batch words",
-            wer, cer, silentPass, runsMs ?? new long[] { 100 }, fellBack, truncated,
+            wer, cer, silentPass, runsMs ?? new long[] { 100 }, fellBack,
+            fellBackCount ?? (fellBack ? 1 : 0), truncated,
             TrimmedSilent: false, BatchParityDiff: "IDENTICAL");
 
     private static readonly EvalRunInfo Info = new("corpus-v1", "model-x", "0.1.3", "2026-07-26", 1);
@@ -81,6 +83,30 @@ public sealed class EvalResultsTests
     }
 
     [Fact]
+    public void PartialFallback_ReportsFlagAndPerRunCount()
+    {
+        // A clip that fell back on 2 of its 3 runs: FellBack is true (ANY run),
+        // the count says how many, markdown shows "count/runs", JSON carries both.
+        var clips = new[]
+        {
+            Clip("partial", wer: 0.10, runsMs: new long[] { 100, 200, 300 },
+                fellBack: true, fellBackCount: 2),
+            Clip("clean", wer: 0.20, runsMs: new long[] { 100, 200, 300 }),
+        };
+
+        var s = EvalResults.Summarize(clips);
+        s.FallbackCount.ShouldBe(1); // clips with ANY fallback, not run count
+
+        var md = EvalResults.ToMarkdown(Info, clips, s);
+        md.ShouldContain("| 2/3 |");
+        md.ShouldContain("| 0/3 |");
+
+        var json = EvalResults.ToJson(Info, clips, s);
+        json.ShouldContain("\"fellBack\": true");
+        json.ShouldContain("\"fellBackCount\": 2");
+    }
+
+    [Fact]
     public void FailedClip_CountedInSummary_MarkedInMarkdownWithoutErrorText()
     {
         // Error rows (per-clip failures in the corpus run) have empty texts and
@@ -90,7 +116,7 @@ public sealed class EvalResultsTests
             Clip("ok", wer: 0.10, cer: 0.05),
             new ClipResult("bad", 0.0, ExpectedSilent: false, HasReference: false,
                 Reference: "", StreamText: "", BatchText: "", Wer: null, Cer: null, SilentPass: null,
-                FinishMsRuns: Array.Empty<long>(), FellBack: false, Truncated: false,
+                FinishMsRuns: Array.Empty<long>(), FellBack: false, FellBackCount: 0, Truncated: false,
                 TrimmedSilent: false, BatchParityDiff: "", Error: "TranscribeCppException: secret failure details"),
         };
 

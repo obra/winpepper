@@ -28,5 +28,6 @@
     <Compile Include="..\..\scripts\asr-eval-corpus\CorpusExport.cs" Link="Corpus\CorpusExport.cs" />
     <Compile Include="..\..\scripts\asr-eval-corpus\ReferencePlanner.cs" Link="Corpus\ReferencePlanner.cs" />
     <Compile Include="..\..\scripts\asr-latency-bench\EvalResults.cs" Link="Bench\EvalResults.cs" />
+    <Compile Include="..\..\scripts\asr-latency-bench\BenchArgs.cs" Link="Bench\BenchArgs.cs" />
   </ItemGroup>
 </Project>

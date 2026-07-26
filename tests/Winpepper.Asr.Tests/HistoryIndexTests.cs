@@ -12,7 +12,9 @@ public sealed class HistoryIndexTests : IDisposable
 
     public void Dispose()
     {
-        try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
+        // Best-effort temp-dir teardown: swallow EVERYTHING (UnauthorizedAccessException
+        // etc., not just IOException) -- cleanup must never fail the test run.
+        try { Directory.Delete(_dir, recursive: true); } catch { }
     }
 
     [Fact]

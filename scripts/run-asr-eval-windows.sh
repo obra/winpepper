@@ -66,7 +66,17 @@ ps_run 7200 "$OUT/corpus.log" "
 
 # Collect results back (results.json contains transcript text -- artifacts/ is gitignored).
 WIN_TEMP_WSL="$(wslpath "$("$PS" -NoProfile -Command 'Write-Output $env:TEMP' | tr -d '\r')")"
-cp -r "$WIN_TEMP_WSL/winpepper-asr-eval-results/." "$OUT/"
+RESULTS_WSL="$WIN_TEMP_WSL/winpepper-asr-eval-results"
+# A skipped corpus run (missing manifest/model/runtime prints "corpus: SKIPPED" and
+# exits 0) or a crash before the write leaves NO results.json -- that must be a loud
+# failure, never a silent pass.
+if [[ ! -f "$RESULTS_WSL/results.json" ]]; then
+  echo "run-asr-eval-windows: FAILED -- expected $RESULTS_WSL/results.json but no results were produced." >&2
+  echo "run-asr-eval-windows: the corpus run was skipped or died before writing results; check $OUT/corpus.log (look for 'SKIPPED': missing manifest.json, nemotron model, or runtime)." >&2
+  if [[ "$corpus_status" -ne 0 ]]; then exit "$corpus_status"; fi
+  exit 3
+fi
+cp -r "$RESULTS_WSL/." "$OUT/"
 if [[ "$corpus_status" -ne 0 ]]; then
   echo "run-asr-eval-windows: corpus eval reported failed clips (exit $corpus_status) -- results still collected in $OUT; see corpus.log and results.md" >&2
   exit "$corpus_status"

@@ -12,7 +12,9 @@ public sealed class CorpusManifestTests : IDisposable
 
     public void Dispose()
     {
-        try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
+        // Best-effort temp-dir teardown: swallow EVERYTHING (UnauthorizedAccessException
+        // etc., not just IOException) -- cleanup must never fail the test run.
+        try { Directory.Delete(_dir, recursive: true); } catch { }
     }
 
     private static CorpusEntry Entry(string id, bool expectedSilent = false, bool exclude = false) =>

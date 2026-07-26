@@ -44,6 +44,15 @@ for (var argIdx = 0; argIdx < args.Length; argIdx++)
         default: scenarioArgs.Add(args[argIdx]); break;
     }
 }
+if (BenchArgs.ValidateRepeats(repeats) is { } repeatsError)
+{
+    // Environment.ExitCode + plain return (NOT `return <int>`): an int-returning
+    // top-level Main would override the Environment.ExitCode = 1 set by the corpus
+    // failure path below with the implicit 0 from falling off the end.
+    Console.Error.WriteLine(repeatsError);
+    Environment.ExitCode = 2;
+    return;
+}
 var requested = scenarioArgs.Count > 0 ? scenarioArgs.ToArray() : new[]
 {
     "sim-local-batch", "sim-local-stream",
@@ -346,7 +355,7 @@ foreach (var scenario in requested)
                     var trimResult = Winpepper.Audio.SilenceTrimmer.Trim(wavAudio);
 
                     var streamText = "";
-                    var fellBack = false;
+                    var fellBackCount = 0;
                     var truncated = false;
                     var finishRuns = new List<long>();
                     for (var run = 0; run < repeats; run++)
@@ -399,14 +408,14 @@ foreach (var scenario in requested)
                             finishMs = swFinish.ElapsedMilliseconds;
                         }
                         finishRuns.Add(finishMs);
-                        if (run == 0)
-                        {
-                            // Accuracy and flags from the first run; later runs only add latency samples.
-                            streamText = runText;
-                            fellBack = runFellBack;
-                            truncated = nemLog.Lines.Any(l => l.Contains("was_truncated", StringComparison.OrdinalIgnoreCase));
-                        }
+                        // Accuracy text comes from the first run; EVERY run contributes a
+                        // latency sample AND its fallback/truncation flags (a clip that fell
+                        // back only on run 3 of 5 still reports fellBack, with the count).
+                        if (run == 0) streamText = runText;
+                        if (runFellBack) fellBackCount++;
+                        truncated |= nemLog.Lines.Any(l => l.Contains("was_truncated", StringComparison.OrdinalIgnoreCase));
                     }
+                    var fellBack = fellBackCount > 0;
 
                     double? wer = null;
                     double? cer = null;
@@ -424,8 +433,8 @@ foreach (var scenario in requested)
                     clipResults.Add(new ClipResult(
                         entry.Id, wavAudio.Length / 16000.0, entry.ExpectedSilent, hasReference,
                         referenceText, streamText, batchText, wer, cer, silentPass,
-                        finishRuns, fellBack, truncated, trimResult.IsSilent, parityDiff));
-                    Console.WriteLine($"# corpus[{entry.Id}]: fellBack={fellBack} truncated={truncated} " +
+                        finishRuns, fellBack, fellBackCount, truncated, trimResult.IsSilent, parityDiff));
+                    Console.WriteLine($"# corpus[{entry.Id}]: fellBack={fellBackCount}/{repeats} truncated={truncated} " +
                         $"wer={(wer is null ? "n/a" : wer.Value.ToString("F3"))} finishMs={finishRuns[0]} parity: {parityDiff}");
                 }
                 catch (Exception ex)
@@ -436,7 +445,7 @@ foreach (var scenario in requested)
                     clipResults.Add(new ClipResult(
                         entry.Id, 0.0, entry.ExpectedSilent, HasReference: false,
                         Reference: "", StreamText: "", BatchText: "", Wer: null, Cer: null, SilentPass: null,
-                        FinishMsRuns: Array.Empty<long>(), FellBack: false, Truncated: false,
+                        FinishMsRuns: Array.Empty<long>(), FellBack: false, FellBackCount: 0, Truncated: false,
                         TrimmedSilent: false, BatchParityDiff: "",
                         Error: $"{ex.GetType().Name}: {ex.Message}"));
                     Console.Error.WriteLine($"# corpus[{entry.Id}]: FAILED {ex.GetType().Name}: {ex.Message}");

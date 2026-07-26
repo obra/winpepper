@@ -18,8 +18,9 @@ public sealed record ClipResult(
     double? Cer,
     bool? SilentPass,
     IReadOnlyList<long> FinishMsRuns,
-    bool FellBack,
-    bool Truncated,
+    bool FellBack,          // true when ANY run fell back to batch
+    int FellBackCount,      // how many of the runs fell back (0..FinishMsRuns.Count)
+    bool Truncated,         // true when ANY run's native engine reported truncation
     bool TrimmedSilent,
     string BatchParityDiff,
     string? Error = null); // non-null = per-clip failure row (empty texts, null metrics); text goes to results.json only
@@ -101,7 +102,7 @@ public static class EvalResults
         sb.AppendLine($"- transcribe.cpp: `{info.TranscribeCppVersion}`");
         sb.AppendLine($"- date: {info.DateUtc}, repeats: {info.Repeats}");
         sb.AppendLine();
-        sb.AppendLine("| clip | audio (s) | WER | CER | silent | post-stop ms (runs) | fellBack | truncated | error |");
+        sb.AppendLine("| clip | audio (s) | WER | CER | silent | post-stop ms (runs) | fellBack (runs) | truncated | error |");
         sb.AppendLine("|---|---|---|---|---|---|---|---|---|");
         foreach (var c in clips)
         {
@@ -115,7 +116,7 @@ public static class EvalResults
             var cerCell = c.Cer is not null ? c.Cer.Value.ToString("F3") : "-";
             var silentCell = c.SilentPass is null ? "-" : (c.SilentPass.Value ? "PASS" : "FAIL");
             sb.AppendLine($"| {c.Id} | {c.AudioSeconds:F1} | {werCell} | {cerCell} | {silentCell} | " +
-                          $"{string.Join(" ", c.FinishMsRuns)} | {c.FellBack} | {c.Truncated} | - |");
+                          $"{string.Join(" ", c.FinishMsRuns)} | {c.FellBackCount}/{c.FinishMsRuns.Count} | {c.Truncated} | - |");
         }
         sb.AppendLine();
         sb.AppendLine($"**Summary:** {summary.ClipCount} clips ({summary.ScoredCount} scored). " +

@@ -134,9 +134,10 @@ static async Task<int> RunReferences(string corpusDir, bool force)
     // scheduleDetached is `a => _ = Task.Run(a)` (AssemblyAiTranscriber.cs:38), which
     // would race process exit in this short-lived CLI. Capture the delete task via the
     // injectable scheduleDetached hook (ctor param, AssemblyAiTranscriber.cs:30) and
-    // await it per clip below, so every remote transcript delete deterministically
-    // completes before exit. The transcriber gets a console warning logger so a failed
-    // delete (logged inside ScheduleDelete, AssemblyAiTranscriber.cs:94) is visible.
+    // await it per clip in a FINALLY below, so every remote transcript delete
+    // deterministically completes before exit even when the clip's error path runs.
+    // The transcriber gets a console warning logger so a failed delete (logged inside
+    // ScheduleDelete, AssemblyAiTranscriber.cs:94) is visible.
     Task? pendingDelete = null;
     var transcriber = new AssemblyAiTranscriber(
         client, new EnvKeyStore(), opts, new ConsoleWarnLogger<AssemblyAiTranscriber>(),
@@ -166,15 +167,6 @@ static async Task<int> RunReferences(string corpusDir, bool force)
                     File.WriteAllText(refPath, result.Text.TrimEnd() + Environment.NewLine);
                     written++;
                     Console.WriteLine($"references[{entry.Id}]: ok ({result.Text.Length} chars)");
-                    if (pendingDelete is not null)
-                    {
-                        // Drain the remote-transcript delete NOW, per clip: ScheduleDelete's
-                        // own try/catch means this never throws; a failed delete surfaces as
-                        // a [Warning] line from ConsoleWarnLogger, not an exception.
-                        await pendingDelete;
-                        pendingDelete = null;
-                        Console.WriteLine($"references[{entry.Id}]: remote transcript delete drained");
-                    }
                 }
                 catch (Exception ex)
                 {
@@ -186,6 +178,22 @@ static async Task<int> RunReferences(string corpusDir, bool force)
                     // next clip; no reference file is written for this one.
                     failed++;
                     Console.Error.WriteLine($"references[{entry.Id}]: FAILED {ex.Message}");
+                }
+                finally
+                {
+                    if (pendingDelete is not null)
+                    {
+                        // Drain the remote-transcript delete NOW, per clip, in a FINALLY:
+                        // a delete scheduled before a later failure (e.g. writing the
+                        // reference file) must still complete before the tool exits --
+                        // "audio is provably deleted from the cloud before exit" holds
+                        // on error paths too. ScheduleDelete's own try/catch means this
+                        // never throws; a failed delete surfaces as a [Warning] line
+                        // from ConsoleWarnLogger, not an exception.
+                        await pendingDelete;
+                        pendingDelete = null;
+                        Console.WriteLine($"references[{entry.Id}]: remote transcript delete drained");
+                    }
                 }
                 break;
         }

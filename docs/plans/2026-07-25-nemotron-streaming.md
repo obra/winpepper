@@ -102,11 +102,19 @@ transcribe.cpp v0.1.3 (MIT), nemotron-speech-streaming-en-0.6b Q8_0 GGUF
    unload path would reintroduce the dispose races this design avoids and the
    model is opt-in-install); the residency is stated honestly in the model
    card caption and README, and idle-unload is the recorded follow-up.
+   *Addendum 2026-07-26: the model is no longer opt-in-install — it
+   auto-installs in the background on first run (StreamingAutoInstaller),
+   so the ~1 GB residency now applies to any streaming-enabled user after
+   their first streaming dictation. The opt-out is the streaming toggle
+   (which also skips the auto-install). This strengthens the case for the
+   idle-unload follow-up.*
 6. **Performance posture on weaker hardware (load-bearing review, 2026-07-25):**
    the dev-host feed RTF is 0.112, but field evidence (Handy issue #1754,
    maintainer) puts low-end laptops at only 1–2x real time. There is no
    runtime perf gate by design: exposure is limited to users who explicitly
-   install the streaming model, and the full batch-fallback guard
+   install the streaming model *(addendum 2026-07-26: now to all
+   streaming-enabled users — the model auto-installs on first run)*, and the
+   full batch-fallback guard
    (`was_truncated`/failure ⇒ TDT batch) is the safety valve — a slow machine
    gets today's batch behavior (plus wasted stream cost), never a corrupt
    transcript. The bench (Task 9) records real feed/finalize numbers; if the

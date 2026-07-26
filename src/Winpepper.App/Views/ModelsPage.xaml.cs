@@ -14,6 +14,7 @@ public sealed partial class ModelsPage : Page
     private bool _streamingDownloadInProgress;
     private bool _asrSelectedVerified;
     private CancellationTokenSource? _lifetimeCts;
+    private EventHandler<StreamingAutoInstallStatus>? _autoInstallStatusChanged;
 
     public ModelsTabViewModel ViewModel { get; private set; } = null!;
 
@@ -55,6 +56,10 @@ public sealed partial class ModelsPage : Page
 
         AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
+        // The background auto-install may finish (or fail) while this page is
+        // open; refresh the streaming card's state line when it does.
+        _autoInstallStatusChanged = (_, _) => DispatcherQueue.TryEnqueue(UpdateInstalledLabels);
+        App.Shell!.StreamingAutoInstaller.StatusChanged += _autoInstallStatusChanged;
         UpdateInstalledLabels();
         WireSpeechProvider(s);
         try
@@ -352,13 +357,28 @@ public sealed partial class ModelsPage : Page
         var models = App.Shell!.ModelsServices;
         var streamingInstalled = models.Registry.Find(ModelRegistry.StreamingAsrName)!
             .IsFullyInstalled(models.ModelsRoot);
-        StreamingInstalledText.Text = streamingInstalled ? "Installed" : "Not downloaded";
+        // The background auto-install (AppShell.StartAsync) shares the page's
+        // operation gate, so an Install click during it simply waits its turn
+        // and then verify-short-circuits — but the state line must be honest
+        // about what is happening right now.
+        var autoStatus = App.Shell!.StreamingAutoInstaller.Status;
+        var streamingBusy = _streamingDownloadInProgress
+            || autoStatus == StreamingAutoInstallStatus.Installing;
+        StreamingInstalledText.Text = streamingInstalled ? "Installed"
+            : streamingBusy ? "Installing\u2026"
+            : autoStatus == StreamingAutoInstallStatus.Failed ? "Install failed \u2014 use Install to retry"
+            : "Not downloaded";
         StreamingInstalledIcon.Visibility = streamingInstalled ? Visibility.Visible : Visibility.Collapsed;
         StreamingNotInstalledIcon.Visibility = streamingInstalled ? Visibility.Collapsed : Visibility.Visible;
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
+        if (_autoInstallStatusChanged is not null)
+        {
+            App.Shell!.StreamingAutoInstaller.StatusChanged -= _autoInstallStatusChanged;
+            _autoInstallStatusChanged = null;
+        }
         _lifetimeCts?.Cancel();
         _lifetimeCts?.Dispose();
         _lifetimeCts = null;

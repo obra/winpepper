@@ -63,8 +63,9 @@ public class ModelRegistryCatalogTests
 
     [Fact]
     public void ResolveOrDefault_throws_for_StreamingAsr_kind_defaults()
-        // StreamingAsr deliberately has no default: it is opt-in-install only,
-        // never a resolvable AsrModelName. This test documents that contract.
+        // StreamingAsr deliberately has no default: it is never a resolvable
+        // AsrModelName (it auto-installs in the background but is not a batch
+        // ASR selection). This test documents that contract.
         => Assert.Throws<ArgumentOutOfRangeException>(
             () => new ModelRegistry().ResolveOrDefault(null, ModelKind.StreamingAsr));
 }

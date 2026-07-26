@@ -31,8 +31,7 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         // Models pages are recreated during navigation, while the underlying
         // downloader service is shared. Key the operation gate by that service
         // so two page view models cannot write the same model files at once.
-        _downloadGate = DownloadGates.GetValue(
-            downloader, static _ => new SemaphoreSlim(1, 1));
+        _downloadGate = SharedOperationGateFor(downloader);
 
         AsrCard = new ModelCardViewModel(ModelKind.Asr,
             registry.ByKind(ModelKind.Asr), installRoot, currentAsrName, promoteAsr,
@@ -40,13 +39,23 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         CleanupCard = new ModelCardViewModel(ModelKind.Cleanup,
             registry.ByKind(ModelKind.Cleanup), installRoot, currentCleanupName, promoteCleanup,
             dispatch, progressInterval, progressDelay);
-        // The streaming model is a single opt-in descriptor: there is no
+        // The streaming model is a single fixed descriptor: there is no
         // selection to promote, so the card pins the one name and the promote
         // callback is a no-op.
         StreamingCard = new ModelCardViewModel(ModelKind.StreamingAsr,
             registry.ByKind(ModelKind.StreamingAsr), installRoot, ModelRegistry.StreamingAsrName, _ => { },
             dispatch, progressInterval, progressDelay);
     }
+
+    /// <summary>
+    /// The per-downloader-service operation gate. Everything that writes model
+    /// files through the same downloader must serialize on this one semaphore:
+    /// Models page view models (recreated per navigation) and the background
+    /// <see cref="StreamingAutoInstaller"/> all share it, so an install started
+    /// in one place can never write the same files concurrently with another.
+    /// </summary>
+    public static SemaphoreSlim SharedOperationGateFor(IDownloader downloader)
+        => DownloadGates.GetValue(downloader, static _ => new SemaphoreSlim(1, 1));
 
     public ModelCardViewModel AsrCard { get; }
     public ModelCardViewModel CleanupCard { get; }
@@ -86,7 +95,7 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // The streaming model is opt-in: exactly the nemotron descriptor.
+            // The streaming model is exactly the nemotron descriptor.
             // No pre-filter on IsFullyInstalled: presence-only checks cannot
             // distinguish ready files from a corrupt installation (e.g. the
             // archive downloaded but extraction failed or the runtime tree was

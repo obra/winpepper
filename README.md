@@ -63,10 +63,13 @@ files it thinks with — about 1.2 GB, once.
 Until the models are downloaded, Winpepper will tell you "Speech model not
 installed. Open the Models tab to download it."
 
-**Live streaming (optional):** installing the **Nemotron Speech Streaming**
-model from the Models tab (~720 MB, English only, NVIDIA Open Model License)
-enables real local streaming — transcription runs while you speak and the text
-is ready almost the moment you release the hotkey. It uses the MIT-licensed
+**Live streaming:** Winpepper also downloads the **Nemotron Speech Streaming**
+model (~720 MB, English only, NVIDIA Open Model License) automatically in the
+background on first run — dictation works immediately without it, and you can
+install or repair it yourself from the Models tab (or skip it entirely by
+turning streaming off there). Once installed it enables real local streaming —
+transcription runs while you speak and the text is ready almost the moment you
+release the hotkey. It uses the MIT-licensed
 [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) engine
 (downloaded alongside the model, pinned and checksum-verified; see
 THIRD-PARTY-NOTICES.md). Without it, local dictations are transcribed in one

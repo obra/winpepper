@@ -140,7 +140,7 @@ public sealed class ModelRegistry
         {
             ModelKind.Asr => DefaultAsrName,
             ModelKind.Cleanup => DefaultCleanupName,
-            ModelKind.StreamingAsr => throw new ArgumentOutOfRangeException(nameof(kind), kind, "StreamingAsr is opt-in-install only; it has no default."),
+            ModelKind.StreamingAsr => throw new ArgumentOutOfRangeException(nameof(kind), kind, "StreamingAsr is never a selectable AsrModelName; it has no default."),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
         return Find(defaultName)

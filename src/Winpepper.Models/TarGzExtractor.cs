@@ -20,14 +20,23 @@ namespace Winpepper.Models;
 /// </summary>
 public static class TarGzExtractor
 {
-    public static void EnsureExtracted(string archivePath, string destinationDir, string archiveSha256)
+    /// <summary>True when the marker records a completed extraction of exactly
+    /// this archive (by SHA-256) and the destination tree exists.</summary>
+    public static bool IsExtracted(string archivePath, string destinationDir, string archiveSha256)
     {
         var marker = archivePath + ".extracted";
-        if (File.Exists(marker) && Directory.Exists(destinationDir) &&
-            string.Equals(File.ReadAllText(marker).Trim(), archiveSha256, StringComparison.OrdinalIgnoreCase))
+        return File.Exists(marker) && Directory.Exists(destinationDir) &&
+            string.Equals(File.ReadAllText(marker).Trim(), archiveSha256, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static void EnsureExtracted(string archivePath, string destinationDir, string archiveSha256)
+    {
+        if (IsExtracted(archivePath, destinationDir, archiveSha256))
         {
             return;
         }
+
+        var marker = archivePath + ".extracted";
 
         if (Directory.Exists(destinationDir))
         {

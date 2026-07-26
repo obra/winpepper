@@ -189,3 +189,23 @@ The full non-Windows regression gate has been **successfully executed**. All 810
 No blockers. No issues. No skipped projects.
 
 Task 5 complete.
+
+---
+
+## Fix Round 1: Restore Pinned Batch-Call-Count Assertions
+
+**Commit:** 2c3c770 - `test(asr): restore pinned batch-call-count assertions in NemotronStreamingTranscriber tests`
+
+**Changes:**
+- Restored three assertions verifying batch fallback call counts in `NemotronStreamingTranscriberTests.cs`:
+  1. `Streams_in_160ms_chunks_and_returns_final_text`: Assert.Equal(0, batch.Calls) — proves happy streamed path never invokes batch
+  2. `Zero_pushed_audio_goes_straight_to_batch_without_a_stream`: Assert.Equal(1, batch.Calls) — verifies batch is called once
+  3. `Empty_final_text_falls_back_to_batch`: Assert.Equal(1, batch.Calls) — verifies batch fallback is invoked once
+
+**Covering Test Run:**
+- Command: `dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "*NemotronStreamingTranscriber*" -notrait "Platform=Windows"`
+- Result: **12 tests passed, 0 failed, 0 errors**
+
+**Linux Full Suite:**
+- Command: `./scripts/linux-tests.sh`
+- Result: **LINUX SUITE: GREEN** — 1092 tests passed across all 9 projects, 0 failures

@@ -20,6 +20,8 @@ var processingTime = TimeSpan.FromSeconds(3.0);    // cloud batch processing for
 
 var wavPaths = new List<string>();
 string? modelDir = null;
+string? nemotronModel = null;
+string? nemotronRuntime = null;
 var gain = 1.0;
 var leadSilenceMs = 0;
 var scenarioArgs = new List<string>();
@@ -29,6 +31,8 @@ for (var argIdx = 0; argIdx < args.Length; argIdx++)
     {
         case "--wav": wavPaths.Add(args[++argIdx]); break;
         case "--model-dir": modelDir = args[++argIdx]; break;
+        case "--nemotron-model": nemotronModel = args[++argIdx]; break;
+        case "--nemotron-runtime": nemotronRuntime = args[++argIdx]; break;
         case "--gain": gain = double.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
         case "--lead-silence-ms": leadSilenceMs = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
         default: scenarioArgs.Add(args[argIdx]); break;
@@ -198,6 +202,88 @@ foreach (var scenario in requested)
             }
             break;
         }
+        case "real-nemotron-stream":
+        {
+            if (nemotronModel is null || nemotronRuntime is null || wavPaths.Count == 0)
+            {
+                Console.WriteLine("real-nemotron-stream: SKIPPED (requires --nemotron-model, --nemotron-runtime and at least one --wav)");
+                break;
+            }
+            if (!File.Exists(nemotronModel) || !File.Exists(Path.Combine(nemotronRuntime, "transcribe.dll")))
+            {
+                Console.WriteLine($"real-nemotron-stream: SKIPPED (model or runtime not found)");
+                break;
+            }
+            using var engine = Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
+                nemotronRuntime, nemotronModel, msg => Console.WriteLine($"# nem-log: {msg}"));
+            Console.WriteLine($"# real-nemotron-stream: engine loaded (CPU backend, att_context_right=13)");
+
+            // Optional TDT batch reference for the quality characterization.
+            ParakeetSession? tdtSession = null;
+            ParakeetTranscriber? tdtBatch = null;
+            if (modelDir is not null && ParakeetSession.ModelFilesPresent(modelDir))
+            {
+                tdtSession = new ParakeetSession(modelDir);
+                tdtBatch = new ParakeetTranscriber(tdtSession, "parakeet-tdt-0.6b-v3");
+            }
+            try
+            {
+                foreach (var wavPath in wavPaths)
+                {
+                    var name = Path.GetFileName(wavPath);
+                    var wavAudio = BenchAudio.Prepare(BenchAudio.ReadMono16k(wavPath), gain, leadSilenceMs);
+                    var seconds = wavAudio.Length / 16000.0;
+
+                    // (a) nemotron BATCH — the parity reference (same engine, offline).
+                    var swNb = Stopwatch.StartNew();
+                    var nemBatchText = engine.TranscribeBatch(wavAudio);
+                    swNb.Stop();
+                    rows.Add(($"nem-batch {name}", "REAL nemotron", seconds, swNb.ElapsedMilliseconds));
+                    Console.WriteLine($"# nem-batch[{name}]: \"{nemBatchText}\"");
+
+                    // (b) nemotron STREAMED through the REAL production stack:
+                    // NemotronStreamingTranscriber inside StreamingDictationSession,
+                    // 50 ms frames at real-time pace (the manual-equivalent check).
+                    var fellBack = false;
+                    var fallbackProbe = new ProbeTranscriber(() => fellBack = true, tdtBatch);
+                    var streaming = new NemotronStreamingTranscriber(
+                        () => engine, fallbackProbe, "nemotron-streaming-en");
+                    await using var session = StreamingDictationSession.Start(
+                        _ => Task.FromResult<IStreamingTranscriber?>(streaming),
+                        NullLogger.Instance, CancellationToken.None, TimeSpan.FromSeconds(10));
+                    const int frame = 800; // 50 ms
+                    for (var i = 0; i < wavAudio.Length; i += frame)
+                    {
+                        session.OnFrame(wavAudio.AsMemory(i, Math.Min(frame, wavAudio.Length - i)));
+                        await Task.Delay(50);
+                    }
+                    var swStream = Stopwatch.StartNew();
+                    var streamResult = await session.FinishAsync(wavAudio, CancellationToken.None);
+                    swStream.Stop();
+                    if (streamResult is null) throw new InvalidOperationException("no transcript from coordinator");
+                    rows.Add(($"nem-stream {name}", "REAL nemotron", seconds, swStream.ElapsedMilliseconds));
+                    Console.WriteLine($"# nem-stream[{name}]: fellBackToBatch={fellBack} \"{streamResult.Text}\"");
+
+                    // (c) parity bar: streamed-nemotron == batch-nemotron.
+                    var parity = TranscriptDiff.Summarize(nemBatchText, streamResult.Text);
+                    Console.WriteLine($"# diff-parity[{name}]: {parity.Describe()}");
+
+                    // (d) honest characterization vs the TDT ONNX batch engine.
+                    if (tdtBatch is not null)
+                    {
+                        var tdtText = (await tdtBatch.TranscribeAsync(wavAudio, CancellationToken.None)).Text;
+                        Console.WriteLine($"# tdt-batch[{name}]: \"{tdtText}\"");
+                        var vsTdt = TranscriptDiff.Summarize(tdtText, streamResult.Text);
+                        Console.WriteLine($"# diff-vs-tdt[{name}]: {vsTdt.Describe()}");
+                    }
+                }
+            }
+            finally
+            {
+                tdtSession?.Dispose();
+            }
+            break;
+        }
         default:
             Console.WriteLine($"{scenario}: unknown scenario");
             break;
@@ -265,6 +351,21 @@ sealed class PacedTranscriber : ITranscriber
     {
         await Task.Delay(_cost, ct);
         return new TranscriptionResult("simulated transcript", ModelName);
+    }
+}
+
+sealed class ProbeTranscriber : ITranscriber
+{
+    private readonly Action _onCalled;
+    private readonly ITranscriber? _inner;
+    public ProbeTranscriber(Action onCalled, ITranscriber? inner) { _onCalled = onCalled; _inner = inner; }
+    public string ModelName => _inner?.ModelName ?? "fallback-probe";
+    public Task<TranscriptionResult> TranscribeAsync(ReadOnlyMemory<float> audio, CancellationToken ct)
+    {
+        _onCalled();
+        return _inner is not null
+            ? _inner.TranscribeAsync(audio, ct)
+            : Task.FromResult(new TranscriptionResult("", ModelName));
     }
 }
 

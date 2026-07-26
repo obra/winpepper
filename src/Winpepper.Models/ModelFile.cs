@@ -16,4 +16,12 @@ public sealed record ModelFile
 
     /// <summary>Expected total size in bytes (used for progress + sanity).</summary>
     public required long SizeBytes { get; init; }
+
+    /// <summary>
+    /// Optional: after download + SHA-256 verification, extract this .tar.gz
+    /// archive into this directory (relative to the model install dir). The
+    /// archive file itself is KEPT so IsFullyInstalled and hash re-verification
+    /// keep working. Extraction is idempotent (TarGzExtractor marker file).
+    /// </summary>
+    public string? ExtractToRelative { get; init; }
 }

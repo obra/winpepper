@@ -132,7 +132,33 @@ No `# nem-log:` warning lines appeared in any category log.
 
 ## Windows pre-push gate result
 
-appended by Task 10
+Run date: 2026-07-26. Ran against commit `4fdfdf2`
+(`4fdfdf28a33399220ba77464971cbf55a126b43d`); the only uncommitted files in
+the tree were this task's docs (`THIRD-PARTY-NOTICES.md`, `README.md`, this
+section), which do not affect compilation. GREEN on the first attempt — no
+fixes were required; the App-project changes from Tasks 6/7 compiled cleanly
+on their first Windows build. Verbatim summary block:
+
+```
+================ windows-gate summary ================
+Winpepper.App build: OK
+Winpepper.Asr.Tests (net9.0): OK     Winpepper.Asr.Tests  Total: 200, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 6.815s
+Winpepper.Audio.Tests (net9.0): OK     Winpepper.Audio.Tests  Total: 62, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.387s
+Winpepper.Audio.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Audio.Tests  Total: 64, Errors: 0, Failed: 0, Skipped: 1, Not Run: 0, Time: 0.420s
+Winpepper.Cleanup.Tests (net9.0): OK     Winpepper.Cleanup.Tests  Total: 85, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.718s
+Winpepper.Cleanup.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Cleanup.Tests  Total: 87, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 0.782s
+Winpepper.Core.Tests (net9.0): OK     Winpepper.Core.Tests  Total: 379, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.330s
+Winpepper.Corrections.Tests (net9.0): OK     Winpepper.Corrections.Tests  Total: 23, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.585s
+Winpepper.History.Tests (net9.0): OK     Winpepper.History.Tests  Total: 45, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.980s
+Winpepper.IntegrationTests (net9.0): OK     Winpepper.IntegrationTests  Total: 2, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.626s
+Winpepper.Models.Tests (net9.0): OK     Winpepper.Models.Tests  Total: 87, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.622s
+Winpepper.Platform.Tests (net9.0): OK     Winpepper.Platform.Tests  Total: 218, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 0.540s
+Winpepper.Platform.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Platform.Tests  Total: 222, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 1.635s
+GATE: GREEN
+```
+
+Actual test count across the 12 runs: 1474 (0 errors, 0 failures,
+7 skipped — the pre-existing Windows-only skips).
 
 ## Cross-references & environment honesty
 

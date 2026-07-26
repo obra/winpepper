@@ -18,4 +18,8 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\..\scripts\asr-latency-bench\BenchAudio.cs" Link="Bench\BenchAudio.cs" />
+    <Compile Include="..\..\scripts\asr-latency-bench\TranscriptDiff.cs" Link="Bench\TranscriptDiff.cs" />
+  </ItemGroup>
 </Project>

@@ -24,6 +24,9 @@ string? nemotronModel = null;
 string? nemotronRuntime = null;
 var gain = 1.0;
 var leadSilenceMs = 0;
+string? corpusDir = null;
+var outDir = "artifacts/asr-eval-results"; // default INSIDE gitignored artifacts/: results.json contains transcript text, and a bare "asr-eval-results/" is NOT gitignored
+var repeats = 1;
 var scenarioArgs = new List<string>();
 for (var argIdx = 0; argIdx < args.Length; argIdx++)
 {
@@ -35,6 +38,9 @@ for (var argIdx = 0; argIdx < args.Length; argIdx++)
         case "--nemotron-runtime": nemotronRuntime = args[++argIdx]; break;
         case "--gain": gain = double.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
         case "--lead-silence-ms": leadSilenceMs = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
+        case "--corpus": corpusDir = args[++argIdx]; break;
+        case "--out": outDir = args[++argIdx]; break;
+        case "--repeats": repeats = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
         default: scenarioArgs.Add(args[argIdx]); break;
     }
 }
@@ -284,6 +290,181 @@ foreach (var scenario in requested)
             }
             break;
         }
+        case "corpus":
+        {
+            if (corpusDir is null || nemotronModel is null || nemotronRuntime is null)
+            {
+                Console.WriteLine("corpus: SKIPPED (requires --corpus, --nemotron-model and --nemotron-runtime)");
+                break;
+            }
+            var manifestPath = Path.Combine(corpusDir, "manifest.json");
+            if (!File.Exists(manifestPath) || !File.Exists(nemotronModel)
+                || !File.Exists(Path.Combine(nemotronRuntime, "transcribe.dll")))
+            {
+                Console.WriteLine("corpus: SKIPPED (manifest, model or runtime not found)");
+                break;
+            }
+            var manifest = AsrEvalCorpus.CorpusManifest.Load(manifestPath);
+            using var corpusEngine = Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
+                nemotronRuntime, nemotronModel, msg => Console.WriteLine($"# nem-log: {msg}"));
+            // SECOND engine instance (same model + runtime, its OWN compute gate),
+            // used ONLY as the streaming sessions' batch fallback via
+            // EngineBatchTranscriber. Do NOT "simplify" this back to one engine:
+            // during FinishAsync the primary engine's native stream still HOLDS the
+            // engine-wide SemaphoreSlim(1,1) compute gate (acquired
+            // TranscribeCppEngine.cs:177, released only in NativeStream.Dispose at
+            // :336, whose sole caller is Session.DisposeAsync() at
+            // NemotronStreamingTranscriber.cs:174, which StreamingDictationSession
+            // invokes only AFTER FinishAsync returns, StreamingDictationSession.cs:120-121).
+            // A same-engine fallback awaited inside FinishAsync would stall 5 s at the
+            // gate wait (TranscribeCppEngine.cs:235) and throw TranscribeCppException
+            // on EVERY fallback clip. Cost: ~700 MB extra model RAM, bench-only, accepted.
+            using var fallbackEngine = Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
+                nemotronRuntime, nemotronModel, msg => Console.WriteLine($"# nem-fallback-log: {msg}"));
+            Console.WriteLine($"# corpus: engines loaded (primary + fallback), {manifest.Entries.Count} manifest entries, repeats={repeats}");
+
+            var clipResults = new List<ClipResult>();
+            foreach (var entry in manifest.Entries.Where(e => !e.Exclude))
+            {
+                // One bad clip must not destroy the whole eval: any per-clip failure
+                // (including a null coordinator result) becomes an error row, and
+                // results.json/results.md are still written after the loop.
+                try
+                {
+                    var wavAudio = BenchAudio.ReadMono16k(Path.Combine(corpusDir, entry.WavPath));
+                    var refPath = AsrEvalCorpus.ReferencePlanner.ReferencePath(corpusDir, entry);
+                    var hasReference = File.Exists(refPath);
+                    var referenceText = hasReference ? File.ReadAllText(refPath).Trim() : "";
+
+                    // (a) batch parity reference: the PRIMARY engine, offline over the
+                    //     full clip. Gate-safe: it runs before any streaming session
+                    //     exists on this engine, so its compute gate is free.
+                    var batchText = corpusEngine.TranscribeBatch(wavAudio);
+
+                    // (b) production passes silence-trimmed audio to FinishAsync (PipelineHost.cs:554);
+                    //     streamed frames stay untrimmed -- same asymmetry as production.
+                    var trimResult = Winpepper.Audio.SilenceTrimmer.Trim(wavAudio);
+
+                    var streamText = "";
+                    var fellBack = false;
+                    var truncated = false;
+                    var finishRuns = new List<long>();
+                    for (var run = 0; run < repeats; run++)
+                    {
+                        var runFellBack = false;
+                        // Fallback runs on the SECOND engine -- see the fallbackEngine comment above.
+                        var probe = new ProbeTranscriber(() => runFellBack = true, new EngineBatchTranscriber(fallbackEngine));
+                        var nemLog = new ListLogger();
+                        var streaming = new NemotronStreamingTranscriber(
+                            () => corpusEngine, probe, "nemotron-streaming-en", nemLog);
+                        await using var session = StreamingDictationSession.Start(
+                            _ => Task.FromResult<IStreamingTranscriber?>(streaming),
+                            NullLogger.Instance, CancellationToken.None, TimeSpan.FromSeconds(10));
+
+                        // Production sends one ~500 ms preroll burst at session start, then
+                        // steady 50 ms frames (WarmWasapiRecorder.cs:144-147, PipelineHost.cs:455).
+                        // Stopwatch-scheduled pacing: steady frame s is due at s*50 ms, so
+                        // cumulative timing stays true to real time (no Task.Delay drift).
+                        var segments = EvalFraming.Segments(wavAudio.Length);
+                        var pacer = Stopwatch.StartNew();
+                        for (var s = 0; s < segments.Count; s++)
+                        {
+                            if (s > 0)
+                            {
+                                var waitMs = s * 50L - pacer.ElapsedMilliseconds;
+                                if (waitMs > 0) await Task.Delay((int)waitMs);
+                            }
+                            var (segOffset, segLength) = segments[s];
+                            session.OnFrame(wavAudio.AsMemory(segOffset, segLength));
+                        }
+
+                        long finishMs;
+                        string runText;
+                        if (trimResult.IsSilent)
+                        {
+                            // Production drops silent dictations before transcription
+                            // (PipelineHost TrimForTranscription returns null): no text, no latency sample.
+                            runText = "";
+                            finishMs = 0;
+                        }
+                        else
+                        {
+                            var swFinish = Stopwatch.StartNew();
+                            var finishResult = await session.FinishAsync(trimResult.Trimmed, CancellationToken.None);
+                            swFinish.Stop();
+                            if (finishResult is null)
+                                throw new InvalidOperationException(
+                                    $"corpus[{entry.Id}]: no transcript from coordinator"); // caught below -> error row, run continues
+                            runText = finishResult.Text;
+                            finishMs = swFinish.ElapsedMilliseconds;
+                        }
+                        finishRuns.Add(finishMs);
+                        if (run == 0)
+                        {
+                            // Accuracy and flags from the first run; later runs only add latency samples.
+                            streamText = runText;
+                            fellBack = runFellBack;
+                            truncated = nemLog.Lines.Any(l => l.Contains("was_truncated", StringComparison.OrdinalIgnoreCase));
+                        }
+                    }
+
+                    double? wer = null;
+                    double? cer = null;
+                    bool? silentPass = null;
+                    if (entry.ExpectedSilent)
+                    {
+                        silentPass = EvalMetrics.SilentPass(streamText);
+                    }
+                    else if (hasReference)
+                    {
+                        wer = EvalMetrics.Wer(referenceText, streamText).Rate;
+                        cer = EvalMetrics.Cer(referenceText, streamText).Rate;
+                    }
+                    var parityDiff = TranscriptDiff.Summarize(batchText, streamText).Describe();
+                    clipResults.Add(new ClipResult(
+                        entry.Id, wavAudio.Length / 16000.0, entry.ExpectedSilent, hasReference,
+                        referenceText, streamText, batchText, wer, cer, silentPass,
+                        finishRuns, fellBack, truncated, trimResult.IsSilent, parityDiff));
+                    Console.WriteLine($"# corpus[{entry.Id}]: fellBack={fellBack} truncated={truncated} " +
+                        $"wer={(wer is null ? "n/a" : wer.Value.ToString("F3"))} finishMs={finishRuns[0]} parity: {parityDiff}");
+                }
+                catch (Exception ex)
+                {
+                    // Error row: empty texts/metrics; the exception text goes only to
+                    // results.json (gitignored artifacts/) and the run log -- results.md
+                    // shows an ERROR marker and counts, never the message.
+                    clipResults.Add(new ClipResult(
+                        entry.Id, 0.0, entry.ExpectedSilent, HasReference: false,
+                        Reference: "", StreamText: "", BatchText: "", Wer: null, Cer: null, SilentPass: null,
+                        FinishMsRuns: Array.Empty<long>(), FellBack: false, Truncated: false,
+                        TrimmedSilent: false, BatchParityDiff: "",
+                        Error: $"{ex.GetType().Name}: {ex.Message}"));
+                    Console.Error.WriteLine($"# corpus[{entry.Id}]: FAILED {ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            var runInfo = new EvalRunInfo(
+                Path.GetFileName(Path.TrimEndingDirectorySeparator(corpusDir)),
+                Path.GetFileNameWithoutExtension(nemotronModel),
+                Winpepper.Asr.TranscribeCpp.TranscribeCppContract.RequiredVersion,
+                DateTime.UtcNow.ToString("yyyy-MM-dd"),
+                repeats);
+            var evalSummary = EvalResults.Summarize(clipResults);
+            // ALWAYS write both files -- even when clips failed -- then report failures.
+            Directory.CreateDirectory(outDir);
+            File.WriteAllText(Path.Combine(outDir, "results.json"), EvalResults.ToJson(runInfo, clipResults, evalSummary));
+            var resultsMd = EvalResults.ToMarkdown(runInfo, clipResults, evalSummary);
+            File.WriteAllText(Path.Combine(outDir, "results.md"), resultsMd);
+            Console.WriteLine();
+            Console.WriteLine(resultsMd);
+            if (evalSummary.FailedCount > 0)
+            {
+                // Results are already on disk; the non-zero exit only flags the failures.
+                Console.Error.WriteLine($"# corpus: {evalSummary.FailedCount} clip(s) FAILED -- results written to {outDir}, exiting non-zero");
+                Environment.ExitCode = 1;
+            }
+            break;
+        }
         default:
             Console.WriteLine($"{scenario}: unknown scenario");
             break;
@@ -367,6 +548,35 @@ sealed class ProbeTranscriber : ITranscriber
             ? _inner.TranscribeAsync(audio, ct)
             : Task.FromResult(new TranscriptionResult("", ModelName));
     }
+}
+
+/// <summary>Batch fallback for the corpus eval: a SECOND nemotron engine instance
+/// (same model + runtime, its OWN compute gate), offline. Must NOT be the primary
+/// engine: during FinishAsync the primary's native stream still holds its compute
+/// gate (acquired TranscribeCppEngine.cs:177, released only in NativeStream.Dispose
+/// at :336 via Session.DisposeAsync, NemotronStreamingTranscriber.cs:174, which runs
+/// only AFTER FinishAsync returns, StreamingDictationSession.cs:120-121) -- a
+/// same-engine fallback would stall 5 s and throw at the gate wait (:235).
+/// Wrapped in ProbeTranscriber so a fallback is recorded per clip and still yields text.</summary>
+sealed class EngineBatchTranscriber : ITranscriber
+{
+    private readonly Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine _engine;
+    public EngineBatchTranscriber(Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine engine) => _engine = engine;
+    public string ModelName => "nemotron-batch";
+    public Task<TranscriptionResult> TranscribeAsync(ReadOnlyMemory<float> audio, CancellationToken ct)
+        => Task.FromResult(new TranscriptionResult(_engine.TranscribeBatch(audio.ToArray()), ModelName));
+}
+
+/// <summary>Collects NemotronStreamingTranscriber log lines so the corpus eval can
+/// detect the "stream reports was_truncated" fallback reason.</summary>
+sealed class ListLogger : ILogger
+{
+    public List<string> Lines { get; } = new();
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(LogLevel logLevel) => true;
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+        Func<TState, Exception?, string> formatter)
+        => Lines.Add(formatter(state, exception));
 }
 
 sealed class PacedAssemblyAiClient : IAssemblyAiClient

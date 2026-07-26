@@ -9,5 +9,8 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Winpepper.Asr\Winpepper.Asr.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Audio\Winpepper.Audio.csproj" />
+    <Compile Include="..\asr-eval-corpus\CorpusManifest.cs" Link="Corpus\CorpusManifest.cs" />
+    <Compile Include="..\asr-eval-corpus\ReferencePlanner.cs" Link="Corpus\ReferencePlanner.cs" />
   </ItemGroup>
 </Project>

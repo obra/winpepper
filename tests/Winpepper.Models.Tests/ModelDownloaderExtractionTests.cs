@@ -11,6 +11,13 @@ public class ModelDownloaderExtractionTests : IDisposable
     private readonly string _root = Directory.CreateTempSubdirectory("wp-dl-").FullName;
     public void Dispose() { try { Directory.Delete(_root, true); } catch { } }
 
+    // Mirrors the SyncProgress helper in ModelDownloaderTests: reports synchronously
+    // so assertions can run immediately after DownloadAsync completes.
+    private sealed class SyncProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value) => handler(value);
+    }
+
     private static (byte[] Bytes, string Sha256) MakeArchiveBytes()
     {
         var tmp = Directory.CreateTempSubdirectory("wp-arc-").FullName;
@@ -64,6 +71,28 @@ public class ModelDownloaderExtractionTests : IDisposable
         Assert.True(File.Exists(Path.Combine(modelDir, "native.tar.gz")));           // archive kept
         Assert.True(File.Exists(Path.Combine(modelDir, "runtime", "toplevel", "contract.json")));
         Assert.Equal(sha, File.ReadAllText(Path.Combine(modelDir, "native.tar.gz.extracted")).Trim());
+    }
+
+    [Fact]
+    public async Task Extraction_failure_reports_Failed_phase_and_propagates()
+    {
+        // Garbage bytes (not a valid gzip stream) with a matching descriptor:
+        // download and checksum succeed, extraction throws.
+        var bytes = new byte[] { 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03 };
+        var sha = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant();
+        var descriptor = BuildDescriptor(bytes, sha);
+        var fake = new FakeRangeClient();
+        fake.SetBody("https://example.invalid/native.tar.gz", bytes);
+        var downloader = new ModelDownloader(fake);
+        var reports = new List<DownloadProgress>();
+
+        var ex = await Record.ExceptionAsync(() => downloader.DownloadAsync(
+            descriptor, _root, new SyncProgress<DownloadProgress>(reports.Add), CancellationToken.None));
+
+        Assert.NotNull(ex); // extraction failure must still propagate
+        var failed = Assert.Single(reports, r => r.Phase == DownloadPhase.Failed);
+        Assert.Equal("native.tar.gz", failed.FileRelativePath);
+        Assert.False(string.IsNullOrEmpty(failed.ErrorMessage));
     }
 
     [Fact]

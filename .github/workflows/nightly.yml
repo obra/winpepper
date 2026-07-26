@@ -97,7 +97,9 @@ jobs:
           if (-not (Test-Path $exe)) { Write-Error "Winpepper.exe not installed"; exit 1 }
           $output = & $exe --selftest
           $output | Write-Host
-          if ($output -notmatch "WINPEPPER_SELFTEST_OK") {
+          # NOTE: $output is a string array; `-notmatch` on an array filters non-matching
+          # lines (truthy even when the token IS present), so use -not (-match) instead.
+          if (-not ($output -match "WINPEPPER_SELFTEST_OK")) {
             Write-Error "Selftest token missing"
             exit 1
           }

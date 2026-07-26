@@ -62,7 +62,9 @@ if (-not $resolvedMsi -and $BuildMsi) {
     if (-not $wix) {
         throw 'WiX v5 not found on PATH. Install WiX v5 (dotnet tool install --global wix) first.'
     }
-    & dotnet build $wixProj -c Release -p:UseXamlCompilerExecutable=true | Write-Host
+    # -r win-x64 is mandatory: only Winpepper.Corrections declares RuntimeIdentifiers,
+    # so a RID-less restore fails with NETSDK1047.
+    & dotnet build $wixProj -c Release -r win-x64 -p:UseXamlCompilerExecutable=true | Write-Host
     if ($LASTEXITCODE -ne 0) {
         throw "MSI build failed (exit $LASTEXITCODE)."
     }
@@ -77,7 +79,7 @@ if (-not $resolvedMsi) {
     throw @"
 No MSI found in $artifactsDir.
 Either:
-  1) Build it on Windows: dotnet build packaging\Winpepper.Msi.wixproj -c Release
+  1) Build it on Windows: dotnet build packaging\Winpepper.Msi.wixproj -c Release -r win-x64
   2) Pass -MsiPath <path>
   3) Pass -BuildMsi (requires .NET 9 SDK + WiX v5 on host)
 "@

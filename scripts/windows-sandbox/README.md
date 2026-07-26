@@ -67,7 +67,7 @@ After the auto-install finishes, the PowerShell window stays open.
 | Symptom | Fix |
 |---------|-----|
 | `"Windows Sandbox is not enabled"` | Open *Windows Features* → check *Windows Sandbox* → reboot. |
-| `"MSI not found"` | Build it first: `dotnet build packaging\Winpepper.Msi.wixproj -c Release` (on Windows host with WiX v5). |
+| `"MSI not found"` | Build it first: `dotnet build packaging\Winpepper.Msi.wixproj -c Release -r win-x64` (on Windows host with WiX v5; `-r win-x64` is required, otherwise the build fails with NETSDK1047). |
 | `Install exit code 1603` | Read `C:\WinpepperSandbox\install.log` inside the sandbox; usually a previous product GUID conflict from an earlier Sandbox session that wasn't fully reset. Close and reopen Sandbox. |
 | SmartScreen blocks the unsigned MSI inside Sandbox | Inside the sandbox: right-click the MSI → Properties → Unblock, or run the install script again (it already handles silent install, which bypasses the GUI SmartScreen prompt). |
 

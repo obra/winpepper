@@ -41,16 +41,16 @@ public record AppSettings
     public bool AssemblyAiKeytermsEnabled { get; init; } = false;
 
     // Streaming transcription: transcribe audio while you speak so the text is
-    // (nearly) ready the moment you stop. Applies to BOTH providers (local
-    // Parakeet and AssemblyAI cloud). Read LIVE per dictation by PipelineHost,
-    // so a flip takes effect on the very next dictation. Off = pre-streaming
-    // behavior: a single batch transcription after stop.
-    // OFF BY DEFAULT: local streaming against the real int8 Parakeet model
-    // decodes to blanks after the first ~2 s chunk (validated 2026-07-25; see
-    // ParakeetStreamingSession's class doc). The session now detects the
-    // collapse and falls back to batch — correct transcripts, but no latency
-    // win — so streaming stays opt-in until chunked decode quality is fixed.
-    public bool StreamingEnabled { get; init; } = false;
+    // (nearly) ready the moment you stop. Applies to BOTH providers. Read LIVE
+    // per dictation by PipelineHost, so a flip takes effect on the very next
+    // dictation. ON BY DEFAULT (2026-07-25): safe in every configuration —
+    // AssemblyAI streams with local batch fallback; local WITH the Nemotron
+    // streaming model streams via transcribe.cpp with batch fallback on any
+    // failure; local WITHOUT it uses BatchStreamingAdapter (identical to the
+    // old default: one batch transcription at stop). The chunked-TDT streaming
+    // attempt (blank-collapse defect, see 2026-07-25 streaming verification
+    // evidence) is no longer wired for local dictations.
+    public bool StreamingEnabled { get; init; } = true;
 
     // Cleanup model selection. Bound to Winpepper.Models.ModelRegistry.DefaultCleanupName.
     public string CleanupModelName { get; init; } = "qwen2.5-0.5b-instruct-q4_k_m";

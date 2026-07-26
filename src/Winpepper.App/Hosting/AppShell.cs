@@ -74,6 +74,8 @@ public sealed class AppShell : IDisposable
             settings = settings with { AsrModelName = modelsServices.AsrDescriptor.Name };
             store.Save(settings);
         }
+        var nemotronHolder = new NemotronEngineHolder(
+            modelsServices.ModelsRoot, factory.CreateLogger<NemotronEngineHolder>());
         var asrSelection = new Winpepper.Core.Settings.AsrModelSelectionSlot();
         asrSelection.Publish(settings.AsrModelName); // seed with the persisted boot value
         var writer = new DebouncedSettingsWriter(store);
@@ -282,7 +284,8 @@ public sealed class AppShell : IDisposable
                                          clipboardFallback, toasts,
                                          () => store.Load(),
                                          (local, loadedModelName, s, onFallback) => AppShell.BuildStreamingTranscriber(
-                                             local, loadedModelName, s, onFallback, aaiClient, aaiKeyStore, aaiOptions,
+                                             local, loadedModelName, s, onFallback, () => nemotronHolder.TryGet(),
+                                             aaiClient, aaiKeyStore, aaiOptions,
                                              correctionStore, errorBus, factory),
                                          cleanup, correctionStore, windowContext,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
@@ -408,9 +411,11 @@ public sealed class AppShell : IDisposable
     /// Builds the streaming transcriber for a dictation. When AssemblyAI is
     /// selected the cloud streaming provider is wrapped in a
     /// FallbackStreamingTranscriber so any failure lands on the local Parakeet
-    /// session (batch). Otherwise the local chunked-streaming transcriber is
-    /// used. Static, taking its dependencies explicitly, so the pipeline can
-    /// invoke it through an injected delegate without holding an AppShell
+    /// session (batch). Otherwise (local): REAL streaming via transcribe.cpp +
+    /// the Nemotron streaming model when <paramref name="nemotronEngine"/>
+    /// yields an engine, else BatchStreamingAdapter (one batch transcription
+    /// at stop). Static, taking its dependencies explicitly, so the pipeline
+    /// can invoke it through an injected delegate without holding an AppShell
     /// instance. NOTE: the streaming connect sends no keyterms — v3 streaming
     /// DOES support keyterms_prompt but wiring it is deferred (Task 7 Protocol
     /// facts); custom_spelling is batch-only. User corrections still apply via
@@ -422,6 +427,7 @@ public sealed class AppShell : IDisposable
         string loadedModelName,
         AppSettings settings,
         Action<string> onFallback,
+        Func<Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine?>? nemotronEngine,
         Winpepper.Asr.Transcription.IAssemblyAiClient client,
         Winpepper.Asr.Transcription.IAssemblyAiKeyStore keyStore,
         Winpepper.Asr.Transcription.AssemblyAiOptions options,
@@ -431,12 +437,25 @@ public sealed class AppShell : IDisposable
     {
         var localBatch = new Winpepper.Asr.Transcription.ParakeetTranscriber(
             local, loadedModelName);
-        var localStreaming = new Winpepper.Asr.Transcription.ParakeetStreamingTranscriber(
-            local, localBatch, loadedModelName, Winpepper.Asr.PreprocessorConfig.ParakeetTdtV3,
-            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.ParakeetStreamingTranscriber>());
 
         if (!string.Equals(settings.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase))
-            return localStreaming;
+        {
+            // Local streaming: REAL streaming only via transcribe.cpp + the
+            // Nemotron streaming model. The chunked-TDT ParakeetStreamingTranscriber
+            // is deliberately NOT wired anymore: it cannot stream (blank-collapse,
+            // see docs/plans/2026-07-25-streaming-verification-evidence.md) and its
+            // guard carries a residual false-negative risk. Without the engine we
+            // go straight to the batch adapter — same result, no doomed attempt.
+            var engine = nemotronEngine?.Invoke();
+            if (engine is not null)
+            {
+                return new Winpepper.Asr.Transcription.NemotronStreamingTranscriber(
+                    () => engine, localBatch,
+                    Winpepper.Asr.TranscribeCpp.NemotronStreamingModel.Name,
+                    loggerFactory.CreateLogger<Winpepper.Asr.Transcription.NemotronStreamingTranscriber>());
+            }
+            return new Winpepper.Asr.Transcription.BatchStreamingAdapter(localBatch);
+        }
 
         // Snapshot corrections into request extras at build time; keyterms only
         // when opted in — copied verbatim from today's BuildTranscriber. The REST

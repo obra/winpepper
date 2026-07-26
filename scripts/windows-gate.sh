@@ -63,7 +63,7 @@ mkdir -p "$LOG_DIR"
 
 # Cross-OS hygiene pre-clean (see header): remove Linux-built intermediates so
 # every Windows build below starts from a clean slate and compiles each
-# project exactly once. rm -f tolerates non-matching globs.
+# project exactly once. rm -rf tolerates non-matching globs.
 echo "windows-gate: pre-clean src/**/{bin,obj} and tests/**/{bin,obj}"
 rm -rf "$HERE"/src/*/bin "$HERE"/src/*/obj "$HERE"/tests/*/bin "$HERE"/tests/*/obj
 
@@ -81,8 +81,12 @@ run_ps() { # run_ps <timeout_s> <logfile> <ps-command>
 # any TIMEOUT, kill orphaned dotnet.exe processes whose command line points
 # at THIS checkout — never anything else, never Winpepper.exe.
 kill_orphans() {
+  # Derive the filter from this checkout's directory name so the gate works
+  # from any worktree or the main checkout, not just one hardcoded name.
+  local tag
+  tag="$(basename "$HERE")"
   "$PS" -NoProfile -Command \
-    "Get-CimInstance Win32_Process -Filter \"Name='dotnet.exe'\" | Where-Object { \$_.CommandLine -like '*streaming-verification*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
+    "Get-CimInstance Win32_Process -Filter \"Name='dotnet.exe'\" | Where-Object { \$_.CommandLine -like '*$tag*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
     >/dev/null 2>&1 || true
 }
 

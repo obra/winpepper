@@ -5,3 +5,13 @@
   - Before pushing: the FULL suite (all 9 test projects, including Windows-only TFMs) must pass on a Windows host.
   - How to run: build each project in `tests/` with `-c Release`, then execute via the xUnit v3 in-process runner (`dotnet exec <built test dll>`). Do not rely on `dotnet test` — the VSTest host is unreliable on some dev machines.
   - On Linux, provision the .NET 9 SDK locally if needed (`/.dotnet` is gitignored). A green Linux run is necessary but not sufficient — Windows-only code (WinUI, NAudio, DPAPI) only compiles and runs on Windows.
+  - From WSL, THE way to satisfy the Windows pre-push rule is `./scripts/windows-gate.sh`:
+    it builds `Winpepper.App` (Release, `-p:UseXamlCompilerExecutable=true`) and builds + runs
+    all 9 test projects (12 project/TFM runs) on the Windows host via `powershell.exe` interop
+    over the `\\wsl.localhost` UNC path. Exit 0 with `GATE: GREEN` = pass. It never installs
+    the MSI, never launches or kills `Winpepper.exe`, and never writes to
+    `%LOCALAPPDATA%\winpepper`.
+- **ASR model-level audio evidence:** `./scripts/run-bench-windows.sh` builds the latency bench
+  with the Windows dotnet, generates reference TTS WAVs on the host, and runs the real Parakeet
+  model batch-vs-streaming over them (transcripts, post-stop latency, word-level diff). Recorded
+  results: `docs/plans/2026-07-25-streaming-verification-evidence.md`.

@@ -11,18 +11,18 @@
     <PackageReference Include="coverlet.collector" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\\..\\src\\Winpepper.Asr\\Winpepper.Asr.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Asr\Winpepper.Asr.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <None Update="fixtures\\**\\*">
+    <None Update="fixtures\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="..\\..\\scripts\\asr-latency-bench\\BenchAudio.cs" Link="Bench\\BenchAudio.cs" />
-    <Compile Include="..\\..\\scripts\\asr-latency-bench\\TranscriptDiff.cs" Link="Bench\\TranscriptDiff.cs" />
-    <Compile Include="..\\..\\scripts\\asr-eval-corpus\\CorpusManifest.cs" Link="Corpus\\CorpusManifest.cs" />
-    <Compile Include="..\\..\\scripts\\asr-eval-corpus\\HistoryIndex.cs" Link="Corpus\\HistoryIndex.cs" />
-    <Compile Include="..\\..\\scripts\\asr-eval-corpus\\CorpusExport.cs" Link="Corpus\\CorpusExport.cs" />
+    <Compile Include="..\..\scripts\asr-latency-bench\BenchAudio.cs" Link="Bench\BenchAudio.cs" />
+    <Compile Include="..\..\scripts\asr-latency-bench\TranscriptDiff.cs" Link="Bench\TranscriptDiff.cs" />
+    <Compile Include="..\..\scripts\asr-eval-corpus\CorpusManifest.cs" Link="Corpus\CorpusManifest.cs" />
+    <Compile Include="..\..\scripts\asr-eval-corpus\HistoryIndex.cs" Link="Corpus\HistoryIndex.cs" />
+    <Compile Include="..\..\scripts\asr-eval-corpus\CorpusExport.cs" Link="Corpus\CorpusExport.cs" />
   </ItemGroup>
 </Project>

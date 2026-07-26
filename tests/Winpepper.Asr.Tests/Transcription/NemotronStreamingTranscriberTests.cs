@@ -36,6 +36,7 @@ public class NemotronStreamingTranscriberTests
         Assert.True(engine.LastStream.Finalized);
         Assert.Equal("hello world final", result.Text);
         Assert.Equal("nemotron-streaming-en", result.ProviderModelName);
+        Assert.Equal(0, batch.Calls);
     }
 
     [Fact]
@@ -59,6 +60,7 @@ public class NemotronStreamingTranscriberTests
         var result = await s.FinishAsync(Samples(16000), CancellationToken.None);
         Assert.Equal("batch text", result.Text);
         Assert.True(engine.LastStream is null || !engine.LastStream.Finalized);
+        Assert.Equal(1, batch.Calls);
     }
 
     [Fact]
@@ -71,6 +73,7 @@ public class NemotronStreamingTranscriberTests
         await s.PushAsync(Samples(4000), CancellationToken.None);
         var result = await s.FinishAsync(Samples(4000), CancellationToken.None);
         Assert.Equal("batch text", result.Text);
+        Assert.Equal(1, batch.Calls);
     }
 
     [Fact]

@@ -18,10 +18,21 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $artifactsDir = Join-Path $repoRoot 'artifacts'
 $sandboxDir = Join-Path $repoRoot 'scripts\windows-sandbox'
 
-# Verify Windows Sandbox is available
-if (-not (Get-Command 'WindowsSandboxClient.exe' -ErrorAction SilentlyContinue)) {
-    if (-not (Get-WindowsOptionalFeature -Online -FeatureName 'Containers-DisposableClient' -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Enabled' })) {
-        throw 'Windows Sandbox does not appear to be enabled. Open ''Windows Features'' and check ''Windows Sandbox'', then reboot.'
+# Verify Windows Sandbox is available. Probe for the executables first;
+# Get-WindowsOptionalFeature -Online requires elevation, so it is only used as
+# a positive "definitely disabled" signal — an inconclusive query (e.g. from a
+# non-admin prompt) must not produce a false "not enabled" failure.
+$sandboxOnPath = Get-Command 'WindowsSandbox.exe', 'WindowsSandboxClient.exe' -ErrorAction SilentlyContinue
+$sandboxInSystem32 = @('WindowsSandbox.exe', 'WindowsSandboxClient.exe') |
+    ForEach-Object { Join-Path $env:windir "System32\$_" } |
+    Where-Object { Test-Path $_ }
+if (-not $sandboxOnPath -and -not $sandboxInSystem32) {
+    $feature = Get-WindowsOptionalFeature -Online -FeatureName 'Containers-DisposableClientVM' -ErrorAction SilentlyContinue
+    if ($feature -and $feature.State -ne 'Enabled') {
+        throw 'Windows Sandbox is not enabled. Open ''Windows Features'' and check ''Windows Sandbox'', then reboot.'
+    }
+    if (-not $feature) {
+        Write-Warning 'Could not confirm Windows Sandbox is enabled (executable not found; feature query needs elevation). Continuing - launch will fail if it is not enabled.'
     }
 }
 

@@ -19,11 +19,17 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
     private readonly LLamaWeights _weights;
     private readonly ModelParams _params;
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
+    private readonly uint? _samplingSeed;
 
+    /// <param name="samplingSeed">Optional fixed sampling seed. Null (production)
+    /// keeps LLamaSharp's default random seed; the prompt eval suite pins it for
+    /// determinism on top of the temp-0.1 sampling.</param>
     public LlamaCleanupBackend(string modelPath, ILogger<LlamaCleanupBackend> log,
-                                int contextSize = 4096, int gpuLayerCount = 999)
+                                int contextSize = 4096, int gpuLayerCount = 999,
+                                uint? samplingSeed = null)
     {
         _log = log;
+        _samplingSeed = samplingSeed;
         _params = new ModelParams(modelPath)
         {
             ContextSize = (uint)contextSize,
@@ -71,16 +77,18 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
             {
                 ApplyTemplate = false,
             };
+            var pipeline = new DefaultSamplingPipeline
+            {
+                Temperature = temperature,
+                TopP = 0.95f,
+                TopK = 40,
+            };
+            if (_samplingSeed is { } seed) pipeline.Seed = seed;
             var inferenceParams = new InferenceParams
             {
                 MaxTokens = maxNewTokens,
                 AntiPrompts = new List<string> { "<|im_end|>", "</USER-INPUT>", "<USER-INPUT>", "<BASE-PROMPT>" },
-                SamplingPipeline = new DefaultSamplingPipeline
-                {
-                    Temperature = temperature,
-                    TopP = 0.95f,
-                    TopK = 40,
-                },
+                SamplingPipeline = pipeline,
             };
 
             var sb = new StringBuilder();

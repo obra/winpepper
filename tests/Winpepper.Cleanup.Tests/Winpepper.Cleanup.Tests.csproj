@@ -15,5 +15,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
     <ProjectReference Include="..\..\src\Winpepper.Corrections\Winpepper.Corrections.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Models\Winpepper.Models.csproj" />
   </ItemGroup>
 </Project>

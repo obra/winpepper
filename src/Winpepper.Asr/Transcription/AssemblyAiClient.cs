@@ -70,7 +70,7 @@ public sealed class AssemblyAiClient : IAssemblyAiClient
             ["speech_models"] = new[] { model }, // plural array — singular `speech_model` is deprecated
             ["format_text"] = true,
             ["punctuate"] = true,
-            ["disfluencies"] = false,
+            ["disfluencies"] = _opts.Disfluencies,
             ["language_code"] = _opts.LanguageCode,
         };
         if (extras.CustomSpelling.Count > 0)

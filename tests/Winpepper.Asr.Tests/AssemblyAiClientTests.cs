@@ -124,6 +124,25 @@ public sealed class AssemblyAiClientTests
     }
 
     [Fact]
+    public async Task CreateTranscript_DisfluenciesOptionTrue_SendsDisfluenciesTrue()
+    {
+        var handler = new FakeHttpMessageHandler()
+            .Enqueue(HttpStatusCode.OK, "{\"id\":\"t-9\",\"status\":\"queued\"}");
+        var http = new HttpClient(handler);
+        var opts = new AssemblyAiOptions { Disfluencies = true };
+        var client = new AssemblyAiClient(http, () => "KEY", opts, NullLogger<AssemblyAiClient>.Instance,
+            (ts, _) => Task.CompletedTask);
+
+        await client.CreateTranscriptAsync("https://cdn/aai/ok", "universal-3-5-pro",
+            AssemblyAiRequestExtras.Empty, CancellationToken.None);
+
+        var json = Encoding.UTF8.GetString(handler.RequestBodies[0]);
+        json.ShouldContain("\"disfluencies\":true");
+        json.ShouldContain("\"format_text\":true");   // formatting stays on
+        json.ShouldContain("\"punctuate\":true");
+    }
+
+    [Fact]
     public async Task CreateTranscript_MapsCustomSpelling_AndKeyterms()
     {
         var handler = new FakeHttpMessageHandler()

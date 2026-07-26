@@ -6,6 +6,10 @@ public sealed class AssemblyAiOptions
     public string StreamingBaseUrl { get; init; } = "wss://streaming.assemblyai.com";
     public string Model { get; init; } = "universal-2";
     public string LanguageCode { get; init; } = "en_us";
+    // Include filler words ("um", "uh") in the transcript verbatim. Off by
+    // default: dictation output should be clean. Eval reference generation
+    // turns this on so local models are not penalized for transcribing fillers.
+    public bool Disfluencies { get; init; } = false;
 
     // Single owned cloud budget. FallbackTranscriber cancels the cloud attempt
     // after CloudDeadline; the client caps each HTTP request at PerRequestTimeout

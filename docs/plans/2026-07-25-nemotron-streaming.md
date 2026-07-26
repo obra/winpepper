@@ -36,6 +36,9 @@ transcribe.cpp v0.1.3 (MIT), nemotron-speech-streaming-en-0.6b Q8_0 GGUF
 - Default streaming lookahead `att_context_right = 13` (1040 ms). Audio is always 16 kHz mono float32 in [-1, 1].
 - Verified ABI struct sizes (x86-64): `model_load_params`=16, `stream_params`=24, `capabilities`=56, `stream_update`=48, `stream_text`=64, `parakeet_stream_ext`=24 (offset of `att_context_right` is **16**). Every marshaled struct must be verified via `transcribe_abi_struct_size()` at engine init; PKST has no ABI id — assert via `[StructLayout(Size = 24)]` + a managed `Marshal.SizeOf` test.
 - Text pointers returned by `transcribe_stream_get_text` are invalidated by every feed/finalize — copy with `Marshal.PtrToStringUTF8` immediately. A native session is single-threaded. Keep the log callback delegate alive statically.
+- **One compute in flight per model (verified against v0.1.3 transcribe.h:11-20):** transcribe.cpp 0.x does NOT support concurrent compute — "at most one transcribe_run / transcribe_run_batch / active stream may be in flight across ALL sessions of a given model"; overlap produces corrupted decodes. The header's sanctioned fix: "Serialized use of many sessions on one model … is fully supported." The engine therefore owns a compute gate: `BeginStream` holds it for the stream's entire lifetime (released on stream dispose), `TranscribeBatch` holds it for the call (Task 4). The final transcript is always read from `full_text` (authoritative); `committed_text` is best-effort partials.
+- **Session calls can race by design (verified in StreamingDictationSession.cs:126-138 + PipelineHost):** the pipeline DISPOSES a seam session as a concurrent abort while `PushAsync`/`FinishAsync` may be in flight (cancel, silence-drop, drain-timeout, teardown). The Nemotron session must serialize all native access under a session-level lock and make post-dispose calls harmless (Task 5).
+- **VC++ redistributable prerequisite (verified by PE import dump of the real transcribe.dll):** transcribe.dll statically imports MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll — NOT in the tarball, NOT OS-inbox, NOT shipped by the app. On machines without the VC++ 2015–2022 x64 redist the engine load fails; the holder latches to batch (graceful), and the load-error message + README must name the prerequisite (Tasks 4/10). Same-dir statics (ggml.dll, ggml-base.dll) resolve fine: `NativeLibrary.Load(<abs path>)` uses altered search; the ggml backend DLLs are dynamically loaded (GGML_BACKEND_DL confirmed).
 - Do NOT bundle the model or runtime into the MSI (`packaging/winpepper.wxs` stays untouched).
 - Commit style: conventional commits, footer:
   ```
@@ -45,7 +48,7 @@ transcribe.cpp v0.1.3 (MIT), nemotron-speech-streaming-en-0.6b Q8_0 GGUF
   ```
 - Nothing is pushed; the branch stays unmerged for user review.
 - README.md is the only end-user markdown doc; `docs/plans/*` are working/agent docs. `THIRD-PARTY-NOTICES.md` is explicitly requested (Task 10).
-- Reference material: proven spike code at `/home/dan/code/winpepper/artifacts/transcribe-spike-src/Program.cs` (read it — every marshaling fact below is proven there); v0.1.3 headers at `/tmp/t013/transcribe.h` + `/tmp/t013/parakeet.h` (if missing, re-fetch: `mkdir -p /tmp/t013 && curl -sL https://raw.githubusercontent.com/handy-computer/transcribe.cpp/v0.1.3/include/transcribe.h -o /tmp/t013/transcribe.h && curl -sL https://raw.githubusercontent.com/handy-computer/transcribe.cpp/v0.1.3/include/parakeet.h -o /tmp/t013/parakeet.h`). Windows spike scratch (reusable for bench, read-only): `C:\Users\dan\AppData\Local\Temp\transcribe-spike\` containing `nemotron-speech-streaming-en-0.6b-Q8_0.gguf`, `transcribe-native.tar.gz`, extracted dir `transcribe-native-windows-x86_64-cpu-vulkan\`, and test WAVs.
+- Reference material: proven spike code at `/home/dan/code/winpepper/artifacts/transcribe-spike-src/Program.cs` (read it — every marshaling fact below is proven there); v0.1.3 headers at `/tmp/t013/transcribe.h` + `/tmp/t013/parakeet.h` (if missing, re-fetch: `mkdir -p /tmp/t013 && curl -sL https://raw.githubusercontent.com/handy-computer/transcribe.cpp/v0.1.3/include/transcribe.h -o /tmp/t013/transcribe.h && curl -sL https://raw.githubusercontent.com/handy-computer/transcribe.cpp/v0.1.3/include/transcribe/parakeet.h -o /tmp/t013/parakeet.h`; note parakeet.h lives under `include/transcribe/`). Windows spike scratch (reusable for bench, read-only): `C:\Users\dan\AppData\Local\Temp\transcribe-spike\` containing `nemotron-speech-streaming-en-0.6b-Q8_0.gguf`, `transcribe-native.tar.gz`, extracted dir `transcribe-native-windows-x86_64-cpu-vulkan\`, and test WAVs.
 
 ### Pinned acquisition facts (verified 2026-07-25 against source APIs AND local sha256sum of the spike's files — do not re-derive)
 
@@ -89,7 +92,33 @@ transcribe.cpp v0.1.3 (MIT), nemotron-speech-streaming-en-0.6b Q8_0 GGUF
 5. **Engine lifetime:** the model (~0.9 s load) is loaded lazily once per
    process by `NemotronEngineHolder` and never freed (no dispose race, no
    `OrphanedPumpGuard` changes). Each dictation gets its own native *session*
-   (created in `BeginStream`, freed on stream dispose).
+   (created in `BeginStream`, freed on stream dispose) — and, per the v0.1.3
+   header contract, at most ONE compute may be in flight per model, so the
+   engine serializes stream lifetimes and batch runs behind a compute gate
+   (Task 4). Memory honesty (load-bearing review, 2026-07-25): once loaded,
+   ~1 GB stays resident until the app exits. Handy — the tool whose engine we
+   reuse — shipped exactly this posture for months, then moved to a 5-minute
+   idle unload by default (PR #1051). v1 deliberately keeps never-free (an
+   unload path would reintroduce the dispose races this design avoids and the
+   model is opt-in-install); the residency is stated honestly in the model
+   card caption and README, and idle-unload is the recorded follow-up.
+6. **Performance posture on weaker hardware (load-bearing review, 2026-07-25):**
+   the dev-host feed RTF is 0.112, but field evidence (Handy issue #1754,
+   maintainer) puts low-end laptops at only 1–2x real time. There is no
+   runtime perf gate by design: exposure is limited to users who explicitly
+   install the streaming model, and the full batch-fallback guard
+   (`was_truncated`/failure ⇒ TDT batch) is the safety valve — a slow machine
+   gets today's batch behavior (plus wasted stream cost), never a corrupt
+   transcript. The bench (Task 9) records real feed/finalize numbers; if the
+   evidence shows the guard firing on the dev host, that is an acceptance
+   failure, not a tuning knob.
+7. **Fallback visibility asymmetry (intentional):** the cloud streaming path
+   notifies users of fallback via `onFallback` (a toast with cloud-specific
+   wording — `FallbackStreamingTranscriber.cs:129`, `PipelineHost.cs:443-447`).
+   The local nemotron→batch fallback only logs a loud warning: the user still
+   gets a correct local transcript, just slower, and the existing toast text
+   would be wrong for it. The new local branch passes but never invokes
+   `onFallback`.
 
 ## File Structure
 
@@ -520,7 +549,7 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 - Test: `tests/Winpepper.Models.Tests/ModelDownloaderExtractionTests.cs`
 
 **Interfaces:**
-- Consumes: `ModelDownloader.DownloadOneAsync` internals (`ModelDownloader.cs:60-175`): already-installed short-circuit at `:66-78`, final `File.Move(partialPath, finalPath, overwrite: true)` at `:389` region. `ModelFile` record (`ModelFile.cs`).
+- Consumes: `ModelDownloader.DownloadOneAsync` internals (`ModelDownloader.cs:60-175`): already-installed short-circuit at `:66-78`, final `File.Move(partialPath, finalPath, overwrite: true)` at `:173`. `ModelFile` record (`ModelFile.cs`).
 - Produces: `ModelFile.ExtractToRelative : string?` (null = no extraction); `public static class TarGzExtractor { static void EnsureExtracted(string archivePath, string destinationDir, string archiveSha256); }`. Marker file convention: `<archivePath>.extracted` containing the archive's SHA-256 (lowercase hex); presence with matching content = already extracted.
 
 - [ ] **Step 1: Write the failing extractor tests**
@@ -622,6 +651,13 @@ namespace Winpepper.Models;
 /// archive's SHA-256 records a completed extraction; a missing or stale marker
 /// triggers a clean re-extract (destination dir is deleted first, so a
 /// half-extracted tree can never be mistaken for a good one).
+/// ORDERING IS LOAD-BEARING: the destination tree is deleted BEFORE the marker,
+/// so a failed delete (Windows locks a loaded transcribe.dll and its tree)
+/// leaves the old marker + old tree consistent instead of latching a sticky
+/// "no marker, undeletable dir" state. A locked tree surfaces as a clear
+/// restart-required error; the engine holder caches a loaded engine for the
+/// process lifetime anyway, so an in-process runtime swap could never take
+/// effect — restart-required is the honest contract.
 /// TarFile.ExtractToDirectory rejects path-traversal entries by design.
 /// </summary>
 public static class TarGzExtractor
@@ -635,8 +671,22 @@ public static class TarGzExtractor
             return;
         }
 
-        if (File.Exists(marker)) File.Delete(marker);
-        if (Directory.Exists(destinationDir)) Directory.Delete(destinationDir, recursive: true);
+        if (Directory.Exists(destinationDir))
+        {
+            try
+            {
+                Directory.Delete(destinationDir, recursive: true);
+            }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+            {
+                // Loaded native DLLs lock the tree (engine already running).
+                throw new IOException(
+                    $"Cannot replace the extracted runtime at '{destinationDir}': files are in " +
+                    "use (the streaming engine is loaded in this or another process). " +
+                    "Restart the app, then retry the install.", e);
+            }
+        }
+        if (File.Exists(marker)) File.Delete(marker);   // only after the tree is gone
         Directory.CreateDirectory(destinationDir);
 
         using (var fs = File.OpenRead(archivePath))
@@ -990,11 +1040,17 @@ public interface ITranscribeCppStream : IDisposable
 public interface ITranscribeCppEngine : IDisposable
 {
     string ModelName { get; }
-    /// <summary>Begin one streaming session (one per dictation).
+    /// <summary>Begin one streaming session (one per dictation). Acquires the
+    /// engine-wide compute gate for the STREAM'S LIFETIME (released when the
+    /// stream is disposed) — transcribe.cpp 0.x allows at most one compute in
+    /// flight per model (see Global Constraints). Throws TranscribeCppException
+    /// if the gate cannot be acquired within 5 s (previous dictation's stream
+    /// not yet disposed) — callers fall back to batch.
     /// attContextRight in encoder frames: {13,6,1,0} = {1040,480,80,0} ms.</summary>
     ITranscribeCppStream BeginStream(int attContextRight);
     /// <summary>Offline single-utterance transcription on a dedicated native
-    /// session (bench parity reference; not used by the app pipeline).</summary>
+    /// session (bench parity reference; not used by the app pipeline). Holds
+    /// the same compute gate for the duration of the call.</summary>
     string TranscribeBatch(float[] mono16k);
 }
 ```
@@ -1156,7 +1212,13 @@ namespace Winpepper.Asr.TranscribeCpp;
 /// Any failure throws TranscribeCppException — callers fall back to batch.
 /// The model handle lives until Dispose (in practice: process lifetime via
 /// NemotronEngineHolder). Each BeginStream/TranscribeBatch uses its own native
-/// session. A stream/session is single-threaded.
+/// session. A stream/session is single-threaded, AND — v0.1.3 header contract
+/// (transcribe.h:11-20) — at most ONE compute (run or active stream) may be in
+/// flight across ALL sessions of a model: _computeGate serializes them.
+/// BeginStream holds the gate for the stream's lifetime (released on stream
+/// dispose); TranscribeBatch holds it per call. A 5 s acquire timeout turns a
+/// stuck predecessor into a TranscribeCppException (=> batch fallback), never
+/// a deadlock.
 /// </summary>
 public sealed class TranscribeCppEngine : ITranscribeCppEngine
 {
@@ -1172,6 +1234,11 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
     };
 
     private readonly IntPtr _model;
+    // v0.1.3 contract: at most one compute in flight per model across ALL
+    // sessions (transcribe.h:11-20). BeginStream holds this for the stream's
+    // lifetime; TranscribeBatch per call.
+    private readonly SemaphoreSlim _computeGate = new(1, 1);
+    private static readonly TimeSpan s_gateTimeout = TimeSpan.FromSeconds(5);
     private bool _disposed;
 
     public string ModelName { get; }
@@ -1212,7 +1279,21 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
                         : IntPtr.Zero);
                 s_resolverInstalled = true;
                 // 3. first native call, per header contract: once, at startup.
-                TranscribeCppNative.transcribe_log_set(s_log, IntPtr.Zero);
+                // transcribe.dll statically imports the VC++ 2015-2022 x64 CRT
+                // (msvcp140/vcruntime140/vcruntime140_1 — verified by PE import
+                // dump); on a machine without the redist the first call throws
+                // DllNotFoundException. Name the fix in the error.
+                try
+                {
+                    TranscribeCppNative.transcribe_log_set(s_log, IntPtr.Zero);
+                }
+                catch (Exception e) when (e is DllNotFoundException or BadImageFormatException)
+                {
+                    throw new TranscribeCppException(
+                        "failed to load transcribe.dll — likely missing the Microsoft " +
+                        "Visual C++ 2015-2022 x64 Redistributable (msvcp140/vcruntime140). " +
+                        "Install it from aka.ms/vs/17/release/vc_redist.x64.exe and retry.", e);
+                }
             }
             else if (!string.Equals(s_runtimeDir, runtimeDir, StringComparison.OrdinalIgnoreCase))
             {
@@ -1282,6 +1363,25 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
     public ITranscribeCppStream BeginStream(int attContextRight)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        // One compute in flight per model: hold the gate for the stream's
+        // lifetime. A previous dictation's stream normally disposes in ms; a
+        // 5 s timeout means a stuck one degrades to batch, never corrupts.
+        if (!_computeGate.Wait(s_gateTimeout))
+            throw new TranscribeCppException(
+                "another transcription is still active on the engine (compute gate timeout)");
+        try
+        {
+            return BeginStreamHoldingGate(attContextRight);
+        }
+        catch
+        {
+            _computeGate.Release();
+            throw;
+        }
+    }
+
+    private ITranscribeCppStream BeginStreamHoldingGate(int attContextRight)
+    {
         var st = TranscribeCppNative.transcribe_session_init(_model, IntPtr.Zero, out var session);
         if (st != 0)
             throw new TranscribeCppException($"session_init failed: {TranscribeCppNative.Status(st)}");
@@ -1311,7 +1411,7 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
                 Marshal.FreeHGlobal(pExt);
                 if (pSp != IntPtr.Zero) Marshal.FreeHGlobal(pSp);
             }
-            return new NativeStream(session);
+            return new NativeStream(session, () => _computeGate.Release());
         }
         catch
         {
@@ -1324,20 +1424,30 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (mono16k.Length == 0) return "";
-        var st = TranscribeCppNative.transcribe_session_init(_model, IntPtr.Zero, out var session);
-        if (st != 0)
-            throw new TranscribeCppException($"session_init failed: {TranscribeCppNative.Status(st)}");
+        if (!_computeGate.Wait(s_gateTimeout))
+            throw new TranscribeCppException(
+                "another transcription is still active on the engine (compute gate timeout)");
         try
         {
-            var stRun = TranscribeCppNative.transcribe_run(session, mono16k, mono16k.Length, IntPtr.Zero);
-            if (stRun != 0)
-                throw new TranscribeCppException($"transcribe_run failed: {TranscribeCppNative.Status(stRun)}");
-            // Copy immediately — pointer dies with the session.
-            return TranscribeCppNative.Str(TranscribeCppNative.transcribe_full_text(session));
+            var st = TranscribeCppNative.transcribe_session_init(_model, IntPtr.Zero, out var session);
+            if (st != 0)
+                throw new TranscribeCppException($"session_init failed: {TranscribeCppNative.Status(st)}");
+            try
+            {
+                var stRun = TranscribeCppNative.transcribe_run(session, mono16k, mono16k.Length, IntPtr.Zero);
+                if (stRun != 0)
+                    throw new TranscribeCppException($"transcribe_run failed: {TranscribeCppNative.Status(stRun)}");
+                // Copy immediately — pointer dies with the session.
+                return TranscribeCppNative.Str(TranscribeCppNative.transcribe_full_text(session));
+            }
+            finally
+            {
+                TranscribeCppNative.transcribe_session_free(session);
+            }
         }
         finally
         {
-            TranscribeCppNative.transcribe_session_free(session);
+            _computeGate.Release();
         }
     }
 
@@ -1351,10 +1461,15 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
     private sealed class NativeStream : ITranscribeCppStream
     {
         private readonly IntPtr _session;
+        private readonly Action _releaseComputeGate;
         private string _lastCommitted = "";
         private bool _disposed;
 
-        public NativeStream(IntPtr session) => _session = session;
+        public NativeStream(IntPtr session, Action releaseComputeGate)
+        {
+            _session = session;
+            _releaseComputeGate = releaseComputeGate;
+        }
 
         public string? Feed(float[] samples, int count)
         {
@@ -1404,7 +1519,14 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
         {
             if (_disposed) return;
             _disposed = true;
-            TranscribeCppNative.transcribe_session_free(_session);
+            try
+            {
+                TranscribeCppNative.transcribe_session_free(_session);
+            }
+            finally
+            {
+                _releaseComputeGate();   // exactly once — the compute gate frees here
+            }
         }
     }
 }
@@ -1469,6 +1591,15 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
   - never throws from `PushAsync` (except OCE) — any engine failure latches "corrupt";
   - `FinishAsync` falls back to `batchFallback(fullAudio)` with a LOUD `LogWarning` when: engine/stream creation failed, any feed threw, finalize threw, `WasTruncated`, the final text is null/whitespace, or **zero samples were ever pushed** (the streaming-disabled "late path" calls the seam with zero pushes — go straight to batch, don't spin up a native stream);
   - the transcriber never disposes the engine (the holder owns it); it disposes only its stream.
+  - **Dispose is a concurrent abort (verified pipeline behavior):**
+    `StreamingDictationSession`/`PipelineHost` call `DisposeAsync` WHILE a
+    `PushAsync`/`FinishAsync` may still be in flight (cancel, silence-drop,
+    drain-timeout, teardown — StreamingDictationSession.cs:126-138). All native
+    stream access (create/feed/finalize/dispose) is therefore serialized under
+    a session-level lock, and after dispose the session never touches native
+    again: `PushAsync` becomes a no-op, `FinishAsync` goes straight to batch
+    fallback. Native calls are short (a 160 ms feed computes in ~20 ms), so a
+    plain `lock` is fine; the batch-fallback await happens OUTSIDE the lock.
   - "Committed text growth" note: for this model family, committed text grows
     append-only during speech and tentative stays empty — committed IS the
     partial stream. The existing `IStreamingTranscriptionSession` seam exposes
@@ -1709,6 +1840,34 @@ public class NemotronStreamingTranscriberTests
         await s.PushAsync(Samples(2560), CancellationToken.None);
         Assert.Equal(13, engine.LastStream!.AttContextRight);
     }
+
+    // Dispose-is-abort contract: the pipeline disposes sessions while pushes
+    // may still arrive (cancel / silence-drop / drain-timeout / teardown).
+    [Fact]
+    public async Task Push_after_dispose_is_a_harmless_no_op()
+    {
+        var engine = new FakeTranscribeCppEngine();
+        var t = Make(engine, new RecordingBatchTranscriber());
+        var s = await t.StartSessionAsync(CancellationToken.None);
+        await s.PushAsync(Samples(2560), CancellationToken.None);
+        await s.DisposeAsync();                                   // pipeline abort path
+        await s.PushAsync(Samples(2560), CancellationToken.None); // must NOT throw
+        Assert.Single(engine.LastStream!.FeedCounts);             // no native touch after dispose
+    }
+
+    [Fact]
+    public async Task Finish_after_dispose_falls_back_to_batch_without_native_calls()
+    {
+        var engine = new FakeTranscribeCppEngine();
+        var batch = new RecordingBatchTranscriber();
+        var t = Make(engine, batch);
+        var s = await t.StartSessionAsync(CancellationToken.None);
+        await s.PushAsync(Samples(2560), CancellationToken.None);
+        await s.DisposeAsync();
+        var result = await s.FinishAsync(Samples(4000), CancellationToken.None);
+        Assert.Equal("batch text", result.Text);
+        Assert.False(engine.LastStream!.Finalized);
+    }
 }
 ```
 
@@ -1775,11 +1934,17 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private readonly ILogger? _log;
 
         private readonly float[] _buffer = new float[FeedChunkSamples];
+        // Serializes ALL native stream access. The pipeline disposes sessions
+        // as a concurrent abort (cancel/silence-drop/drain-timeout/teardown),
+        // so Push/Finish/Dispose can genuinely race — never let two of them
+        // touch the native stream at once, and never touch it after dispose.
+        private readonly object _nativeGate = new();
         private int _buffered;
         private ITranscribeCppStream? _stream;
         private bool _streamed;   // at least one successful native feed
         private bool _corrupt;
         private string? _corruptReason;
+        private bool _disposed;
 
         public Session(Func<ITranscribeCppEngine> engineProvider, ITranscriber batchFallback,
             string modelName, int attContextRight, ILogger? log)
@@ -1794,72 +1959,103 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         public ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
-            if (_corrupt) return ValueTask.CompletedTask;
-            try
+            lock (_nativeGate)
             {
-                EnsureStream();
-                var span = mono16k.Span;
-                var offset = 0;
-                while (offset < span.Length)
+                if (_disposed || _corrupt) return ValueTask.CompletedTask;
+                try
                 {
-                    var take = Math.Min(FeedChunkSamples - _buffered, span.Length - offset);
-                    span.Slice(offset, take).CopyTo(_buffer.AsSpan(_buffered));
-                    _buffered += take;
-                    offset += take;
-                    if (_buffered == FeedChunkSamples)
+                    EnsureStream();
+                    var span = mono16k.Span;
+                    var offset = 0;
+                    while (offset < span.Length)
                     {
-                        _stream!.Feed(_buffer, FeedChunkSamples);
-                        _streamed = true;
-                        _buffered = 0;
+                        var take = Math.Min(FeedChunkSamples - _buffered, span.Length - offset);
+                        span.Slice(offset, take).CopyTo(_buffer.AsSpan(_buffered));
+                        _buffered += take;
+                        offset += take;
+                        if (_buffered == FeedChunkSamples)
+                        {
+                            _stream!.Feed(_buffer, FeedChunkSamples);
+                            _streamed = true;
+                            _buffered = 0;
+                        }
                     }
                 }
-            }
-            catch (Exception e) when (e is not OperationCanceledException)
-            {
-                MarkCorrupt("push", e);
+                catch (Exception e) when (e is not OperationCanceledException)
+                {
+                    MarkCorrupt("push", e);
+                }
             }
             return ValueTask.CompletedTask;
         }
 
         public async Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
         {
-            // Zero pushed audio (streaming-off "late path", or all-silence
-            // recordings) — do not spin the native stream at all.
-            if (!_corrupt && _stream is null && _buffered == 0)
-                return await Fallback("no audio was streamed", fullAudio, ct).ConfigureAwait(false);
-
-            if (_corrupt)
-                return await Fallback(_corruptReason ?? "streaming failed", fullAudio, ct).ConfigureAwait(false);
-
-            try
+            // All native work happens synchronously under the lock; the batch
+            // fallback await runs OUTSIDE it (never hold a lock across await).
+            string? fallbackReason;
+            string finalText = "";
+            lock (_nativeGate)
             {
-                EnsureStream();
-                if (_buffered > 0)
+                if (_disposed)
                 {
-                    _stream!.Feed(_buffer, _buffered);   // flush the tail
-                    _streamed = true;
-                    _buffered = 0;
+                    fallbackReason = "session was disposed (aborted) before finish";
                 }
-                var (text, truncated) = _stream!.Finalize();
-                if (truncated)
-                    return await Fallback("stream reports was_truncated", fullAudio, ct).ConfigureAwait(false);
-                if (string.IsNullOrWhiteSpace(text))
-                    return await Fallback("final streamed transcript is empty", fullAudio, ct).ConfigureAwait(false);
-                if (!_streamed)
-                    return await Fallback("no chunk was ever fed", fullAudio, ct).ConfigureAwait(false);
-                return new TranscriptionResult(text, _modelName);
+                else if (!_corrupt && _stream is null && _buffered == 0)
+                {
+                    // Zero pushed audio (streaming-off "late path", or
+                    // all-silence recordings) — no native stream at all.
+                    fallbackReason = "no audio was streamed";
+                }
+                else if (_corrupt)
+                {
+                    fallbackReason = _corruptReason ?? "streaming failed";
+                }
+                else
+                {
+                    try
+                    {
+                        EnsureStream();
+                        if (_buffered > 0)
+                        {
+                            _stream!.Feed(_buffer, _buffered);   // flush the tail
+                            _streamed = true;
+                            _buffered = 0;
+                        }
+                        var (text, truncated) = _stream!.Finalize();
+                        if (truncated)
+                            fallbackReason = "stream reports was_truncated";
+                        else if (string.IsNullOrWhiteSpace(text))
+                            fallbackReason = "final streamed transcript is empty";
+                        else if (!_streamed)
+                            fallbackReason = "no chunk was ever fed";
+                        else
+                        {
+                            fallbackReason = null;
+                            finalText = text;
+                        }
+                    }
+                    catch (Exception e) when (e is not OperationCanceledException)
+                    {
+                        MarkCorrupt("finish", e);
+                        fallbackReason = _corruptReason!;
+                    }
+                }
             }
-            catch (Exception e) when (e is not OperationCanceledException)
-            {
-                MarkCorrupt("finish", e);
-                return await Fallback(_corruptReason!, fullAudio, ct).ConfigureAwait(false);
-            }
+
+            if (fallbackReason is not null)
+                return await Fallback(fallbackReason, fullAudio, ct).ConfigureAwait(false);
+            return new TranscriptionResult(finalText, _modelName);
         }
 
         public ValueTask DisposeAsync()
         {
-            try { _stream?.Dispose(); } catch { /* native cleanup must not throw upward */ }
-            _stream = null;
+            lock (_nativeGate)
+            {
+                _disposed = true;   // Push/Finish become no-ops / batch-only after this
+                try { _stream?.Dispose(); } catch { /* native cleanup must not throw upward */ }
+                _stream = null;
+            }
             return ValueTask.CompletedTask;
         }
 
@@ -1890,7 +2086,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Asr.Tests -f net9.0 --filter "FullyQualifiedName~NemotronStreamingTranscriber" 2>&1 | tail -5`
-Expected: PASS (10 tests).
+Expected: PASS (12 tests).
 
 - [ ] **Step 6: Full suite + commit**
 
@@ -1917,6 +2113,13 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 **Interfaces:**
 - Consumes: `TranscribeCppEngine.Load`, `NemotronStreamingModel.IsInstalled/GgufPath/RuntimeDir`, `NemotronStreamingTranscriber`, existing `BatchStreamingAdapter` (read `src/Winpepper.Asr/Transcription/BatchStreamingAdapter.cs` for its exact ctor — it wraps an `ITranscriber`), `ParakeetTranscriber`.
 - Produces: `NemotronEngineHolder` with `public ITranscribeCppEngine? TryGet()` (thread-safe, lazy, caches success forever and failure until files change is NOT attempted — failure latches for process lifetime with one loud error log). `BuildStreamingTranscriber` gains one parameter: `Func<Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine?>? nemotronEngine`. The `PipelineHost` delegate signature (`Func<ParakeetSession, string, AppSettings, Action<string>, IStreamingTranscriber>`) is UNCHANGED — the AppShell.Create closure supplies the new argument.
+
+**Sequencing note (load-bearing review):** the `StreamingEnabled` default flip
+(Step 2) and the local-branch rewiring (Step 4) land in this SAME task/commit
+deliberately. Today's local ON branch still constructs the proven-broken
+chunked-TDT `ParakeetStreamingTranscriber` (`AppShell.cs:434-439`) — flipping
+the default in an earlier commit would enable that path for every local user
+until the rewire lands. Do not split these steps across commits.
 
 - [ ] **Step 1: Update the settings default test (failing first)**
 
@@ -2020,7 +2223,7 @@ itself uses.)
 
 In `src/Winpepper.App/Hosting/AppShell.cs`:
 
-1. Add the parameter after `onFallback` in the signature at `:698` region:
+1. Add the parameter after `onFallback` in the signature at `:420` (doc comment `:407`):
    ```csharp
    Func<Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine?>? nemotronEngine,
    ```
@@ -2195,7 +2398,7 @@ the Cleanup card's exact structure (installed icon + label, per-file progress
 - header text: `Live streaming model (optional)`
 - caption `TextBlock`:
   ```xml
-  <TextBlock Text="Nemotron Speech Streaming 0.6B (English only) with the transcribe.cpp runtime — about 720 MB. Enables live local streaming when 'Transcribe while you speak' is on. Model weights are under the NVIDIA Open Model License; downloaded from Hugging Face / GitHub on request."
+  <TextBlock Text="Nemotron Speech Streaming 0.6B (English only) with the transcribe.cpp runtime — about 720 MB. Enables live local streaming when 'Transcribe while you speak' is on. After your first streaming dictation the model stays loaded (about 1 GB of memory) until you close Winpepper. Model weights are under the NVIDIA Open Model License; downloaded from Hugging Face / GitHub on request. Requires the Microsoft Visual C++ x64 runtime (preinstalled on most PCs)."
              TextWrapping="Wrap"
              Foreground="{ThemeResource TextFillColorSecondaryBrush}"
              Style="{ThemeResource CaptionTextBlockStyle}" />
@@ -2242,7 +2445,7 @@ bench-adjacent manual-equivalent check in Task 9.)
 
 - [ ] **Step 1: Add the args**
 
-In the arg loop (`Program.cs:109-119`), add:
+In the arg loop (`Program.cs:26-36`), add:
 
 ```csharp
         case "--nemotron-model": nemotronModel = args[++argIdx]; break;
@@ -2366,6 +2569,13 @@ sealed class ProbeTranscriber : ITranscriber
 Add any missing `using` lines to match (the file already uses top-level
 statements with `ParakeetSession`, `Stopwatch`, `NullLogger` — check the top of
 the file).
+
+Compute-gate caution (v0.1.3 one-compute-per-model rule): `TranscribeBatch` and
+the streaming session share the engine's compute gate. The scenario above is
+safe because each leg finishes before the next starts and `await using` frees
+the stream (releasing the gate) at the end of each iteration — keep it that
+way; a leaked stream would make the next `TranscribeBatch` throw a gate-timeout
+`TranscribeCppException` rather than corrupt, but the bench run would be wasted.
 
 - [ ] **Step 3: Verify it builds on Linux**
 
@@ -2608,9 +2818,15 @@ in `src/Winpepper.Models/ModelRegistry.cs` (URL + SHA-256 verified).
   handy-computer (https://huggingface.co/handy-computer/nemotron-speech-streaming-en-0.6b-gguf)
 - License: NVIDIA Open Model License ("license: other" on Hugging Face) —
   https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/
+- Licensed by NVIDIA Corporation under the NVIDIA Open Model License
 - The weights are not redistributed by this project. Users download them
-  directly from Hugging Face via the Models tab and accept NVIDIA's license
-  terms by doing so.
+  directly from Hugging Face via the Models tab; the License provides that by
+  using, reproducing, or distributing any portion of the Model you agree to be
+  bound by the Agreement (acceptance by conduct — no click-through is
+  required). The attribution line above and this link to the Agreement are
+  included preemptively to satisfy the License's Section 3 notice condition in
+  case facilitating the download is ever characterized as distribution. The
+  License may be updated by NVIDIA; the live URL above is authoritative.
 
 ## Existing model downloads
 
@@ -2636,7 +2852,11 @@ is ready almost the moment you release the hotkey. It uses the MIT-licensed
 (downloaded alongside the model, pinned and checksum-verified; see
 THIRD-PARTY-NOTICES.md). Without it, local dictations are transcribed in one
 pass after you stop — same results, just slower to appear. All local speech
-audio stays on your machine either way.
+audio stays on your machine either way. Two practical notes: the engine needs
+the Microsoft Visual C++ x64 runtime (preinstalled on most PCs; if streaming
+silently stays off, install it from aka.ms/vs/17/release/vc_redist.x64.exe),
+and after your first streaming dictation the model stays loaded (~1 GB of
+memory) until you close Winpepper.
 ```
 
 - [ ] **Step 3: Run the Windows gate (the pre-push gate)**
@@ -2679,10 +2899,32 @@ Leave the branch unpushed and unmerged for user review.
 |---|---|
 | 1. Native binding: contract.json gate before LoadLibrary, ABI struct-size verification (fail loud → batch fallback), explicit layouts, immediate string copies, PKST att-right, pin v0.1.3 | Tasks 1, 4 (gate order in `TranscribeCppEngine.Load`; fallback via holder returning null → batch adapter, and via `TranscribeCppException` → `NemotronStreamingTranscriber` fallback) |
 | 2. Acquisition: GGUF + runtime tarball via ModelRegistry pattern (URL + SHA-256), extract + verify, storage under models dir, NOT in MSI, installable like other models | Tasks 2, 3, 7 (MSI untouched; hashes pinned & verified three ways) |
-| 3. Streaming engine behind IStreamingTranscriber; mono-16k float chunks; committed growth; finalize at stop; R=13 default; CPU backend; StreamingDictationSession / fallback / OrphanedPumpGuard / archival preserved; TDT batch untouched; AppShell wiring gated on local+installed+enabled; blank-guard semantics (empty final ⇒ batch + loud warning) | Tasks 5, 6 (pipeline coordinator untouched; engine never disposed mid-run so no OrphanedPumpGuard interaction; archival lives in PipelineHost, untouched) |
+| 3. Streaming engine behind IStreamingTranscriber; mono-16k float chunks; committed growth; finalize at stop; R=13 default; CPU backend; StreamingDictationSession / fallback / OrphanedPumpGuard / archival preserved; TDT batch untouched; AppShell wiring gated on local+installed+enabled; blank-guard semantics (empty final ⇒ batch + loud warning) | Tasks 5, 6 (pipeline coordinator untouched; engine never disposed mid-run so no OrphanedPumpGuard interaction; archival lives in PipelineHost, untouched). Concurrency hardening from the load-bearing review: engine-wide compute gate (Task 4, v0.1.3 one-compute-per-model header contract) + session-level native lock with dispose-is-abort semantics (Task 5, verified pipeline behavior) |
 | 4. UI: installable model card w/ honest English-only caption; StreamingEnabled caption update; default decision documented | Task 7; decision 1/2 in "Documented planner decisions"; default flip in Task 6 |
 | 5. Verification: bench scenario, same binding+model, 4 WAV categories, streamed-vs-batch diff + post-stop latency, parity bar = streamed-nemotron == batch-nemotron, TDT comparison characterized, <500 ms for 10 s phrase, REAL numbers in evidence doc, end-to-end manual-equivalent check | Tasks 8, 9 (streamed leg runs the real production coordinator at real-time pacing = manual-equivalent) |
 | 6. Docs/licensing: transcribe.cpp MIT notice, nemotron NVIDIA Open Model License recorded + surfaced, README updated honestly | Task 10 + Task 7 card caption |
 | Env rules: Linux suite green per commit; windows-gate foreground with orphan poll; no system installs; no %LOCALAPPDATA%\winpepper writes; %TEMP% downloads; spike scratch reuse; commit style; nothing pushed | Global Constraints + every task's final step + Task 9 Step 1 / Task 10 Step 3 |
 
 No silent deferrals: every fake/stub above (FakeTranscribeCppEngine, ProbeTranscriber, FakeRangeClient) is test/bench instrumentation; the production behavior each stands in for is proven by Task 9's real-model, real-engine, real-coordinator bench run with recorded transcripts and latencies, plus Task 10's windows-gate App build.
+
+### Load-bearing assumption review (2026-07-25, post-planning)
+
+The plan's assumptions were enumerated and validated (ledger:
+`.worktrees/.the-usual-logs/nemotron-streaming/load-bearing-ledger.md` — 12
+verified, 5 falsified-and-fixed, 5 accepted). Fixes folded in above:
+engine-wide compute gate (v0.1.3 forbids concurrent compute per model),
+session-level dispose-is-abort lock (the pipeline disposes sessions during
+in-flight pushes), VC++ redist prerequisite surfaced (transcribe.dll statically
+imports msvcp140/vcruntime140), extractor locked-tree ordering + restart
+semantics, NVIDIA §3 notice text, memory-residency honesty (decision 5),
+perf posture on weak hardware (decision 6), fallback-visibility asymmetry
+(decision 7), and corrected line refs (`AppShell.cs:420`, bench arg loop
+`:26-36`, `File.Move :173`, parakeet.h under `include/transcribe/`).
+Independently RUN-verified during review (do not re-derive): the real
+`ModelDownloader` downloads + resumes the pinned tarball from both hosts
+anonymously; `TarFile.ExtractToDirectory` extracts the real v0.1.3 tarball to
+the expected tree (17 plain file entries); HF serves the GGUF ungated.
+Deliberately accepted (validated by Task 9 itself, honest-stop on failure):
+streamed-vs-batch parity, CPU finalize latency, runtime committed-growth
+timing — no primary spike output artifacts exist, so Task 9's bench is the
+first recorded evidence; treat its acceptance criteria as real gates.

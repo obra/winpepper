@@ -86,10 +86,14 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // The streaming model is opt-in: exactly the nemotron descriptor,
-            // and only when it is not already fully installed.
-            var selected = new[] { _registry.Find(ModelRegistry.StreamingAsrName)! }
-                .Where(d => !d.IsFullyInstalled(_installRoot));
+            // The streaming model is opt-in: exactly the nemotron descriptor.
+            // No pre-filter on IsFullyInstalled: presence-only checks cannot
+            // distinguish ready files from a corrupt installation (e.g. the
+            // archive downloaded but extraction failed or the runtime tree was
+            // deleted). Always route through the downloader, whose verify
+            // short-circuit keeps a healthy install cheap and whose
+            // EnsureExtracted heal path repairs a broken one.
+            var selected = new[] { _registry.Find(ModelRegistry.StreamingAsrName)! };
 
             foreach (var d in selected)
                 await DownloadOneAsync(d, ct).ConfigureAwait(false);

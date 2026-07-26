@@ -417,14 +417,33 @@ public sealed class AppShell : IDisposable
         // leaves batch fully functional and is re-attempted on the next
         // launch or from the Models card (shared operation gate — no double
         // download). No error-bus report: streaming is an enhancement, and
-        // the Models card surfaces the failed state with a retry.
+        // the Models card surfaces the failed state with a retry. On a fresh
+        // install the attempt is deferred until onboarding completes (see
+        // below).
         _ = Task.Run(async () =>
         {
             var log = LogFactory.CreateLogger("Winpepper.App.StreamingAutoInstall");
             try
             {
+                // Read a fresh settings snapshot on the background thread (the
+                // injected Settings is a startup-time snapshot) and use it for
+                // both checks below.
+                var settings = SettingsStore.Load();
+
+                // Fresh install: onboarding is blocking on the ~1.1 GB v3
+                // download right now, and running the ~730 MB streaming
+                // download concurrently would roughly double that wait. Defer:
+                // consistent with the retry policy above, the install simply
+                // lands on the next launch.
+                if (!settings.OnboardingCompleted)
+                {
+                    log.LogInformation(
+                        "Onboarding not completed; deferring the streaming model auto-install to the next launch");
+                    return;
+                }
+
                 await StreamingAutoInstaller.StartAsync(
-                    SettingsStore.Load().StreamingEnabled, CancellationToken.None);
+                    settings.StreamingEnabled, CancellationToken.None);
                 switch (StreamingAutoInstaller.Status)
                 {
                     case Winpepper.Models.StreamingAutoInstallStatus.Installed:

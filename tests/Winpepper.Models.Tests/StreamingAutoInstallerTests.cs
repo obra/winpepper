@@ -176,6 +176,31 @@ public class StreamingAutoInstallerTests : IDisposable
     }
 
     [Fact]
+    public async Task A_throwing_StatusChanged_subscriber_cannot_fault_the_install()
+    {
+        // StartAsync's contract is never-throw; SetStatus must make that
+        // mechanical by containing subscriber exceptions. Without that, a
+        // throwing subscriber faults RunAsync (and re-faults inside its catch
+        // via SetStatus(Failed)), surfacing an exception to the host's
+        // fire-and-forget Task.Run.
+        var fake = new FakeDownloader();
+        var installer = CreateInstaller(fake);
+        installer.StatusChanged += (_, _) => throw new InvalidOperationException("subscriber boom");
+
+        await installer.StartAsync(streamingEnabled: true, TestContext.Current.CancellationToken);
+
+        // The install itself completed and the status still updated.
+        Assert.Equal(new[] { ModelRegistry.StreamingAsrName }, fake.DownloadedNames);
+        Assert.Equal(StreamingAutoInstallStatus.Installed, installer.Status);
+        Assert.Null(installer.LastError);
+    }
+
+    // Note: the "defer auto-install until onboarding completes" policy lives
+    // in the Windows-only AppShell wiring (it reads SettingsStore.Load()
+    // before calling StartAsync), so it is not testable from this
+    // pure-managed suite.
+
+    [Fact]
     public async Task AutoInstall_and_models_card_download_never_run_concurrently()
     {
         // The auto-install shares the Models page's per-downloader operation

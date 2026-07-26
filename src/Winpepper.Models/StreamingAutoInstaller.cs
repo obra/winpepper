@@ -150,7 +150,12 @@ public sealed class StreamingAutoInstaller
     private void SetStatus(StreamingAutoInstallStatus status)
     {
         lock (_gate) _status = status;
-        StatusChanged?.Invoke(this, status);
+        // Contain subscriber exceptions: StartAsync's never-throw contract
+        // must hold mechanically, not depend on every subscriber behaving.
+        // Status is already committed above, so observers via Status still
+        // see the update.
+        try { StatusChanged?.Invoke(this, status); }
+        catch { /* subscriber fault must not fault the install */ }
     }
 
     private sealed class NullProgress : IProgress<DownloadProgress>

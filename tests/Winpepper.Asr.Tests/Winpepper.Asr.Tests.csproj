@@ -23,6 +23,7 @@
     <Compile Include="..\..\scripts\asr-latency-bench\TranscriptDiff.cs" Link="Bench\TranscriptDiff.cs" />
     <Compile Include="..\..\scripts\asr-eval-corpus\CorpusManifest.cs" Link="Corpus\CorpusManifest.cs" />
     <Compile Include="..\..\scripts\asr-latency-bench\EvalMetrics.cs" Link="Bench\EvalMetrics.cs" />
+    <Compile Include="..\..\scripts\asr-latency-bench\EvalFraming.cs" Link="Bench\EvalFraming.cs" />
     <Compile Include="..\..\scripts\asr-eval-corpus\HistoryIndex.cs" Link="Corpus\HistoryIndex.cs" />
     <Compile Include="..\..\scripts\asr-eval-corpus\CorpusExport.cs" Link="Corpus\CorpusExport.cs" />
     <Compile Include="..\..\scripts\asr-eval-corpus\ReferencePlanner.cs" Link="Corpus\ReferencePlanner.cs" />

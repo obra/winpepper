@@ -259,7 +259,7 @@ Note: `TranscribeCppException` is declared in this task (it's needed by
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `cd /home/dan/code/winpepper/.worktrees/nemotron-streaming && /home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Asr.Tests -f net9.0 --filter "FullyQualifiedName~TranscribeCpp" 2>&1 | tail -20`
+Run: `cd /home/dan/code/winpepper/.worktrees/nemotron-streaming && /home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "*TranscribeCpp*" -notrait "Platform=Windows" 2>&1 | tail -20` (never `dotnet test` — VSTest is unreliable per AGENTS.md; all test runs in this plan use build + `dotnet exec`)
 Expected: compile FAILURE — `TranscribeCppNative`/`TranscribeCppContract` do not exist.
 
 - [ ] **Step 4: Write `TranscribeCppNative.cs`**
@@ -516,7 +516,7 @@ public sealed record TranscribeCppContract(string Version, string HeaderHash)
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cd /home/dan/code/winpepper/.worktrees/nemotron-streaming && /home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Asr.Tests -f net9.0 --filter "FullyQualifiedName~TranscribeCpp" 2>&1 | tail -5`
+Run: `cd /home/dan/code/winpepper/.worktrees/nemotron-streaming && /home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "*TranscribeCpp*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: PASS (13 tests).
 
 - [ ] **Step 7: Full Linux suite + commit**
@@ -633,7 +633,7 @@ public class TarGzExtractorTests : IDisposable
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Models.Tests -f net9.0 --filter "FullyQualifiedName~TarGzExtractor" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -class "*TarGzExtractor*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: compile FAILURE — `TarGzExtractor` does not exist.
 
 - [ ] **Step 3: Implement `TarGzExtractor`**
@@ -702,7 +702,7 @@ public static class TarGzExtractor
 
 - [ ] **Step 4: Run extractor tests to verify they pass**
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Models.Tests -f net9.0 --filter "FullyQualifiedName~TarGzExtractor" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -class "*TarGzExtractor*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: PASS (4 tests).
 
 - [ ] **Step 5: Write the failing downloader-hook test**
@@ -799,7 +799,7 @@ new fake style.)
 
 - [ ] **Step 6: Run to verify failure**
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Models.Tests -f net9.0 --filter "FullyQualifiedName~ModelDownloaderExtraction" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -class "*ModelDownloaderExtraction*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: compile FAILURE — `ModelFile.ExtractToRelative` does not exist.
 
 - [ ] **Step 7: Implement the property + hook**
@@ -842,7 +842,7 @@ Expected: compile FAILURE — `ModelFile.ExtractToRelative` does not exist.
 - [ ] **Step 8: Run tests, full suite, commit**
 
 ```bash
-/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Models.Tests -f net9.0 2>&1 | tail -5   # PASS
+/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -notrait "Platform=Windows" 2>&1 | tail -5   # PASS
 ./scripts/linux-tests.sh    # LINUX SUITE: GREEN
 git add src/Winpepper.Models tests/Winpepper.Models.Tests
 git commit -m "feat(models): idempotent tar.gz extraction for archive model files
@@ -911,7 +911,7 @@ in its style:
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Models.Tests -f net9.0 --filter "FullyQualifiedName~ModelRegistryCatalog" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -class "*ModelRegistryCatalog*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: compile FAILURE (`StreamingAsr`, `StreamingAsrName` missing).
 
 - [ ] **Step 3: Implement**
@@ -997,7 +997,7 @@ Expected output hash: `9f536cb0fb839bd305e6d92fb214fd417c7718a416a6c7646a9911fbd
 - [ ] **Step 6: Run tests, full suite, commit**
 
 ```bash
-/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Models.Tests -f net9.0 2>&1 | tail -5   # PASS
+/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -notrait "Platform=Windows" 2>&1 | tail -5   # PASS
 ./scripts/linux-tests.sh    # LINUX SUITE: GREEN
 git add src/Winpepper.Models tests/Winpepper.Models.Tests scripts/verify-model-hashes.ps1
 git commit -m "feat(models): register nemotron-streaming-en (Q8_0 GGUF + transcribe.cpp v0.1.3 runtime) with pinned hashes
@@ -1016,7 +1016,7 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 - Create: `src/Winpepper.Asr/TranscribeCpp/TranscribeCppEngine.cs`
 - Create: `src/Winpepper.Asr/TranscribeCpp/NemotronStreamingModel.cs`
 - Test: `tests/Winpepper.Asr.Tests/TranscribeCpp/TranscribeCppEngineGateTests.cs`
-- Test: `tests/Winpepper.Integration.Tests/NemotronLayoutContractTests.cs` (registry paths == locator paths)
+- Test: `tests/Winpepper.IntegrationTests/NemotronLayoutContractTests.cs` (registry paths == locator paths)
 
 **Interfaces:**
 - Consumes: Task 1's `TranscribeCppNative`, `TranscribeCppContract`, `TranscribeCppException`; Task 3's on-disk layout.
@@ -1113,17 +1113,17 @@ public class TranscribeCppEngineGateTests : IDisposable
 }
 ```
 
-And the cross-project layout contract (in `Winpepper.Integration.Tests`, which
+And the cross-project layout contract (in `Winpepper.IntegrationTests`, which
 may reference both `Winpepper.Models` and `Winpepper.Asr` — add the project
 references to its csproj if absent):
 
 ```csharp
-// tests/Winpepper.Integration.Tests/NemotronLayoutContractTests.cs
+// tests/Winpepper.IntegrationTests/NemotronLayoutContractTests.cs
 using Winpepper.Asr.TranscribeCpp;
 using Winpepper.Models;
 using Xunit;
 
-namespace Winpepper.Integration.Tests;
+namespace Winpepper.IntegrationTests;
 
 public class NemotronLayoutContractTests
 {
@@ -1149,7 +1149,7 @@ public class NemotronLayoutContractTests
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Asr.Tests -f net9.0 --filter "FullyQualifiedName~TranscribeCppEngineGate" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "*TranscribeCppEngineGate*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: compile FAILURE.
 
 - [ ] **Step 3: Implement `NemotronStreamingModel` + `ITranscribeCppEngine.cs`**
@@ -1534,15 +1534,15 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Asr.Tests -f net9.0 --filter "FullyQualifiedName~TranscribeCpp" 2>&1 | tail -5`
-and `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Integration.Tests -f net9.0 --filter "FullyQualifiedName~NemotronLayout" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "*TranscribeCpp*" -notrait "Platform=Windows" 2>&1 | tail -5`
+and `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.IntegrationTests/Winpepper.IntegrationTests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.IntegrationTests/bin/Release/net9.0/Winpepper.IntegrationTests.dll -class "*NemotronLayout*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: PASS. (The gate tests never reach native code: contract.json checks fire first.)
 
 - [ ] **Step 6: Full suite + commit**
 
 ```bash
 ./scripts/linux-tests.sh    # LINUX SUITE: GREEN
-git add src/Winpepper.Asr/TranscribeCpp tests/Winpepper.Asr.Tests tests/Winpepper.Integration.Tests
+git add src/Winpepper.Asr/TranscribeCpp tests/Winpepper.Asr.Tests tests/Winpepper.IntegrationTests
 git commit -m "feat(asr): transcribe.cpp engine with contract/version/ABI gates, CPU backend, PKST streaming and batch run
 
 Generated with [Amplifier](https://github.com/microsoft/amplifier)
@@ -1873,7 +1873,7 @@ public class NemotronStreamingTranscriberTests
 
 - [ ] **Step 3: Run to verify failure**
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Asr.Tests -f net9.0 --filter "FullyQualifiedName~NemotronStreamingTranscriber" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "*NemotronStreamingTranscriber*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: compile FAILURE.
 
 - [ ] **Step 4: Implement**
@@ -2085,7 +2085,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Asr.Tests -f net9.0 --filter "FullyQualifiedName~NemotronStreamingTranscriber" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -class "*NemotronStreamingTranscriber*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: PASS (12 tests).
 
 - [ ] **Step 6: Full suite + commit**
@@ -2128,7 +2128,7 @@ In `tests/Winpepper.Core.Tests/AppSettingsDefaultsTests.cs`, find the
 `tests/Winpepper.Core.Tests/Settings/StreamingSettingPersistenceTests.cs` for
 hardcoded default expectations and update in the same way.
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Core.Tests -f net9.0 --filter "FullyQualifiedName~AppSettings" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll -class "*AppSettings*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: FAIL (default is still `false`).
 
 - [ ] **Step 2: Flip the default with an honest doc comment**
@@ -2363,7 +2363,7 @@ plus service dependencies visible at `ModelsTabViewModel.cs:37-42`.)
 
 - [ ] **Step 2: Run to verify failure**
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet test tests/Winpepper.Models.Tests -f net9.0 --filter "FullyQualifiedName~ModelsTabViewModelStreaming" 2>&1 | tail -5`
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Models.Tests/Winpepper.Models.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -class "*ModelsTabViewModelStreaming*" -notrait "Platform=Windows" 2>&1 | tail -5`
 Expected: compile FAILURE (`StreamingCard` missing).
 
 - [ ] **Step 3: Implement the ViewModel additions**

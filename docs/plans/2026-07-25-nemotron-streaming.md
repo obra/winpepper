@@ -2342,7 +2342,7 @@ Task 9 Step 1.
 
 **Interfaces:**
 - Consumes: `ModelRegistry.StreamingAsrName`, `ModelKind.StreamingAsr`, the existing card/progress machinery (`ModelsTabViewModel.DownloadMissingAsync` at `ModelsTabViewModel.cs:48-96`, `ModelProvisioningCoordinator`, `DownloadProgress`), existing page wiring (`ModelsPage.xaml.cs:31-62` for registry/root access, `:200-203` for the streaming toggle).
-- Produces: `ModelsTabViewModel.StreamingCard` (same card type as `CleanupCard`) listing the `StreamingAsr` descriptor; `Task DownloadStreamingAsync()` that downloads exactly the nemotron descriptor through the same coordinator/downloader path `DownloadMissingAsync` uses, routing progress to `StreamingCard`.
+- Produces: `ModelsTabViewModel.StreamingCard` (same card type as `CleanupCard`) listing the `StreamingAsr` descriptor; `Task DownloadStreamingAsync(CancellationToken ct)` (same signature as `DownloadMissingAsync`) that downloads exactly the nemotron descriptor through the same coordinator/downloader path `DownloadMissingAsync` uses, routing progress to `StreamingCard`.
 
 **Before writing code:** read `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs`
 in full (it is small) and mirror its existing structures exactly — same card
@@ -2399,8 +2399,8 @@ In `ModelsTabViewModel.cs`:
   `registry.ByKind(ModelKind.StreamingAsr)`.
 - Fix the two-way kind routing from Task 3 Step 4 so `StreamingAsr` progress
   goes to `StreamingCard` (a `switch` on `d.Kind`).
-- Add `DownloadStreamingAsync()`: same body shape as `DownloadMissingAsync`
-  (`:48-96`) but the descriptor set is exactly
+- Add `DownloadStreamingAsync(CancellationToken ct)`: same signature and body
+  shape as `DownloadMissingAsync` (`:48-96`) but the descriptor set is exactly
   `new[] { registry.Find(ModelRegistry.StreamingAsrName)! }.Where(d => !d.IsFullyInstalled(modelsRoot))`.
 
 Run the Step 1 tests — expected: PASS.
@@ -2431,11 +2431,55 @@ the Cleanup card's exact structure (installed icon + label, per-file progress
   ```
 - an install `Button` (`x:Name="StreamingModelInstallButton"`,
   `AutomationProperties.AutomationId="StreamingModelInstallButton"`, content
-  `Install streaming model`) wired in `ModelsPage.xaml.cs` next to the existing
-  download wiring:
+  `Install streaming model`) wired via a XAML `Click="OnInstallStreamingModel"`
+  attribute (the same wiring style as the existing download button) to a
+  dedicated handler in `ModelsPage.xaml.cs` that mirrors `OnDownloadMissing`
+  (`:265-301`) exactly — same re-entrancy guard, button disabling,
+  cancellation token, `catch (OperationCanceledException)`, and
+  `catch (Exception)` → log + ErrorBus shape. Do NOT wire a bare
+  `Click += async (_, _) => await ...` lambda: `DownloadStreamingAsync`
+  propagates `ModelDownloadException` on any failed download, and an unhandled
+  exception escaping an `async void` WinUI handler crashes the app instead of
+  surfacing the established ErrorBus toast.
   ```csharp
-  StreamingModelInstallButton.Click += async (_, _) => await ViewModel.DownloadStreamingAsync();
+  private bool _streamingDownloadInProgress;
+
+  private async void OnInstallStreamingModel(object sender, RoutedEventArgs e)
+  {
+      if (_streamingDownloadInProgress) return;
+      _streamingDownloadInProgress = true;
+      var button = sender as Button;
+      if (button is not null) button.IsEnabled = false;
+
+      try
+      {
+          await ViewModel.DownloadStreamingAsync(_lifetimeCts?.Token ?? CancellationToken.None);
+          // Refresh the streaming card's installed label here (Step 4's
+          // installed-state bullet below), mirroring OnDownloadMissing's
+          // post-download UpdateInstalledLabels() call.
+      }
+      catch (OperationCanceledException)
+      {
+          // Mirrors OnDownloadMissing: cancellation must not surface as a crash.
+      }
+      catch (Exception ex)
+      {
+          var shell = App.Shell!;
+          shell.LogFactory.CreateLogger<ModelsPage>()
+              .LogError(ex, "Streaming model download failed");
+          shell.ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
+      }
+      finally
+      {
+          if (button is not null) button.IsEnabled = true;
+          _streamingDownloadInProgress = false;
+      }
+  }
   ```
+  (`_lifetimeCts` is the page's existing navigation-scoped CTS that
+  `OnDownloadMissing` already uses; keep the guard field separate from
+  `_downloadInProgress` so the two downloads don't block each other's
+  buttons, but reuse everything else verbatim.)
 - installed-state label driven by
   `models.Registry.Find(ModelRegistry.StreamingAsrName)!.IsFullyInstalled(models.ModelsRoot)`
   refreshed the same way/places the Cleanup card refreshes its installed state

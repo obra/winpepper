@@ -15,6 +15,20 @@ namespace Winpepper.Asr.Transcription;
 /// encoder context. Dictations shorter than one chunk never stream — FinishAsync
 /// takes the exact batch path via <c>batchFallback</c>, and ANY streaming failure
 /// also lands on <c>batchFallback(fullAudio)</c>, so reliability never regresses.
+///
+/// KNOWN DEFECT (real int8 Parakeet-TDT model, validated 2026-07-25): chunked
+/// decodes collapse to blanks after the first encode — the joint argmaxes blank
+/// with large duration skips on every post-first encode, deterministically, on
+/// both DirectML and CPU EPs, regardless of normalization strategy, decoder
+/// state handling, or chunk/context sizes (Task 7b experiments; even ideal
+/// batch-preprocessed 3 s MID-utterance windows can decode to zero tokens, so
+/// this is a model-level limitation of short-window chunked inference, not a
+/// plumbing bug). No exception is thrown, so the corrupt path alone cannot see
+/// it. The guard below makes that failure LOUD instead of silently truncating:
+/// any post-first encode that decodes to zero tokens — or a streamed dictation
+/// whose total decode is empty — forces FinishAsync onto the batch fallback.
+/// The trade-off (a genuinely silent chunk also forfeits the latency win) only
+/// ever costs speed, never words.
 /// </summary>
 public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
 {
@@ -38,6 +52,7 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
     private bool _speechSeen;        // leading-silence gate latch
     private bool _streamed;
     private bool _corrupt;
+    private bool _blankCollapse;     // a post-first encode decoded to zero tokens (known int8 defect)
 
     /// <summary>
     /// Frame-RMS floor for the leading-silence gate. Mirrors the batch trimmer's
@@ -118,7 +133,7 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
             return await _batchFallback(fullAudio, ct);
         try
         {
-            return await Task.Run(() =>
+            var streamed = await Task.Run<TranscriptionResult?>(() =>
             {
                 _skipper.Flush();
                 _mel.Finish();
@@ -129,6 +144,11 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
                     _pending.Clear();
                     EncodeAndDecode(tail);
                 }
+                // Blank-collapse guard (see class doc): a zero-token post-first
+                // encode, or an entirely empty streamed decode, means the stream
+                // cannot be trusted — hand the decision back to the batch path.
+                if (_blankCollapse || _tokens.Count == 0)
+                    return null;
                 var result = new TranscriptionResult(_backend.DecodeTokens(_tokens), _modelName);
                 if (_skipper.SkippedMs > 0)
                     _log?.LogInformation(
@@ -136,6 +156,11 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
                         _skipper.SkippedMs, _skipper.RunsSkipped);
                 return result;
             }, ct);
+            if (streamed is not null) return streamed;
+            _log?.LogWarning(
+                "streaming decode collapsed to blanks (known int8 chunked-decode defect); " +
+                "batch-transcribing the full buffer instead of returning a truncated transcript");
+            return await _batchFallback(fullAudio, ct);
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception ex)
@@ -180,9 +205,23 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
         // Token timings are unused on the streaming path (only the token ids feed
         // DecodeTokens at finish), so hand the decoder throwaway lists instead of
         // accumulating them for the whole dictation.
+        var tokensBefore = _tokens.Count;
         TdtGreedyDecoder.Decode(_backend, enc, _state, _tokens, new List<int>(), new List<int>(),
             startFrame: discard, frameIndexOffset: _globalEncFrames - discard);
         _globalEncFrames += enc.Frames - discard;
+
+        // Blank-collapse guard (see class doc): a post-first encode that decodes
+        // to ZERO tokens matches the known int8 chunked-decode defect — the
+        // stream can no longer be trusted, so FinishAsync must take the batch
+        // fallback. A genuinely silent chunk trips this too; that false positive
+        // costs only the latency win, never transcript content.
+        if (_streamed && _tokens.Count == tokensBefore && !_blankCollapse)
+        {
+            _blankCollapse = true;
+            _log?.LogWarning(
+                "streaming encode decoded to zero tokens (known int8 chunked-decode defect); " +
+                "will batch-transcribe the full buffer at stop");
+        }
         _streamed = true;
 
         _context.AddRange(chunk);

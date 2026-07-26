@@ -302,6 +302,7 @@ sealed class BenchKeyStore : IAssemblyAiKeyStore
 sealed class PacedParakeetBackend : IParakeetBackend
 {
     private readonly double _rtf;
+    private bool _emitNext;
     public PacedParakeetBackend(double rtf) => _rtf = rtf;
     public int VocabSize => 8;
     public int BlankId => 7;
@@ -317,13 +318,18 @@ sealed class PacedParakeetBackend : IParakeetBackend
         // (a proportional tIn/8 diverges on the second chunk: T=300 -> 37 vs 38,
         // silently corrupting the session and falling back to the 3 s batch fake).
         var tOut = (tIn - 1) / 8 + 1;
+        _emitNext = true; // first decode step after each encode emits one token
         return new EncoderOutput(new float[2 * tOut], tOut, 2, tOut);
     }
 
     public DecoderJointResult DecodeJoint(float[] encoderFrame, int lastToken, float[] stateH, float[] stateC)
     {
         var logits = new float[8 + 5];
-        logits[BlankId] = 10f;
+        // One non-blank token per encode: an all-blank stream would trip the
+        // session's blank-collapse guard and fall back to the 3 s batch fake,
+        // which would fake sim-local-stream's post-stop latency number.
+        logits[_emitNext ? 0 : BlankId] = 10f;
+        _emitNext = false;
         logits[8 + 1] = 10f;
         return new DecoderJointResult(logits, stateH, stateC);
     }

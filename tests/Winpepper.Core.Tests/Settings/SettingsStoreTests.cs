@@ -188,11 +188,14 @@ public class SettingsStoreTests : IDisposable
     }
 
     [Fact]
-    public void StreamingEnabled_MissingFromOlderFile_DefaultsTrue()
+    public void StreamingEnabled_MissingFromOlderFile_DefaultsFalse()
     {
         // UPGRADE PATH: a settings.json written by a build BEFORE StreamingEnabled
         // existed (real old-shape serialized output — camelCase, no streamingEnabled
-        // key). Loading it must fill the default (true), not throw and not zero it.
+        // key). Loading it must fill the default, not throw and not fail the load.
+        // The default is FALSE: real-model chunked streaming decodes to blanks
+        // after the first chunk (2026-07-25 validation; see AppSettings comment),
+        // so streaming is opt-in until that defect is fixed.
         File.WriteAllText(_path, """
             {
               "schema": 1,
@@ -218,7 +221,7 @@ public class SettingsStoreTests : IDisposable
 
         var s = new SettingsStore(_path).Load();
 
-        s.StreamingEnabled.ShouldBeTrue();
+        s.StreamingEnabled.ShouldBeFalse();
 
         // The old file's own values still load — proof this exercised the real
         // deserializer, not a defaults fallback from a rejected file.

@@ -147,6 +147,52 @@ public class ParakeetStreamingSessionTests
     }
 
     [Fact]
+    public async Task PostFirstChunkDecodingToZeroTokens_FallsBackToBatchAtFinish_AndWarns()
+    {
+        // Reproduces the real-model defect shape (V5 probe, 2026-07-25): the FIRST
+        // encode emits tokens, every later encode decodes to 100% blanks — no
+        // exception, so the corrupt path never fires and the streamed transcript
+        // would be silently truncated to ~the first chunk. The session must
+        // detect the collapse, warn loudly, and return the batch fallback.
+        var backend0 = new FakeParakeetBackend();
+        FakeParakeetBackend backend = null!;
+        backend = new FakeParakeetBackend
+        {
+            // Encode #1 emits token 2 once; every later encode is all blanks.
+            Joint = (frame, last) => backend.EncodeMelFrameCounts.Count == 1 && last == backend.BlankId
+                ? backend0.Emit(2, 1)
+                : backend0.Emit(backend.BlankId, 1),
+        };
+        ReadOnlyMemory<float> seen = default;
+        var log = new CollectingTestLogger();
+        var session = new ParakeetStreamingSession(
+            backend, "parakeet-test", PreprocessorConfig.ParakeetTdtV3,
+            (audio, _) => { seen = audio; return Task.FromResult(new TranscriptionResult("BATCH", "parakeet-test")); },
+            chunkMelFrames: 50, leftContextMelFrames: 0, log: log);
+        await session.PushAsync(Audio(Hop * 120), TestContext.Current.CancellationToken); // 2 chunks encode
+
+        var result = await session.FinishAsync(Audio(Hop * 120), TestContext.Current.CancellationToken);
+
+        result.Text.ShouldBe("BATCH");            // NOT the truncated streamed "2"
+        seen.Length.ShouldBe(Hop * 120);          // fallback got the FULL buffer
+        log.Warnings.ShouldNotBeEmpty();          // the failure is loud, not silent
+    }
+
+    [Fact]
+    public async Task StreamThatDecodesToZeroTokensOverall_FallsBackToBatchAtFinish()
+    {
+        // A streamed dictation whose decode produced NO tokens at all is never
+        // returned as an empty streamed transcript — batch verifies it instead.
+        var backend = new FakeParakeetBackend(); // default joint: always blank
+        var session = NewSession(backend, chunk: 50, context: 0);
+        await session.PushAsync(Audio(Hop * 60), TestContext.Current.CancellationToken); // 1 chunk encodes
+
+        var result = await session.FinishAsync(Audio(Hop * 60), TestContext.Current.CancellationToken);
+
+        result.Text.ShouldBe("BATCH");
+    }
+
+    [Fact]
     public async Task MidStreamEncoderFailure_FallsBackToBatchAtFinish()
     {
         var calls = 0;
@@ -215,7 +261,21 @@ public class ParakeetStreamingSessionTests
         // The fake returns T/2 encoder frames at factor 2; every encode below has
         // even T, where T/2 == floor((T-1)/2)+1, so the exact-form assertion holds
         // throughout and the session streams to completion.
-        var backend = new FakeParakeetBackend { SubsamplingFactor = 2 };
+        // The joint emits token 2 whenever the encoder frame's within-encode
+        // index (component [1]) is 0 or 10 (10 = the context discard for the
+        // follow-up encodes), so no encode decodes to zero tokens — the
+        // blank-collapse guard must NOT trip and the streamed (non-fallback)
+        // result must be returned. Encode 1 decodes frames 0..24 and emits at
+        // BOTH 0 and 10; encodes 2 and 3 start at frame 10 and emit once each.
+        var backend0 = new FakeParakeetBackend();
+        FakeParakeetBackend backend = null!;
+        backend = new FakeParakeetBackend
+        {
+            SubsamplingFactor = 2,
+            Joint = (frame, _) => frame[1] == 0f || frame[1] == 10f
+                ? backend0.Emit(2, 1)
+                : backend0.Emit(backend.BlankId, 1),
+        };
         var fallbackCalled = false;
         var session = NewSession(backend,
             (_, _) => { fallbackCalled = true; return Task.FromResult(new TranscriptionResult("BATCH", "parakeet-test")); },
@@ -227,7 +287,7 @@ public class ParakeetStreamingSessionTests
         var result = await session.FinishAsync(Audio(Hop * 119), TestContext.Current.CancellationToken);
 
         fallbackCalled.ShouldBeFalse();  // consistent factor-2 encodes pass the re-assertion
-        result.Text.ShouldBe("");        // STREAMED transcript: default joint emits only blanks
+        result.Text.ShouldBe("2,2,2,2"); // STREAMED transcript: emissions at frames 0,10 / 10 / 10
         result.ProviderModelName.ShouldBe("parakeet-test");
         backend.EncodeMelFrameCounts.ShouldBe(new[] { 50, 20 + 50, 20 + 20 });
         // Discard math observably correct: encode 1 decodes frames 0..24 (no context,
@@ -251,5 +311,27 @@ public class ParakeetStreamingSessionTests
         await using var s1 = await transcriber.StartSessionAsync(TestContext.Current.CancellationToken);
         await using var s2 = await transcriber.StartSessionAsync(TestContext.Current.CancellationToken);
         s1.ShouldNotBeSameAs(s2);
+    }
+}
+
+/// <summary>Collects log lines by level so tests can assert the session's
+/// blank-decode fallback is LOUD (a warning), not silent.</summary>
+internal sealed class CollectingTestLogger : Microsoft.Extensions.Logging.ILogger
+{
+    public List<string> Warnings { get; } = new();
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        Microsoft.Extensions.Logging.LogLevel logLevel,
+        Microsoft.Extensions.Logging.EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        if (logLevel == Microsoft.Extensions.Logging.LogLevel.Warning)
+            Warnings.Add(formatter(state, exception));
     }
 }

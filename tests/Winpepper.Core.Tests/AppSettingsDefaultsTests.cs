@@ -30,9 +30,12 @@ public sealed class AppSettingsDefaultsTests
     }
 
     [Fact]
-    public void Defaults_StreamingEnabled_IsTrue()
+    public void Defaults_StreamingEnabled_IsFalse()
     {
+        // OFF by default: real-model chunked streaming decodes to blanks after
+        // the first ~2 s chunk (2026-07-25 validation; ParakeetStreamingSession
+        // class doc), so streaming is opt-in until that defect is fixed.
         var s = new AppSettings();
-        s.StreamingEnabled.ShouldBeTrue(); // streaming is the default experience
+        s.StreamingEnabled.ShouldBeFalse();
     }
 }

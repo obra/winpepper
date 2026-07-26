@@ -172,6 +172,24 @@ jobs:
           Write-Host "SHA256: $hash"
           "path=$checksumPath" >> $env:GITHUB_OUTPUT
 
+      - name: Create stable-named download aliases
+        id: stable
+        run: |
+          # Copies of the MSI + checksum under version-independent names so
+          # the README can offer a one-click link that always points at the
+          # newest release:
+          #   https://github.com/obra/winpepper/releases/latest/download/winpepper-x64.msi
+          # (GitHub's /releases/latest/download/<asset> URL only works when
+          # the asset name is identical across releases.) The versioned asset
+          # is still published alongside - winget manifests reference it.
+          $msi = "${{ steps.version.outputs.msi }}"
+          $stable = "artifacts\winpepper-x64.msi"
+          Copy-Item $msi $stable -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $stable).Hash.ToLowerInvariant()
+          "$hash *winpepper-x64.msi" | Out-File -Encoding ascii -NoNewline "$stable.sha256"
+          "msi=$stable" >> $env:GITHUB_OUTPUT
+          "checksum=$stable.sha256" >> $env:GITHUB_OUTPUT
+
       - name: Publish GitHub Release
         # v3, not v2: v2.6.2 is the final v2 release, unmaintained and on the
         # deprecated Node 20 runtime; v3 has the same inputs and defaults
@@ -182,7 +200,16 @@ jobs:
           files: |
             ${{ steps.version.outputs.msi }}
             ${{ steps.checksum.outputs.path }}
-          prerelease: ${{ contains(github.ref_name, '-') }}
+            ${{ steps.stable.outputs.msi }}
+            ${{ steps.stable.outputs.checksum }}
+          # Deliberately NOT marked prerelease even for -alpha tags: GitHub's
+          # /releases/latest/download/<asset> URL (the README's one-click
+          # download button) only resolves to the newest NON-prerelease
+          # release. Alpha status is communicated in the README and release
+          # notes instead. Revisit if stable and preview channels ever
+          # coexist.
+          prerelease: false
+          make_latest: true
           generate_release_notes: true
           fail_on_unmatched_files: true
 

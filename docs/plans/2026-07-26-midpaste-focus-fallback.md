@@ -7,7 +7,7 @@
 
 **Goal:** If the foreground window changes WHILE transcribed text is actively being typed into the target (mid-paste), immediately halt the remaining keystrokes and fall back to the existing click-to-paste (pending paste) behavior — and the pill click must then paste the WHOLE transcription, never just the un-sent remainder.
 
-**Architecture:** Today `TextInjector.TryInject` hands the entire transcript to Windows in ONE `SendInput` call, so there is no in-process "mid-paste" moment to interrupt. We convert the send into a chunked loop: pure, Linux-testable primitives (`InjectionChunker`, `MidPasteDecider`, `GuardedInjectionRun`) drive the loop and check the foreground window handle (HWND) between chunks; `TextInjector` grows a `TryInjectGuarded` method that wires those primitives to real `SendInput`/`GetForegroundWindow` via constructor-injectable seams (same pattern as its existing `isKeyDown` seam). `PipelineHost` (all three paste call sites: hold arm, toggle arm, pill-click retry) maps an `Interrupted` outcome to the existing pending-paste flow with the FULL original text.
+**Architecture:** Today `TextInjector.TryInject` hands the entire transcript to Windows in ONE `SendInput` call, so there is no in-process "mid-paste" moment to interrupt. We convert the send into a PACED chunked loop: pure, Linux-testable primitives (`InjectionChunker`, `MidPasteDecider`, `GuardedInjectionRun`) drive the loop, pause 20 ms between chunks (load-bearing — validated: an unpaced loop finishes in single-digit milliseconds because `SendInput` is queue-insertion, so no human focus change could ever be observed between chunks), and check BOTH the physical modifier state (a halt gesture like Alt+Tab starts with Alt going down BEFORE any foreground change is visible) AND the foreground window handle (HWND) before every chunk; `TextInjector` grows a `TryInjectGuarded` method that wires those primitives to real `SendInput`/`GetForegroundWindow` and the existing key-state probe via constructor-injectable seams (same pattern as its existing `isKeyDown` seam). `PipelineHost` (all three paste call sites: hold arm, toggle arm, pill-click retry) maps an `Interrupted` outcome to the existing pending-paste flow with the FULL original text.
 
 **Tech Stack:** C# / .NET 9, xUnit v3 + Shouldly (no mocking library — hand-built fakes/lambdas), Win32 `SendInput`/`GetForegroundWindow` P/Invoke, WinUI 3 (untouched — the existing pill PENDING state is reused as-is).
 
@@ -54,9 +54,18 @@ All new pure logic goes in `src/Winpepper.Platform/Injection/` (precedent: `Modi
 
 Nothing in `Winpepper.Core` changes: the existing `SessionViewModel.EnterPendingPaste(string, InjectionTarget)`, `NotifyPasteAttempted(bool)`, `PendingPasteState`, `SessionStage.PendingPaste`, and the pill's PENDING visual/click handling are reused untouched (they already hold arbitrary text and keep the slot on a failed attempt — which is exactly the full-text retry semantics we need).
 
-**Why HWND-only mid-paste checks (not the full `InjectionTarget` UIA identity):** the pre-paste decision uses UIA `FocusedElement.GetRuntimeId()`, a slow COM round-trip — far too heavy to run between every 32-code-unit chunk. `GetForegroundWindow()` is a cheap kernel call and matches the spec ("if the WINDOW focus changes"). Element-level focus moves within the same window do not halt the paste.
+**Why HWND-only mid-paste checks (not the full `InjectionTarget` UIA identity):** the pre-paste decision uses UIA `FocusedElement.GetRuntimeId()`, a slow COM round-trip — far too heavy to run between every 32-code-unit chunk. `GetForegroundWindow()` is a cheap kernel call (measured ~11 ns/call; see the validation ledger, A1a) and matches the spec ("if the WINDOW focus changes"). Element-level focus moves within the same window do not halt the paste.
 
-**Known trade-off (accepted):** a single `SendInput` batch is atomic relative to other injected input; a chunked send is not, so another process's synthetic input could theoretically interleave between chunks. This is inherent to making the paste interruptible; a chunk size of 32 code units keeps the windows tiny.
+**Why the loop is PACED (load-bearing, validated — ledger A1):** `SendInput` is queue-insertion — it returns after inserting events into the system input queue in microseconds; an unpaced 32-unit chunk loop for even a 2000-code-unit text completes in single-digit milliseconds, long before any human can react (≥400–600 ms), so the between-chunk guard could never fire and the feature would be a no-op. `GuardedInjectionRun` therefore pauses `InterChunkPauseMs = 20` ms between chunks (never before the first): ~1600 code units/s — far faster than any typist, slow enough that a long paste spans the human reaction window (1000 units ≈ 0.6 s).
+
+**Why a per-chunk physical-modifier check (load-bearing, validated — ledger A6):** injected `KEYEVENTF_UNICODE` characters are delivered with the CURRENT physical modifier state applied (see `ModifierGuard`'s own doc), and a halt gesture like Alt+Tab starts with Alt going down BEFORE any foreground change is observable — so an HWND-only guard would type Alt-modified garbage (menu accelerators) during the Alt→Tab gap. The guard halts (⇒ `Interrupted`) as soon as a physical modifier is observed down, which is a positive observation, not a failed one, so the fail-open policy is preserved. The modifier check cannot re-trip on the prelude's own timeout: `NeutralizeHeldModifiers` synthesizes KEYUPs, so after it returns the observable modifier state is up.
+
+**Known trade-offs (accepted; adjudicated in the validation ledger `.worktrees/.the-usual-logs/midpaste-focus-fallback/load-bearing-ledger.md`):**
+- A single `SendInput` batch is atomic relative to other injected input; a chunked send is not, so another process's synthetic input could theoretically interleave between chunks. Inherent to making the paste interruptible.
+- Paced typing adds latency: ~20 ms per 32 code units (~0.6 s per 1000 units). Accepted — it is what makes interruption physically possible.
+- ≤ ~1 chunk (32 code units) may still land in the NEW window in a rare race: events already inserted into the system queue but not yet routed follow the focus change (ledger AD-1). Cosmetic — the pending slot always holds the FULL text.
+- `TryPastePending` runs on the WinUI UI thread; a paced click-paste stalls it for the paste duration (typical 60–190 ms, ~0.6 s per 1000 units). Accepted (ledger AD-3); if smoke shows unacceptable pill jank, the follow-up is background dispatch, NOT removing pacing. The serialized hotkey loop is similarly delayed during a paced hold/toggle paste.
+- UIPI: `SendInput` to an elevated target reports success while keystrokes are silently dropped (MSDN: "neither GetLastError nor the return value will indicate the failure was caused by UIPI blocking"). An elevated-from-start target therefore still yields a false `Completed` — byte-for-byte today's production behavior, unchanged by this plan (ledger AD-2); a mid-run focus flip INTO an elevated window now classifies `Interrupted` with the full text kept (an improvement).
 
 ---
 
@@ -398,9 +407,11 @@ Linux test suite: GREEN (see ./scripts/linux-tests.sh)."
       IReadOnlyList<string> chunks,
       long hwndAtSendStart,
       Func<long> currentForegroundHwnd,
-      Func<string, bool> sendChunk)
+      Func<string, bool> sendChunk,
+      Func<bool>? modifierHeld = null,
+      Action? pauseBetweenChunks = null)
   ```
-  in namespace `Winpepper.Platform.Injection` — used by Task 5 (`TextInjector.TryInjectGuarded`). Semantics: the focus check runs BEFORE every chunk (including the first — the modifier-release wait can burn up to 1500 ms before the first keystroke, so focus may already have moved). `Halt` → `Interrupted` with remaining chunks unsent; `sendChunk` returning false → `SendFailed`; all chunks sent → `Completed`; empty chunk list → `Completed`.
+  in namespace `Winpepper.Platform.Injection` — used by Task 5 (`TextInjector.TryInjectGuarded`). Semantics: `pauseBetweenChunks` runs BETWEEN chunks only (never before the first) — pacing exists so a human focus change can land while the loop is still running (ledger A1). The guard checks run BEFORE every chunk (including the first — the modifier-release wait can burn up to 1500 ms before the first keystroke, so focus may already have moved), in this order: `modifierHeld` returning true (a physical modifier going down is the LEADING edge of a halt gesture — observable before any foreground change; ledger A6) → `Interrupted`; then the HWND check, `Halt` → `Interrupted` with remaining chunks unsent; `sendChunk` returning false → `SendFailed`; all chunks sent → `Completed`; empty chunk list → `Completed`. Both new params are optional (null ⇒ that check/pause is skipped) so 4-arg callers keep compiling.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -526,6 +537,39 @@ public class GuardedInjectionRunTests
         sentText.Length.ShouldBeLessThan(text.Length);
         text.StartsWith(sentText, StringComparison.Ordinal).ShouldBeTrue();
     }
+
+    [Fact]
+    public void ModifierDown_MidRun_Interrupts_AfterPrefixOnly()
+    {
+        // The halt gesture's LEADING edge is a physical modifier going down
+        // (Alt, before Alt+Tab moves the foreground). The guard must halt on
+        // the modifier itself so no chunk goes out Alt-modified (ledger A6).
+        var sent = new List<string>();
+        var outcome = GuardedInjectionRun.Execute(
+            chunks: new[] { "aa", "bb", "cc" },
+            hwndAtSendStart: 42,
+            currentForegroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            modifierHeld: () => sent.Count >= 1); // "Alt goes down" after chunk 1
+
+        outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        sent.ShouldBe(new[] { "aa" });
+    }
+
+    [Fact]
+    public void Pause_Runs_Between_Chunks_Never_Before_The_First()
+    {
+        var events = new List<string>();
+        var outcome = GuardedInjectionRun.Execute(
+            chunks: new[] { "aa", "bb", "cc" },
+            hwndAtSendStart: 42,
+            currentForegroundHwnd: () => 42,
+            sendChunk: c => { events.Add("send:" + c); return true; },
+            pauseBetweenChunks: () => events.Add("pause"));
+
+        outcome.ShouldBe(InjectionRunOutcome.Completed);
+        events.ShouldBe(new[] { "send:aa", "pause", "send:bb", "pause", "send:cc" });
+    }
 }
 ```
 
@@ -545,14 +589,19 @@ Create `src/Winpepper.Platform/Injection/GuardedInjectionRun.cs`:
 namespace Winpepper.Platform.Injection;
 
 /// <summary>
-/// Pure driver for an interruptible, chunked injection send. Before EVERY
-/// chunk (including the first -- the modifier-release wait can delay the
-/// first keystroke by up to 1500 ms) it asks <see cref="MidPasteDecider"/>
-/// whether the window we started typing into is still foreground; on Halt it
-/// stops immediately and reports <see cref="InjectionRunOutcome.Interrupted"/>
-/// so the caller can hold the WHOLE original text as a pending paste.
-/// All Win32 access is behind the two delegates, so this loop is fully
-/// unit-testable on Linux.
+/// Pure driver for an interruptible, chunked, PACED injection send. The pause
+/// runs BETWEEN chunks (never before the first): without pacing the whole
+/// loop completes in single-digit milliseconds (SendInput is queue-insertion,
+/// ~µs per call) and no human focus change could ever be observed mid-run.
+/// Before EVERY chunk (including the first -- the modifier-release wait can
+/// delay the first keystroke by up to 1500 ms) it checks, in order: has a
+/// physical modifier gone down (the leading edge of a halt gesture -- Alt is
+/// down before Alt+Tab changes the foreground), then asks
+/// <see cref="MidPasteDecider"/> whether the window we started typing into is
+/// still foreground. On either halt it stops immediately and reports
+/// <see cref="InjectionRunOutcome.Interrupted"/> so the caller can hold the
+/// WHOLE original text as a pending paste. All Win32 access is behind the
+/// delegates, so this loop is fully unit-testable on Linux.
 /// </summary>
 public static class GuardedInjectionRun
 {
@@ -560,20 +609,28 @@ public static class GuardedInjectionRun
         IReadOnlyList<string> chunks,
         long hwndAtSendStart,
         Func<long> currentForegroundHwnd,
-        Func<string, bool> sendChunk)
+        Func<string, bool> sendChunk,
+        Func<bool>? modifierHeld = null,
+        Action? pauseBetweenChunks = null)
     {
         ArgumentNullException.ThrowIfNull(chunks);
         ArgumentNullException.ThrowIfNull(currentForegroundHwnd);
         ArgumentNullException.ThrowIfNull(sendChunk);
 
-        foreach (var chunk in chunks)
+        for (var i = 0; i < chunks.Count; i++)
         {
+            if (i > 0) pauseBetweenChunks?.Invoke();
+
+            // Checks sit immediately before the send, so the exposure window
+            // is the (microsecond-scale) send itself, not the pause.
+            if (modifierHeld?.Invoke() == true)
+                return InjectionRunOutcome.Interrupted;
             if (MidPasteDecider.Decide(hwndAtSendStart, currentForegroundHwnd())
                 == MidPasteDecision.Halt)
             {
                 return InjectionRunOutcome.Interrupted;
             }
-            if (!sendChunk(chunk))
+            if (!sendChunk(chunks[i]))
                 return InjectionRunOutcome.SendFailed;
         }
         return InjectionRunOutcome.Completed;
@@ -583,7 +640,7 @@ public static class GuardedInjectionRun
 
 As in Task 2: if the build complains about missing `System` / `System.Collections.Generic` types (`Func`, `IReadOnlyList`, `ArgumentNullException`), add the corresponding `using` lines above the namespace.
 
-Note: when `hwndAtSendStart == 0` the decider always returns `Continue`, so the probe result is irrelevant — but the probe IS still invoked per chunk. That is fine (it is a cheap call in production); the `EmptyChunks` test only forbids probing when there is nothing to send.
+Note: when `hwndAtSendStart == 0` the decider always returns `Continue`, so the probe result is irrelevant — but the probe IS still invoked per chunk. That is fine (it is a cheap call in production — measured ~11 ns); the `EmptyChunks` test only forbids probing when there is nothing to send. The `modifierHeld` probe is intentionally NOT disabled by an unknown HWND baseline: a positively-observed held modifier is an observation, not a failed one, so halting on it respects the fail-open policy.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -592,7 +649,7 @@ dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c R
 dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform.Tests.dll -notrait "Platform=Windows" -class "Winpepper.Platform.Tests.Injection.GuardedInjectionRunTests"
 ```
 
-Expected: 7 tests, `Failed: 0`, `Errors: 0`.
+Expected: 9 tests, `Failed: 0`, `Errors: 0`.
 
 - [ ] **Step 5: Run the full Linux suite and commit**
 
@@ -604,11 +661,13 @@ Expected: `LINUX SUITE: GREEN`.
 
 ```bash
 git add src/Winpepper.Platform/Injection/GuardedInjectionRun.cs tests/Winpepper.Platform.Tests/Injection/GuardedInjectionRunTests.cs
-git commit -m "feat(inject): pure interruptible send-loop driver (GuardedInjectionRun)
+git commit -m "feat(inject): pure paced interruptible send-loop driver (GuardedInjectionRun)
 
-Per-chunk foreground check (before EVERY chunk, incl. the first) -> Halt =>
-Interrupted with remaining chunks unsent; sendChunk false => SendFailed;
-all sent => Completed. Fully Linux-unit-tested via delegates.
+Per-chunk guard (before EVERY chunk, incl. the first): physical-modifier
+halt, then foreground-HWND check -> Interrupted with remaining chunks
+unsent; sendChunk false => SendFailed; all sent => Completed. Inter-chunk
+pause hook runs between chunks only -- pacing is what makes the guard able
+to observe a human halt at all. Fully Linux-unit-tested via delegates.
 
 Linux test suite: GREEN (see ./scripts/linux-tests.sh)."
 ```
@@ -624,7 +683,7 @@ Linux test suite: GREEN (see ./scripts/linux-tests.sh)."
 **Interfaces:**
 - Consumes: existing `ModifierGuard`, `SendInputNative`, existing helpers `ToCodeUnits` / `BuildKeyDownUpInputs`.
 - Produces (for Task 5):
-  - `TextInjector` constructor: `TextInjector(ILogger<TextInjector> log, Func<int, bool>? isKeyDown = null, Func<long>? foregroundHwnd = null, Func<string, bool>? sendChunk = null)` — the two new optional params are test seams following the existing `isKeyDown` seam pattern; production defaults are `DefaultForegroundProbe` (Win32 `GetForegroundWindow`, 0 on non-Windows/failure) and `SendChunkViaSendInput` (the existing build-inputs + `SendInput` tail, per chunk).
+  - `TextInjector` constructor: `TextInjector(ILogger<TextInjector> log, Func<int, bool>? isKeyDown = null, Func<long>? foregroundHwnd = null, Func<string, bool>? sendChunk = null, Action<int>? sleep = null)` — the three new optional params are test seams following the existing `isKeyDown` seam pattern; production defaults are `DefaultForegroundProbe` (Win32 `GetForegroundWindow`, 0 on non-Windows/failure), `SendChunkViaSendInput` (the existing build-inputs + `SendInput` tail, per chunk), and `Thread.Sleep` (inter-chunk pacing; tests inject a no-op or recorder).
   - Private `void NeutralizeHeldModifiers()` — the existing modifier-release prelude, extracted verbatim.
   - `public static partial IntPtr SendInputNative.GetForegroundWindow()` (internal class, same assembly).
 - `public bool TryInject(string text)` keeps its exact current signature and behavior in this task.
@@ -652,19 +711,32 @@ In `src/Winpepper.Platform/Injection/TextInjector.cs`:
     /// <summary>UTF-16 code units per guarded send chunk (Task: mid-paste focus fallback).</summary>
     internal const int ChunkCodeUnits = 32;
 
+    /// <summary>
+    /// Pause between guarded send chunks. Load-bearing (validation ledger, A1):
+    /// SendInput is queue-insertion (~µs per call), so an UNPACED loop finishes
+    /// in single-digit milliseconds and the mid-paste guard could never observe
+    /// a human focus change. 20 ms/chunk ≈ 1600 code units/s -- far faster than
+    /// any typist, slow enough that a long paste spans the human reaction
+    /// window (a 1000-unit paste ≈ 0.6 s).
+    /// </summary>
+    internal const int InterChunkPauseMs = 20;
+
     private readonly Func<long> _foregroundHwnd;
     private readonly Func<string, bool> _sendChunk;
+    private readonly Action<int> _sleep;
 
     public TextInjector(
         ILogger<TextInjector> log,
         Func<int, bool>? isKeyDown = null,
         Func<long>? foregroundHwnd = null,
-        Func<string, bool>? sendChunk = null)
+        Func<string, bool>? sendChunk = null,
+        Action<int>? sleep = null)
     {
         _log = log;
         _isKeyDown = isKeyDown ?? DefaultKeyProbe;
         _foregroundHwnd = foregroundHwnd ?? DefaultForegroundProbe;
         _sendChunk = sendChunk ?? SendChunkViaSendInput;
+        _sleep = sleep ?? Thread.Sleep;
     }
 
     /// <summary>Foreground HWND as Int64; 0 when unknown (non-Windows, or the call fails).</summary>
@@ -756,8 +828,8 @@ git commit -m "refactor(inject): extract modifier prelude + per-chunk send; add 
 1. SendInputNative gains GetForegroundWindow (LibraryImport, unguarded like
    its siblings; never invoked on Linux at runtime).
 2. TextInjector: NeutralizeHeldModifiers() and SendChunkViaSendInput()
-   extracted verbatim; ctor gains optional foregroundHwnd/sendChunk seams
-   (same pattern as the existing isKeyDown seam). No behavior change.
+   extracted verbatim; ctor gains optional foregroundHwnd/sendChunk/sleep
+   seams (same pattern as the existing isKeyDown seam). No behavior change.
 
 Linux test suite: GREEN (see ./scripts/linux-tests.sh)."
 ```
@@ -773,7 +845,7 @@ Linux test suite: GREEN (see ./scripts/linux-tests.sh)."
 **Interfaces:**
 - Consumes: `InjectionChunker.Split` (Task 2), `GuardedInjectionRun.Execute` (Task 3), `InjectionRunOutcome` (Task 1), seams from Task 4.
 - Produces (for Task 6):
-  - `public InjectionRunOutcome TryInjectGuarded(string text)` — the ONLY paste entry point `PipelineHost` will use after Task 6. Baselines the foreground HWND at METHOD ENTRY (before the up-to-1500 ms modifier wait, so a focus change during the wait is caught before the first chunk), then runs the guarded chunk loop. Empty text → `Completed`.
+  - `public InjectionRunOutcome TryInjectGuarded(string text)` — the ONLY paste entry point `PipelineHost` will use after Task 6. Baselines the foreground HWND at METHOD ENTRY (before the up-to-1500 ms modifier wait, so a focus change during the wait is caught before the first chunk), then runs the guarded chunk loop paced at `InterChunkPauseMs` (20 ms) between chunks, with a per-chunk physical-modifier halt (`ModifierGuard.AnyDown` via the `isKeyDown` seam — ledger A6) and the per-chunk HWND check. Empty text → `Completed`.
   - `public bool TryInject(string text)` becomes a thin adapter: `TryInjectGuarded(text) == InjectionRunOutcome.Completed` (kept so any existing caller/test keeps compiling; on Windows its observable typing behavior is unchanged when focus is stable).
 
 - [ ] **Step 1: Write the failing tests**
@@ -796,9 +868,10 @@ public class TextInjectorGuardedTests
         Func<string, bool> sendChunk)
         => new(
             NullLogger<TextInjector>.Instance,
-            isKeyDown: _ => false,          // no held modifiers => no sleep
+            isKeyDown: _ => false,          // no held modifiers => no wait, no modifier halt
             foregroundHwnd: foregroundHwnd,
-            sendChunk: sendChunk);
+            sendChunk: sendChunk,
+            sleep: _ => { });               // no real pacing in unit tests
 
     [Fact]
     public void Guarded_StableFocus_SendsWholeText_InChunks()
@@ -879,6 +952,43 @@ public class TextInjectorGuardedTests
     }
 
     [Fact]
+    public void Guarded_ModifierPressed_MidSend_Interrupts()
+    {
+        // The halt gesture's LEADING edge is a physical modifier going down
+        // (Alt, before Alt+Tab moves the foreground). The guard halts on the
+        // modifier itself so no chunk goes out Alt-modified (ledger A6).
+        var sent = new List<string>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => sent.Count >= 1, // "Alt goes down" after chunk 1
+            foregroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: _ => { });
+        var text = new string('a', 96); // 3 chunks of 32
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Interrupted);
+
+        sent.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Guarded_Paces_Between_Chunks_Only()
+    {
+        var sleeps = new List<int>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: _ => true,
+            sleep: sleeps.Add);
+        var text = new string('a', 96); // 3 chunks => exactly 2 inter-chunk pauses
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        sleeps.ShouldBe(new[] { 20, 20 }); // TextInjector.InterChunkPauseMs
+    }
+
+    [Fact]
     public void TryInject_Adapter_True_OnCompleted_False_OnInterrupted()
     {
         var stable = NewInjector(() => 42, _ => true);
@@ -908,16 +1018,25 @@ In `src/Winpepper.Platform/Injection/TextInjector.cs`, replace the Task-4 versio
 ```csharp
     /// <summary>
     /// Interruptible paste: types the text in chunks of
-    /// <see cref="ChunkCodeUnits"/> UTF-16 code units, checking before every
-    /// chunk that the window that was foreground when this method was entered
-    /// is STILL foreground. If focus moves mid-paste the remaining chunks are
-    /// not sent and <see cref="InjectionRunOutcome.Interrupted"/> is returned
-    /// so the caller can hold the WHOLE original text as a pending paste.
+    /// <see cref="ChunkCodeUnits"/> UTF-16 code units, pausing
+    /// <see cref="InterChunkPauseMs"/> between chunks (pacing is what makes
+    /// the guard able to observe a human halt gesture at all -- an unpaced
+    /// loop is queue-insertion-fast and finishes in milliseconds) and
+    /// checking before every chunk that (a) no physical modifier has gone
+    /// down (the leading edge of Alt+Tab -- injected Unicode is delivered
+    /// with the current physical modifier state applied) and (b) the window
+    /// that was foreground when this method was entered is STILL foreground.
+    /// If either check trips, the remaining chunks are not sent and
+    /// <see cref="InjectionRunOutcome.Interrupted"/> is returned so the
+    /// caller can hold the WHOLE original text as a pending paste.
     /// The baseline is captured at method entry -- BEFORE the modifier-release
     /// wait (up to 1500 ms) -- so a focus change during that wait is caught
-    /// before the first keystroke. Fail-open: if the foreground window cannot
-    /// be determined (probe returns 0), the guard is disabled and the paste
-    /// proceeds exactly as it did before this feature.
+    /// before the first keystroke. The modifier check cannot re-trip on the
+    /// prelude's own timeout: NeutralizeHeldModifiers synthesizes KEYUPs, so
+    /// after it returns the observable modifier state is up. Fail-open: if
+    /// the foreground window cannot be determined (probe returns 0), the
+    /// HWND guard is disabled and the paste proceeds exactly as it did
+    /// before this feature.
     /// </summary>
     public InjectionRunOutcome TryInjectGuarded(string text)
     {
@@ -926,9 +1045,15 @@ In `src/Winpepper.Platform/Injection/TextInjector.cs`, replace the Task-4 versio
         var hwndAtSendStart = _foregroundHwnd();
         NeutralizeHeldModifiers();
         var chunks = InjectionChunker.Split(text, ChunkCodeUnits);
-        var outcome = GuardedInjectionRun.Execute(chunks, hwndAtSendStart, _foregroundHwnd, _sendChunk);
+        var outcome = GuardedInjectionRun.Execute(
+            chunks,
+            hwndAtSendStart,
+            _foregroundHwnd,
+            _sendChunk,
+            modifierHeld: () => ModifierGuard.AnyDown(_isKeyDown),
+            pauseBetweenChunks: () => _sleep(InterChunkPauseMs));
         if (outcome == InjectionRunOutcome.Interrupted)
-            _log.LogInformation("Injection interrupted: foreground window changed mid-paste");
+            _log.LogInformation("Injection interrupted: foreground window or physical modifier state changed mid-paste");
         return outcome;
     }
 
@@ -943,7 +1068,7 @@ dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c R
 dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform.Tests.dll -notrait "Platform=Windows"
 ```
 
-Expected: `Failed: 0`, `Errors: 0` (7 new tests plus all pre-existing ones).
+Expected: `Failed: 0`, `Errors: 0` (9 new tests plus all pre-existing ones).
 
 - [ ] **Step 5: Run the full Linux suite and commit**
 
@@ -955,11 +1080,13 @@ Expected: `LINUX SUITE: GREEN`.
 
 ```bash
 git add src/Winpepper.Platform/Injection/TextInjector.cs tests/Winpepper.Platform.Tests/Injection/TextInjectorGuardedTests.cs
-git commit -m "feat(inject): interruptible TryInjectGuarded -- halt typing when foreground changes mid-paste
+git commit -m "feat(inject): interruptible paced TryInjectGuarded -- halt typing on mid-paste focus or modifier change
 
-1. TryInjectGuarded chunks the text (32 code units, surrogate-safe) and
-   checks the foreground HWND before every chunk; Interrupted means the
-   remainder was never sent.
+1. TryInjectGuarded chunks the text (32 code units, surrogate-safe), paces
+   20 ms between chunks (an unpaced loop is queue-insertion-fast, so the
+   guard could never observe a human halt), and checks physical modifiers +
+   foreground HWND before every chunk; Interrupted means the remainder was
+   never sent.
 2. Baseline captured at method entry, before the modifier wait, so a focus
    change during the wait sends nothing.
 3. TryInject becomes a bool adapter over the guarded run (fail-open keeps
@@ -984,6 +1111,8 @@ Notes that MUST hold in this task:
 - An interrupt is a user action, not an error: do NOT call `_errorBus.Report` for `Interrupted` (the existing `ErrorReport_WhilePending_KeepsPendingClickable` semantics remain reserved for real failures).
 - `injected` stays `false` on interrupt, so the existing `PostPasteGate.ShouldWatch(..., injected, ...)` correctly skips the learning watcher, `_engine.Apply(SessionEvent.InjectionCompleted)` still runs (VM stage stays `PendingPaste` — already pinned by the existing Core test `EngineIdle_WhilePending_KeepsPendingStage`), and history archiving stays unconditional.
 - In `TryPastePending`, on interrupt the pending slot is simply KEPT (`NotifyPasteAttempted(false)`) — the slot still holds the full original text, so the next click re-pastes ALL of it (pinned by the existing Core test `NotifyPasteAttempted_Failure_KeepsPending`).
+- Threading (validated; ledger A9/AD-3): the hold and toggle arms run on a thread-pool thread (hotkey loop via `Task.Run`), so the paced send never touches the UI thread there — but the hotkey loop is serialized, so a long paced paste delays subsequent hotkey events by the paste duration (accepted). `TryPastePending` runs synchronously ON the WinUI UI thread from the pill's pointer handler: the paced guarded run stalls that thread ~20 ms per 32-unit chunk (~0.6 s per 1000 code units; typical transcriptions of 100–300 chars ⇒ 60–190 ms). Accepted trade-off — do NOT redesign the click handler in this task; if smoke item 8 shows unacceptable pill jank, the follow-up is dispatching the retry to a background thread, not removing pacing.
+- `Interrupted` now also fires when a physical modifier goes down mid-send (the leading edge of the halt gesture — ledger A6). It maps to the SAME pending-paste fallback at all three sites; no extra branch is needed.
 
 `PipelineHost` is `#if WINDOWS` and no test project references `Winpepper.App` (repo convention: this glue layer is verified by the Windows gate build + the manual Windows smoke checklist, exactly like the original pending-paste feature). So this task has no new automated test; its compile is proven by the Windows gate in Task 7 and its behavior by the smoke checklist there.
 
@@ -1010,7 +1139,8 @@ Replace the `else` block's opening with:
                         injected = outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
                         if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
                         {
-                            // Focus moved to another window while the keystrokes
+                            // Focus moved to another window (or a halt-gesture
+                            // modifier went down) while the keystrokes
                             // were still going out: stop typing and hold the WHOLE
                             // transcription as a pending paste (never just the
                             // remainder -- a torn partial paste in the old window
@@ -1019,7 +1149,7 @@ Replace the `else` block's opening with:
                             // clipboard clobbering -- the pill is the surface.
                             _vm.EnterPendingPaste(final, _targetAtStart);
                             _log.LogInformation(
-                                "Injection interrupted by focus change; held full text as pending paste ({Chars} chars)",
+                                "Injection interrupted (focus or modifier change); held full text as pending paste ({Chars} chars)",
                                 final.Length);
                         }
                         else if (!injected)
@@ -1051,7 +1181,8 @@ Replace with:
                         injected2 = outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
                         if (outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
                         {
-                            // Focus moved to another window while the keystrokes
+                            // Focus moved to another window (or a halt-gesture
+                            // modifier went down) while the keystrokes
                             // were still going out: stop typing and hold the WHOLE
                             // transcription as a pending paste (never just the
                             // remainder -- a torn partial paste in the old window
@@ -1060,7 +1191,7 @@ Replace with:
                             // clipboard clobbering -- the pill is the surface.
                             _vm.EnterPendingPaste(final2, _targetAtStart);
                             _log.LogInformation(
-                                "Injection interrupted by focus change; held full text as pending paste ({Chars} chars)",
+                                "Injection interrupted (focus or modifier change); held full text as pending paste ({Chars} chars)",
                                 final2.Length);
                         }
                         else if (!injected2)
@@ -1122,7 +1253,7 @@ with:
             // still holds the FULL original text, so the next click re-pastes
             // all of it. Not an error -- no ErrorBus report.
             _log.LogInformation(
-                "Pending paste interrupted by focus change; slot kept with full text for another click");
+                "Pending paste interrupted (focus or modifier change); slot kept with full text for another click");
         else
             _log.LogWarning("Pending paste injection failed");
 
@@ -1195,13 +1326,14 @@ Fix any errors in the files this plan touched, commit as `fix(inject): ...` or `
 
 These are the production proofs of the user story. They cannot be automated in this repo (no test project references `Winpepper.App`; real `SendInput`/foreground behavior needs a live desktop). Record results in the task notes/PR description.
 
-1. Dictate a LONG utterance (several sentences) into Notepad; do not touch anything. Expect: full text lands in Notepad, pill returns to idle (guard is invisible when focus is stable).
-2. Dictate a long utterance into Notepad and, the instant text starts appearing, Alt+Tab to another window. Expect: typing stops almost immediately (within ~one chunk), pill shows "Click to paste".
+1. Dictate a LONG utterance (several sentences) into Notepad; do not touch anything. Expect: full text lands in Notepad, streaming in visibly fast paced bursts (~1600 code units/s — the 20 ms inter-chunk pacing), pill returns to idle (guard is invisible when focus is stable).
+2. Dictate a long utterance into Notepad and, the instant text starts appearing, Alt+Tab to another window. Expect: typing stops almost immediately — the halt normally triggers on the physical Alt going DOWN, before the foreground even changes (at most ~one more 32-unit chunk) — and the pill shows "Click to paste".
 3. Focus a fresh empty editor window and click the pill. Expect: the ENTIRE transcription appears — including the part that had already been typed into Notepad before the halt (the whole text, not the remainder).
 4. Repeat (2), then click the pill and Alt+Tab away again while the click-paste is typing. Expect: typing halts again, pill stays "Click to paste"; clicking once more into a stable window pastes the ENTIRE transcription.
 5. Regression — pre-existing hold behavior: dictate, and switch windows BEFORE the transcription completes (not mid-paste). Expect: nothing is typed anywhere; pill shows "Click to paste"; click pastes the full text (unchanged behavior).
 6. Regression — modifier guard: hold Ctrl while a dictation finishes; release after ~1 s. Expect: text types normally after release (no control-character garbage).
 7. Regression — next dictation discards a pending slot: leave a pending paste unpasted, start a new dictation. Expect: old pending text is discarded; new flow proceeds normally.
+8. Pill responsiveness during click-paste (accepted trade-off, ledger AD-3): click-paste a LONG (multi-sentence) pending text into a stable window. Expect: the ENTIRE text lands; the pill may be briefly unresponsive while it types (the paced guarded run stalls the UI thread ~20 ms per 32-unit chunk), then repaints and returns to idle. If the jank is clearly unacceptable, note it in the PR — the designated follow-up is dispatching the retry to a background thread, NOT removing pacing.
 
 - [ ] **Step 5: Confirm branch is push-ready**
 
@@ -1217,7 +1349,7 @@ Expected: the commits from Tasks 1–6 (plus any gate fixes), clean working tree
 ## Self-Review (performed at plan-writing time)
 
 **1. Spec coverage:**
-- "If focus changes WHILE text is actively being pasted, immediately halt" → Tasks 1–5 create the interruptible send (per-chunk HWND checks); Task 6 wires it into all three production paste sites. The only physical way to halt a `SendInput`-based paste is to chunk it — covered.
+- "If focus changes WHILE text is actively being pasted, immediately halt" → Tasks 1–5 create the interruptible send (per-chunk modifier + HWND checks, paced so the guard can physically observe a human halt gesture); Task 6 wires it into all three production paste sites. The only physical way to halt a `SendInput`-based paste is to chunk it AND pace it — covered.
 - "Fall back to the same click-to-paste behavior" → Task 6 reuses the exact existing pending-paste flow (`EnterPendingPaste`, pill PENDING state, `TryPastePending`); no parallel mechanism invented.
 - "Click-to-paste must paste the WHOLE transcription, not just the remainder" → Task 6 passes `final`/`final2` (full text) to `EnterPendingPaste`; the pill-retry interrupt path keeps the untouched full-text slot (`NotifyPasteAttempted(false)`). Pinned at the pure level by `Interrupted_Run_Sent_Text_Is_A_Strict_Prefix_Never_The_Whole` (Task 3) plus existing Core tests (`EnterPendingPaste_HoldsTextAndShowsPendingStage`, `NotifyPasteAttempted_Failure_KeepsPending`), and at the production level by smoke items 3–4.
 - "All tests green before committing (Linux subset); full Windows suite via ./scripts/windows-gate.sh before pushing" → every task's Step 5 runs `linux-tests.sh`; Task 7 runs the gate.
@@ -1227,4 +1359,10 @@ Expected: the commits from Tasks 1–6 (plus any gate fixes), clean working tree
 
 **2. Placeholder scan:** every code step contains complete code; every run step has an exact command and expected output. The two adaptive instructions (logger acquisition in Task 5 Step 1, toggle-arm local names in Task 6 Step 2) each state the concrete expected value AND where to verify it — no TBDs.
 
-**3. Type consistency:** `InjectionRunOutcome { Completed, Interrupted, SendFailed }`, `MidPasteDecision { Continue, Halt }`, `MidPasteDecider.Decide(long, long)`, `InjectionChunker.Split(string, int)`, `GuardedInjectionRun.Execute(IReadOnlyList<string>, long, Func<long>, Func<string,bool>)`, `TextInjector.TryInjectGuarded(string) -> InjectionRunOutcome`, `TryInject(string) -> bool`, `ChunkCodeUnits = 32` — used with these exact names/signatures in every task that references them (verified line-by-line). Existing consumed APIs (`EnterPendingPaste(string, InjectionTarget)`, `NotifyPasteAttempted(bool)`, `InjectionText.ForPaste(string)`, `_targetAtStart`) match the current source verbatim.
+**3. Type consistency:** `InjectionRunOutcome { Completed, Interrupted, SendFailed }`, `MidPasteDecision { Continue, Halt }`, `MidPasteDecider.Decide(long, long)`, `InjectionChunker.Split(string, int)`, `GuardedInjectionRun.Execute(IReadOnlyList<string>, long, Func<long>, Func<string,bool>, Func<bool>? modifierHeld = null, Action? pauseBetweenChunks = null)`, `TextInjector.TryInjectGuarded(string) -> InjectionRunOutcome`, `TryInject(string) -> bool`, `TextInjector(ILogger<TextInjector>, Func<int,bool>? isKeyDown = null, Func<long>? foregroundHwnd = null, Func<string,bool>? sendChunk = null, Action<int>? sleep = null)`, `ChunkCodeUnits = 32`, `InterChunkPauseMs = 20` — used with these exact names/signatures in every task that references them (verified line-by-line). Existing consumed APIs (`EnterPendingPaste(string, InjectionTarget)`, `NotifyPasteAttempted(bool)`, `InjectionText.ForPaste(string)`, `_targetAtStart`, `ModifierGuard.AnyDown(Func<int,bool>)`) match the current source verbatim.
+
+**4. Post-planning load-bearing validation revisions (Stage 2):** the workflow's validation stage (assumption ledger: `/home/dan/code/winpepper/.worktrees/.the-usual-logs/midpaste-focus-fallback/load-bearing-ledger.md`, with full evidence reports alongside it) falsified three assumptions; the plan above already incorporates the fixes:
+- **A1 (falsified):** an unpaced chunk loop completes in single-digit milliseconds (`SendInput` is queue-insertion, ~µs per call; measured production floor 3 ms/112 chars), so the between-chunk guard could never observe a human focus change. Fix: `InterChunkPauseMs = 20` pacing between chunks (Tasks 3–5) — 1000 code units ≈ 0.6 s, inside the human reaction window.
+- **A6 (falsified):** injected `KEYEVENTF_UNICODE` chars are delivered with the CURRENT physical modifier state, so the Alt→Tab gap would have typed Alt-modified garbage. Fix: per-chunk `modifierHeld` halt (`ModifierGuard.AnyDown` via the `isKeyDown` seam, Tasks 3 and 5), which also halts EARLIER than any HWND check could (Alt-down precedes the foreground change).
+- **A8b (falsified):** UIPI-dropped `SendInput` reports success (MSDN-verbatim), so an elevated-from-start target still silently loses the paste — pre-existing production behavior, unchanged by this plan; accepted (ledger AD-2). Mid-run elevation flips now classify `Interrupted` (an improvement).
+- Accepted residuals (ledger AD-1/AD-3): ≤1-chunk (~32 chars) bleed into a newly focused window in a rare race; pill-click UI-thread stall and serialized-hotkey-loop delay during a paced send. Verified supporting facts: pill is `WS_EX_NOACTIVATE` (clicking it never changes foreground — the guarded retry cannot soft-lock); `GetForegroundWindow` ≈ 11 ns/call; sequential `SendInput` calls preserve FIFO ordering with drops visible via the return value.

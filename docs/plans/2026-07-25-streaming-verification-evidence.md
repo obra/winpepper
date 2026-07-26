@@ -196,7 +196,31 @@ substitute for the local streamed-path evidence above.
 
 ## Windows pre-push gate result
 
-<filled by the final gate run — see "Gate summary" below>
+Run date: 2026-07-25. Ran against commit `1a031ef` (`git rev-parse --short HEAD`).
+Verbatim summary block from `artifacts/windows-gate/final-run.txt`:
+
+```
+================ windows-gate summary ================
+Winpepper.App build: OK
+Winpepper.Asr.Tests (net9.0): OK     Winpepper.Asr.Tests  Total: 172, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 7.732s
+Winpepper.Audio.Tests (net9.0): OK     Winpepper.Audio.Tests  Total: 62, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.455s
+Winpepper.Audio.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Audio.Tests  Total: 64, Errors: 0, Failed: 0, Skipped: 1, Not Run: 0, Time: 0.475s
+Winpepper.Cleanup.Tests (net9.0): OK     Winpepper.Cleanup.Tests  Total: 85, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.784s
+Winpepper.Cleanup.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Cleanup.Tests  Total: 87, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 0.804s
+Winpepper.Core.Tests (net9.0): OK     Winpepper.Core.Tests  Total: 379, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.581s
+Winpepper.Corrections.Tests (net9.0): OK     Winpepper.Corrections.Tests  Total: 23, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.825s
+Winpepper.History.Tests (net9.0): OK     Winpepper.History.Tests  Total: 45, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.162s
+Winpepper.IntegrationTests (net9.0): OK     Winpepper.IntegrationTests  Total: 1, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.411s
+Winpepper.Models.Tests (net9.0): OK     Winpepper.Models.Tests  Total: 73, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.602s
+Winpepper.Platform.Tests (net9.0): OK     Winpepper.Platform.Tests  Total: 218, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 0.562s
+Winpepper.Platform.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Platform.Tests  Total: 222, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 2.198s
+grand total tests: 1431 (cross-check only; roughly ~1300+ across 12 runs -- record the actual number)
+GATE: GREEN
+```
+
+Honesty note: Skipped totals 7 across the 12 runs (Llama self-skips plus
+platform skips). This is expected per the plan; there are 0 failures and 0
+errors.
 
 ## Cross-references & environment honesty
 

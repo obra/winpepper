@@ -54,7 +54,7 @@ Copied from the spec and `AGENTS.md` — every task's requirements implicitly in
 2. **Manifest is a local DTO, not a `ProjectReference` to `Winpepper.History`.** The tool only READS the history folder; a ~20-line camelCase DTO keeps every shared file BCL-only so it can be `Compile Include`'d into `tests/Winpepper.Asr.Tests` (the repo's existing pattern for bench files). The real `index.json` parse is proven end-to-end in Task 3.
 3. **Disfluencies via a source change (Route A):** add `AssemblyAiOptions.Disfluencies { get; init; } = false` and send `_opts.Disfluencies` in `AssemblyAiClient.CreateTranscriptAsync`. Default `false` keeps the app's behavior identical; the eval sets `true`. This literally reuses the existing client (spec requirement) instead of reimplementing the HTTP layer.
 4. **No number-word normalization.** The spec says "consider number-word normalization only if simple" — it is not simple to do correctly (dates, currency, ordinals), and the same normalization is applied to reference and every candidate alike, so relative ranking (the stated purpose) is unaffected. WER/CER reuse `TranscriptDiff.Normalize` (lowercase, strip punctuation keeping apostrophes, collapse whitespace) unchanged.
-5. **Batch fallback in the corpus mode** wraps the SAME nemotron engine's `TranscribeBatch` in a `ProbeTranscriber` (the bench's integrity-control pattern), so `fellBack` is recorded per clip and a fallback run still produces text. Truncation is detected by scanning `NemotronStreamingTranscriber`'s log lines for `was_truncated` (its fallback reason string) — the only externally observable truncation signal.
+5. **Batch fallback in the corpus mode runs on a SECOND `TranscribeCppEngine` instance** (same model + runtime, its own compute gate), wrapped in a `ProbeTranscriber` (the bench's integrity-control pattern), so `fellBack` is recorded per clip and a fallback run still produces text. It must NOT be the primary engine — code inspection falsified that: `FinishAsync` never disposes the native stream; the sole dispose site is `Session.DisposeAsync()` (`NemotronStreamingTranscriber.cs:174`), which `StreamingDictationSession` calls only AFTER `FinishAsync` returns (`StreamingDictationSession.cs:120-121`), and the stream holds the engine-wide `SemaphoreSlim(1,1)` compute gate for its whole lifetime (acquired `TranscribeCppEngine.cs:177`, released only in `NativeStream.Dispose`, `:336`). A fallback awaited inside `FinishAsync` that calls `TranscribeBatch` on the SAME engine therefore stalls 5 s at the gate wait (`:235`) and throws `TranscribeCppException` — every fallback clip would fail. (Production never hits this: its batch fallback is a different engine.) The batch-parity `TranscribeBatch` call stays on the primary `corpusEngine` — it runs before any streaming session exists on that engine, so it is gate-safe. Cost of the second instance: ~700 MB extra model RAM, bench-only, accepted — do not "simplify" back to one engine. Truncation is detected by scanning `NemotronStreamingTranscriber`'s log lines for `was_truncated` (its fallback reason string) — the only externally observable truncation signal.
 6. **Silent clips replay production exactly:** streamed frames stay untrimmed; the buffer passed to `FinishAsync` is `SilenceTrimmer.Trim(...)`'s output; when `Trim` says `IsSilent`, production drops the dictation without transcribing (`PipelineHost` `TrimForTranscription` → null), so the eval records an empty transcript and no latency sample for that clip.
 7. **`results.md` contains no transcript text** (safe to quote in the committed evidence doc); `results.json` carries full transcripts, references, and diffs and stays in gitignored `artifacts/`.
 
@@ -1007,8 +1007,8 @@ git commit -m "feat(eval): reference planning -- skip/write-empty/transcribe dec
 - Modify: `scripts/asr-eval-corpus/Program.cs` (add `references` command)
 
 **Interfaces:**
-- Consumes: `ReferencePlanner` (Task 5), `AssemblyAiOptions.Disfluencies` (Task 4), `AssemblyAiTranscriber`/`AssemblyAiClient`/`AssemblyAiModels`/`IAssemblyAiKeyStore` from `Winpepper.Asr.Transcription`, `BenchAudio.ReadMono16k` (linked file, namespace `AsrLatencyBench`).
-- Produces: the `references` CLI command; `clips/<id>.reference.txt` files.
+- Consumes: `ReferencePlanner` (Task 5), `AssemblyAiOptions.Disfluencies` (Task 4), `AssemblyAiTranscriber`/`AssemblyAiClient`/`AssemblyAiModels`/`IAssemblyAiKeyStore` from `Winpepper.Asr.Transcription` — including the transcriber's injectable `scheduleDetached` constructor hook (`Action<Func<Task>>`, `AssemblyAiTranscriber.cs:30`; default `a => _ = Task.Run(a)` at `:38`, i.e. fire-and-forget), `BenchAudio.ReadMono16k` (linked file, namespace `AsrLatencyBench`).
+- Produces: the `references` CLI command; `clips/<id>.reference.txt` files. Failure contract: a failed clip is recorded and the command CONTINUES to the next clip, prints a final `N written, M skipped, K failed` summary, and exits non-zero if any failed; re-running retries only missing/failed references (existing ones are skipped). Remote transcript deletes are drained deterministically before exit.
 
 - [ ] **Step 1: Implement the references command**
 
@@ -1020,6 +1020,7 @@ In `scripts/asr-eval-corpus/Program.cs`:
 using System.Globalization;
 using AsrEvalCorpus;
 using AsrLatencyBench;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Winpepper.Asr.Transcription;
 ```
@@ -1061,8 +1062,17 @@ static async Task<int> RunReferences(string corpusDir, bool force)
     };
     using var http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
     var client = new AssemblyAiClient(http, () => key, opts, NullLogger<AssemblyAiClient>.Instance);
+    // DeleteAfterTranscribe deletes are DETACHED in the transcriber: its default
+    // scheduleDetached is `a => _ = Task.Run(a)` (AssemblyAiTranscriber.cs:38), which
+    // would race process exit in this short-lived CLI. Capture the delete task via the
+    // injectable scheduleDetached hook (ctor param, AssemblyAiTranscriber.cs:30) and
+    // await it per clip below, so every remote transcript delete deterministically
+    // completes before exit. The transcriber gets a console warning logger so a failed
+    // delete (logged inside ScheduleDelete, AssemblyAiTranscriber.cs:94) is visible.
+    Task? pendingDelete = null;
     var transcriber = new AssemblyAiTranscriber(
-        client, new EnvKeyStore(), opts, NullLogger<AssemblyAiTranscriber>.Instance);
+        client, new EnvKeyStore(), opts, new ConsoleWarnLogger<AssemblyAiTranscriber>(),
+        scheduleDetached: work => pendingDelete = work());
 
     var written = 0;
     var skipped = 0;
@@ -1088,9 +1098,24 @@ static async Task<int> RunReferences(string corpusDir, bool force)
                     File.WriteAllText(refPath, result.Text.TrimEnd() + Environment.NewLine);
                     written++;
                     Console.WriteLine($"references[{entry.Id}]: ok ({result.Text.Length} chars)");
+                    if (pendingDelete is not null)
+                    {
+                        // Drain the remote-transcript delete NOW, per clip: ScheduleDelete's
+                        // own try/catch means this never throws; a failed delete surfaces as
+                        // a [Warning] line from ConsoleWarnLogger, not an exception.
+                        await pendingDelete;
+                        pendingDelete = null;
+                        Console.WriteLine($"references[{entry.Id}]: remote transcript delete drained");
+                    }
                 }
                 catch (Exception ex)
                 {
+                    // Covers transport failures AND transcripts that complete with
+                    // status "error" -- AssemblyAiTranscriber.cs:73-74 throws
+                    // AssemblyAiException for those, e.g. "Audio duration is too
+                    // short." (documented minimum 160 ms; the 0.51 s corpus floor
+                    // clears it, but handle it anyway). The loop CONTINUES to the
+                    // next clip; no reference file is written for this one.
                     failed++;
                     Console.Error.WriteLine($"references[{entry.Id}]: FAILED {ex.Message}");
                 }
@@ -1098,6 +1123,9 @@ static async Task<int> RunReferences(string corpusDir, bool force)
         }
     }
     Console.WriteLine($"references: {written} written, {skipped} skipped, {failed} failed");
+    // Non-zero exit when any clip failed. Re-running retries ONLY missing/failed
+    // references: Decide skips clips whose reference file already exists, and a
+    // failed clip never wrote one -- idempotent by construction.
     return failed == 0 ? 0 : 1;
 }
 ```
@@ -1112,6 +1140,22 @@ sealed class EnvKeyStore : Winpepper.Asr.Transcription.IAssemblyAiKeyStore
     public void Save(string apiKey) { }
     public string? Load() => null;
     public void Clear() { }
+}
+
+/// <summary>Warning+ console logger so the transcriber's non-fatal warnings
+/// (notably a failed remote transcript delete) are visible in this CLI instead
+/// of being swallowed by NullLogger. Never logs the API key (the transcriber
+/// already guarantees that).</summary>
+sealed class ConsoleWarnLogger<T> : ILogger<T>
+{
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Warning;
+    public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        if (IsEnabled(logLevel))
+            Console.Error.WriteLine($"[{logLevel}] {formatter(state, exception)}");
+    }
 }
 ```
 
@@ -1527,9 +1571,9 @@ git commit -m "feat(bench): preroll-burst plus 50 ms frame segmentation matching
 **Interfaces:**
 - Consumes: nothing new.
 - Produces (used by Task 10):
-  - `AsrLatencyBench.ClipResult(string Id, double AudioSeconds, bool ExpectedSilent, bool HasReference, string Reference, string StreamText, string BatchText, double? Wer, double? Cer, bool? SilentPass, IReadOnlyList<long> FinishMsRuns, bool FellBack, bool Truncated, bool TrimmedSilent, string BatchParityDiff)` — record
+  - `AsrLatencyBench.ClipResult(string Id, double AudioSeconds, bool ExpectedSilent, bool HasReference, string Reference, string StreamText, string BatchText, double? Wer, double? Cer, bool? SilentPass, IReadOnlyList<long> FinishMsRuns, bool FellBack, bool Truncated, bool TrimmedSilent, string BatchParityDiff, string? Error = null)` — record; `Error` is `null` for normal rows; a failed clip carries a short exception type/message (results.json only — results.md shows just an ERROR marker) with empty texts and null metrics
   - `AsrLatencyBench.EvalRunInfo(string Corpus, string SpeechModel, string TranscribeCppVersion, string DateUtc, int Repeats)` — record
-  - `AsrLatencyBench.EvalSummary(int ClipCount, int ScoredCount, double? MeanWer, double? MedianWer, double? MeanCer, long LatencyP50Ms, long LatencyP90Ms, long LatencyMaxMs, int FallbackCount, int TruncatedCount, int SilentClipCount, int SilentPassCount)` — record
+  - `AsrLatencyBench.EvalSummary(int ClipCount, int ScoredCount, double? MeanWer, double? MedianWer, double? MeanCer, long LatencyP50Ms, long LatencyP90Ms, long LatencyMaxMs, int FallbackCount, int TruncatedCount, int SilentClipCount, int SilentPassCount, int FailedCount)` — record
   - `AsrLatencyBench.EvalResults.Summarize(IReadOnlyList<ClipResult>)` → `EvalSummary`
   - `AsrLatencyBench.EvalResults.ToJson(EvalRunInfo, IReadOnlyList<ClipResult>, EvalSummary)` → `string`
   - `AsrLatencyBench.EvalResults.ToMarkdown(EvalRunInfo, IReadOnlyList<ClipResult>, EvalSummary)` → `string` (numbers + ids only, NO transcript text)
@@ -1626,6 +1670,33 @@ public sealed class EvalResultsTests
         json.ShouldContain("\"wer\": 0.25");
         json.ShouldContain("\"finishMsRuns\"");
     }
+
+    [Fact]
+    public void FailedClip_CountedInSummary_MarkedInMarkdownWithoutErrorText()
+    {
+        // Error rows (per-clip failures in the corpus run) have empty texts and
+        // null metrics; results.md shows only an ERROR marker + counts.
+        var clips = new[]
+        {
+            Clip("ok", wer: 0.10, cer: 0.05),
+            new ClipResult("bad", 0.0, ExpectedSilent: false, HasReference: false,
+                Reference: "", StreamText: "", BatchText: "", Wer: null, Cer: null, SilentPass: null,
+                FinishMsRuns: Array.Empty<long>(), FellBack: false, Truncated: false,
+                TrimmedSilent: false, BatchParityDiff: "", Error: "TranscribeCppException: secret failure details"),
+        };
+
+        var s = EvalResults.Summarize(clips);
+
+        s.ClipCount.ShouldBe(2);
+        s.ScoredCount.ShouldBe(1);
+        s.FailedCount.ShouldBe(1);
+
+        var md = EvalResults.ToMarkdown(Info, clips, s);
+        md.ShouldContain("| bad |");
+        md.ShouldContain("ERROR");
+        md.ShouldContain("Failed: 1");
+        md.ShouldNotContain("secret failure details"); // exception text stays out of results.md
+    }
 }
 ```
 
@@ -1665,7 +1736,8 @@ public sealed record ClipResult(
     bool FellBack,
     bool Truncated,
     bool TrimmedSilent,
-    string BatchParityDiff);
+    string BatchParityDiff,
+    string? Error = null); // non-null = per-clip failure row (empty texts, null metrics); text goes to results.json only
 
 public sealed record EvalRunInfo(
     string Corpus, string SpeechModel, string TranscribeCppVersion, string DateUtc, int Repeats);
@@ -1682,7 +1754,8 @@ public sealed record EvalSummary(
     int FallbackCount,
     int TruncatedCount,
     int SilentClipCount,
-    int SilentPassCount);
+    int SilentPassCount,
+    int FailedCount);
 
 public sealed record EvalReport(EvalRunInfo Info, EvalSummary Summary, IReadOnlyList<ClipResult> Clips);
 
@@ -1727,7 +1800,8 @@ public static class EvalResults
             FallbackCount: clips.Count(c => c.FellBack),
             TruncatedCount: clips.Count(c => c.Truncated),
             SilentClipCount: silent.Length,
-            SilentPassCount: silent.Count(c => c.SilentPass == true));
+            SilentPassCount: silent.Count(c => c.SilentPass == true),
+            FailedCount: clips.Count(c => c.Error is not null));
     }
 
     public static string ToJson(EvalRunInfo info, IReadOnlyList<ClipResult> clips, EvalSummary summary)
@@ -1742,22 +1816,29 @@ public static class EvalResults
         sb.AppendLine($"- transcribe.cpp: `{info.TranscribeCppVersion}`");
         sb.AppendLine($"- date: {info.DateUtc}, repeats: {info.Repeats}");
         sb.AppendLine();
-        sb.AppendLine("| clip | audio (s) | WER | CER | silent | post-stop ms (runs) | fellBack | truncated |");
-        sb.AppendLine("|---|---|---|---|---|---|---|---|");
+        sb.AppendLine("| clip | audio (s) | WER | CER | silent | post-stop ms (runs) | fellBack | truncated | error |");
+        sb.AppendLine("|---|---|---|---|---|---|---|---|---|");
         foreach (var c in clips)
         {
+            if (c.Error is not null)
+            {
+                // Ids and a marker only -- the exception text stays in results.json.
+                sb.AppendLine($"| {c.Id} | - | - | - | - | - | - | - | ERROR |");
+                continue;
+            }
             var werCell = c.Wer is not null ? c.Wer.Value.ToString("F3") : (c.ExpectedSilent ? "-" : "no ref");
             var cerCell = c.Cer is not null ? c.Cer.Value.ToString("F3") : "-";
             var silentCell = c.SilentPass is null ? "-" : (c.SilentPass.Value ? "PASS" : "FAIL");
             sb.AppendLine($"| {c.Id} | {c.AudioSeconds:F1} | {werCell} | {cerCell} | {silentCell} | " +
-                          $"{string.Join(" ", c.FinishMsRuns)} | {c.FellBack} | {c.Truncated} |");
+                          $"{string.Join(" ", c.FinishMsRuns)} | {c.FellBack} | {c.Truncated} | - |");
         }
         sb.AppendLine();
         sb.AppendLine($"**Summary:** {summary.ClipCount} clips ({summary.ScoredCount} scored). " +
             $"WER mean {Fmt(summary.MeanWer)} / median {Fmt(summary.MedianWer)}; CER mean {Fmt(summary.MeanCer)}. " +
             $"Post-stop latency p50 {summary.LatencyP50Ms} ms, p90 {summary.LatencyP90Ms} ms, max {summary.LatencyMaxMs} ms. " +
             $"Fallbacks: {summary.FallbackCount}. Truncations: {summary.TruncatedCount}. " +
-            $"Silent clips: {summary.SilentPassCount}/{summary.SilentClipCount} pass.");
+            $"Silent clips: {summary.SilentPassCount}/{summary.SilentClipCount} pass. " +
+            $"Failed: {summary.FailedCount}.");
         return sb.ToString();
 
         static string Fmt(double? v) => v is null ? "n/a" : v.Value.ToString("F3");
@@ -1772,7 +1853,7 @@ dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f 
 dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -notrait "Platform=Windows" -class Winpepper.Asr.Tests.EvalResultsTests
 ```
 
-Expected: PASS (4 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 5: Full suite + commit**
 
@@ -1793,7 +1874,7 @@ git commit -m "feat(bench): eval results model with aggregate summary, JSON and 
 
 **Interfaces:**
 - Consumes: `EvalFraming` (Task 8), `EvalMetrics` (Task 7), `EvalResults`/`ClipResult`/`EvalRunInfo` (Task 9), `AsrEvalCorpus.CorpusManifest`/`ReferencePlanner` (Tasks 1, 5), `Winpepper.Audio.SilenceTrimmer.Trim(ReadOnlySpan<float>)` → `TrimResult { float[] Trimmed; bool IsSilent; ... }`, existing bench types (`ProbeTranscriber`, `BenchAudio`, `TranscriptDiff`), production classes (`TranscribeCppEngine.Load(...)`, `NemotronStreamingTranscriber(Func<ITranscribeCppEngine>, ITranscriber, string, ILogger?, int)`, `StreamingDictationSession.Start(...)/OnFrame/FinishAsync`), and `Winpepper.Asr.TranscribeCpp.TranscribeCppContract.RequiredVersion` (the pinned transcribe.cpp version constant — the pin documented at `TranscribeCppEngine.cs:7` lives at `TranscribeCppContract.cs:21`).
-- Produces: the `corpus` scenario: `AsrLatencyBench.dll corpus --corpus <dir> --nemotron-model <gguf> --nemotron-runtime <dir> [--repeats N] [--out <dir>]`, writing `results.json` + `results.md`.
+- Produces: the `corpus` scenario: `AsrLatencyBench.dll corpus --corpus <dir> --nemotron-model <gguf> --nemotron-runtime <dir> [--repeats N] [--out <dir>]`, writing `results.json` + `results.md` (default `--out` is gitignored `artifacts/asr-eval-results`). Failure contract: a failed clip becomes an error row, both files are ALWAYS written after the loop, and the process exits non-zero (via `Environment.ExitCode`) when any clip failed.
 
 - [ ] **Step 1: Wire the csproj**
 
@@ -1816,7 +1897,7 @@ In `scripts/asr-latency-bench/Program.cs`, next to the existing flag variables (
 
 ```csharp
 string? corpusDir = null;
-var outDir = "asr-eval-results";
+var outDir = "artifacts/asr-eval-results"; // default INSIDE gitignored artifacts/: results.json contains transcript text, and a bare "asr-eval-results/" is NOT gitignored
 var repeats = 1;
 ```
 
@@ -1852,103 +1933,140 @@ In the scenario `switch`, before `default:`, add (model the structure on the exi
             var manifest = AsrEvalCorpus.CorpusManifest.Load(manifestPath);
             using var corpusEngine = Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
                 nemotronRuntime, nemotronModel, msg => Console.WriteLine($"# nem-log: {msg}"));
-            Console.WriteLine($"# corpus: engine loaded, {manifest.Entries.Count} manifest entries, repeats={repeats}");
+            // SECOND engine instance (same model + runtime, its OWN compute gate),
+            // used ONLY as the streaming sessions' batch fallback via
+            // EngineBatchTranscriber. Do NOT "simplify" this back to one engine:
+            // during FinishAsync the primary engine's native stream still HOLDS the
+            // engine-wide SemaphoreSlim(1,1) compute gate (acquired
+            // TranscribeCppEngine.cs:177, released only in NativeStream.Dispose at
+            // :336, whose sole caller is Session.DisposeAsync() at
+            // NemotronStreamingTranscriber.cs:174, which StreamingDictationSession
+            // invokes only AFTER FinishAsync returns, StreamingDictationSession.cs:120-121).
+            // A same-engine fallback awaited inside FinishAsync would stall 5 s at the
+            // gate wait (TranscribeCppEngine.cs:235) and throw TranscribeCppException
+            // on EVERY fallback clip. Cost: ~700 MB extra model RAM, bench-only, accepted.
+            using var fallbackEngine = Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
+                nemotronRuntime, nemotronModel, msg => Console.WriteLine($"# nem-fallback-log: {msg}"));
+            Console.WriteLine($"# corpus: engines loaded (primary + fallback), {manifest.Entries.Count} manifest entries, repeats={repeats}");
 
             var clipResults = new List<ClipResult>();
             foreach (var entry in manifest.Entries.Where(e => !e.Exclude))
             {
-                var wavAudio = BenchAudio.ReadMono16k(Path.Combine(corpusDir, entry.WavPath));
-                var refPath = AsrEvalCorpus.ReferencePlanner.ReferencePath(corpusDir, entry);
-                var hasReference = File.Exists(refPath);
-                var referenceText = hasReference ? File.ReadAllText(refPath).Trim() : "";
-
-                // (a) batch parity reference: same engine, offline over the full clip.
-                var batchText = corpusEngine.TranscribeBatch(wavAudio);
-
-                // (b) production passes silence-trimmed audio to FinishAsync (PipelineHost.cs:554);
-                //     streamed frames stay untrimmed -- same asymmetry as production.
-                var trimResult = Winpepper.Audio.SilenceTrimmer.Trim(wavAudio);
-
-                var streamText = "";
-                var fellBack = false;
-                var truncated = false;
-                var finishRuns = new List<long>();
-                for (var run = 0; run < repeats; run++)
+                // One bad clip must not destroy the whole eval: any per-clip failure
+                // (including a null coordinator result) becomes an error row, and
+                // results.json/results.md are still written after the loop.
+                try
                 {
-                    var runFellBack = false;
-                    var probe = new ProbeTranscriber(() => runFellBack = true, new EngineBatchTranscriber(corpusEngine));
-                    var nemLog = new ListLogger();
-                    var streaming = new NemotronStreamingTranscriber(
-                        () => corpusEngine, probe, "nemotron-streaming-en", nemLog);
-                    await using var session = StreamingDictationSession.Start(
-                        _ => Task.FromResult<IStreamingTranscriber?>(streaming),
-                        NullLogger.Instance, CancellationToken.None, TimeSpan.FromSeconds(10));
+                    var wavAudio = BenchAudio.ReadMono16k(Path.Combine(corpusDir, entry.WavPath));
+                    var refPath = AsrEvalCorpus.ReferencePlanner.ReferencePath(corpusDir, entry);
+                    var hasReference = File.Exists(refPath);
+                    var referenceText = hasReference ? File.ReadAllText(refPath).Trim() : "";
 
-                    // Production sends one ~500 ms preroll burst at session start, then
-                    // steady 50 ms frames (WarmWasapiRecorder.cs:144-147, PipelineHost.cs:455).
-                    // Stopwatch-scheduled pacing: steady frame s is due at s*50 ms, so
-                    // cumulative timing stays true to real time (no Task.Delay drift).
-                    var segments = EvalFraming.Segments(wavAudio.Length);
-                    var pacer = Stopwatch.StartNew();
-                    for (var s = 0; s < segments.Count; s++)
+                    // (a) batch parity reference: the PRIMARY engine, offline over the
+                    //     full clip. Gate-safe: it runs before any streaming session
+                    //     exists on this engine, so its compute gate is free.
+                    var batchText = corpusEngine.TranscribeBatch(wavAudio);
+
+                    // (b) production passes silence-trimmed audio to FinishAsync (PipelineHost.cs:554);
+                    //     streamed frames stay untrimmed -- same asymmetry as production.
+                    var trimResult = Winpepper.Audio.SilenceTrimmer.Trim(wavAudio);
+
+                    var streamText = "";
+                    var fellBack = false;
+                    var truncated = false;
+                    var finishRuns = new List<long>();
+                    for (var run = 0; run < repeats; run++)
                     {
-                        if (s > 0)
+                        var runFellBack = false;
+                        // Fallback runs on the SECOND engine -- see the fallbackEngine comment above.
+                        var probe = new ProbeTranscriber(() => runFellBack = true, new EngineBatchTranscriber(fallbackEngine));
+                        var nemLog = new ListLogger();
+                        var streaming = new NemotronStreamingTranscriber(
+                            () => corpusEngine, probe, "nemotron-streaming-en", nemLog);
+                        await using var session = StreamingDictationSession.Start(
+                            _ => Task.FromResult<IStreamingTranscriber?>(streaming),
+                            NullLogger.Instance, CancellationToken.None, TimeSpan.FromSeconds(10));
+
+                        // Production sends one ~500 ms preroll burst at session start, then
+                        // steady 50 ms frames (WarmWasapiRecorder.cs:144-147, PipelineHost.cs:455).
+                        // Stopwatch-scheduled pacing: steady frame s is due at s*50 ms, so
+                        // cumulative timing stays true to real time (no Task.Delay drift).
+                        var segments = EvalFraming.Segments(wavAudio.Length);
+                        var pacer = Stopwatch.StartNew();
+                        for (var s = 0; s < segments.Count; s++)
                         {
-                            var waitMs = s * 50L - pacer.ElapsedMilliseconds;
-                            if (waitMs > 0) await Task.Delay((int)waitMs);
+                            if (s > 0)
+                            {
+                                var waitMs = s * 50L - pacer.ElapsedMilliseconds;
+                                if (waitMs > 0) await Task.Delay((int)waitMs);
+                            }
+                            var (segOffset, segLength) = segments[s];
+                            session.OnFrame(wavAudio.AsMemory(segOffset, segLength));
                         }
-                        var (segOffset, segLength) = segments[s];
-                        session.OnFrame(wavAudio.AsMemory(segOffset, segLength));
+
+                        long finishMs;
+                        string runText;
+                        if (trimResult.IsSilent)
+                        {
+                            // Production drops silent dictations before transcription
+                            // (PipelineHost TrimForTranscription returns null): no text, no latency sample.
+                            runText = "";
+                            finishMs = 0;
+                        }
+                        else
+                        {
+                            var swFinish = Stopwatch.StartNew();
+                            var finishResult = await session.FinishAsync(trimResult.Trimmed, CancellationToken.None);
+                            swFinish.Stop();
+                            if (finishResult is null)
+                                throw new InvalidOperationException(
+                                    $"corpus[{entry.Id}]: no transcript from coordinator"); // caught below -> error row, run continues
+                            runText = finishResult.Text;
+                            finishMs = swFinish.ElapsedMilliseconds;
+                        }
+                        finishRuns.Add(finishMs);
+                        if (run == 0)
+                        {
+                            // Accuracy and flags from the first run; later runs only add latency samples.
+                            streamText = runText;
+                            fellBack = runFellBack;
+                            truncated = nemLog.Lines.Any(l => l.Contains("was_truncated", StringComparison.OrdinalIgnoreCase));
+                        }
                     }
 
-                    long finishMs;
-                    string runText;
-                    if (trimResult.IsSilent)
+                    double? wer = null;
+                    double? cer = null;
+                    bool? silentPass = null;
+                    if (entry.ExpectedSilent)
                     {
-                        // Production drops silent dictations before transcription
-                        // (PipelineHost TrimForTranscription returns null): no text, no latency sample.
-                        runText = "";
-                        finishMs = 0;
+                        silentPass = EvalMetrics.SilentPass(streamText);
                     }
-                    else
+                    else if (hasReference)
                     {
-                        var swFinish = Stopwatch.StartNew();
-                        var finishResult = await session.FinishAsync(trimResult.Trimmed, CancellationToken.None);
-                        swFinish.Stop();
-                        if (finishResult is null)
-                            throw new InvalidOperationException($"corpus[{entry.Id}]: no transcript from coordinator");
-                        runText = finishResult.Text;
-                        finishMs = swFinish.ElapsedMilliseconds;
+                        wer = EvalMetrics.Wer(referenceText, streamText).Rate;
+                        cer = EvalMetrics.Cer(referenceText, streamText).Rate;
                     }
-                    finishRuns.Add(finishMs);
-                    if (run == 0)
-                    {
-                        // Accuracy and flags from the first run; later runs only add latency samples.
-                        streamText = runText;
-                        fellBack = runFellBack;
-                        truncated = nemLog.Lines.Any(l => l.Contains("was_truncated", StringComparison.OrdinalIgnoreCase));
-                    }
+                    var parityDiff = TranscriptDiff.Summarize(batchText, streamText).Describe();
+                    clipResults.Add(new ClipResult(
+                        entry.Id, wavAudio.Length / 16000.0, entry.ExpectedSilent, hasReference,
+                        referenceText, streamText, batchText, wer, cer, silentPass,
+                        finishRuns, fellBack, truncated, trimResult.IsSilent, parityDiff));
+                    Console.WriteLine($"# corpus[{entry.Id}]: fellBack={fellBack} truncated={truncated} " +
+                        $"wer={(wer is null ? "n/a" : wer.Value.ToString("F3"))} finishMs={finishRuns[0]} parity: {parityDiff}");
                 }
-
-                double? wer = null;
-                double? cer = null;
-                bool? silentPass = null;
-                if (entry.ExpectedSilent)
+                catch (Exception ex)
                 {
-                    silentPass = EvalMetrics.SilentPass(streamText);
+                    // Error row: empty texts/metrics; the exception text goes only to
+                    // results.json (gitignored artifacts/) and the run log -- results.md
+                    // shows an ERROR marker and counts, never the message.
+                    clipResults.Add(new ClipResult(
+                        entry.Id, 0.0, entry.ExpectedSilent, HasReference: false,
+                        Reference: "", StreamText: "", BatchText: "", Wer: null, Cer: null, SilentPass: null,
+                        FinishMsRuns: Array.Empty<long>(), FellBack: false, Truncated: false,
+                        TrimmedSilent: false, BatchParityDiff: "",
+                        Error: $"{ex.GetType().Name}: {ex.Message}"));
+                    Console.Error.WriteLine($"# corpus[{entry.Id}]: FAILED {ex.GetType().Name}: {ex.Message}");
                 }
-                else if (hasReference)
-                {
-                    wer = EvalMetrics.Wer(referenceText, streamText).Rate;
-                    cer = EvalMetrics.Cer(referenceText, streamText).Rate;
-                }
-                var parityDiff = TranscriptDiff.Summarize(batchText, streamText).Describe();
-                clipResults.Add(new ClipResult(
-                    entry.Id, wavAudio.Length / 16000.0, entry.ExpectedSilent, hasReference,
-                    referenceText, streamText, batchText, wer, cer, silentPass,
-                    finishRuns, fellBack, truncated, trimResult.IsSilent, parityDiff));
-                Console.WriteLine($"# corpus[{entry.Id}]: fellBack={fellBack} truncated={truncated} " +
-                    $"wer={(wer is null ? "n/a" : wer.Value.ToString("F3"))} finishMs={finishRuns[0]} parity: {parityDiff}");
             }
 
             var runInfo = new EvalRunInfo(
@@ -1958,12 +2076,19 @@ In the scenario `switch`, before `default:`, add (model the structure on the exi
                 DateTime.UtcNow.ToString("yyyy-MM-dd"),
                 repeats);
             var evalSummary = EvalResults.Summarize(clipResults);
+            // ALWAYS write both files -- even when clips failed -- then report failures.
             Directory.CreateDirectory(outDir);
             File.WriteAllText(Path.Combine(outDir, "results.json"), EvalResults.ToJson(runInfo, clipResults, evalSummary));
             var resultsMd = EvalResults.ToMarkdown(runInfo, clipResults, evalSummary);
             File.WriteAllText(Path.Combine(outDir, "results.md"), resultsMd);
             Console.WriteLine();
             Console.WriteLine(resultsMd);
+            if (evalSummary.FailedCount > 0)
+            {
+                // Results are already on disk; the non-zero exit only flags the failures.
+                Console.Error.WriteLine($"# corpus: {evalSummary.FailedCount} clip(s) FAILED -- results written to {outDir}, exiting non-zero");
+                Environment.ExitCode = 1;
+            }
             break;
         }
 ```
@@ -1975,7 +2100,13 @@ If the constant `Winpepper.Asr.TranscribeCpp.TranscribeCppContract.RequiredVersi
 Near `ProbeTranscriber` (~line 357), add:
 
 ```csharp
-/// <summary>Batch fallback for the corpus eval: the same nemotron engine, offline.
+/// <summary>Batch fallback for the corpus eval: a SECOND nemotron engine instance
+/// (same model + runtime, its OWN compute gate), offline. Must NOT be the primary
+/// engine: during FinishAsync the primary's native stream still holds its compute
+/// gate (acquired TranscribeCppEngine.cs:177, released only in NativeStream.Dispose
+/// at :336 via Session.DisposeAsync, NemotronStreamingTranscriber.cs:174, which runs
+/// only AFTER FinishAsync returns, StreamingDictationSession.cs:120-121) -- a
+/// same-engine fallback would stall 5 s and throw at the gate wait (:235).
 /// Wrapped in ProbeTranscriber so a fallback is recorded per clip and still yields text.</summary>
 sealed class EngineBatchTranscriber : ITranscriber
 {
@@ -2041,8 +2172,10 @@ Create `scripts/run-asr-eval-windows.sh`:
 # artifacts/asr-eval/.
 #
 # Host safety: only host writes are the %TEMP% staging/results dirs and NuGet
-# restore. Reads (never writes) the corpus dir and the transcribe-spike model
-# and runtime. Never touches a running Winpepper.exe or %LOCALAPPDATA%\winpepper.
+# restore. Reads (never writes) the corpus dir and the app-installed nemotron
+# model and runtime under %LOCALAPPDATA%\winpepper\models (the canonical tree,
+# read-only to us; NEM_MODEL/NEM_RUNTIME env overrides are the escape hatch).
+# Never touches a running Winpepper.exe or any other %LOCALAPPDATA%\winpepper data.
 #
 # Usage: ./scripts/run-asr-eval-windows.sh <corpus-dir-wsl> [repeats]
 #   e.g. ./scripts/run-asr-eval-windows.sh /mnt/c/Users/dan/winpepper-evals/corpus-v1 3
@@ -2057,8 +2190,8 @@ PS="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 [[ -x "$PS" ]] || { echo "run-asr-eval-windows: powershell.exe not found at $PS" >&2; exit 2; }
 UNC_ROOT="$(wslpath -w "$HERE")"
 CORPUS_WIN="$(wslpath -w "$CORPUS_WSL")"
-NEM_MODEL="${NEM_MODEL:-C:\\Users\\dan\\AppData\\Local\\Temp\\transcribe-spike\\nemotron-speech-streaming-en-0.6b-Q8_0.gguf}"
-NEM_RUNTIME="${NEM_RUNTIME:-C:\\Users\\dan\\AppData\\Local\\Temp\\transcribe-spike\\transcribe-native-windows-x86_64-cpu-vulkan}"
+NEM_MODEL="${NEM_MODEL:-C:\\Users\\dan\\AppData\\Local\\winpepper\\models\\nemotron-streaming-en\\nemotron-speech-streaming-en-0.6b-Q8_0.gguf}"
+NEM_RUNTIME="${NEM_RUNTIME:-C:\\Users\\dan\\AppData\\Local\\winpepper\\models\\nemotron-streaming-en\\runtime\\transcribe-native-windows-x86_64-cpu-vulkan}"
 OUT="$HERE/artifacts/asr-eval"
 mkdir -p "$OUT"
 
@@ -2085,17 +2218,25 @@ ps_run 300 "$OUT/stage.log" "
   Copy-Item -Recurse '$bench_bin' \$dst"
 
 echo "=== [4/4] Run the corpus eval (repeats=$REPEATS) ==="
+# The bench exits non-zero when any clip FAILED (per-clip error rows) but still
+# writes results.json/results.md first -- so collect results even on failure,
+# then propagate the exit code.
+corpus_status=0
 ps_run 7200 "$OUT/corpus.log" "
   \$res = Join-Path \$env:TEMP 'winpepper-asr-eval-results'
   if (Test-Path \$res) { Remove-Item -Recurse -Force \$res }
   Set-Location (Join-Path \$env:TEMP 'winpepper-asr-eval')
   dotnet exec AsrLatencyBench.dll corpus --corpus '$CORPUS_WIN' \
     --nemotron-model '$NEM_MODEL' --nemotron-runtime '$NEM_RUNTIME' \
-    --repeats $REPEATS --out \$res"
+    --repeats $REPEATS --out \$res" || corpus_status=$?
 
 # Collect results back (results.json contains transcript text -- artifacts/ is gitignored).
 WIN_TEMP_WSL="$(wslpath "$("$PS" -NoProfile -Command 'Write-Output $env:TEMP' | tr -d '\r')")"
 cp -r "$WIN_TEMP_WSL/winpepper-asr-eval-results/." "$OUT/"
+if [[ "$corpus_status" -ne 0 ]]; then
+  echo "run-asr-eval-windows: corpus eval reported failed clips (exit $corpus_status) -- results still collected in $OUT; see corpus.log and results.md" >&2
+  exit "$corpus_status"
+fi
 echo "run-asr-eval-windows: done -- results in $OUT (results.md, results.json), logs alongside"
 ```
 
@@ -2152,7 +2293,7 @@ ls /mnt/c/Users/dan/winpepper-evals/corpus-v1/clips/*.reference.txt | wc -l
 
 Expected: `references: N written, 0 skipped, 0 failed` (N = clip count) and one `.reference.txt` per non-excluded clip. Then re-run the same command once more — expected: `references: 0 written, N skipped, 0 failed` (idempotence proven). Spot-check ONE file is plain readable text (`wc -c` on it; do not paste its content anywhere).
 
-**If KEY ABSENT:** do NOT fabricate anything. Proceed to Step 3 (the eval still proves streaming + latency + batch-parity diffs without WER), and in Step 5 record precisely: references are pending, and the user must run, after `export ASSEMBLYAI_API_KEY=...`:
+**If KEY ABSENT:** do NOT fabricate anything. Proceed to Step 3 (the eval still proves streaming + latency + batch-parity diffs without WER); Step 5's reference spot-check is then also pending, and in Step 6 record precisely: references are pending, and the user must run, after `export ASSEMBLYAI_API_KEY=...`:
 
 ```bash
 dotnet run --project scripts/asr-eval-corpus -c Release -- references --corpus /mnt/c/Users/dan/winpepper-evals/corpus-v1
@@ -2167,24 +2308,30 @@ cat artifacts/asr-eval/results.md
 python3 -c "import json;r=json.load(open('artifacts/asr-eval/results.json'));print(r['info'],r['summary'])"
 ```
 
-Expected: the four driver stages complete; `results.md` shows one row per clip with real post-stop latencies (3 runs each), `fellBack`/`truncated` flags, batch-parity noted per clip on the run log, and — if references exist — real WER/CER numbers plus the aggregate summary line. `results.json` carries full transcripts. If the nemotron model/runtime are missing at the spike paths, the scenario prints `corpus: SKIPPED (...)` — in that case set `NEM_MODEL`/`NEM_RUNTIME` env overrides to the installed locations and re-run; do not fake a results file.
+Expected: the four driver stages complete; `results.md` shows one row per clip with real post-stop latencies (3 runs each), `fellBack`/`truncated` flags, batch-parity noted per clip on the run log, and — if references exist — real WER/CER numbers plus the aggregate summary line (including `Failed: 0`; a non-zero failed count means per-clip error rows — investigate before trusting the numbers). `results.json` carries full transcripts. The driver defaults to the app-installed model/runtime tree at `C:\Users\dan\AppData\Local\winpepper\models\nemotron-streaming-en` (canonical, verified present with `transcribe.dll` contract 0.1.3; read-only to us). If they have moved, the scenario prints `corpus: SKIPPED (...)` — in that case set the `NEM_MODEL`/`NEM_RUNTIME` env overrides to the actual locations and re-run; do not fake a results file.
 
 - [ ] **Step 4: Sanity-check honesty controls in the output**
 
-Verify in `artifacts/asr-eval/corpus.log`: per-clip `# corpus[<id>]: fellBack=... truncated=... wer=... finishMs=...` lines exist for every non-excluded clip (proof the production path streamed each clip), and `results.md` contains no transcript text.
+Verify in `artifacts/asr-eval/corpus.log`: per-clip `# corpus[<id>]: fellBack=... truncated=... wer=... finishMs=...` lines exist for every non-excluded clip (proof the production path streamed each clip; a failed clip instead shows `# corpus[<id>]: FAILED ...` and an ERROR row — the driver exits non-zero when any clip failed), and `results.md` contains no transcript text.
 
-- [ ] **Step 5: Write the evidence doc**
+- [ ] **Step 5: Mandatory human spot-check of the references (before trusting any numbers)**
+
+Ask the user (Dan) to open a handful of `clips/<id>.reference.txt` files next to their WAVs and confirm, by listening, that each reference matches what was actually said. This MUST include verifying that at least one clip with an audible spoken filler retains "um"/"uh" in its reference — if fillers are systematically absent despite being audible, treat disfluencies as a vendor no-op for this model and revisit the scoring policy (references would then be missing words every local candidate transcribes verbatim). Record only the outcome in the evidence doc: clip ids checked + pass/fail — never the reference text itself. Do not proceed to conclusions about model ranking until this check passes.
+
+- [ ] **Step 6: Write the evidence doc**
 
 Create `docs/plans/2026-07-26-asr-eval-framework-evidence.md` containing, honestly and exactly:
 - The commands run (exporter, references or the honest "key absent" statement with the two pending commands from Step 2, driver).
 - The exporter output lines (counts) proving re-runnability.
 - The full `results.md` content (it is privacy-safe by construction: ids and numbers only).
 - The run metadata line: corpus folder name, speech model name, transcribe.cpp version, date, repeats.
+- The Step 5 spot-check outcome: clip ids checked + pass/fail (including the filler check), no reference text.
+- If number/currency/date content appears in any clip, spot-check its rendering between references and transcripts (references use formatted digits; local nemotron output was verified digit-native) and record the outcome as ids + ok/mismatch counts only.
 - A one-line statement of which of the two branches (key present/absent) this run took and what, if anything, remains for the user.
 
 No transcript or reference text may appear in this file.
 
-- [ ] **Step 6: Full Linux suite (bin/obj were cleaned by the driver — rebuild), commit, Windows gate**
+- [ ] **Step 7: Full Linux suite (bin/obj were cleaned by the driver — rebuild), commit, Windows gate**
 
 ```bash
 ./scripts/linux-tests.sh
@@ -2210,4 +2357,4 @@ Expected: linux tests all `Failed: 0`; commit succeeds; the gate ends `GATE: GRE
 
 **2. Placeholder scan:** no TBD/TODO/"handle edge cases"/"similar to Task N" anywhere; every code step contains complete code; every run step has a command and expected output. The single lookup contingency (the `TranscribeCppContract.RequiredVersion` namespace, Task 10 Step 3) names the exact file and line to confirm against.
 
-**3. Type consistency:** `ClipTimings`, `CorpusEntry`, `CorpusManifest`, `CorpusJson`, `HistoryIndexEntry/File`, `ExportItem/ExportPlan/BuildPlan`, `ReferenceAction/ReferencePlanner.{Decide,ReferencePath}`, `ErrorRate/EvalMetrics.{Wer,Cer,SilentPass}`, `EvalFraming.{Segments,PrerollSamples,FrameSamples}`, `ClipResult/EvalRunInfo/EvalSummary/EvalReport/EvalResults.{Summarize,ToJson,ToMarkdown,Percentile}`, `EngineBatchTranscriber`, `ListLogger` — cross-checked; signatures used in Tasks 3, 6, 10 match their defining tasks (1, 2, 5, 7, 8, 9) exactly.
+**3. Type consistency:** `ClipTimings`, `CorpusEntry`, `CorpusManifest`, `CorpusJson`, `HistoryIndexEntry/File`, `ExportItem/ExportPlan/BuildPlan`, `ReferenceAction/ReferencePlanner.{Decide,ReferencePath}`, `ErrorRate/EvalMetrics.{Wer,Cer,SilentPass}`, `EvalFraming.{Segments,PrerollSamples,FrameSamples}`, `ClipResult` (incl. trailing `string? Error = null` — error rows from Task 10's per-clip catch), `EvalRunInfo`, `EvalSummary` (incl. trailing `int FailedCount`), `EvalReport/EvalResults.{Summarize,ToJson,ToMarkdown,Percentile}`, `EngineBatchTranscriber` (constructed with the SECOND engine instance, never the primary — see design decision 5), `ListLogger`, `EnvKeyStore/ConsoleWarnLogger` (Task 6) — cross-checked; signatures used in Tasks 3, 6, 10 match their defining tasks (1, 2, 5, 7, 8, 9) exactly, and `Error`/`FailedCount` sit last with defaults/named use so every positional construction in Tasks 9-10 still compiles.

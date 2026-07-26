@@ -40,10 +40,17 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         CleanupCard = new ModelCardViewModel(ModelKind.Cleanup,
             registry.ByKind(ModelKind.Cleanup), installRoot, currentCleanupName, promoteCleanup,
             dispatch, progressInterval, progressDelay);
+        // The streaming model is a single opt-in descriptor: there is no
+        // selection to promote, so the card pins the one name and the promote
+        // callback is a no-op.
+        StreamingCard = new ModelCardViewModel(ModelKind.StreamingAsr,
+            registry.ByKind(ModelKind.StreamingAsr), installRoot, ModelRegistry.StreamingAsrName, _ => { },
+            dispatch, progressInterval, progressDelay);
     }
 
     public ModelCardViewModel AsrCard { get; }
     public ModelCardViewModel CleanupCard { get; }
+    public ModelCardViewModel StreamingCard { get; }
 
     public async Task DownloadMissingAsync(CancellationToken ct)
     {
@@ -63,37 +70,7 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
                 _registry.All, _installRoot, [CleanupCard.SelectedName]));
 
             foreach (var d in selected)
-            {
-                // Skip StreamingAsr — Task 7 will add the real card
-                if (d.Kind == ModelKind.StreamingAsr)
-                    continue;
-
-                var card = d.Kind switch
-                {
-                    ModelKind.Asr => AsrCard,
-                    ModelKind.Cleanup => CleanupCard,
-                    _ => throw new ArgumentOutOfRangeException(nameof(d.Kind), d.Kind, null),
-                };
-                var progress = new DirectProgress<DownloadProgress>(card.ReportProgress);
-                try
-                {
-                    await _downloader.DownloadAsync(d, _installRoot, progress, ct).ConfigureAwait(false);
-                }
-                finally
-                {
-                    try
-                    {
-                        // Direct progress callbacks have all returned when the
-                        // downloader completes. Await the bounded UI bridge so
-                        // terminal state is visible before the next model.
-                        await card.DrainProgressAsync().ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        card.ResetProgressAfterRun();
-                    }
-                }
-            }
+                await DownloadOneAsync(d, ct).ConfigureAwait(false);
 
             AsrCard.RaiseIsSelectedInstalledChanged();
             CleanupCard.RaiseIsSelectedInstalledChanged();
@@ -101,6 +78,57 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         finally
         {
             _downloadGate.Release();
+        }
+    }
+
+    public async Task DownloadStreamingAsync(CancellationToken ct)
+    {
+        await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // The streaming model is opt-in: exactly the nemotron descriptor,
+            // and only when it is not already fully installed.
+            var selected = new[] { _registry.Find(ModelRegistry.StreamingAsrName)! }
+                .Where(d => !d.IsFullyInstalled(_installRoot));
+
+            foreach (var d in selected)
+                await DownloadOneAsync(d, ct).ConfigureAwait(false);
+
+            StreamingCard.RaiseIsSelectedInstalledChanged();
+        }
+        finally
+        {
+            _downloadGate.Release();
+        }
+    }
+
+    private async Task DownloadOneAsync(ModelDescriptor d, CancellationToken ct)
+    {
+        var card = d.Kind switch
+        {
+            ModelKind.Asr => AsrCard,
+            ModelKind.Cleanup => CleanupCard,
+            ModelKind.StreamingAsr => StreamingCard,
+            _ => throw new ArgumentOutOfRangeException(nameof(d.Kind), d.Kind, null),
+        };
+        var progress = new DirectProgress<DownloadProgress>(card.ReportProgress);
+        try
+        {
+            await _downloader.DownloadAsync(d, _installRoot, progress, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            try
+            {
+                // Direct progress callbacks have all returned when the
+                // downloader completes. Await the bounded UI bridge so
+                // terminal state is visible before the next model.
+                await card.DrainProgressAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                card.ResetProgressAfterRun();
+            }
         }
     }
 

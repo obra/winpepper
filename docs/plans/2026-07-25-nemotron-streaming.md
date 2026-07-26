@@ -708,8 +708,12 @@ Expected: PASS (4 tests).
 - [ ] **Step 5: Write the failing downloader-hook test**
 
 Follow the existing `ModelDownloader` test style in
-`tests/Winpepper.Models.Tests` (there are existing downloader tests using a
-fake `IHttpRangeClient` — read one first and reuse its fake). The new test:
+`tests/Winpepper.Models.Tests`. The existing fake is `FakeRangeClient`
+(`tests/Winpepper.Models.Tests/ModelDownloaderTests.cs:335-386`), an
+`internal sealed class ... : IHttpRangeClient` declared at file scope AFTER
+the test class — same assembly and namespace, so this new test file references
+it directly. It has an implicit parameterless constructor; response bodies are
+registered via `SetBody(string url, byte[] body)`. Read it first. The new test:
 
 ```csharp
 // tests/Winpepper.Models.Tests/ModelDownloaderExtractionTests.cs
@@ -762,9 +766,11 @@ public class ModelDownloaderExtractionTests : IDisposable
                 },
             },
         };
-        // Use the SAME fake IHttpRangeClient the existing ModelDownloader tests
-        // use (see the neighboring test file), serving `bytes` for the URL.
-        var downloader = new ModelDownloader(new FakeRangeClient(bytes));
+        // Reuse the existing FakeRangeClient from ModelDownloaderTests.cs
+        // (parameterless ctor; bodies registered per-URL via SetBody).
+        var fake = new FakeRangeClient();
+        fake.SetBody("https://example.invalid/native.tar.gz", bytes);
+        var downloader = new ModelDownloader(fake);
         await downloader.DownloadAsync(descriptor, _root,
             new Progress<DownloadProgress>(), CancellationToken.None);
 
@@ -783,7 +789,9 @@ public class ModelDownloaderExtractionTests : IDisposable
         Directory.CreateDirectory(modelDir);
         await File.WriteAllBytesAsync(Path.Combine(modelDir, "native.tar.gz"), bytes); // pre-installed, never extracted
 
-        var downloader = new ModelDownloader(new FakeRangeClient(bytes));
+        var fake = new FakeRangeClient();
+        fake.SetBody("https://example.invalid/native.tar.gz", bytes);
+        var downloader = new ModelDownloader(fake);
         await downloader.DownloadAsync(descriptor, _root,
             new Progress<DownloadProgress>(), CancellationToken.None);
 
@@ -792,10 +800,13 @@ public class ModelDownloaderExtractionTests : IDisposable
 }
 ```
 
-(`FakeRangeClient` / `BuildDescriptor`: copy the fake-client shape from the
-existing downloader tests in the same directory; `BuildDescriptor` is the
-descriptor literal from the first test extracted to a helper. Do not invent a
-new fake style.)
+(`FakeRangeClient` is the EXISTING `internal sealed class` at
+`ModelDownloaderTests.cs:335-386` — declared at file scope but visible across
+the `Winpepper.Models.Tests` assembly, so reference it directly. Do NOT copy or
+redeclare it: a second `FakeRangeClient` in the same namespace is a compile
+error. Do not invent a new fake style. `BuildDescriptor` is the descriptor
+literal from the first test extracted to a private static helper of this test
+class.)
 
 - [ ] **Step 6: Run to verify failure**
 
@@ -2108,7 +2119,7 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 - Create: `src/Winpepper.App/Hosting/NemotronEngineHolder.cs`
 - Modify: `src/Winpepper.App/Hosting/AppShell.cs` (method at `:420`, doc comment `:407`, injection closure `:284-286`)
 - Modify: `src/Winpepper.Core/Settings/AppSettings.cs:53` (default + doc comment)
-- Test: `tests/Winpepper.Core.Tests/AppSettingsDefaultsTests.cs` (update expectation)
+- Test: `tests/Winpepper.Core.Tests/AppSettingsDefaultsTests.cs` and `tests/Winpepper.Core.Tests/Settings/SettingsStoreTests.cs` (update default expectations)
 
 **Interfaces:**
 - Consumes: `TranscribeCppEngine.Load`, `NemotronStreamingModel.IsInstalled/GgufPath/RuntimeDir`, `NemotronStreamingTranscriber`, existing `BatchStreamingAdapter` (read `src/Winpepper.Asr/Transcription/BatchStreamingAdapter.cs` for its exact ctor — it wraps an `ITranscriber`), `ParakeetTranscriber`.
@@ -2123,13 +2134,28 @@ until the rewire lands. Do not split these steps across commits.
 
 - [ ] **Step 1: Update the settings default test (failing first)**
 
-In `tests/Winpepper.Core.Tests/AppSettingsDefaultsTests.cs`, find the
-`StreamingEnabled` default assertion and flip it to expect `true`. Also check
-`tests/Winpepper.Core.Tests/Settings/StreamingSettingPersistenceTests.cs` for
-hardcoded default expectations and update in the same way.
+EXACTLY TWO tests assert the current `false` default; flip BOTH to expect
+`true`:
 
-Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll -class "*AppSettings*" -notrait "Platform=Windows" 2>&1 | tail -5`
-Expected: FAIL (default is still `false`).
+1. `tests/Winpepper.Core.Tests/AppSettingsDefaultsTests.cs:32-40` —
+   `Defaults_StreamingEnabled_IsFalse` asserts
+   `s.StreamingEnabled.ShouldBeFalse()` (`:39`). Flip to `ShouldBeTrue()` and
+   rename the test `Defaults_StreamingEnabled_IsTrue`.
+2. `tests/Winpepper.Core.Tests/Settings/SettingsStoreTests.cs:190-231` —
+   `StreamingEnabled_MissingFromOlderFile_DefaultsFalse` loads an old-shape
+   settings.json with NO `streamingEnabled` key and asserts
+   `s.StreamingEnabled.ShouldBeFalse()` (`:224`). Flip that one assertion to
+   `ShouldBeTrue()` and rename the test
+   `StreamingEnabled_MissingFromOlderFile_DefaultsTrue` (leave its other
+   assertions — `MicDeviceId`, `AsrProvider`, `PlaySounds` — untouched).
+
+No other test asserts the default:
+`tests/Winpepper.Core.Tests/Settings/StreamingSettingPersistenceTests.cs`
+writes an EXPLICIT `false` through the writer/store chain and asserts that
+round-trip, so it stays green regardless of the default — do not change it.
+
+Run: `/home/dan/code/winpepper/.dotnet/dotnet build tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true --nologo -v q && /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll -class "*AppSettingsDefaults*" -class "*SettingsStoreTests*" -notrait "Platform=Windows" 2>&1 | tail -5`
+Expected: FAIL (exactly the two flipped tests fail — the default is still `false`).
 
 - [ ] **Step 2: Flip the default with an honest doc comment**
 

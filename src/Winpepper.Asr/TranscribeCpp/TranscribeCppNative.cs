@@ -14,7 +14,7 @@ namespace Winpepper.Asr.TranscribeCpp;
 ///   fields => byte (bool would marshal as 4-byte BOOL and shift offsets).
 /// - size_t => UIntPtr. Optional struct pointers => IntPtr (Zero = defaults).
 /// </summary>
-public static class TranscribeCppNative
+internal static class TranscribeCppNative
 {
     private const string Dll = "transcribe";
 

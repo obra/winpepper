@@ -38,10 +38,6 @@ public sealed record TranscribeCppContract(string Version, string HeaderHash)
             }
             return new TranscribeCppContract(v.GetString()!, h.GetString()!);
         }
-        catch (TranscribeCppException)
-        {
-            throw;
-        }
         catch (JsonException e)
         {
             throw new TranscribeCppException("contract.json is not valid JSON", e);

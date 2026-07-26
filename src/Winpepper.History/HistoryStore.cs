@@ -5,7 +5,7 @@ namespace Winpepper.History;
 
 /// <summary>
 /// Persistent newest-first archive of dictation sessions. Backed by a single
-/// JSON index file plus a tree of WAV files on disk. Pruned to 50 entries
+/// JSON index file plus a tree of WAV files on disk. Pruned to 100 entries
 /// on every <see cref="Append"/>; pruned entries' WAVs are deleted.
 ///
 /// Thread-safety: callers are expected to serialize access (one pipeline
@@ -15,7 +15,7 @@ namespace Winpepper.History;
 /// </summary>
 public sealed class HistoryStore
 {
-    public const int MaxEntries = 50;
+    public const int MaxEntries = 100;
 
     /// <summary>Spec §5.4: WAVs follow a 30-day rolling retention.</summary>
     public static readonly TimeSpan MaxAge = TimeSpan.FromDays(30);
@@ -94,7 +94,7 @@ public sealed class HistoryStore
             var fresh = combined.Where(e => e.CreatedAtUtc >= cutoff).ToList();
             var stale = combined.Where(e => e.CreatedAtUtc < cutoff).ToList();
 
-            // Tier 2: count cap (50 entries) over the fresh survivors.
+            // Tier 2: count cap (100 entries) over the fresh survivors.
             var keep = fresh.Take(MaxEntries).ToList();
             var dropForCount = fresh.Skip(MaxEntries).ToList();
 

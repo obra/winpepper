@@ -48,11 +48,11 @@ public class HistoryStoreTests : IDisposable
     }
 
     [Fact]
-    public void Append_PrunesTo50_AndDeletesPrunedWavFiles()
+    public void Append_PrunesTo100_AndDeletesPrunedWavFiles()
     {
         var store = new HistoryStore(_root);
-        // Pre-create 60 entries with real WAV files on disk.
-        for (var i = 0; i < 60; i++)
+        // Pre-create 110 entries with real WAV files on disk.
+        for (var i = 0; i < 110; i++)
         {
             var rel = $"2026-05-15/entry-{i:00}.wav";
             var abs = Path.Combine(_root, rel);
@@ -67,16 +67,16 @@ public class HistoryStoreTests : IDisposable
         }
 
         var entries = store.Load().Entries;
-        entries.Count.ShouldBe(50);
-        // Newest 50 should be i=10..59
-        entries.First().Id.ShouldBe("e59");
+        entries.Count.ShouldBe(100);
+        // Newest 100 should be i=10..109
+        entries.First().Id.ShouldBe("e109");
         entries.Last().Id.ShouldBe("e10");
 
         // WAV files for the pruned (oldest) entries should be gone.
         for (var i = 0; i < 10; i++)
             File.Exists(Path.Combine(_root, $"2026-05-15/entry-{i:00}.wav")).ShouldBeFalse();
         // WAV files for the kept entries should still exist.
-        for (var i = 10; i < 60; i++)
+        for (var i = 10; i < 110; i++)
             File.Exists(Path.Combine(_root, $"2026-05-15/entry-{i:00}.wav")).ShouldBeTrue();
     }
 

@@ -30,12 +30,14 @@ public sealed class AppSettingsDefaultsTests
     }
 
     [Fact]
-    public void Defaults_StreamingEnabled_IsFalse()
+    public void Defaults_StreamingEnabled_IsTrue()
     {
-        // OFF by default: real-model chunked streaming decodes to blanks after
-        // the first ~2 s chunk (2026-07-25 validation; ParakeetStreamingSession
-        // class doc), so streaming is opt-in until that defect is fixed.
+        // ON by default (2026-07-25): safe in every configuration. AssemblyAI
+        // streams with local batch fallback; local with the Nemotron streaming
+        // model streams via transcribe.cpp; local without it uses the batch
+        // adapter (identical to the old default). The chunked-TDT streaming
+        // attempt (blank-collapse defect) is no longer wired for local.
         var s = new AppSettings();
-        s.StreamingEnabled.ShouldBeFalse();
+        s.StreamingEnabled.ShouldBeTrue();
     }
 }

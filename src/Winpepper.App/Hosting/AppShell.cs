@@ -51,6 +51,14 @@ public sealed class AppShell : IDisposable
     /// </summary>
     public Winpepper.Core.Settings.AsrModelSelectionSlot AsrModelSelection { get; }
 
+    /// <summary>
+    /// Background first-run installer for the Nemotron streaming model +
+    /// native runtime. Kicked off (non-blocking) from <see cref="StartAsync"/>;
+    /// the Models page reads its status so the streaming card reflects an
+    /// in-flight or failed auto-install.
+    /// </summary>
+    public Winpepper.Models.StreamingAutoInstaller StreamingAutoInstaller { get; }
+
     private readonly WinUiSoundEffectPlayer _sounds;
 
     public static AppShell Create()
@@ -74,6 +82,14 @@ public sealed class AppShell : IDisposable
             settings = settings with { AsrModelName = modelsServices.AsrDescriptor.Name };
             store.Save(settings);
         }
+        var nemotronHolder = new NemotronEngineHolder(
+            modelsServices.ModelsRoot, factory.CreateLogger<NemotronEngineHolder>());
+        // Same first-run treatment the batch model gets via onboarding, minus
+        // the blocking: constructed here, kicked off in StartAsync. It shares
+        // ModelsServices (and therefore the Models page's operation gate), so
+        // an Install click during the auto-install can never double-download.
+        var streamingAutoInstaller = new Winpepper.Models.StreamingAutoInstaller(
+            modelsServices.Registry, modelsServices.ModelsRoot, modelsServices);
         var asrSelection = new Winpepper.Core.Settings.AsrModelSelectionSlot();
         asrSelection.Publish(settings.AsrModelName); // seed with the persisted boot value
         var writer = new DebouncedSettingsWriter(store);
@@ -282,7 +298,8 @@ public sealed class AppShell : IDisposable
                                          clipboardFallback, toasts,
                                          () => store.Load(),
                                          (local, loadedModelName, s, onFallback) => AppShell.BuildStreamingTranscriber(
-                                             local, loadedModelName, s, onFallback, aaiClient, aaiKeyStore, aaiOptions,
+                                             local, loadedModelName, s, onFallback, () => nemotronHolder.TryGet(),
+                                             aaiClient, aaiKeyStore, aaiOptions,
                                              correctionStore, errorBus, factory),
                                          cleanup, correctionStore, windowContext,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
@@ -298,7 +315,8 @@ public sealed class AppShell : IDisposable
                             autostart, pipeline, sounds, historyServices, modelsServices,
                             toasts, clipboardFallback, crashHandler,
                             logTail, uiThread, diagHost,
-                            aaiKeyStore, aaiClient, aaiOptions, asrSelection);
+                            aaiKeyStore, aaiClient, aaiOptions, asrSelection,
+                            streamingAutoInstaller);
     }
 
     private AppShell(ILoggerFactory factory, SettingsStore store, AppSettings settings,
@@ -319,7 +337,8 @@ public sealed class AppShell : IDisposable
                      Winpepper.Asr.Transcription.IAssemblyAiKeyStore assemblyAiKeyStore,
                      Winpepper.Asr.Transcription.AssemblyAiClient assemblyAiClient,
                      Winpepper.Asr.Transcription.AssemblyAiOptions assemblyAiOptions,
-                     Winpepper.Core.Settings.AsrModelSelectionSlot asrSelection)
+                     Winpepper.Core.Settings.AsrModelSelectionSlot asrSelection,
+                     Winpepper.Models.StreamingAutoInstaller streamingAutoInstaller)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;
@@ -336,6 +355,7 @@ public sealed class AppShell : IDisposable
         AssemblyAiClient = assemblyAiClient;
         AssemblyAiOptions = assemblyAiOptions;
         AsrModelSelection = asrSelection;
+        StreamingAutoInstaller = streamingAutoInstaller;
 
         Pill = new StatusPillWindow(sessionVm);
         // Clicking the pill in its PENDING state pastes the held text into the
@@ -387,6 +407,65 @@ public sealed class AppShell : IDisposable
                 .LogError(ex, "ASR verification failed during pipeline startup");
             ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
         }
+
+        // First-run auto-install of the Nemotron streaming model + native
+        // runtime — the same install-on-first-run treatment the batch model
+        // gets via onboarding, but background and non-blocking: dictation
+        // works immediately on the batch path, and streaming activates on the
+        // first dictation after the install lands (PipelineHost re-checks
+        // installed state per dictation). StartAsync never throws; a failure
+        // leaves batch fully functional and is re-attempted on the next
+        // launch or from the Models card (shared operation gate — no double
+        // download). No error-bus report: streaming is an enhancement, and
+        // the Models card surfaces the failed state with a retry. On a fresh
+        // install the attempt is deferred until onboarding completes (see
+        // below).
+        _ = Task.Run(async () =>
+        {
+            var log = LogFactory.CreateLogger("Winpepper.App.StreamingAutoInstall");
+            try
+            {
+                // Read a fresh settings snapshot on the background thread (the
+                // injected Settings is a startup-time snapshot) and use it for
+                // both checks below.
+                var settings = SettingsStore.Load();
+
+                // Fresh install: onboarding is blocking on the ~1.1 GB v3
+                // download right now, and running the ~730 MB streaming
+                // download concurrently would roughly double that wait. Defer:
+                // consistent with the retry policy above, the install simply
+                // lands on the next launch.
+                if (!settings.OnboardingCompleted)
+                {
+                    log.LogInformation(
+                        "Onboarding not completed; deferring the streaming model auto-install to the next launch");
+                    return;
+                }
+
+                await StreamingAutoInstaller.StartAsync(
+                    settings.StreamingEnabled, CancellationToken.None);
+                switch (StreamingAutoInstaller.Status)
+                {
+                    case Winpepper.Models.StreamingAutoInstallStatus.Installed:
+                        log.LogInformation("Nemotron streaming model is installed");
+                        break;
+                    case Winpepper.Models.StreamingAutoInstallStatus.SkippedStreamingDisabled:
+                        log.LogInformation("Streaming disabled; skipped the streaming model auto-install");
+                        break;
+                    case Winpepper.Models.StreamingAutoInstallStatus.Failed:
+                        log.LogWarning(
+                            "Nemotron streaming model auto-install failed (batch dictation unaffected; " +
+                            "retried next launch or via the Models tab): {AutoInstallError}",
+                            StreamingAutoInstaller.LastError);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                // Defensive: StartAsync's contract is never-throw.
+                log.LogWarning(ex, "Streaming model auto-install crashed unexpectedly");
+            }
+        });
     }
 
     public void ShowMain() => ShowMain(navigateToOnboarding: false);
@@ -408,9 +487,11 @@ public sealed class AppShell : IDisposable
     /// Builds the streaming transcriber for a dictation. When AssemblyAI is
     /// selected the cloud streaming provider is wrapped in a
     /// FallbackStreamingTranscriber so any failure lands on the local Parakeet
-    /// session (batch). Otherwise the local chunked-streaming transcriber is
-    /// used. Static, taking its dependencies explicitly, so the pipeline can
-    /// invoke it through an injected delegate without holding an AppShell
+    /// session (batch). Otherwise (local): REAL streaming via transcribe.cpp +
+    /// the Nemotron streaming model when <paramref name="nemotronEngine"/>
+    /// yields an engine, else BatchStreamingAdapter (one batch transcription
+    /// at stop). Static, taking its dependencies explicitly, so the pipeline
+    /// can invoke it through an injected delegate without holding an AppShell
     /// instance. NOTE: the streaming connect sends no keyterms — v3 streaming
     /// DOES support keyterms_prompt but wiring it is deferred (Task 7 Protocol
     /// facts); custom_spelling is batch-only. User corrections still apply via
@@ -422,6 +503,7 @@ public sealed class AppShell : IDisposable
         string loadedModelName,
         AppSettings settings,
         Action<string> onFallback,
+        Func<Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine?>? nemotronEngine,
         Winpepper.Asr.Transcription.IAssemblyAiClient client,
         Winpepper.Asr.Transcription.IAssemblyAiKeyStore keyStore,
         Winpepper.Asr.Transcription.AssemblyAiOptions options,
@@ -431,12 +513,25 @@ public sealed class AppShell : IDisposable
     {
         var localBatch = new Winpepper.Asr.Transcription.ParakeetTranscriber(
             local, loadedModelName);
-        var localStreaming = new Winpepper.Asr.Transcription.ParakeetStreamingTranscriber(
-            local, localBatch, loadedModelName, Winpepper.Asr.PreprocessorConfig.ParakeetTdtV3,
-            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.ParakeetStreamingTranscriber>());
 
         if (!string.Equals(settings.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase))
-            return localStreaming;
+        {
+            // Local streaming: REAL streaming only via transcribe.cpp + the
+            // Nemotron streaming model. The chunked-TDT ParakeetStreamingTranscriber
+            // is deliberately NOT wired anymore: it cannot stream (blank-collapse,
+            // see docs/plans/2026-07-25-streaming-verification-evidence.md) and its
+            // guard carries a residual false-negative risk. Without the engine we
+            // go straight to the batch adapter — same result, no doomed attempt.
+            var engine = nemotronEngine?.Invoke();
+            if (engine is not null)
+            {
+                return new Winpepper.Asr.Transcription.NemotronStreamingTranscriber(
+                    () => engine, localBatch,
+                    Winpepper.Asr.TranscribeCpp.NemotronStreamingModel.Name,
+                    loggerFactory.CreateLogger<Winpepper.Asr.Transcription.NemotronStreamingTranscriber>());
+            }
+            return new Winpepper.Asr.Transcription.BatchStreamingAdapter(localBatch);
+        }
 
         // Snapshot corrections into request extras at build time; keyterms only
         // when opted in — copied verbatim from today's BuildTranscriber. The REST

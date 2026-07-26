@@ -31,8 +31,7 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         // Models pages are recreated during navigation, while the underlying
         // downloader service is shared. Key the operation gate by that service
         // so two page view models cannot write the same model files at once.
-        _downloadGate = DownloadGates.GetValue(
-            downloader, static _ => new SemaphoreSlim(1, 1));
+        _downloadGate = SharedOperationGateFor(downloader);
 
         AsrCard = new ModelCardViewModel(ModelKind.Asr,
             registry.ByKind(ModelKind.Asr), installRoot, currentAsrName, promoteAsr,
@@ -40,10 +39,27 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         CleanupCard = new ModelCardViewModel(ModelKind.Cleanup,
             registry.ByKind(ModelKind.Cleanup), installRoot, currentCleanupName, promoteCleanup,
             dispatch, progressInterval, progressDelay);
+        // The streaming model is a single fixed descriptor: there is no
+        // selection to promote, so the card pins the one name and the promote
+        // callback is a no-op.
+        StreamingCard = new ModelCardViewModel(ModelKind.StreamingAsr,
+            registry.ByKind(ModelKind.StreamingAsr), installRoot, ModelRegistry.StreamingAsrName, _ => { },
+            dispatch, progressInterval, progressDelay);
     }
+
+    /// <summary>
+    /// The per-downloader-service operation gate. Everything that writes model
+    /// files through the same downloader must serialize on this one semaphore:
+    /// Models page view models (recreated per navigation) and the background
+    /// <see cref="StreamingAutoInstaller"/> all share it, so an install started
+    /// in one place can never write the same files concurrently with another.
+    /// </summary>
+    public static SemaphoreSlim SharedOperationGateFor(IDownloader downloader)
+        => DownloadGates.GetValue(downloader, static _ => new SemaphoreSlim(1, 1));
 
     public ModelCardViewModel AsrCard { get; }
     public ModelCardViewModel CleanupCard { get; }
+    public ModelCardViewModel StreamingCard { get; }
 
     public async Task DownloadMissingAsync(CancellationToken ct)
     {
@@ -63,28 +79,7 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
                 _registry.All, _installRoot, [CleanupCard.SelectedName]));
 
             foreach (var d in selected)
-            {
-                var card = d.Kind == ModelKind.Asr ? AsrCard : CleanupCard;
-                var progress = new DirectProgress<DownloadProgress>(card.ReportProgress);
-                try
-                {
-                    await _downloader.DownloadAsync(d, _installRoot, progress, ct).ConfigureAwait(false);
-                }
-                finally
-                {
-                    try
-                    {
-                        // Direct progress callbacks have all returned when the
-                        // downloader completes. Await the bounded UI bridge so
-                        // terminal state is visible before the next model.
-                        await card.DrainProgressAsync().ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        card.ResetProgressAfterRun();
-                    }
-                }
-            }
+                await DownloadOneAsync(d, ct).ConfigureAwait(false);
 
             AsrCard.RaiseIsSelectedInstalledChanged();
             CleanupCard.RaiseIsSelectedInstalledChanged();
@@ -92,6 +87,61 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         finally
         {
             _downloadGate.Release();
+        }
+    }
+
+    public async Task DownloadStreamingAsync(CancellationToken ct)
+    {
+        await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            // The streaming model is exactly the nemotron descriptor.
+            // No pre-filter on IsFullyInstalled: presence-only checks cannot
+            // distinguish ready files from a corrupt installation (e.g. the
+            // archive downloaded but extraction failed or the runtime tree was
+            // deleted). Always route through the downloader, whose verify
+            // short-circuit keeps a healthy install cheap and whose
+            // EnsureExtracted heal path repairs a broken one.
+            var selected = new[] { _registry.Find(ModelRegistry.StreamingAsrName)! };
+
+            foreach (var d in selected)
+                await DownloadOneAsync(d, ct).ConfigureAwait(false);
+
+            StreamingCard.RaiseIsSelectedInstalledChanged();
+        }
+        finally
+        {
+            _downloadGate.Release();
+        }
+    }
+
+    private async Task DownloadOneAsync(ModelDescriptor d, CancellationToken ct)
+    {
+        var card = d.Kind switch
+        {
+            ModelKind.Asr => AsrCard,
+            ModelKind.Cleanup => CleanupCard,
+            ModelKind.StreamingAsr => StreamingCard,
+            _ => throw new ArgumentOutOfRangeException(nameof(d.Kind), d.Kind, null),
+        };
+        var progress = new DirectProgress<DownloadProgress>(card.ReportProgress);
+        try
+        {
+            await _downloader.DownloadAsync(d, _installRoot, progress, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            try
+            {
+                // Direct progress callbacks have all returned when the
+                // downloader completes. Await the bounded UI bridge so
+                // terminal state is visible before the next model.
+                await card.DrainProgressAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                card.ResetProgressAfterRun();
+            }
         }
     }
 

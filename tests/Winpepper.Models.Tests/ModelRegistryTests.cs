@@ -63,7 +63,7 @@ public class ModelRegistryTests
         {
             foreach (var f in d.Files)
             {
-                f.Url.ShouldStartWith("https://huggingface.co/");
+                f.Url.ShouldMatch("^https://");
                 f.SizeBytes.ShouldBeGreaterThan(0);
                 f.Sha256.Length.ShouldBe(64);
             }

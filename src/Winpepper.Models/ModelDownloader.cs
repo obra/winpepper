@@ -70,6 +70,7 @@ public sealed class ModelDownloader
             if (finalSize == file.SizeBytes &&
                 await ChecksumVerifier.VerifyAsync(finalPath, file.Sha256, ct).ConfigureAwait(false))
             {
+                EnsureExtracted(descriptor, modelDir, file, finalSize, progress);
                 Report(progress, descriptor, file, finalSize, DownloadPhase.Complete);
                 return;
             }
@@ -171,6 +172,7 @@ public sealed class ModelDownloader
         }
 
         File.Move(partialPath, finalPath, overwrite: true);
+        EnsureExtracted(descriptor, modelDir, file, actualSize, progress);
         Report(progress, descriptor, file, actualSize, DownloadPhase.Complete);
     }
 
@@ -262,6 +264,24 @@ public sealed class ModelDownloader
             Phase = phase,
             ErrorMessage = errorMessage,
         });
+
+    private static void EnsureExtracted(ModelDescriptor descriptor, string modelDir, ModelFile file,
+                                        long bytesDownloaded, IProgress<DownloadProgress> progress)
+    {
+        if (file.ExtractToRelative is null) return;
+        try
+        {
+            TarGzExtractor.EnsureExtracted(
+                Path.Combine(modelDir, file.RelativePath),
+                Path.Combine(modelDir, file.ExtractToRelative),
+                file.Sha256);
+        }
+        catch (Exception ex)
+        {
+            Report(progress, descriptor, file, bytesDownloaded, DownloadPhase.Failed, ex.Message);
+            throw;
+        }
+    }
 
     private static void TryDelete(string path)
     {

@@ -11,8 +11,10 @@ namespace Winpepper.App.Views;
 public sealed partial class ModelsPage : Page
 {
     private bool _downloadInProgress;
+    private bool _streamingDownloadInProgress;
     private bool _asrSelectedVerified;
     private CancellationTokenSource? _lifetimeCts;
+    private EventHandler<StreamingAutoInstallStatus>? _autoInstallStatusChanged;
 
     public ModelsTabViewModel ViewModel { get; private set; } = null!;
 
@@ -54,6 +56,10 @@ public sealed partial class ModelsPage : Page
 
         AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
+        // The background auto-install may finish (or fail) while this page is
+        // open; refresh the streaming card's state line when it does.
+        _autoInstallStatusChanged = (_, _) => DispatcherQueue.TryEnqueue(UpdateInstalledLabels);
+        App.Shell!.StreamingAutoInstaller.StatusChanged += _autoInstallStatusChanged;
         UpdateInstalledLabels();
         WireSpeechProvider(s);
         try
@@ -306,6 +312,36 @@ public sealed partial class ModelsPage : Page
         }
     }
 
+    private async void OnInstallStreamingModel(object sender, RoutedEventArgs e)
+    {
+        if (_streamingDownloadInProgress) return;
+        _streamingDownloadInProgress = true;
+        var button = sender as Button;
+        if (button is not null) button.IsEnabled = false;
+
+        try
+        {
+            await ViewModel.DownloadStreamingAsync(_lifetimeCts?.Token ?? CancellationToken.None);
+            UpdateInstalledLabels();
+        }
+        catch (OperationCanceledException)
+        {
+            // Mirrors OnDownloadMissing: cancellation must not surface as a crash.
+        }
+        catch (Exception ex)
+        {
+            var shell = App.Shell!;
+            shell.LogFactory.CreateLogger<ModelsPage>()
+                .LogError(ex, "Streaming model download failed");
+            shell.ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
+        }
+        finally
+        {
+            if (button is not null) button.IsEnabled = true;
+            _streamingDownloadInProgress = false;
+        }
+    }
+
     private void UpdateInstalledLabels()
     {
         var asrInstalled = _asrSelectedVerified;
@@ -317,10 +353,32 @@ public sealed partial class ModelsPage : Page
         CleanupInstalledText.Text = cleanupInstalled ? "Installed" : "Not downloaded";
         CleanupInstalledIcon.Visibility = cleanupInstalled ? Visibility.Visible : Visibility.Collapsed;
         CleanupNotInstalledIcon.Visibility = cleanupInstalled ? Visibility.Collapsed : Visibility.Visible;
+
+        var models = App.Shell!.ModelsServices;
+        var streamingInstalled = models.Registry.Find(ModelRegistry.StreamingAsrName)!
+            .IsFullyInstalled(models.ModelsRoot);
+        // The background auto-install (AppShell.StartAsync) shares the page's
+        // operation gate, so an Install click during it simply waits its turn
+        // and then verify-short-circuits — but the state line must be honest
+        // about what is happening right now.
+        var autoStatus = App.Shell!.StreamingAutoInstaller.Status;
+        var streamingBusy = _streamingDownloadInProgress
+            || autoStatus == StreamingAutoInstallStatus.Installing;
+        StreamingInstalledText.Text = streamingInstalled ? "Installed"
+            : streamingBusy ? "Installing\u2026"
+            : autoStatus == StreamingAutoInstallStatus.Failed ? "Install failed \u2014 use Install to retry"
+            : "Not downloaded";
+        StreamingInstalledIcon.Visibility = streamingInstalled ? Visibility.Visible : Visibility.Collapsed;
+        StreamingNotInstalledIcon.Visibility = streamingInstalled ? Visibility.Collapsed : Visibility.Visible;
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
+        if (_autoInstallStatusChanged is not null)
+        {
+            App.Shell!.StreamingAutoInstaller.StatusChanged -= _autoInstallStatusChanged;
+            _autoInstallStatusChanged = null;
+        }
         _lifetimeCts?.Cancel();
         _lifetimeCts?.Dispose();
         _lifetimeCts = null;

@@ -4,33 +4,14 @@ using Xunit;
 
 namespace Winpepper.Cleanup.Tests;
 
+// Deliberately NO "prompt contains phrase X" tests here: asserting that text
+// we wrote contains text we wrote pins wording without testing behavior, and
+// blocks prompt editing for no protection. Prompt BEHAVIOR is covered by the
+// runner's guards (CleanupRunnerTests) and, eventually, the model-gated eval
+// suite (kata ngrv). What remains below are structural invariants tied to
+// real regressions and actual routing logic.
 public class BasePromptsTests
 {
-    [Fact]
-    public void Default_MentionsFillerWords()
-    {
-        var p = BasePrompts.Default;
-        // Each of these filler words must appear in the default prompt per §6.3.
-        foreach (var filler in new[] { "um", "uh", "like", "you know", "basically", "literally", "sort of", "kind of" })
-            p.ShouldContain(filler, Case.Sensitive);
-    }
-
-    [Fact]
-    public void Default_MentionsSelfCorrectionCommands()
-    {
-        var p = BasePrompts.Default;
-        p.ShouldContain("scratch that");
-        p.ShouldContain("never mind");
-        p.ShouldContain("start over");
-    }
-
-    [Fact]
-    public void Default_RequiresFullTranscriptReproduction()
-    {
-        var p = BasePrompts.Default;
-        p.ShouldContain("never summarize", Case.Insensitive);
-    }
-
     [Fact]
     public void Default_HasExactlyOneExample()
     {
@@ -50,13 +31,6 @@ public class BasePromptsTests
         // output text shown in the prompt.
         BasePrompts.DefaultExampleOutputs.Count.ShouldBe(1);
         BasePrompts.Default.ShouldContain("Output: " + BasePrompts.DefaultExampleOutputs[0]);
-    }
-
-    [Fact]
-    public void Literal_DisablesFillerRemoval()
-    {
-        BasePrompts.Literal.ShouldContain("do not remove filler", Case.Insensitive);
-        BasePrompts.Literal.ShouldContain("punctuation", Case.Insensitive);
     }
 
     [Fact]

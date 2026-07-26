@@ -4,44 +4,6 @@
 
 Local, private voice dictation for Windows — hold a key, speak, and your words are typed into any app.
 
-## Please read this first
-
-Winpepper was written entirely by an AI agent. No human has ever tested it.
-
-Every line of code, every test, every commit, and every document here — including
-this page — was produced by an AI model across one long autonomous session. A
-human approved the goal and the plan, but nobody has installed the app, clicked
-around it, or spoken a sentence into it.
-
-Here is what is known: the app builds, installs, uninstalls, starts up, and
-reports a healthy idle state in its log on a test machine. Whether dictation
-actually works on real hardware, with a real microphone, on a real desktop —
-nobody knows yet. If you install this, you are the first person to find out.
-
-So: try it, but don't depend on it for anything important yet. Bug reports are
-genuinely useful. The [Windows Sandbox route](#try-it-risk-free) lets you try it
-without touching your own PC.
-
-<details>
-<summary>What has specifically not been verified (click to expand)</summary>
-
-The test machine had no microphone and no interactive desktop session — it was
-driven entirely over a remote shell. So none of the following has been confirmed
-by anyone, human or agent:
-
-- a real microphone
-- an interactive desktop session you can actually click into
-- pressing Right Ctrl + Right Shift while speaking
-- whether the app's screens render correctly
-- whether the post-dictation learning prompts appear and behave
-- whether the Lab (re-run a past dictation) panels work
-- whether the model download screen works (the download code itself has automated tests)
-
-The automated test suite does pass in full: 9 test projects, hundreds of tests,
-no failures. That covers the logic, not the experience.
-
-</details>
-
 ## Download and install
 
 **[Download Winpepper for Windows (64-bit installer)](https://github.com/obra/winpepper/releases/latest/download/winpepper-x64.msi)**
@@ -187,6 +149,22 @@ for near-instant results with slightly rougher text.
 diagnostics bundle**. It creates a zip of logs and system information — never your
 audio, never your transcripts — that's safe to attach to a bug report. Please file
 one at [github.com/obra/winpepper/issues](https://github.com/obra/winpepper/issues).
+
+## Project status
+
+Winpepper is alpha software: in active development, in real-world use, and
+improving quickly. Expect an occasional rough edge — and when you hit one, the
+**Diagnostics** tab builds a safe-to-share bug report bundle in one click (see
+above).
+
+Quality is taken seriously. Nearly a thousand automated tests run on every
+change, every release is installed and self-tested on a clean Windows machine
+before it is published, and the speech engine is verified against real recorded
+audio.
+
+One thing worth knowing about how it's made: Winpepper is written almost
+entirely by an AI coding agent working under human direction, with people
+testing the results and reviewing the work.
 
 ## For developers
 

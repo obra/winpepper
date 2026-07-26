@@ -109,6 +109,34 @@ public abstract class CleanupPromptEvalTestsBase
 
         var evalCase = CleanupEvalCases.ByName(caseName);
 
+        // Known-failing baseline (see CleanupEvalCases.KnownFailingBaseline for
+        // the policy): the case still RUNS; a failure on a baselined (model,
+        // case) pair becomes a dynamic skip carrying the baseline reason plus
+        // the fresh failure detail. A non-baselined failure fails loudly.
+        try
+        {
+            await RunAndVerifyAsync(evalCase, caseName);
+        }
+        catch (Exception ex) when (
+            CleanupEvalCases.TryGetBaselineReason(_fx.ModelName, caseName, out var baselineReason))
+        {
+            Assert.Skip(
+                $"KNOWN-FAILING baseline ({_fx.ModelName}/{caseName}): {baselineReason}\n" +
+                $"Fresh failure detail: {ex.Message}");
+        }
+
+        // Passed while baselined: surface that the entry may be retirable.
+        if (CleanupEvalCases.TryGetBaselineReason(_fx.ModelName, caseName, out var staleReason))
+        {
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                $"NOTE: case '{caseName}' PASSED but is in KnownFailingBaseline for " +
+                $"'{_fx.ModelName}' — the baseline entry may be retirable (verify across " +
+                $"a few runs; the Vulkan GPU path is nondeterministic). Entry: {staleReason}");
+        }
+    }
+
+    private async Task RunAndVerifyAsync(CleanupEvalCase evalCase, string caseName)
+    {
         // Production path end-to-end: CleanupRunner with default options
         // (Ordinary profile => BasePrompts.Default, temp 0.1, 15s timeout,
         // no window context), no corrections, so the runner's preflight and

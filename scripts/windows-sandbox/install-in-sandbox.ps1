@@ -54,10 +54,19 @@ if ($runValue) {
 
 # Run selftest
 Write-Host "`nRunning Winpepper --selftest..." -ForegroundColor Cyan
-$selftest = & $exe --selftest 2>&1
+# Winpepper.exe is a GUI-subsystem binary (OutputType=WinExe), and PowerShell
+# launches those detached: `$selftest = & $exe --selftest 2>&1` returns
+# immediately with NO captured output and no $LASTEXITCODE, so the token check
+# always reported a false failure. Start-Process with explicit stdout/stderr
+# redirection both waits for exit and captures the output.
+$selftestOutLog = Join-Path $logDir 'selftest.out.log'
+$selftestErrLog = Join-Path $logDir 'selftest.err.log'
+$selftestProc = Start-Process -FilePath $exe -ArgumentList '--selftest' -Wait -PassThru -NoNewWindow `
+    -RedirectStandardOutput $selftestOutLog -RedirectStandardError $selftestErrLog
+$selftest = @(Get-Content $selftestOutLog -ErrorAction SilentlyContinue) + @(Get-Content $selftestErrLog -ErrorAction SilentlyContinue)
 $selftest | ForEach-Object { Write-Host "  $_" }
-if ($LASTEXITCODE -ne 0) {
-    throw "Self-test failed with exit code $LASTEXITCODE."
+if ($selftestProc.ExitCode -ne 0) {
+    throw "Self-test failed with exit code $($selftestProc.ExitCode)."
 }
 if ($selftest -match 'WINPEPPER_SELFTEST_OK') {
     Write-Host 'Self-test PASSED.' -ForegroundColor Green

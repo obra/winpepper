@@ -95,8 +95,20 @@ jobs:
         run: |
           $exe = Join-Path $env:LOCALAPPDATA 'Programs\Winpepper\Winpepper.exe'
           if (-not (Test-Path $exe)) { Write-Error "Winpepper.exe not installed"; exit 1 }
-          $output = & $exe --selftest
+          # Winpepper.exe is a GUI-subsystem binary (OutputType=WinExe), and
+          # PowerShell launches those detached: `$output = & $exe --selftest`
+          # returns immediately with NO captured output and no $LASTEXITCODE,
+          # so the token check can never pass. Start-Process with explicit
+          # stdout/stderr redirection both waits for exit and captures output.
+          $proc = Start-Process -FilePath $exe -ArgumentList '--selftest' -Wait -PassThru -NoNewWindow `
+            -RedirectStandardOutput artifacts\selftest.out.log -RedirectStandardError artifacts\selftest.err.log
+          $output = Get-Content artifacts\selftest.out.log -ErrorAction SilentlyContinue
           $output | Write-Host
+          Get-Content artifacts\selftest.err.log -ErrorAction SilentlyContinue | Write-Host
+          if ($proc.ExitCode -ne 0) {
+            Write-Error "Selftest exited with code $($proc.ExitCode)"
+            exit 1
+          }
           # NOTE: $output is a string array; `-notmatch` on an array filters non-matching
           # lines (truthy even when the token IS present), so use -not (-match) instead.
           if (-not ($output -match "WINPEPPER_SELFTEST_OK")) {
@@ -149,4 +161,6 @@ jobs:
           path: |
             artifacts/install.log
             artifacts/uninstall.log
+            artifacts/selftest.out.log
+            artifacts/selftest.err.log
           if-no-files-found: ignore

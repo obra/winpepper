@@ -19,3 +19,5 @@ node_modules/
 
 # Generated Windows Sandbox config (scripts/windows-sandbox/)
 *.wsb
+
+.kata.local.toml

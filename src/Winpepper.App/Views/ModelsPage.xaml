@@ -38,7 +38,7 @@
                          provider-specific AssemblyAI panel. -->
                     <ToggleSwitch x:Name="StreamingToggle" Header="Transcribe while you speak"
                                   AutomationProperties.AutomationId="StreamingEnabledToggle" />
-                    <TextBlock Text="Transcribes audio during your dictation so the text is ready almost as soon as you stop. Works with both providers. Turn off to transcribe everything in one pass after you stop."
+                    <TextBlock Text="Starts transcribing while you dictate. With the AssemblyAI provider this makes text ready almost as soon as you stop. With the local model it currently falls back to whole-recording transcription (no speed benefit) due to a model limitation."
                                TextWrapping="Wrap"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                Style="{ThemeResource CaptionTextBlockStyle}" />

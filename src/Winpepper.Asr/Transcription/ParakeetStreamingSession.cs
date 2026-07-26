@@ -28,7 +28,9 @@ namespace Winpepper.Asr.Transcription;
 /// any post-first encode that decodes to zero tokens — or a streamed dictation
 /// whose total decode is empty — forces FinishAsync onto the batch fallback.
 /// The trade-off (a genuinely silent chunk also forfeits the latency win) only
-/// ever costs speed, never words.
+/// ever costs speed, never words. Residual false negative: the guard only
+/// detects total blank collapse (zero tokens from a post-first encode) — a
+/// degraded-but-nonzero streamed transcript would not trigger the batch fallback.
 /// </summary>
 public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
 {

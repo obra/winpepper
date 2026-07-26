@@ -1,0 +1,214 @@
+name: Release MSI
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write   # create the GitHub Release and upload assets
+
+jobs:
+  release-msi:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Nerdbank.GitVersioning needs history
+
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Publish Winpepper.App
+        run: |
+          dotnet publish src/Winpepper.App/Winpepper.App.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:WindowsPackageType=None
+
+      - name: Locate or stub WinAppSDK bootstrapper
+        id: bootstrap
+        run: |
+          # Mirrors nightly.yml: the MSI's <Binary> bootstrapper reference is
+          # consumed by an InstallWinAppSdk custom action gated FALSE, so a
+          # stub satisfies the wxs bind without affecting behavior. Prefer the
+          # real exe when the NuGet cache has one.
+          $pkg = Get-ChildItem -Path "$env:USERPROFILE\.nuget\packages" -Recurse -Filter 'WindowsAppRuntimeInstall-x64.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+          New-Item -ItemType Directory -Path "packaging\bootstrapper" -Force | Out-Null
+          if ($pkg) {
+            Copy-Item $pkg.FullName -Destination "packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe" -Force
+            Write-Host "Using real WindowsAppRuntimeInstall-x64.exe from $($pkg.FullName)"
+          } else {
+            'stub' | Out-File -Encoding ASCII 'packaging\bootstrapper\WindowsAppRuntimeInstall-x64.exe'
+            Write-Host "::warning::Real WindowsAppRuntimeInstall-x64.exe not found in NuGet cache; placed text stub. This is fine while the InstallWinAppSdk MSI custom action remains gated FALSE."
+          }
+
+      - name: Build MSI
+        # -r win-x64 is required: without it, the wixproj's transitive
+        # dependency on Winpepper.History (net9.0-windows10.0.19041.0)
+        # fails with NETSDK1047.
+        run: dotnet build packaging\Winpepper.Msi.wixproj -c Release -r win-x64
+
+      - name: Locate MSI and derive release asset name
+        id: version
+        run: |
+          # The built filename carries NBGV's 4-part version
+          # (winpepper-0.6.2.240-x64.msi) — glob it, then rename to the
+          # tag-derived name (winpepper-0.6.2-alpha-x64.msi) so release asset
+          # URLs are predictable for winget and for humans.
+          $msi = Get-ChildItem -Path "artifacts" -Filter "winpepper-*-x64.msi" | Select-Object -First 1
+          if (-not $msi) { Write-Error "No MSI produced."; exit 1 }
+          Write-Host "Built MSI: $($msi.Name)"
+          # Guard 1: the versioned-output naming target (3b1903e) has never run
+          # in CI, and pre-3b1903e nightlies produced a degenerate
+          # 'winpepper--x64.msi' (empty version) that the loose glob would
+          # silently match. Require the 4-part-version form.
+          if ($msi.Name -notmatch '^winpepper-\d+\.\d+\.\d+\.\d+-x64\.msi$') {
+            Write-Error "Built MSI name '$($msi.Name)' is not the expected winpepper-<a.b.c.height>-x64.msi form."
+            exit 1
+          }
+          $tagVersion = "$env:GITHUB_REF_NAME".TrimStart('v')
+          # Guard 2: the asset is named from the TAG while the MSI's internal/
+          # ARP version comes from version.json (NBGV). A mismatched tag (e.g.
+          # v0.7.0 on a 0.6.2 tree) would publish a mislabeled asset whose
+          # winget manifest and ARP DisplayVersion disagree. Require the tag's
+          # numeric prefix to match the built version's first three parts.
+          $tagNumeric = ($tagVersion -split '-')[0]
+          if ($msi.Name -notmatch ('^winpepper-' + [regex]::Escape($tagNumeric) + '\.\d+-x64\.msi$')) {
+            Write-Error "Tag $env:GITHUB_REF_NAME (numeric $tagNumeric) does not match built MSI '$($msi.Name)' - fix version.json or the tag before releasing."
+            exit 1
+          }
+          $assetName = "winpepper-$tagVersion-x64.msi"
+          $assetPath = Join-Path $msi.DirectoryName $assetName
+          if ($msi.Name -ne $assetName) { Move-Item $msi.FullName $assetPath -Force }
+          "msi=$assetPath" >> $env:GITHUB_OUTPUT
+          "name=$assetName" >> $env:GITHUB_OUTPUT
+
+      - name: Install MSI (silent)
+        run: |
+          # Start-Process -Wait is a PowerShell cmdlet, not a native command,
+          # so it does NOT update $LASTEXITCODE. Capture the process with
+          # -PassThru and read its ExitCode property explicitly.
+          $msi = "${{ steps.version.outputs.msi }}"
+          $proc = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /l*v artifacts\install.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Get-Content artifacts\install.log -Tail 200
+            Write-Error "msiexec install failed (exit code $($proc.ExitCode))"
+            exit 1
+          }
+
+      - name: Selftest installed binary
+        run: |
+          $exe = Join-Path $env:LOCALAPPDATA 'Programs\Winpepper\Winpepper.exe'
+          if (-not (Test-Path $exe)) { Write-Error "Winpepper.exe not installed"; exit 1 }
+          $output = & $exe --selftest
+          $output | Write-Host
+          # NOTE: $output is a string array; `-notmatch` on an array filters non-matching
+          # lines (truthy even when the token IS present), so use -not (-match) instead.
+          if (-not ($output -match "WINPEPPER_SELFTEST_OK")) {
+            Write-Error "Selftest token missing"
+            exit 1
+          }
+
+      - name: Verify autostart Run key
+        run: |
+          $val = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Winpepper -ErrorAction SilentlyContinue
+          if (-not $val -or $val.Winpepper -notmatch '--tray') {
+            Write-Error "Autostart Run key not set as expected. Got: $($val.Winpepper)"
+            exit 1
+          }
+          Write-Host "Autostart OK: $($val.Winpepper)"
+
+      - name: Uninstall MSI (silent)
+        run: |
+          # Start-Process -Wait doesn't update $LASTEXITCODE; use -PassThru.
+          $msi = "${{ steps.version.outputs.msi }}"
+          $proc = Start-Process msiexec.exe -ArgumentList "/x `"$msi`" /qn /l*v artifacts\uninstall.log" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) {
+            Get-Content artifacts\uninstall.log -Tail 200
+            Write-Error "msiexec uninstall failed (exit code $($proc.ExitCode))"
+            exit 1
+          }
+          if (Test-Path (Join-Path $env:LOCALAPPDATA 'Programs\Winpepper\Winpepper.exe')) {
+            Write-Error "INSTALLFOLDER not cleaned up by uninstall"
+            exit 1
+          }
+          $val = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Winpepper -ErrorAction SilentlyContinue
+          if ($val) {
+            Write-Error "Run key not removed by uninstall: $($val.Winpepper)"
+            exit 1
+          }
+
+      - name: Generate SHA256 checksum
+        id: checksum
+        run: |
+          # Hash the exact bytes being uploaded (after the rename) — winget's
+          # InstallerSha256 must match the published asset.
+          $msi = "${{ steps.version.outputs.msi }}"
+          $name = "${{ steps.version.outputs.name }}"
+          $hash = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLowerInvariant()
+          $checksumPath = "$msi.sha256"
+          # "<hash> *<filename>" is sha256sum-compatible and easy to eyeball.
+          "$hash *$name" | Out-File -Encoding ascii -NoNewline $checksumPath
+          Write-Host "SHA256: $hash"
+          "path=$checksumPath" >> $env:GITHUB_OUTPUT
+
+      - name: Publish GitHub Release
+        # v3, not v2: v2.6.2 is the final v2 release, unmaintained and on the
+        # deprecated Node 20 runtime; v3 has the same inputs and defaults
+        # (draft: false, so the release is published - with assets already
+        # uploaded - before any needs:-dependent job starts).
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            ${{ steps.version.outputs.msi }}
+            ${{ steps.checksum.outputs.path }}
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Upload install/uninstall logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-msi-logs
+          path: |
+            artifacts/install.log
+            artifacts/uninstall.log
+          if-no-files-found: ignore
+
+  # Submits the just-published release to microsoft/winget-pkgs.
+  #
+  # Deliberately a job here rather than a `release:`-triggered workflow:
+  # the release above is created with the default GITHUB_TOKEN, and events
+  # created by GITHUB_TOKEN do not trigger other workflows.
+  #
+  # Skipped until the repo variable WINGET_AUTOSUBMIT is set to 'true'
+  # (one-time setup: WINGET_TOKEN secret + winget-pkgs fork + first manual
+  # submission — see docs/release.md). winget-releaser can only UPDATE a
+  # package that already exists in winget-pkgs.
+  #
+  # Pin note: @v2 verified 2026-07-25 (inputs identifier/release-tag/
+  # installers-regex/token; runs on any OS with cargo on PATH — preinstalled
+  # on windows-latest). The v2 tag is a frozen 2024-11 snapshot behind main;
+  # revisit the pin if ever moving off windows-latest (ubuntu-slim breaks
+  # under @v2's `cargo binstall` invocation).
+  winget:
+    needs: release-msi
+    if: vars.WINGET_AUTOSUBMIT == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Submit obra.Winpepper to microsoft/winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: obra.Winpepper
+          release-tag: ${{ github.ref_name }}
+          installers-regex: '\.msi$'
+          token: ${{ secrets.WINGET_TOKEN }}

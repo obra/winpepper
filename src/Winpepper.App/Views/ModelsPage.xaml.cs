@@ -197,6 +197,11 @@ public sealed partial class ModelsPage : Page
         AssemblyAiKeytermsToggle.Toggled += (_, _) =>
             _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiKeytermsEnabled = AssemblyAiKeytermsToggle.IsOn });
 
+        // Streaming toggle (provider-agnostic; read LIVE per dictation by PipelineHost).
+        StreamingToggle.IsOn = current.StreamingEnabled;
+        StreamingToggle.Toggled += (_, _) =>
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { StreamingEnabled = StreamingToggle.IsOn });
+
         // Key status
         AsrStatusText.Text = keyStore.HasKey ? "A key is saved on this PC." : "No key saved.";
 

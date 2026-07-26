@@ -124,6 +124,8 @@ correction post-pass maps any surviving "chat gbt" to "ChatGPT").
 
 > **Known issue (2026-05-16):** the `Winpepper.App` build currently fails on the VM with `Microsoft.WindowsAppSDK 1.6/1.7 + .NET 9` due to a `RuntimeEnvironment.GetRuntimeInterfaceAsObject` PNSE in the XAML markup compiler chain. See the milestone commit at the tip of `plan-3/ui-shell` for the full diagnosis. Until the toolchain blocker is resolved (likely by installing VS Build Tools so .NET Framework MSBuild can host the markup compiler, or by waiting for a WinAppSDK update), this smoke procedure is **deferred**. All non-XAML projects build green on Linux and on the VM.
 
+> **Superseded (2026-07-25):** resolved — WinAppSDK 1.8.260508005 + `-p:UseXamlCompilerExecutable=true` builds the App (see "Verified working launch procedure" below), including from a WSL2 UNC checkout (commit 3b1903e). Run `./scripts/windows-gate.sh` from WSL for the scripted build + full-suite gate.
+
 1. Sync: `./scripts/sync-to-vm.sh`
 2. Build: `./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj -c Debug"`
 3. Confirm models are present: `./scripts/winrun "Test-Path C:\Users\user\AppData\Local\winpepper\models\parakeet-tdt-0.6b-v3\encoder.onnx"` should be `True`.
@@ -158,6 +160,8 @@ Tray autostart variant: after onboarding completes, restart the app with `dotnet
 > WinUI markup compiler blocker (Plan 3 milestone commit 4bdb988) is resolved. The
 > procedure below is the canonical Plan 4 smoke and runs once Winpepper.App builds.
 
+> **Superseded (2026-07-25):** Winpepper.App builds now (WinAppSDK 1.8 + `-p:UseXamlCompilerExecutable=true`, commit 3b1903e); the blocker above no longer applies.
+
 1. `./scripts/sync-to-vm.sh`
 2. `./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj -c Release"`
 3. Launch the packaged app on the VM (per Plan 3's onboarding instructions).
@@ -186,6 +190,7 @@ Tray autostart variant: after onboarding completes, restart the app with `dotnet
 ### Setup
 1. Build + deploy as in earlier plans. Confirm `dotnet test` (Linux filter) is fully green.
 2. Run `./scripts/winrun "dotnet build src/Winpepper.App/Winpepper.App.csproj"`. WinUI compiler PNSE is expected (carry-forward); proceed with the previously-built binary or, once the WinUI block is resolved, with the fresh build.
+   > **Superseded (2026-07-25):** the WinUI compiler PNSE no longer occurs with WinAppSDK 1.8 + `-p:UseXamlCompilerExecutable=true` (commit 3b1903e); expect a clean build.
 3. Launch the app on the VM.
 
 ### Post-paste learning
@@ -240,6 +245,8 @@ Tray autostart variant: after onboarding completes, restart the app with `dotnet
 > + WiX authoring are complete and green on Linux for everything that does not
 > require an actual published App. When the WinUI block is resolved (per the
 > Plan 3 note above), execute the procedure below end-to-end.
+
+> **Superseded (2026-07-25):** the Winpepper.App build blocker is resolved (WinAppSDK 1.8 + `-p:UseXamlCompilerExecutable=true`, commit 3b1903e); the procedure below is executable.
 
 **Prerequisites on the VM:**
 
@@ -310,6 +317,8 @@ key; step 8 uninstalls cleanly; step 9 leaves `%LOCALAPPDATA%\winpepper` intact.
 > When that unblocks, exercise the procedure below to confirm a major-upgrade
 > install of a newer MSI over an older one preserves all per-user state and
 > respects the user's autostart preference.
+
+> **Superseded (2026-07-25):** the Winpepper.App build blocker is resolved (WinAppSDK 1.8 + `-p:UseXamlCompilerExecutable=true`, commit 3b1903e); the procedure below is executable.
 
 Goal: confirm settings, corrections, history, models, and the autostart Run key
 all survive a major-upgrade install (MajorUpgrade is

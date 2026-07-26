@@ -28,4 +28,14 @@ public sealed class AppSettingsDefaultsTests
         s.AssemblyAiCloudDeadlineSeconds.ShouldBe(10);        // single owned budget
         s.AssemblyAiKeytermsEnabled.ShouldBeFalse();          // opt-in, may cost extra
     }
+
+    [Fact]
+    public void Defaults_StreamingEnabled_IsFalse()
+    {
+        // OFF by default: real-model chunked streaming decodes to blanks after
+        // the first ~2 s chunk (2026-07-25 validation; ParakeetStreamingSession
+        // class doc), so streaming is opt-in until that defect is fixed.
+        var s = new AppSettings();
+        s.StreamingEnabled.ShouldBeFalse();
+    }
 }

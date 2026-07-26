@@ -52,7 +52,14 @@ public sealed class WarmCaptureBuffer
         }
     }
 
-    public void StartSession(int prerollSamples)
+    /// <summary>
+    /// Begin a session, seeding up to <paramref name="prerollSamples"/> from the
+    /// ring. Returns the seeded pre-roll (empty when none) so the recorder can
+    /// raise it through FramesAvailable — streaming consumers must observe the
+    /// same audio that StopSession will return, and the pre-roll never flows
+    /// through Ingest during the session.
+    /// </summary>
+    public float[] StartSession(int prerollSamples)
     {
         if (prerollSamples < 0) prerollSamples = 0;
         lock (_lock)
@@ -63,6 +70,7 @@ public sealed class WarmCaptureBuffer
                 _session.AddRange(_ring.GetRange(_ring.Count - take, take));
             _active = true;
             _sessionWasSilent = false;
+            return take > 0 ? _session.ToArray() : Array.Empty<float>();
         }
     }
 

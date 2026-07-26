@@ -10,9 +10,8 @@ namespace Winpepper.Asr;
 /// Decoder hidden state shape is the parakeet-rs export convention: [2, 1, 640].
 /// Vocab size is inferred from vocab.txt (last token is the blank).
 /// </summary>
-public sealed class ParakeetSession : IDisposable
+public sealed class ParakeetSession : IParakeetBackend, IDisposable
 {
-    private const int MaxTokensPerStep = 10;
     private const int DecoderHiddenLayers = 2;
     private const int DecoderHiddenDim = 640;
 
@@ -25,6 +24,13 @@ public sealed class ParakeetSession : IDisposable
 
     /// <summary>True when the session is using the DirectML EP; false on CPU fallback.</summary>
     public bool UsingDirectML { get; }
+
+    public int VocabSize => _vocab.Size;
+    public int BlankId => _vocab.BlankId;
+    int IParakeetBackend.DecoderHiddenLayers => DecoderHiddenLayers;
+    int IParakeetBackend.DecoderHiddenDim => DecoderHiddenDim;
+
+    public string DecodeTokens(IEnumerable<int> tokenIds) => _vocab.Decode(tokenIds);
 
     public ParakeetSession(string modelDir)
     {
@@ -93,11 +99,16 @@ public sealed class ParakeetSession : IDisposable
     public ParakeetTranscript Transcribe(ReadOnlySpan<float> samples16k)
     {
         var features = _features.Extract(samples16k); // [T, 128]
-        var (encoderOut, encoderLen, encoderDim, encoderTime) = RunEncoder(features);
-        return GreedyDecode(encoderOut, encoderLen, encoderDim, encoderTime);
+        var enc = Encode(features);
+        var state = new TdtDecoderState(DecoderHiddenLayers, DecoderHiddenDim, _vocab.BlankId);
+        var tokens = new List<int>();
+        var frameIndices = new List<int>();
+        var durations = new List<int>();
+        TdtGreedyDecoder.Decode(this, enc, state, tokens, frameIndices, durations);
+        return new ParakeetTranscript(_vocab.Decode(tokens), tokens, frameIndices, durations);
     }
 
-    private (float[] EncoderOut, int Len, int Dim, int Time) RunEncoder(float[,] features)
+    public EncoderOutput Encode(float[,] features)
     {
         var time = features.GetLength(0);
         var feat = features.GetLength(1);
@@ -128,90 +139,36 @@ public sealed class ParakeetSession : IDisposable
         var flat = new float[d * tprime];
         var idx = 0;
         foreach (var v in outTensor) flat[idx++] = v;
-        return (flat, (int)lengths[0], d, tprime);
+        return new EncoderOutput(flat, (int)lengths[0], d, tprime);
     }
 
-    private ParakeetTranscript GreedyDecode(float[] encoderOut, int validLen, int d, int tprime)
+    public DecoderJointResult DecodeJoint(float[] encoderFrame, int lastToken, float[] stateH, float[] stateC)
     {
-        var vocabSize = _vocab.Size;
-        var blankId = _vocab.BlankId;
+        var encFrame = new DenseTensor<float>(encoderFrame, new[] { 1, encoderFrame.Length, 1 });
+        var targets = new DenseTensor<int>(new[] { lastToken }, new[] { 1, 1 });
+        var targetLen = new DenseTensor<int>(new[] { 1 }, new[] { 1 });
+        var sh = new DenseTensor<float>(stateH, new[] { DecoderHiddenLayers, 1, DecoderHiddenDim });
+        var sc = new DenseTensor<float>(stateC, new[] { DecoderHiddenLayers, 1, DecoderHiddenDim });
 
-        var stateH = new float[DecoderHiddenLayers * 1 * DecoderHiddenDim];
-        var stateC = new float[DecoderHiddenLayers * 1 * DecoderHiddenDim];
-        var lastToken = blankId;
-
-        var tokens = new List<int>();
-        var frameIndices = new List<int>();
-        var durations = new List<int>();
-
-        var t = 0;
-        var emitted = 0;
-        var frameBuf = new float[d];
-
-        while (t < Math.Min(tprime, validLen))
+        using var results = _decoderJoint.Run(new[]
         {
-            // encoderOut is laid out [D, T'] row-major: the D-vector at time t is
-            // {encoderOut[d_idx * T' + t] for d_idx in 0..D}.
-            for (var k = 0; k < d; k++) frameBuf[k] = encoderOut[k * tprime + t];
-            var encFrame = new DenseTensor<float>(frameBuf, new[] { 1, d, 1 });
-            var targets = new DenseTensor<int>(new[] { lastToken }, new[] { 1, 1 });
-            var targetLen = new DenseTensor<int>(new[] { 1 }, new[] { 1 });
-            var sh = new DenseTensor<float>(stateH, new[] { DecoderHiddenLayers, 1, DecoderHiddenDim });
-            var sc = new DenseTensor<float>(stateC, new[] { DecoderHiddenLayers, 1, DecoderHiddenDim });
+            NamedOnnxValue.CreateFromTensor("encoder_outputs", encFrame),
+            NamedOnnxValue.CreateFromTensor("targets", targets),
+            NamedOnnxValue.CreateFromTensor("target_length", targetLen),
+            NamedOnnxValue.CreateFromTensor("input_states_1", sh),
+            NamedOnnxValue.CreateFromTensor("input_states_2", sc),
+        });
 
-            using var results = _decoderJoint.Run(new[]
-            {
-                NamedOnnxValue.CreateFromTensor("encoder_outputs", encFrame),
-                NamedOnnxValue.CreateFromTensor("targets", targets),
-                NamedOnnxValue.CreateFromTensor("target_length", targetLen),
-                NamedOnnxValue.CreateFromTensor("input_states_1", sh),
-                NamedOnnxValue.CreateFromTensor("input_states_2", sc),
-            });
+        var logits = results.First(r => r.Name == "outputs").AsTensor<float>();
+        var flat = new float[logits.Length];
+        var idx = 0;
+        foreach (var v in logits) flat[idx++] = v;
 
-            var logits = results.First(r => r.Name == "outputs").AsTensor<float>();
-            var flat = new float[logits.Length];
-            var idx = 0;
-            foreach (var v in logits) flat[idx++] = v;
-
-            // Pick best token from first vocab_size logits.
-            var bestToken = 0; var bestVal = float.NegativeInfinity;
-            for (var i = 0; i < vocabSize; i++)
-                if (flat[i] > bestVal) { bestVal = flat[i]; bestToken = i; }
-
-            // Pick best duration from remaining logits.
-            var durCount = flat.Length - vocabSize;
-            var bestDur = 0; var bestDurVal = float.NegativeInfinity;
-            for (var i = 0; i < durCount; i++)
-                if (flat[vocabSize + i] > bestDurVal) { bestDurVal = flat[vocabSize + i]; bestDur = i; }
-
-            if (bestToken != blankId)
-            {
-                tokens.Add(bestToken);
-                frameIndices.Add(t);
-                durations.Add(bestDur);
-                lastToken = bestToken;
-                emitted++;
-
-                var newH = results.First(r => r.Name == "output_states_1").AsTensor<float>();
-                var newC = results.First(r => r.Name == "output_states_2").AsTensor<float>();
-                var hi = 0; foreach (var v in newH) stateH[hi++] = v;
-                var ci = 0; foreach (var v in newC) stateC[ci++] = v;
-            }
-
-            if (bestDur > 0)
-            {
-                t += bestDur;
-                emitted = 0;
-            }
-            else if (bestToken == blankId || emitted >= MaxTokensPerStep)
-            {
-                t += 1;
-                emitted = 0;
-            }
-        }
-
-        var text = _vocab.Decode(tokens);
-        return new ParakeetTranscript(text, tokens, frameIndices, durations);
+        var newH = results.First(r => r.Name == "output_states_1").AsTensor<float>();
+        var newC = results.First(r => r.Name == "output_states_2").AsTensor<float>();
+        var h = new float[newH.Length]; var hi = 0; foreach (var v in newH) h[hi++] = v;
+        var c = new float[newC.Length]; var ci = 0; foreach (var v in newC) c[ci++] = v;
+        return new DecoderJointResult(flat, h, c);
     }
 
     private bool _disposed;

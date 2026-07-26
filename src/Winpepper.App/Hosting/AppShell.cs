@@ -281,7 +281,7 @@ public sealed class AppShell : IDisposable
                                          historyServices.Archiver, cleanupModelName,
                                          clipboardFallback, toasts,
                                          () => store.Load(),
-                                         (local, loadedModelName, s, onFallback) => AppShell.BuildTranscriber(
+                                         (local, loadedModelName, s, onFallback) => AppShell.BuildStreamingTranscriber(
                                              local, loadedModelName, s, onFallback, aaiClient, aaiKeyStore, aaiOptions,
                                              correctionStore, errorBus, factory),
                                          cleanup, correctionStore, windowContext,
@@ -405,15 +405,19 @@ public sealed class AppShell : IDisposable
     }
 
     /// <summary>
-    /// Builds the transcriber for a dictation. When AssemblyAI is selected the
-    /// cloud provider is wrapped in a FallbackTranscriber so any failure lands
-    /// on the local Parakeet session. Otherwise the local transcriber is used.
-    /// Static, taking its dependencies explicitly, so the pipeline can invoke it
-    /// through an injected delegate without holding an AppShell instance — see
-    /// the Task 10 Step 1 wiring note for why no AppShell reference is available
-    /// when PipelineHost is constructed.
+    /// Builds the streaming transcriber for a dictation. When AssemblyAI is
+    /// selected the cloud streaming provider is wrapped in a
+    /// FallbackStreamingTranscriber so any failure lands on the local Parakeet
+    /// session (batch). Otherwise the local chunked-streaming transcriber is
+    /// used. Static, taking its dependencies explicitly, so the pipeline can
+    /// invoke it through an injected delegate without holding an AppShell
+    /// instance. NOTE: the streaming connect sends no keyterms — v3 streaming
+    /// DOES support keyterms_prompt but wiring it is deferred (Task 7 Protocol
+    /// facts); custom_spelling is batch-only. User corrections still apply via
+    /// cleanup's deterministic corrections pass, and the cloud REST batch
+    /// transcriber built below (the zero-pushed fallback) keeps its extras.
     /// </summary>
-    public static Winpepper.Asr.Transcription.ITranscriber BuildTranscriber(
+    public static Winpepper.Asr.Transcription.IStreamingTranscriber BuildStreamingTranscriber(
         Winpepper.Asr.ParakeetSession local,
         string loadedModelName,
         AppSettings settings,
@@ -425,27 +429,37 @@ public sealed class AppShell : IDisposable
         Winpepper.Core.Errors.ErrorBus errorBus,
         ILoggerFactory loggerFactory)
     {
-        var localTranscriber = new Winpepper.Asr.Transcription.ParakeetTranscriber(
+        var localBatch = new Winpepper.Asr.Transcription.ParakeetTranscriber(
             local, loadedModelName);
+        var localStreaming = new Winpepper.Asr.Transcription.ParakeetStreamingTranscriber(
+            local, localBatch, loadedModelName, Winpepper.Asr.PreprocessorConfig.ParakeetTdtV3,
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.ParakeetStreamingTranscriber>());
 
         if (!string.Equals(settings.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase))
-            return localTranscriber;
+            return localStreaming;
 
-        // Snapshot corrections into request extras at build time; keyterms only when opted in.
+        // Snapshot corrections into request extras at build time; keyterms only
+        // when opted in — copied verbatim from today's BuildTranscriber. The REST
+        // batch transcriber is the streaming session's zero-pushed fallback (A9).
         Winpepper.Asr.Transcription.AssemblyAiRequestExtras Extras()
         {
             var data = correctionStore?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
             return Winpepper.Asr.Transcription.CorrectionSpellingMapper.ToExtras(data, options.KeytermsEnabled);
         }
 
-        var cloud = new Winpepper.Asr.Transcription.AssemblyAiTranscriber(
+        var cloudBatch = new Winpepper.Asr.Transcription.AssemblyAiTranscriber(
             client, keyStore, options,
             loggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiTranscriber>(),
             extrasProvider: Extras);
 
-        return new Winpepper.Asr.Transcription.FallbackTranscriber(
-            cloud, localTranscriber,
-            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.FallbackTranscriber>(),
+        var cloud = new Winpepper.Asr.Transcription.AssemblyAiStreamingTranscriber(
+            () => new Winpepper.Asr.Transcription.ClientStreamingWebSocket(),
+            cloudBatch, keyStore, options,
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.AssemblyAiStreamingTranscriber>());
+
+        return new Winpepper.Asr.Transcription.FallbackStreamingTranscriber(
+            cloud, localBatch,
+            loggerFactory.CreateLogger<Winpepper.Asr.Transcription.FallbackStreamingTranscriber>(),
             onFallback: onFallback,
             cloudDeadline: options.CloudDeadline,
             onConfigError: msg => errorBus.Report(

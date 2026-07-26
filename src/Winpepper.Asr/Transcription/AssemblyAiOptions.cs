@@ -3,6 +3,7 @@ namespace Winpepper.Asr.Transcription;
 public sealed class AssemblyAiOptions
 {
     public string BaseUrl { get; init; } = "https://api.assemblyai.com";
+    public string StreamingBaseUrl { get; init; } = "wss://streaming.assemblyai.com";
     public string Model { get; init; } = "universal-2";
     public string LanguageCode { get; init; } = "en_us";
 

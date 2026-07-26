@@ -32,6 +32,10 @@ public sealed class PipelineHost : IDisposable
     private readonly Func<string?, string> _resolveAsrModelName;
     private readonly Func<string, bool> _isAsrModelReady;
     private readonly Winpepper.Core.Asr.AsrModelSwapState _asrSwap = new();
+    // Item B: a drain-timeout (or teardown) abandon can orphan a streaming pump
+    // still executing a native call on the shared ParakeetSession; every dispose
+    // of that session routes through this guard so it can never race a live pump.
+    private readonly Winpepper.Core.Asr.OrphanedPumpGuard _orphanGuard;
     private readonly SessionEngine _engine;
     private readonly SessionViewModel _vm;
     private readonly ISoundEffectPlayer _sounds;
@@ -42,6 +46,8 @@ public sealed class PipelineHost : IDisposable
     private Action<Exception>? _captureFaultHandler;
     private Action? _captureRecoveredHandler;
     private Action<ReadOnlyMemory<float>>? _frameHandler;
+    private Winpepper.Asr.Transcription.StreamingDictationSession? _streamingSession;
+    private Action<ReadOnlyMemory<float>>? _streamFrameHandler;
 
     private readonly Winpepper.Cleanup.CleanupRunner? _cleanup;        // PLAN2-TYPE
     // NOTE: no CleanupOptions field. Options are built PER DICTATION from the
@@ -60,7 +66,7 @@ public sealed class PipelineHost : IDisposable
     private readonly Winpepper.Platform.Injection.ClipboardFallback _clipboardFallback;
     private readonly Winpepper.Core.Notifications.IToastService _toasts;
     private readonly Func<AppSettings> _settingsProvider;
-    private readonly Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> _buildTranscriber;
+    private readonly Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> _buildTranscriber;
     private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
     private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
     private InjectionTarget _targetAtStart = InjectionTarget.Empty;
@@ -83,7 +89,7 @@ public sealed class PipelineHost : IDisposable
         Winpepper.Platform.Injection.ClipboardFallback clipboardFallback,
         Winpepper.Core.Notifications.IToastService toasts,
         Func<AppSettings> settingsProvider,
-        Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.ITranscriber> transcriberFactory,
+        Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> transcriberFactory,
         Winpepper.Cleanup.CleanupRunner? cleanup = null,                       // PLAN2-TYPE
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
@@ -93,6 +99,7 @@ public sealed class PipelineHost : IDisposable
         bool prewarmMicEnabled = true)
     {
         _log = factory.CreateLogger<PipelineHost>();
+        _orphanGuard = new(ex => _log.LogWarning(ex, "deferred ASR session dispose failed"));
         _errorBus = errorBus;
         _engine = engine;
         _vm = vm;
@@ -229,7 +236,11 @@ public sealed class PipelineHost : IDisposable
                         var old = _asr;
                         _asr = fresh;
                         _asrSwap.CommitLoad(desired);
-                        old?.Dispose(); // under _startGate; idempotent (Step 5)
+                        // Under _startGate; idempotent (Step 5). Routed through the
+                        // orphan guard: if an abandoned streaming pump may still be
+                        // executing a native call on the old session, the dispose is
+                        // deferred until that pump completes (RunOrDefer never blocks).
+                        if (old is not null) _orphanGuard.RunOrDefer(old.Dispose);
                         _log.LogInformation(
                             "ASR model loaded (swap #{Generation}): {Previous} -> {Model}",
                             _asrSwap.Generation, previousModel ?? "(none)", desired);
@@ -294,6 +305,11 @@ public sealed class PipelineHost : IDisposable
                         _currentSessionId);
                 };
                 recorder.FramesAvailable += _frameHandler;
+                // Streaming tee: a permanent handler that forwards frames to the
+                // current dictation's streaming session (null outside dictations,
+                // so this is a no-op at idle). OnFrame copies and never blocks.
+                _streamFrameHandler = frame => _streamingSession?.OnFrame(frame);
+                recorder.FramesAvailable += _streamFrameHandler;
                 recorder.CaptureFaulted += _captureFaultHandler;
                 _captureRecoveredHandler = () =>
                     // The recorder raises CaptureRecovered only after a
@@ -405,6 +421,37 @@ public sealed class PipelineHost : IDisposable
                 _currentSessionId = Guid.NewGuid();
                 _log.LogInformation("Session started (hold) {SessionId}", _currentSessionId);
                 _sounds.PlayStart();
+                // Start the streaming dictation session BEFORE StartSession —
+                // StartSession raises the 500 ms pre-roll synchronously through
+                // FramesAvailable, so the session must already exist (frames
+                // queue in the coordinator until the factory completes) or the
+                // cloud stream permanently loses the first ~500 ms. The factory
+                // runs on a background pump so recording start stays instant;
+                // model ensure is silent here (reportErrors: false) — the stop
+                // arm's late path re-runs the check with today's exact error UX.
+                var settingsForStream = _settingsProvider();
+                if (settingsForStream.StreamingEnabled)
+                {
+                    _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                        ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                        {
+                            var cloudSel = string.Equals(settingsForStream.AsrProvider, "assemblyai",
+                                StringComparison.OrdinalIgnoreCase);
+                            var ready = TryEnsureAsrModel(reportErrors: false);
+                            if ((!ready && !cloudSel) || _asr is null) return null;
+                            return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream, notice =>
+                                _ = _toasts.ShowAsync(
+                                    "Winpepper",
+                                    "Cloud transcription unavailable — used local speech recognition instead.",
+                                    Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                    TimeSpan.FromSeconds(6)));
+                        }, ct2),
+                        _log, ct);
+                }
+                else
+                {
+                    _log.LogDebug("streaming disabled by settings; batch transcription will run at stop");
+                }
                 _warmRecorder!.StartSession(includePrerollMs: 500);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 _targetAtStart = CaptureTarget();
@@ -464,6 +511,13 @@ public sealed class PipelineHost : IDisposable
                     _engine.Apply(SessionEvent.TranscriptReady);
                     _engine.Apply(SessionEvent.InjectionCompleted);
                     _ctxPrefetchTask = null;
+                    if (_streamingSession is not null)
+                    {
+                        var droppedStreaming = _streamingSession;
+                        _streamingSession = null;
+                        await droppedStreaming.DisposeAsync();
+                        NoteStreamingReleased(droppedStreaming);
+                    }
                     _recordStopwatch = null;
                     break;
                 }
@@ -472,32 +526,88 @@ public sealed class PipelineHost : IDisposable
                 var settingsNow = _settingsProvider();
                 var cloudSelected = string.Equals(
                     settingsNow.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase);
-                // Provider-aware (req 6): a failed LOCAL swap never skips or
-                // aborts a CLOUD dictation; soften its error surface.
-                var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
-                if ((!localReady && !cloudSelected) || _asr is null)
-                {
-                    // Terminal-state early-exit (S2): never bare-return — drive
-                    // the engine back so the next dictation can start.
-                    _engine.Apply(SessionEvent.Failed);
-                    if (cloudSelected && _asr is null)
-                    {
-                        // Cloud selected but no local session exists at all (the
-                        // fallback wrapper needs one): surface this rare case.
-                        _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                            new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
-                            Guid.Empty);
-                    }
-                    _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
-                    return;
-                }
-                var transcriber = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow, notice =>
+                Action<string> fallbackNotice = notice =>
                     _ = _toasts.ShowAsync(
                         "Winpepper",
                         "Cloud transcription unavailable — used local speech recognition instead.",
                         Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                        TimeSpan.FromSeconds(6)));
-                var transcription = await transcriber.TranscribeAsync(trimmed, ct);
+                        TimeSpan.FromSeconds(6));
+                // Finish the streaming session FIRST — before ANY TryEnsureAsrModel
+                // call: the ensure's swap branch disposes the ParakeetSession the
+                // streaming transcriber still holds (no engine-state gating), so
+                // no ensure may run while a session is in flight. The factory's
+                // own ensure (start arm) ran before the session captured the
+                // model. A mid-dictation model change applies to the NEXT dictation.
+                var streaming = _streamingSession;
+                _streamingSession = null;
+                Winpepper.Asr.Transcription.TranscriptionResult? maybeTranscription = null;
+                if (streaming is not null)
+                {
+                    // Dispose the coordinator on ALL paths — including a FinishAsync
+                    // throw (pump-error rethrow, inner-session throw, ct cancel):
+                    // otherwise the inner streaming session (e.g. cloud websocket)
+                    // leaks. DisposeAsync is idempotent, never throws, and is a
+                    // near-no-op after a successful FinishAsync or a drain-timeout
+                    // (both already disposed the inner session internally).
+                    try
+                    {
+                        maybeTranscription = await streaming.FinishAsync(trimmed, ct);
+                    }
+                    finally
+                    {
+                        await streaming.DisposeAsync();
+                        // If the abandon left the pump orphaned (drain timeout /
+                        // bounded dispose wait expired), register it so no model
+                        // dispose can race the native call it may still be in.
+                        NoteStreamingReleased(streaming);
+                    }
+                }
+                if (maybeTranscription is null)
+                {
+                    // Late path: no streaming session materialized, its factory
+                    // returned null (no provider at start), or the drain deadline
+                    // expired on a wedged connection (session already abandoned +
+                    // disposed inside FinishAsync). Run today's ensure + error UX,
+                    // then the batch-equivalent path via the streaming seam. The
+                    // cloud wrapper bounds BOTH its connect (StartSessionAsync)
+                    // and its post-stop wait with the cloud deadline (Task 8), so
+                    // even on the wedged network that caused a drain timeout this
+                    // path cannot hang the serial hotkey loop.
+                    // Provider-aware (req 6): a failed LOCAL swap never skips or
+                    // aborts a CLOUD dictation; soften its error surface.
+                    // Drain-timeout abandon (A5 residual, Item B): running the
+                    // ensure here is safe even after a drain timeout — the
+                    // abandoned pump was registered with _orphanGuard above
+                    // (inside the FinishAsync finally), so the ensure's Swap
+                    // branch DEFERS the old session's dispose until that pump
+                    // completes instead of racing its in-flight native call.
+                    var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
+                    var asrNow = _asr;
+                    if ((!localReady && !cloudSelected) || asrNow is null)
+                    {
+                        if (streaming is not null)
+                        {
+                            await streaming.DisposeAsync(); // no-op after FinishAsync; never throws
+                        }
+                        // Terminal-state early-exit (S2): never bare-return — drive
+                        // the engine back so the next dictation can start.
+                        _engine.Apply(SessionEvent.Failed);
+                        if (cloudSelected && asrNow is null)
+                        {
+                            // Cloud selected but no local session exists at all (the
+                            // fallback wrapper needs one): surface this rare case.
+                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                                new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
+                                Guid.Empty);
+                        }
+                        _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
+                        return;
+                    }
+                    var transcriber = _buildTranscriber(asrNow, _asrSwap.LoadedModelName!, settingsNow, fallbackNotice);
+                    await using var lateSession = await transcriber.StartSessionAsync(ct);
+                    maybeTranscription = await lateSession.FinishAsync(trimmed, ct);
+                }
+                var transcription = maybeTranscription;
                 transcribeSw.Stop();
 
                 string final = transcription.Text;
@@ -670,6 +780,13 @@ public sealed class PipelineHost : IDisposable
             case HotkeyEventKind.Cancel:
                 _engine.Apply(SessionEvent.CancelRequested);
                 _ = _warmRecorder?.StopSession();
+                if (_streamingSession is not null)
+                {
+                    var cancelledStreaming = _streamingSession;
+                    _streamingSession = null;
+                    await cancelledStreaming.DisposeAsync();
+                    NoteStreamingReleased(cancelledStreaming);
+                }
                 break;
             case HotkeyEventKind.Toggle:
                 if (_engine.State == SessionState.Idle)
@@ -680,6 +797,31 @@ public sealed class PipelineHost : IDisposable
                     _currentSessionId = Guid.NewGuid();
                     _log.LogInformation("Session started (toggle) {SessionId}", _currentSessionId);
                     _sounds.PlayStart();
+                    // (same comment as the HoldDown arm: create BEFORE StartSession
+                    // so the synchronously-raised pre-roll is not dropped)
+                    var settingsForStream2 = _settingsProvider();
+                    if (settingsForStream2.StreamingEnabled)
+                    {
+                        _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                            ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                            {
+                                var cloudSel2 = string.Equals(settingsForStream2.AsrProvider, "assemblyai",
+                                    StringComparison.OrdinalIgnoreCase);
+                                var ready2 = TryEnsureAsrModel(reportErrors: false);
+                                if ((!ready2 && !cloudSel2) || _asr is null) return null;
+                                return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream2, notice =>
+                                    _ = _toasts.ShowAsync(
+                                        "Winpepper",
+                                        "Cloud transcription unavailable — used local speech recognition instead.",
+                                        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                        TimeSpan.FromSeconds(6)));
+                            }, ct2),
+                            _log, ct);
+                    }
+                    else
+                    {
+                        _log.LogDebug("streaming disabled by settings; batch transcription will run at stop");
+                    }
                     _warmRecorder!.StartSession(includePrerollMs: 500);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                     _targetAtStart = CaptureTarget();
@@ -738,6 +880,13 @@ public sealed class PipelineHost : IDisposable
                         _engine.Apply(SessionEvent.TranscriptReady);
                         _engine.Apply(SessionEvent.InjectionCompleted);
                         _ctxPrefetchTask = null;
+                        if (_streamingSession is not null)
+                        {
+                            var droppedStreaming2 = _streamingSession;
+                            _streamingSession = null;
+                            await droppedStreaming2.DisposeAsync();
+                            NoteStreamingReleased(droppedStreaming2);
+                        }
                         _recordStopwatch = null;
                         break;
                     }
@@ -746,26 +895,88 @@ public sealed class PipelineHost : IDisposable
                     var settingsNow2 = _settingsProvider();
                     var cloudSelected2 = string.Equals(
                         settingsNow2.AsrProvider, "assemblyai", StringComparison.OrdinalIgnoreCase);
-                    var localReady2 = TryEnsureAsrModel(reportErrors: !cloudSelected2);
-                    if ((!localReady2 && !cloudSelected2) || _asr is null)
-                    {
-                        _engine.Apply(SessionEvent.Failed);
-                        if (cloudSelected2 && _asr is null)
-                        {
-                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                                new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
-                                Guid.Empty);
-                        }
-                        _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
-                        return;
-                    }
-                    var transcriber2 = _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsNow2, notice =>
+                    Action<string> fallbackNotice2 = notice =>
                         _ = _toasts.ShowAsync(
                             "Winpepper",
                             "Cloud transcription unavailable — used local speech recognition instead.",
                             Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                            TimeSpan.FromSeconds(6)));
-                    var transcription2 = await transcriber2.TranscribeAsync(trimmed2, ct);
+                            TimeSpan.FromSeconds(6));
+                    // Finish the streaming session FIRST — before ANY TryEnsureAsrModel
+                    // call: the ensure's swap branch disposes the ParakeetSession the
+                    // streaming transcriber still holds (no engine-state gating), so
+                    // no ensure may run while a session is in flight. The factory's
+                    // own ensure (start arm) ran before the session captured the
+                    // model. A mid-dictation model change applies to the NEXT dictation.
+                    var streaming2 = _streamingSession;
+                    _streamingSession = null;
+                    Winpepper.Asr.Transcription.TranscriptionResult? maybeTranscription2 = null;
+                    if (streaming2 is not null)
+                    {
+                        // Dispose the coordinator on ALL paths — including a FinishAsync
+                        // throw (pump-error rethrow, inner-session throw, ct cancel):
+                        // otherwise the inner streaming session (e.g. cloud websocket)
+                        // leaks. DisposeAsync is idempotent, never throws, and is a
+                        // near-no-op after a successful FinishAsync or a drain-timeout
+                        // (both already disposed the inner session internally).
+                        try
+                        {
+                            maybeTranscription2 = await streaming2.FinishAsync(trimmed2, ct);
+                        }
+                        finally
+                        {
+                            await streaming2.DisposeAsync();
+                            // If the abandon left the pump orphaned (drain timeout /
+                            // bounded dispose wait expired), register it so no model
+                            // dispose can race the native call it may still be in.
+                            NoteStreamingReleased(streaming2);
+                        }
+                    }
+                    if (maybeTranscription2 is null)
+                    {
+                        // Late path: no streaming session materialized, its factory
+                        // returned null (no provider at start), or the drain deadline
+                        // expired on a wedged connection (session already abandoned +
+                        // disposed inside FinishAsync). Run today's ensure + error UX,
+                        // then the batch-equivalent path via the streaming seam. The
+                        // cloud wrapper bounds BOTH its connect (StartSessionAsync)
+                        // and its post-stop wait with the cloud deadline (Task 8), so
+                        // even on the wedged network that caused a drain timeout this
+                        // path cannot hang the serial hotkey loop.
+                        // Provider-aware (req 6): a failed LOCAL swap never skips or
+                        // aborts a CLOUD dictation; soften its error surface.
+                        // Drain-timeout abandon (A5 residual, Item B): running the
+                        // ensure here is safe even after a drain timeout — the
+                        // abandoned pump was registered with _orphanGuard above
+                        // (inside the FinishAsync finally), so the ensure's Swap
+                        // branch DEFERS the old session's dispose until that pump
+                        // completes instead of racing its in-flight native call.
+                        var localReady2 = TryEnsureAsrModel(reportErrors: !cloudSelected2);
+                        var asrNow2 = _asr;
+                        if ((!localReady2 && !cloudSelected2) || asrNow2 is null)
+                        {
+                            if (streaming2 is not null)
+                            {
+                                await streaming2.DisposeAsync(); // no-op after FinishAsync; never throws
+                            }
+                            // Terminal-state early-exit (S2): never bare-return — drive
+                            // the engine back so the next dictation can start.
+                            _engine.Apply(SessionEvent.Failed);
+                            if (cloudSelected2 && asrNow2 is null)
+                            {
+                                // Cloud selected but no local session exists at all (the
+                                // fallback wrapper needs one): surface this rare case.
+                                _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                                    new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
+                                    Guid.Empty);
+                            }
+                            _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
+                            return;
+                        }
+                        var transcriber2 = _buildTranscriber(asrNow2, _asrSwap.LoadedModelName!, settingsNow2, fallbackNotice2);
+                        await using var lateSession2 = await transcriber2.StartSessionAsync(ct);
+                        maybeTranscription2 = await lateSession2.FinishAsync(trimmed2, ct);
+                    }
+                    var transcription2 = maybeTranscription2;
                     transcribeSw2.Stop();
 
                     string final2 = transcription2.Text;
@@ -937,6 +1148,13 @@ public sealed class PipelineHost : IDisposable
         }
     }
 
+    /// <summary>Call after permanently letting go of a streaming coordinator. If its
+    /// pump was abandoned still-running, register it so no model dispose can race it.</summary>
+    private void NoteStreamingReleased(Winpepper.Asr.Transcription.StreamingDictationSession s)
+    {
+        if (!s.PumpCompletion.IsCompleted) _orphanGuard.Register(s.PumpCompletion);
+    }
+
     /// <summary>
     /// Silence-trims the finished recording for TRANSCRIPTION ONLY. Returns the
     /// trimmed samples to send to ASR, or <c>null</c> when the recording has no
@@ -1000,15 +1218,33 @@ public sealed class PipelineHost : IDisposable
             _runCts?.Cancel();
             try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
             _hook.Dispose();
+            // An in-flight streaming session (app shut down mid-dictation) holds a
+            // live pump + inner socket; dispose it here or it leaks at teardown.
+            // DisposeAsync never throws and is internally bounded, but mirror the
+            // file's bounded-wait convention (_runTask above) anyway; Task.Run
+            // avoids blocking on continuations posted to this (possibly UI) thread.
+            // Runs BEFORE the _asr dispose below: if the bounded wait expires the
+            // pump is orphaned possibly mid-native-call on _asr, so it must be
+            // registered with the guard before any model dispose is routed.
+            var streamingAtTeardown = _streamingSession;
+            _streamingSession = null;
+            if (streamingAtTeardown is not null)
+            {
+                try { Task.Run(() => streamingAtTeardown.DisposeAsync().AsTask()).Wait(TimeSpan.FromSeconds(2)); } catch { }
+                NoteStreamingReleased(streamingAtTeardown);
+            }
             lock (_startGate)
             {
-                _asr?.Dispose();
+                var asrAtTeardown = _asr;
                 _asr = null;
+                if (asrAtTeardown is not null) _orphanGuard.RunOrDefer(asrAtTeardown.Dispose);
             }
             if (_warmRecorder is not null)
             {
-                // Bug 8 (hygiene): unhook the meter + fault handlers before teardown.
+                // Bug 8 (hygiene): unhook the meter + streaming-tee + fault
+                // handlers before teardown.
                 if (_frameHandler is not null) _warmRecorder.FramesAvailable -= _frameHandler;
+                if (_streamFrameHandler is not null) _warmRecorder.FramesAvailable -= _streamFrameHandler;
                 if (_captureFaultHandler is not null) _warmRecorder.CaptureFaulted -= _captureFaultHandler;
                 if (_captureRecoveredHandler is not null) _warmRecorder.CaptureRecovered -= _captureRecoveredHandler;
                 _warmRecorder.Dispose();

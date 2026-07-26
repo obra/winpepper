@@ -13,9 +13,9 @@ public sealed class MelFeatureExtractor
     private readonly double[] _window;
     private readonly double[][] _melFilters;
 
-    private const double MelOffset = 1.0 / (1 << 24); // 2^-24
-    private const double Epsilon = 1e-5;
-    private const double MelMin = 1e-30;
+    internal const double MelOffset = 1.0 / (1 << 24); // 2^-24
+    internal const double Epsilon = 1e-5;
+    internal const double MelMin = 1e-30;
 
     public MelFeatureExtractor(PreprocessorConfig config)
     {
@@ -88,7 +88,7 @@ public sealed class MelFeatureExtractor
         return output;
     }
 
-    private static void HandRolledRfftPower(ReadOnlySpan<double> frame, int n, double[] power)
+    internal static void HandRolledRfftPower(ReadOnlySpan<double> frame, int n, double[] power)
     {
         // O(n^2) DFT — fine for n=512 (called once per frame, hundreds of frames per second).
         // Optimize in Plan 2 if hot.
@@ -105,7 +105,7 @@ public sealed class MelFeatureExtractor
         }
     }
 
-    private static double[] BuildHannWindow(int nFft, int winLength)
+    internal static double[] BuildHannWindow(int nFft, int winLength)
     {
         var w = new double[nFft];
         var offset = (nFft - winLength) / 2;
@@ -114,7 +114,7 @@ public sealed class MelFeatureExtractor
         return w;
     }
 
-    private static double[][] BuildSlaneyMelFilters(int nFft, int nMels, int sr)
+    internal static double[][] BuildSlaneyMelFilters(int nFft, int nMels, int sr)
     {
         static double HzToMel(double f) =>
             f < 1000.0

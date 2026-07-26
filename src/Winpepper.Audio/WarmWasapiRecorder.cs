@@ -139,7 +139,12 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
         // it just no longer CLAIMS it.
         _coordinator.EnsureStarted(force: true);
         var prerollSamples = _prewarm ? Math.Max(0, includePrerollMs) * (SampleRate16k / 1000) : 0;
-        _buffer.StartSession(prerollSamples);
+        var preroll = _buffer.StartSession(prerollSamples);
+        // The seeded pre-roll never flows through Ingest during the session, so
+        // raise it here — otherwise streaming consumers (Task 10's frame tee)
+        // would be missing the dictation's first ~500 ms. The level meter also
+        // subscribes; one larger frame at session start is harmless.
+        if (preroll.Length > 0) FramesAvailable?.Invoke(preroll);
     }
 
     /// <summary>

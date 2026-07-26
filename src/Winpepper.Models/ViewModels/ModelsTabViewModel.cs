@@ -64,7 +64,16 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
 
             foreach (var d in selected)
             {
-                var card = d.Kind == ModelKind.Asr ? AsrCard : CleanupCard;
+                // Skip StreamingAsr — Task 7 will add the real card
+                if (d.Kind == ModelKind.StreamingAsr)
+                    continue;
+
+                var card = d.Kind switch
+                {
+                    ModelKind.Asr => AsrCard,
+                    ModelKind.Cleanup => CleanupCard,
+                    _ => throw new ArgumentOutOfRangeException(nameof(d.Kind), d.Kind, null),
+                };
                 var progress = new DirectProgress<DownloadProgress>(card.ReportProgress);
                 try
                 {

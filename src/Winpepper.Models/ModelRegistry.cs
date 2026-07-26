@@ -10,6 +10,7 @@ public sealed class ModelRegistry
     public const string DefaultAsrName = "parakeet-tdt-0.6b-v3";
     public const string SecondAsrName = "parakeet-tdt-0.6b-v2";
     public const string DefaultCleanupName = "qwen2.5-0.5b-instruct-q4_k_m";
+    public const string StreamingAsrName = "nemotron-streaming-en";
 
     private readonly List<ModelDescriptor> _all;
 
@@ -96,6 +97,31 @@ public sealed class ModelRegistry
                     },
                 },
             },
+            new ModelDescriptor
+            {
+                Name = StreamingAsrName,
+                Kind = ModelKind.StreamingAsr,
+                DisplayName = "Nemotron Speech Streaming (0.6B, Q8_0 GGUF, English)",
+                InstallDirRelative = "nemotron-streaming-en",
+                Files = new[]
+                {
+                    new ModelFile
+                    {
+                        RelativePath = "nemotron-speech-streaming-en-0.6b-Q8_0.gguf",
+                        Url = "https://huggingface.co/handy-computer/nemotron-speech-streaming-en-0.6b-gguf/resolve/main/nemotron-speech-streaming-en-0.6b-Q8_0.gguf",
+                        Sha256 = "90d8c89714cd31efc88be62a40c6b2bea57e0cc2063af1ffe2c28f1a228ca110",
+                        SizeBytes = 729_650_176,
+                    },
+                    new ModelFile
+                    {
+                        RelativePath = "transcribe-native-0.1.3-windows-x86_64-cpu-vulkan.tar.gz",
+                        Url = "https://github.com/handy-computer/transcribe.cpp/releases/download/v0.1.3/transcribe-native-0.1.3-windows-x86_64-cpu-vulkan.tar.gz",
+                        Sha256 = "9f536cb0fb839bd305e6d92fb214fd417c7718a416a6c7646a9911fbd56fdad5",
+                        SizeBytes = 25_957_910,
+                        ExtractToRelative = "runtime",
+                    },
+                },
+            },
         };
     }
 
@@ -114,6 +140,7 @@ public sealed class ModelRegistry
         {
             ModelKind.Asr => DefaultAsrName,
             ModelKind.Cleanup => DefaultCleanupName,
+            ModelKind.StreamingAsr => throw new ArgumentOutOfRangeException(nameof(kind), kind, "StreamingAsr is opt-in-install only; it has no default."),
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
         return Find(defaultName)

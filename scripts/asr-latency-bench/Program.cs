@@ -7,6 +7,8 @@
 // model cannot run on Linux). real-remote-* scenarios hit the real AssemblyAI
 // API and run only when ASSEMBLYAI_API_KEY is set.
 using System.Diagnostics;
+using AsrLatencyBench;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Winpepper.Asr;
 using Winpepper.Asr.Transcription;
@@ -16,13 +18,33 @@ const double LocalRtf = 0.30;              // assumed local realtime factor (doc
 var uploadTime = TimeSpan.FromMilliseconds(400);   // ~320 KB WAV upload assumption
 var processingTime = TimeSpan.FromSeconds(3.0);    // cloud batch processing for a 10 s clip
 
-var requested = args.Length > 0 ? args : new[]
+var wavPaths = new List<string>();
+string? modelDir = null;
+var gain = 1.0;
+var leadSilenceMs = 0;
+var scenarioArgs = new List<string>();
+for (var argIdx = 0; argIdx < args.Length; argIdx++)
+{
+    switch (args[argIdx])
+    {
+        case "--wav": wavPaths.Add(args[++argIdx]); break;
+        case "--model-dir": modelDir = args[++argIdx]; break;
+        case "--gain": gain = double.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
+        case "--lead-silence-ms": leadSilenceMs = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
+        default: scenarioArgs.Add(args[argIdx]); break;
+    }
+}
+var requested = scenarioArgs.Count > 0 ? scenarioArgs.ToArray() : new[]
 {
     "sim-local-batch", "sim-local-stream",
     "sim-remote-batch", "sim-remote-stream",
     "real-remote-batch", "real-remote-stream",
 };
-var rows = new List<(string Scenario, string Kind, long PostStopMs)>();
+var audio = wavPaths.Count > 0
+    ? BenchAudio.Prepare(BenchAudio.ReadMono16k(wavPaths[0]), gain, leadSilenceMs)
+    : SynthesizeAudio(AudioSeconds);
+var audioSeconds = audio.Length / 16000.0;
+var rows = new List<(string Scenario, string Kind, double AudioSeconds, long PostStopMs)>();
 
 foreach (var scenario in requested)
 {
@@ -30,18 +52,16 @@ foreach (var scenario in requested)
     {
         case "sim-local-batch":
         {
-            var audio = SynthesizeAudio(AudioSeconds);
             var paced = new PacedTranscriber("parakeet-sim", TimeSpan.FromSeconds(AudioSeconds * LocalRtf));
             var sw = Stopwatch.StartNew();
             await paced.TranscribeAsync(audio, CancellationToken.None);
-            rows.Add((scenario, "simulated", sw.ElapsedMilliseconds));
+            rows.Add((scenario, "simulated", audioSeconds, sw.ElapsedMilliseconds));
             break;
         }
         case "sim-remote-batch":
         {
             // REAL AssemblyAiTranscriber (production upload/create/poll loop),
             // paced fake client for the network edge.
-            var audio = SynthesizeAudio(AudioSeconds);
             var transcriber = new AssemblyAiTranscriber(
                 new PacedAssemblyAiClient(uploadTime, processingTime),
                 new BenchKeyStore("sim-key"),
@@ -49,7 +69,7 @@ foreach (var scenario in requested)
                 NullLogger<AssemblyAiTranscriber>.Instance);
             var sw = Stopwatch.StartNew();
             await transcriber.TranscribeAsync(audio, CancellationToken.None);
-            rows.Add((scenario, "simulated", sw.ElapsedMilliseconds));
+            rows.Add((scenario, "simulated", audioSeconds, sw.ElapsedMilliseconds));
             break;
         }
         case "real-remote-batch":
@@ -60,7 +80,6 @@ foreach (var scenario in requested)
                 Console.WriteLine($"{scenario}: SKIPPED (ASSEMBLYAI_API_KEY not set)");
                 break;
             }
-            var audio = SynthesizeAudio(AudioSeconds);
             var opts = new AssemblyAiOptions { CloudDeadline = TimeSpan.FromSeconds(30) };
             var client = new AssemblyAiClient(
                 new HttpClient(), () => key, opts, NullLogger<AssemblyAiClient>.Instance);
@@ -68,7 +87,7 @@ foreach (var scenario in requested)
                 client, new BenchKeyStore(key), opts, NullLogger<AssemblyAiTranscriber>.Instance);
             var sw = Stopwatch.StartNew();
             var result = await transcriber.TranscribeAsync(audio, CancellationToken.None);
-            rows.Add((scenario, "REAL network", sw.ElapsedMilliseconds));
+            rows.Add((scenario, "REAL network", audioSeconds, sw.ElapsedMilliseconds));
             Console.WriteLine($"  (transcript: \"{result.Text}\")");
             break;
         }
@@ -77,12 +96,11 @@ foreach (var scenario in requested)
             // REAL production pipeline (StreamingDictationSession +
             // ParakeetStreamingTranscriber + chunked mel/decode) with the ONNX
             // encoder edge replaced by the same RTF delay model as sim-local-batch.
-            var audio = SynthesizeAudio(AudioSeconds);
             var backend = new PacedParakeetBackend(LocalRtf);
             var batch = new PacedTranscriber("parakeet-sim", TimeSpan.FromSeconds(AudioSeconds * LocalRtf));
             var streaming = new ParakeetStreamingTranscriber(
                 backend, batch, "parakeet-sim", PreprocessorConfig.ParakeetTdtV3);
-            rows.Add((scenario, "simulated", await MeasureStreaming(streaming, audio)));
+            rows.Add((scenario, "simulated", audioSeconds, await MeasureStreaming(streaming, audio)));
             break;
         }
         case "sim-remote-stream":
@@ -90,7 +108,6 @@ foreach (var scenario in requested)
             // REAL AssemblyAiStreamingTranscriber/session over a paced fake socket
             // (final turn ~300 ms after Terminate — measured Universal-Streaming
             // immediate-finalization order of magnitude).
-            var audio = SynthesizeAudio(AudioSeconds);
             var streaming = new AssemblyAiStreamingTranscriber(
                 () => new PacedFakeSocket(finalizeDelay: TimeSpan.FromMilliseconds(300)),
                 // Zero-pushed REST batch fallback (Task 7 / A9) — never used here:
@@ -98,7 +115,7 @@ foreach (var scenario in requested)
                 new PacedTranscriber("assemblyai-batch-sim", TimeSpan.Zero),
                 new BenchKeyStore("sim-key"), new AssemblyAiOptions(),
                 NullLogger<AssemblyAiStreamingTranscriber>.Instance);
-            rows.Add((scenario, "simulated", await MeasureStreaming(streaming, audio)));
+            rows.Add((scenario, "simulated", audioSeconds, await MeasureStreaming(streaming, audio)));
             break;
         }
         case "real-remote-stream":
@@ -109,14 +126,76 @@ foreach (var scenario in requested)
                 Console.WriteLine($"{scenario}: SKIPPED (ASSEMBLYAI_API_KEY not set)");
                 break;
             }
-            var audio = SynthesizeAudio(AudioSeconds);
             var streaming = new AssemblyAiStreamingTranscriber(
                 () => new ClientStreamingWebSocket(),
                 // Zero-pushed REST batch fallback — never used (realtime pacing).
                 new PacedTranscriber("assemblyai-batch-sim", TimeSpan.Zero),
                 new BenchKeyStore(key), new AssemblyAiOptions(),
                 NullLogger<AssemblyAiStreamingTranscriber>.Instance);
-            rows.Add((scenario, "REAL network", await MeasureStreaming(streaming, audio)));
+            rows.Add((scenario, "REAL network", audioSeconds, await MeasureStreaming(streaming, audio)));
+            break;
+        }
+        case "real-local":
+        {
+            if (modelDir is null || wavPaths.Count == 0)
+            {
+                Console.WriteLine("real-local: SKIPPED (requires --model-dir and at least one --wav)");
+                break;
+            }
+            if (!ParakeetSession.ModelFilesPresent(modelDir))
+            {
+                Console.WriteLine($"real-local: SKIPPED (model files not found in {modelDir})");
+                break;
+            }
+            using var session = new ParakeetSession(modelDir);
+            Console.WriteLine($"# real-local: UsingDirectML={session.UsingDirectML}");
+            var realBatch = new ParakeetTranscriber(session, "parakeet-tdt-0.6b-v3");
+            foreach (var wavPath in wavPaths)
+            {
+                var name = Path.GetFileName(wavPath);
+                var wavAudio = BenchAudio.Prepare(BenchAudio.ReadMono16k(wavPath), gain, leadSilenceMs);
+                var seconds = wavAudio.Length / 16000.0;
+                var (rms, peak, maxFrameRms) = BenchAudio.Stats(wavAudio);
+                Console.WriteLine(
+                    $"# {name}: {seconds:F1}s gain={gain} leadSilenceMs={leadSilenceMs} " +
+                    $"rms={rms:F4} peak={peak:F4} maxFrameRms={maxFrameRms:F4}");
+
+                // Batch: whole buffer through ParakeetSession; post-stop latency is the
+                // full transcription time (nothing was processed before "stop").
+                var swBatch = Stopwatch.StartNew();
+                var batchResult = await realBatch.TranscribeAsync(wavAudio, CancellationToken.None);
+                swBatch.Stop();
+                rows.Add(($"real-local-batch {name}", "REAL local", seconds, swBatch.ElapsedMilliseconds));
+                Console.WriteLine($"# batch[{name}]: \"{batchResult.Text}\"");
+
+                // Streaming: ParakeetStreamingSession fed 50 ms frames at real-time
+                // pace; post-stop latency is FinishAsync only. The batchFallback flag
+                // proves the run genuinely streamed (FinishAsync silently falls back
+                // on any streaming failure, which would fake a plausible number).
+                var fellBack = false;
+                var sessionLog = new CollectingLogger();
+                await using var streaming = new ParakeetStreamingSession(
+                    session, "parakeet-tdt-0.6b-v3", PreprocessorConfig.ParakeetTdtV3,
+                    (mem, ct) => { fellBack = true; return realBatch.TranscribeAsync(mem, ct); },
+                    log: sessionLog);
+                const int frame = 800; // 50 ms at 16 kHz
+                for (var i = 0; i < wavAudio.Length; i += frame)
+                {
+                    await streaming.PushAsync(
+                        wavAudio.AsMemory(i, Math.Min(frame, wavAudio.Length - i)), CancellationToken.None);
+                    await Task.Delay(50);
+                }
+                var swStream = Stopwatch.StartNew();
+                var streamResult = await streaming.FinishAsync(wavAudio, CancellationToken.None);
+                swStream.Stop();
+                rows.Add(($"real-local-stream {name}", "REAL local", seconds, swStream.ElapsedMilliseconds));
+                Console.WriteLine($"# stream[{name}]: fellBackToBatch={fellBack} \"{streamResult.Text}\"");
+                foreach (var logLine in sessionLog.Lines)
+                    Console.WriteLine($"# log[{name}]: {logLine}");
+
+                var diff = TranscriptDiff.Summarize(batchResult.Text, streamResult.Text);
+                Console.WriteLine($"# diff[{name}]: {diff.Describe()}");
+            }
             break;
         }
         default:
@@ -128,8 +207,8 @@ foreach (var scenario in requested)
 Console.WriteLine();
 Console.WriteLine("| scenario | kind | audio | post-stop latency (ms) |");
 Console.WriteLine("|---|---|---|---|");
-foreach (var (s, kind, ms) in rows)
-    Console.WriteLine($"| {s} | {kind} | {AudioSeconds} s | {ms} |");
+foreach (var r in rows)
+    Console.WriteLine($"| {r.Scenario} | {r.Kind} | {r.AudioSeconds:F1} s | {r.PostStopMs} |");
 
 // --- helper functions and classes ---
 
@@ -273,4 +352,23 @@ sealed class PacedFakeSocket : IStreamingWebSocket
     }
     public async Task<string?> ReceiveTextAsync(CancellationToken ct) => await _incoming.Reader.ReadAsync(ct);
     public ValueTask DisposeAsync() { _incoming.Writer.TryWrite(null); return ValueTask.CompletedTask; }
+}
+
+/// <summary>Captures ParakeetStreamingSession log lines so the bench can print
+/// InteriorSilenceSkipper skip stats and fallback warnings inline.</summary>
+sealed class CollectingLogger : Microsoft.Extensions.Logging.ILogger
+{
+    public List<string> Lines { get; } = new();
+
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+    public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+    public void Log<TState>(
+        Microsoft.Extensions.Logging.LogLevel logLevel,
+        Microsoft.Extensions.Logging.EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string> formatter)
+        => Lines.Add($"{logLevel}: {formatter(state, exception)}{(exception is null ? "" : " :: " + exception.Message)}");
 }

@@ -10,21 +10,28 @@ public sealed class FakeTranscribeCppEngine : ITranscribeCppEngine
     public int BeginStreamCalls;
     public bool ThrowOnBeginStream;
     public FakeStream? LastStream;
+    public readonly List<string?> BeginStreamLanguages = new();
+    public string? LastBatchLanguage;
 
     public string FinalText = "hello world final";
     public bool FinalWasTruncated;
     public bool ThrowOnFeed;
     public bool ThrowOnFinalize;
 
-    public ITranscribeCppStream BeginStream(int attContextRight)
+    public ITranscribeCppStream BeginStream(int attContextRight, string? language = null)
     {
         BeginStreamCalls++;
+        BeginStreamLanguages.Add(language);
         if (ThrowOnBeginStream) throw new TranscribeCppException("fake begin failure");
         LastStream = new FakeStream(this) { AttContextRight = attContextRight };
         return LastStream;
     }
 
-    public string TranscribeBatch(float[] mono16k) => "fake-batch";
+    public string TranscribeBatch(float[] mono16k, string? language = null)
+    {
+        LastBatchLanguage = language;
+        return "fake-batch";
+    }
     public void Dispose() => Disposed = true;
     public bool Disposed;
 

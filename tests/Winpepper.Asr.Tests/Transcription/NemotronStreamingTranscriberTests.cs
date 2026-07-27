@@ -148,6 +148,31 @@ public class NemotronStreamingTranscriberTests
         Assert.Equal(13, engine.LastStream!.AttContextRight);
     }
 
+    [Fact]
+    public async Task Language_is_forwarded_to_BeginStream()
+    {
+        var engine = new FakeTranscribeCppEngine { FinalText = "hello world" };
+        var sut = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-3.5-asr-streaming-0.6b",
+            log: null, attContextRight: 13, language: "en-US");
+        var session = await sut.StartSessionAsync(CancellationToken.None);
+        await session.PushAsync(new float[2560], CancellationToken.None);
+        await session.FinishAsync(new float[2560], CancellationToken.None);
+        Assert.Equal(new string?[] { "en-US" }, engine.BeginStreamLanguages);
+    }
+
+    [Fact]
+    public async Task Default_language_is_null()
+    {
+        var engine = new FakeTranscribeCppEngine { FinalText = "hello world" };
+        var sut = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        var session = await sut.StartSessionAsync(CancellationToken.None);
+        await session.PushAsync(new float[2560], CancellationToken.None);
+        await session.FinishAsync(new float[2560], CancellationToken.None);
+        Assert.Equal(new string?[] { null }, engine.BeginStreamLanguages);
+    }
+
     // Dispose-is-abort contract: the pipeline disposes sessions while pushes
     // may still arrive (cancel / silence-drop / drain-timeout / teardown).
     [Fact]

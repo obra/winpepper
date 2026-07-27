@@ -162,20 +162,21 @@ Open `tests/Winpepper.Asr.Tests/TranscribeCpp/TranscribeCppStructLayoutTests.cs`
 [Fact]
 public void RunParams_layout_matches_transcribe_h_v013()
 {
-    Marshal.SizeOf<TranscribeCppNative.RunParams>().ShouldBe(64);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.struct_size)).ToInt32().ShouldBe(0);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.task)).ToInt32().ShouldBe(8);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.timestamps)).ToInt32().ShouldBe(12);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.pnc)).ToInt32().ShouldBe(16);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.itn)).ToInt32().ShouldBe(20);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.language)).ToInt32().ShouldBe(24);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.target_language)).ToInt32().ShouldBe(32);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.keep_special_tags)).ToInt32().ShouldBe(40);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.family)).ToInt32().ShouldBe(48);
-    Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.spec_k_drafts)).ToInt32().ShouldBe(56);
-    TranscribeCppNative.ABI_RUN_PARAMS.ShouldBe(2);
+    Assert.Equal(64, Marshal.SizeOf<TranscribeCppNative.RunParams>());
+    Assert.Equal(0, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.struct_size)));
+    Assert.Equal(8, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.task)));
+    Assert.Equal(12, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.timestamps)));
+    Assert.Equal(16, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.pnc)));
+    Assert.Equal(20, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.itn)));
+    Assert.Equal(24, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.language)));
+    Assert.Equal(32, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.target_language)));
+    Assert.Equal(40, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.keep_special_tags)));
+    Assert.Equal(48, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.family)));
+    Assert.Equal(56, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.spec_k_drafts)));
+    Assert.Equal(2, TranscribeCppNative.ABI_RUN_PARAMS);
 }
 ```
+(xunit `Assert.Equal` expected-first with the `(int)` cast on `Marshal.OffsetOf`, matching this file's existing style — the file imports only `Xunit`, NOT Shouldly, and there are no global usings; do not introduce `.ShouldBe` here.)
 
 - [ ] **Step 3: Run the test to verify it fails**
 
@@ -297,7 +298,7 @@ public async Task Language_is_forwarded_to_BeginStream()
     var session = await sut.StartSessionAsync(CancellationToken.None);
     await session.PushAsync(new float[2560], CancellationToken.None);
     await session.FinishAsync(new float[2560], CancellationToken.None);
-    engine.BeginStreamLanguages.ShouldBe(new string?[] { "en-US" });
+    Assert.Equal(new string?[] { "en-US" }, engine.BeginStreamLanguages);
 }
 
 [Fact]
@@ -309,10 +310,10 @@ public async Task Default_language_is_null()
     var session = await sut.StartSessionAsync(CancellationToken.None);
     await session.PushAsync(new float[2560], CancellationToken.None);
     await session.FinishAsync(new float[2560], CancellationToken.None);
-    engine.BeginStreamLanguages.ShouldBe(new string?[] { null });
+    Assert.Equal(new string?[] { null }, engine.BeginStreamLanguages);
 }
 ```
-NOTE: `FakeBatchTranscriber` here stands for whatever `ITranscriber` fake the existing tests in this file already use for the `batchFallback` argument — reuse that exact type/arrangement rather than inventing a new one. Same for the session-driving calls: match the file's existing method names exactly (the session interface is `IStreamingTranscriptionSession`; use the same push/finish calls the neighboring tests use).
+NOTE: `FakeBatchTranscriber` here stands for whatever `ITranscriber` fake the existing tests in this file already use for the `batchFallback` argument — reuse that exact type/arrangement rather than inventing a new one. Same for the session-driving calls: match the file's existing method names exactly (the session interface is `IStreamingTranscriptionSession`; use the same push/finish calls the neighboring tests use). Assertions use xunit `Assert.Equal` expected-first (collection overload), matching this file's existing style — the file imports only `Xunit` (no `using Shouldly;`, and there are no global usings), so do not use `.ShouldBe` here.
 
 - [ ] **Step 2: Run to verify failure**
 
@@ -1721,6 +1722,12 @@ case "corpus":
     // Streaming mode needs the SECOND engine as the fallback (compute-gate deadlock
     // otherwise -- keep the existing explanatory comment block verbatim).
     // Batch-only mode never opens a stream, so ONE engine suffices (saves ~1 model of RAM).
+    // NULLABILITY: this conditional makes fallbackEngine a TranscribeCppEngine?, and
+    // Directory.Build.props sets <WarningsAsErrors>nullable</WarningsAsErrors>, so any
+    // unguarded use is a BUILD ERROR (CS8604). Flow analysis cannot correlate batchOnly
+    // with the null-ness, so the sole use site -- inside the `if (!batchOnly)` block,
+    // where non-null is guaranteed by construction -- must use the null-forgiving
+    // operator: `new EngineBatchTranscriber(fallbackEngine!)`.
     using var fallbackEngine = batchOnly ? null : Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
         corpusRuntime, corpusGguf, msg => Console.WriteLine($"# nem-fallback-log: {msg}"));
 
@@ -1780,7 +1787,12 @@ case "corpus":
                     // ---- existing streaming replay, unchanged except:
                     //  * NemotronStreamingTranscriber gets (…, modelName, nemLog,
                     //    attContextRight: 13, language: language) and the fallback probe
-                    //    wraps an EngineBatchTranscriber over fallbackEngine as today
+                    //    wraps `new EngineBatchTranscriber(fallbackEngine!)` -- the `!`
+                    //    is REQUIRED (not optional): fallbackEngine is TranscribeCppEngine?
+                    //    from the conditional load above, EngineBatchTranscriber's ctor
+                    //    parameter is non-nullable, and WarningsAsErrors=nullable turns
+                    //    CS8604 into a build error; inside this !batchOnly branch it is
+                    //    non-null by construction
                     //  * the trim/framing/pacing/FinishAsync code moves here verbatim
                     //  * finishMs, runText (stream text), runFellBack, runTruncated set as today
                     if (finishMs > 0) tally.FinishMs.Add(finishMs);

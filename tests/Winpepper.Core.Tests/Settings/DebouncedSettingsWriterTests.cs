@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Shouldly;
 using Winpepper.Core.Settings;
 using Xunit;
@@ -218,5 +219,62 @@ public class DebouncedSettingsWriterTests : IDisposable
         // Writer still usable after a throwing mutator.
         await writer.QueueAndFlushAsync(s => s with { WindowHeight = 200 });
         new SettingsStore(_path).Load().WindowHeight.ShouldBe(200);
+    }
+
+    [Fact]
+    public async Task Flush_Logs_The_Names_Of_Changed_Fields()
+    {
+        // The 327-dictation outage produced ZERO settings-write log
+        // evidence. Every flush must name the fields that changed —
+        // names only, never values (content-free logging rule).
+        var store = new SettingsStore(_path);
+        var log = new ListLogger();
+        using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30), log);
+
+        await writer.QueueAndFlushAsync(s => s with { MicDeviceId = "dev-a", CleanupEnabled = false });
+
+        var line = log.Lines.ShouldHaveSingleItem();
+        line.ShouldStartWith("Information:");
+        line.ShouldContain("MicDeviceId");
+        line.ShouldContain("CleanupEnabled");
+        line.ShouldNotContain("dev-a"); // field NAMES only — never values
+    }
+
+    [Fact]
+    public async Task Flush_Logs_Warning_When_DegradedLoad_SkipsFlush()
+    {
+        // A skipped flush must not be silent either: WRN with the
+        // kept-pending COUNT only — never settings values. Same
+        // directory-at-the-settings-path trick as Task 2's
+        // Flush_SkipsAndKeepsMutations_WhenSettingsFileIsUnreadable.
+        var store = new SettingsStore(_path);
+        var log = new ListLogger();
+        Directory.CreateDirectory(_path); // path exists but is unreadable as a file
+        try
+        {
+            using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30), log);
+            await writer.QueueAndFlushAsync(s => s with { MicDeviceId = "dev-x" });
+
+            var line = log.Lines.ShouldHaveSingleItem();
+            line.ShouldStartWith("Warning:");
+            line.ShouldContain("keeping 1 pending mutation"); // COUNT only
+            line.ShouldNotContain("dev-x");                   // never values
+        }
+        finally
+        {
+            if (Directory.Exists(_path)) Directory.Delete(_path, recursive: true);
+        }
+    }
+
+    private sealed class ListLogger : ILogger
+    {
+        public List<string> Lines { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            lock (Lines) Lines.Add($"{logLevel}:{formatter(state, exception)}");
+        }
     }
 }

@@ -60,4 +60,15 @@ public class InjectionChunkerTests
     {
         Should.Throw<ArgumentOutOfRangeException>(() => InjectionChunker.Split("x", 0));
     }
+
+    [Fact]
+    public void ProductionChunkSize_NeverSplitsSurrogatePair()
+    {
+        // 7 BMP chars put the emoji's high surrogate exactly at the chunk-8
+        // boundary; the chunk must extend by one unit, never tear the pair.
+        var text = new string('a', 7) + "\U0001F600" + new string('b', 4);
+        var chunks = InjectionChunker.Split(text, TextInjector.ChunkCodeUnits);
+        chunks[0].ShouldBe(new string('a', 7) + "\U0001F600"); // 9 units, pair intact
+        string.Concat(chunks).ShouldBe(text);
+    }
 }

@@ -130,7 +130,7 @@ public class GuardedInjectionRunTests
             hwndAtSendStart: 42,
             currentForegroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; },
-            modifierHeld: () => sent.Count >= 1); // "Alt goes down" after chunk 1
+            physicalInputDown: () => sent.Count >= 1); // "Alt goes down" after chunk 1
 
         outcome.ShouldBe(InjectionRunOutcome.Interrupted);
         sent.ShouldBe(new[] { "aa" });

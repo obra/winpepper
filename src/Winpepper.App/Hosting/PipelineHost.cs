@@ -411,7 +411,7 @@ public sealed class PipelineHost : IDisposable
             // still holds the FULL original text, so the next click re-pastes
             // all of it. Not an error -- no ErrorBus report.
             _log.LogInformation(
-                "Pending paste interrupted (focus or modifier change); slot kept with full text for another click");
+                "Pending paste interrupted (focus, modifier, or mouse-button change); slot kept with full text for another click");
         else
             _log.LogWarning("Pending paste injection failed");
 
@@ -719,7 +719,7 @@ public sealed class PipelineHost : IDisposable
                         if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
                         {
                             // Focus moved to another window (or a halt-gesture
-                            // modifier went down) while the keystrokes
+                            // modifier or mouse button went down) while the keystrokes
                             // were still going out: stop typing and hold the WHOLE
                             // transcription as a pending paste (never just the
                             // remainder -- a torn partial paste in the old window
@@ -728,7 +728,7 @@ public sealed class PipelineHost : IDisposable
                             // clipboard clobbering -- the pill is the surface.
                             _vm.EnterPendingPaste(final, _targetAtStart);
                             _log.LogInformation(
-                                "Injection interrupted (focus or modifier change); held full text as pending paste ({Chars} chars)",
+                                "Injection interrupted (focus, modifier, or mouse-button change); held full text as pending paste ({Chars} chars)",
                                 final.Length);
                         }
                         else if (!injected)
@@ -1104,7 +1104,7 @@ public sealed class PipelineHost : IDisposable
                             if (outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
                             {
                                 // Focus moved to another window (or a halt-gesture
-                                // modifier went down) while the keystrokes
+                                // modifier or mouse button went down) while the keystrokes
                                 // were still going out: stop typing and hold the WHOLE
                                 // transcription as a pending paste (never just the
                                 // remainder -- a torn partial paste in the old window
@@ -1113,7 +1113,7 @@ public sealed class PipelineHost : IDisposable
                                 // clipboard clobbering -- the pill is the surface.
                                 _vm.EnterPendingPaste(final2, _targetAtStart);
                                 _log.LogInformation(
-                                    "Injection interrupted (focus or modifier change); held full text as pending paste ({Chars} chars)",
+                                    "Injection interrupted (focus, modifier, or mouse-button change); held full text as pending paste ({Chars} chars)",
                                     final2.Length);
                             }
                             else if (!injected2)

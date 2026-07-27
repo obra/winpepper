@@ -17,6 +17,7 @@ public sealed class FakeTranscribeCppEngine : ITranscribeCppEngine
     public bool FinalWasTruncated;
     public bool ThrowOnFeed;
     public bool ThrowOnFinalize;
+    public TimeSpan FeedDelay; // simulates a slow native transcribe_stream_feed
 
     public ITranscribeCppStream BeginStream(int attContextRight, string? language = null)
     {
@@ -46,6 +47,7 @@ public sealed class FakeTranscribeCppEngine : ITranscribeCppEngine
 
         public string? Feed(float[] samples, int count)
         {
+            if (_e.FeedDelay > TimeSpan.Zero) Thread.Sleep(_e.FeedDelay);
             if (_e.ThrowOnFeed) throw new TranscribeCppException("fake feed failure");
             FeedCounts.Add(count);
             return $"committed after {FeedCounts.Count} feeds";

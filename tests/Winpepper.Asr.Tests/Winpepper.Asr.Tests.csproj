@@ -31,5 +31,6 @@
     <Compile Include="..\..\scripts\asr-latency-bench\BenchArgs.cs" Link="Bench\BenchArgs.cs" />
     <Compile Include="..\..\scripts\asr-latency-bench\Convergence.cs" Link="Bench\Convergence.cs" />
     <Compile Include="..\..\scripts\asr-latency-bench\ResourceUsage.cs" Link="Bench\ResourceUsage.cs" />
+    <Compile Include="..\..\scripts\asr-latency-bench\EvalPasses.cs" Link="Bench\EvalPasses.cs" />
   </ItemGroup>
 </Project>

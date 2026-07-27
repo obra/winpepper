@@ -83,7 +83,10 @@ public sealed partial class RecordingPage : Page
                 _shell.Autostart.Enable(exe, "--tray");
             }
             else _shell.Autostart.Disable();
-            _ = _shell.SettingsWriter.QueueAndFlushAsync(s => s with { AutostartEnabled = AutostartToggle.IsOn });
+            // Capture on the UI thread: mutators execute at FLUSH time and
+            // WinUI controls are thread-affine (see the ModelsPage toggles).
+            var isOn = AutostartToggle.IsOn;
+            _ = _shell.SettingsWriter.QueueAndFlushAsync(s => s with { AutostartEnabled = isOn });
         };
 
         RestartLevelMeter(vm.MicDeviceId);

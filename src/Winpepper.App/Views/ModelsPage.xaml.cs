@@ -42,8 +42,8 @@ public sealed partial class ModelsPage : Page
             },
             promoteCleanup: name =>
             {
-                var cur = settings.Load();
-                settings.Save(cur with { CleanupModelName = name });
+                var shell = App.Shell!;
+                _ = shell.SettingsWriter.QueueAndFlushAsync(s2 => s2 with { CleanupModelName = name }); // durability
             },
             // The progress bridge requires an observable enqueue result: if
             // navigation/app shutdown has closed this queue, fail its drain
@@ -195,18 +195,31 @@ public sealed partial class ModelsPage : Page
             _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiModel = model });
         };
 
-        // Retention + keyterms toggles.
+        // Retention + keyterms toggles. Mutators execute at FLUSH time under
+        // the mutator-replay writer (possibly on a threadpool thread if a
+        // debounce tick races), and WinUI controls are thread-affine — so
+        // capture IsOn into a local NOW, on the UI thread, and let the
+        // lambda close over the local.
         AssemblyAiDeleteToggle.IsOn = current.AssemblyAiDeleteAfterTranscribe;
         AssemblyAiDeleteToggle.Toggled += (_, _) =>
-            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiDeleteAfterTranscribe = AssemblyAiDeleteToggle.IsOn });
+        {
+            var isOn = AssemblyAiDeleteToggle.IsOn;
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiDeleteAfterTranscribe = isOn });
+        };
         AssemblyAiKeytermsToggle.IsOn = current.AssemblyAiKeytermsEnabled;
         AssemblyAiKeytermsToggle.Toggled += (_, _) =>
-            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiKeytermsEnabled = AssemblyAiKeytermsToggle.IsOn });
+        {
+            var isOn = AssemblyAiKeytermsToggle.IsOn;
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { AssemblyAiKeytermsEnabled = isOn });
+        };
 
         // Streaming toggle (provider-agnostic; read LIVE per dictation by PipelineHost).
         StreamingToggle.IsOn = current.StreamingEnabled;
         StreamingToggle.Toggled += (_, _) =>
-            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { StreamingEnabled = StreamingToggle.IsOn });
+        {
+            var isOn = StreamingToggle.IsOn;
+            _ = shell.SettingsWriter.QueueAndFlushAsync(s => s with { StreamingEnabled = isOn });
+        };
 
         // Key status
         AsrStatusText.Text = keyStore.HasKey ? "A key is saved on this PC." : "No key saved.";

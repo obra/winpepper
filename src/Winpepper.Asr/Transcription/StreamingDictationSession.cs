@@ -46,9 +46,26 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                     await foreach (var _ in _frames.Reader.ReadAllAsync(CancellationToken.None)) { }
                     return;
                 }
-                _session = await transcriber.StartSessionAsync(ct);
+                var session = await transcriber.StartSessionAsync(ct);
+                _session = session;
+                // Push via the LOCAL reference, never the nullable field: an
+                // abandon (silence-drop / cancel / drain timeout) nulls
+                // _session concurrently with this loop, and completing the
+                // writer does not stop ReadAllAsync from yielding frames that
+                // are already queued. Pushing into a disposed session is a
+                // benign no-op by session contract.
                 await foreach (var frame in _frames.Reader.ReadAllAsync(CancellationToken.None))
-                    await _session.PushAsync(frame, ct);
+                    await session.PushAsync(frame, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Ordinary teardown, not a pump failure: PipelineHost
+                // cancels the run CTS BEFORE disposing the streaming
+                // session, and a session may check ct before its own
+                // disposed guard (nemotron does) — so a canceled-ct push
+                // can surface mid-drain. The `when` guard keeps OCEs with
+                // an UNcancelled ct (e.g. a dispose-aborted cloud send)
+                // classified exactly as before.
             }
             catch (Exception ex)
             {

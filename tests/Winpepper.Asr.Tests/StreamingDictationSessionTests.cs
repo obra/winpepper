@@ -94,6 +94,104 @@ public class StreamingDictationSessionTests
         transcriber.Session.FinishAudio.Length.ShouldBe(0); // FinishAsync never ran
     }
 
+    // Models the abandon race behind Bug A: dispose lands while the pump is
+    // mid-push and MORE frames are already queued (completing the writer does
+    // not stop ReadAllAsync from yielding them). DisposeAsync releases the
+    // in-flight push SUCCESSFULLY — this is the ordinary silence-drop abandon,
+    // not a failure. On the pre-fix code the pump's next iteration dereferences
+    // the nulled `_session` field, NREs, and logs "streaming dictation pump
+    // failed".
+    private sealed class BlocksFirstPushTranscriber : IStreamingTranscriber
+    {
+        public string ModelName => "blocks-first-push";
+        public BlockingSession Session { get; } = new();
+        public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
+            => Task.FromResult<IStreamingTranscriptionSession>(Session);
+
+        public sealed class BlockingSession : IStreamingTranscriptionSession
+        {
+            private readonly TaskCompletionSource _firstPushStarted = new();
+            private readonly TaskCompletionSource _release = new();
+            private int _pushes;
+
+            public Task FirstPushStarted => _firstPushStarted.Task;
+            public int PushCount => Volatile.Read(ref _pushes);
+
+            public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
+            {
+                // Models nemotron: ct is checked BEFORE any disposed guard
+                // (NemotronStreamingTranscriber.cs:84 vs :87), so a canceled-ct
+                // push mid-drain throws OCE.
+                ct.ThrowIfCancellationRequested();
+                if (Interlocked.Increment(ref _pushes) == 1)
+                {
+                    _firstPushStarted.TrySetResult();
+                    await _release.Task; // held until DisposeAsync abandons the dictation
+                }
+                // Pushes after dispose are the benign no-op both production
+                // sessions implement — just count them.
+            }
+
+            public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
+                => throw new InvalidOperationException("FinishAsync must not run — this dictation is abandoned");
+
+            public ValueTask DisposeAsync()
+            {
+                _release.TrySetResult(); // the in-flight push completes normally
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task AbandonWithQueuedFrames_PumpDrainsWithoutError()
+    {
+        var log = new CapturingLogger();
+        var transcriber = new BlocksFirstPushTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            log, TestContext.Current.CancellationToken);
+        session.OnFrame(new float[10]);
+        session.OnFrame(new float[10]);
+        session.OnFrame(new float[10]);
+        await transcriber.Session.FirstPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        await session.DisposeAsync(); // silence-drop abandon: frames 2 and 3 are still queued
+
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        // The pump drained the remaining frames through its OWN reference —
+        // no NRE, no "streaming dictation pump failed" noise.
+        transcriber.Session.PushCount.ShouldBe(3);
+        log.Warnings.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task TeardownCancel_MidDrain_IsBenign_NoPumpFailureWarning()
+    {
+        var log = new CapturingLogger();
+        var transcriber = new BlocksFirstPushTranscriber();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            log, cts.Token);
+        session.OnFrame(new float[10]);
+        session.OnFrame(new float[10]);
+        await transcriber.Session.FirstPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        cts.Cancel();                 // PipelineHost teardown cancels _runCts FIRST (:1259)...
+        await session.DisposeAsync(); // ...THEN disposes the streaming session (:1270)
+
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        // The canceled-ct push mid-drain is ordinary teardown, not a pump
+        // failure — no "streaming dictation pump failed" noise.
+        log.Warnings.ShouldBeEmpty();
+    }
+
     [Fact]
     public async Task FactoryException_SurfacesAtFinish()
     {

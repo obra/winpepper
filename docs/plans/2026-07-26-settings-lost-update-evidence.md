@@ -145,3 +145,13 @@ GATE: GREEN
 ```
 
 Actual grand total across the 12 runs: 1589 tests, 0 failed.
+
+## Final Linux suite (all tasks complete)
+
+- `./scripts/linux-tests.sh` at HEAD 774e514: LINUX SUITE: GREEN, grand total 1170 tests (fork-point baseline 1162 + 8 new facts). Verbatim last 3 lines:
+
+```
+
+linux-tests grand total: 1170 tests
+LINUX SUITE: GREEN
+```

@@ -26,17 +26,49 @@ stage_runtime() { # stage_runtime <model-dir>
   echo "  runtime copied FROM production (read-only source) -> $dst"
 }
 
-stage_model() { # stage_model <model-name> <source-gguf-filename>
-  local name="$1" gguf="$2"
-  local src="$EVAL_MODELS/$gguf" dir="$EVAL_MODELS/$name"
+stage_model() { # stage_model <model-name> <source-gguf-filename> [expected-bytes]
+  local name="$1" gguf="$2" expected="${3:-}"
+  local src="$EVAL_MODELS/$gguf" dir="$EVAL_MODELS/$name" dst
+  dst="$EVAL_MODELS/$name/$gguf"
   echo "== $name =="
-  [[ -f "$src" || -f "$dir/$gguf" ]] || { echo "  SKIPPED (gguf not found: $src)"; return 0; }
+  [[ -f "$src" || -f "$dst" ]] || { echo "  SKIPPED (gguf not found: $src)"; return 0; }
   mkdir -p "$dir"
-  if [[ ! -f "$dir/$gguf" ]]; then
-    cp "$src" "$dir/$gguf"
-    echo "  gguf copied -> $dir/$gguf"
+
+  # Reference size for verification: explicit expected bytes win; else the source size.
+  local want=""
+  if [[ -n "$expected" ]]; then
+    want="$expected"
+  elif [[ -f "$src" ]]; then
+    want=$(stat -c%s "$src")
+  fi
+
+  if [[ ! -f "$dst" ]]; then
+    cp "$src" "$dst"
+    echo "  gguf copied -> $dst"
   else
-    echo "  gguf already staged: $dir/$gguf"
+    echo "  gguf already staged: $dst"
+  fi
+
+  # ALWAYS size-verify the staged copy (a previously truncated copy must be
+  # detected and repaired, not silently trusted because the file exists).
+  if [[ -z "$want" ]]; then
+    echo "  WARNING: cannot size-verify $dst (source gone, no expected size) -- trusting staged copy as-is"
+  else
+    local have; have=$(stat -c%s "$dst")
+    if [[ "$have" -eq "$want" ]]; then
+      echo "  size VERIFIED: $have bytes"
+    else
+      echo "  size MISMATCH: staged $have bytes, expected $want -- re-copying from source"
+      [[ -f "$src" ]] || { echo "  ERROR: staged copy is bad and source is missing ($src) -- cannot repair" >&2; return 1; }
+      cp "$src" "$dst"
+      have=$(stat -c%s "$dst")
+      if [[ "$have" -eq "$want" ]]; then
+        echo "  re-copied and size VERIFIED: $have bytes"
+      else
+        echo "  ERROR: still mismatched after re-copy ($have of $want bytes) -- source itself is likely truncated" >&2
+        return 1
+      fi
+    fi
   fi
   stage_runtime "$dir"
 }
@@ -52,7 +84,7 @@ qwen_size=0
 [[ -f "$QWEN_DIR/Qwen3-ASR-1.7B-Q8_0.gguf" ]] && qwen_size=$(stat -c%s "$QWEN_DIR/Qwen3-ASR-1.7B-Q8_0.gguf")
 [[ "$qwen_size" -ne "$QWEN_EXPECTED_BYTES" && -f "$QWEN_SRC" ]] && qwen_size=$(stat -c%s "$QWEN_SRC")
 if [[ "$qwen_size" -eq "$QWEN_EXPECTED_BYTES" ]]; then
-  stage_model "qwen3-asr-1.7b" "Qwen3-ASR-1.7B-Q8_0.gguf"
+  stage_model "qwen3-asr-1.7b" "Qwen3-ASR-1.7B-Q8_0.gguf" "$QWEN_EXPECTED_BYTES"
 else
   echo "  SKIPPED (incomplete download: ${qwen_size} of ${QWEN_EXPECTED_BYTES} bytes) -- rerun when complete"
 fi

@@ -6,6 +6,15 @@
 // compute/network edge replaced by a documented delay model (the local ONNX
 // model cannot run on Linux). real-remote-* scenarios hit the real AssemblyAI
 // API and run only when ASSEMBLYAI_API_KEY is set.
+//
+// --repeats rule (corpus scenario; see BenchArgs.ResolveRepeats):
+//   * --repeats N with NO convergence flag (--time-budget-minutes / --min-passes /
+//     --max-passes): legacy pre-convergence semantics -- each clip runs exactly N
+//     times (min-passes = max-passes = N, time budget disabled). Old drivers that
+//     pass only --repeats get the old bounded run, not a multi-pass convergence run.
+//   * --repeats N with --time-budget-minutes and/or --min-passes: N is the pass cap
+//     (same as --max-passes N); convergence semantics apply.
+//   * --repeats together with --max-passes: rejected -- both set the pass cap.
 using System.Diagnostics;
 using AsrLatencyBench;
 using Microsoft.Extensions.Logging;
@@ -28,12 +37,15 @@ string? corpusDir = null;
 string? resultsRoot = null;
 var outDir = "artifacts/asr-eval-results"; // default INSIDE gitignored artifacts/: results.json contains transcript text, and a bare "asr-eval-results/" is NOT gitignored
 var repeats = 1;
+var repeatsSet = false;
 string? modelNameArg = null;
 string? language = null;
 var batchOnly = false;
 var maxClips = 0;
 var timeBudgetMinutes = 55.0;
+var timeBudgetSet = false;
 var minPasses = 2;
+var minPassesSet = false;
 var maxPasses = 0;
 var maxPassesSet = false;
 var scenarioArgs = new List<string>();
@@ -50,13 +62,13 @@ for (var argIdx = 0; argIdx < args.Length; argIdx++)
         case "--corpus": corpusDir = args[++argIdx]; break;
         case "--results-root": resultsRoot = args[++argIdx]; break;
         case "--out": outDir = args[++argIdx]; break;
-        case "--repeats": repeats = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
+        case "--repeats": repeats = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); repeatsSet = true; break;
         case "--model-name": modelNameArg = args[++argIdx]; break;
         case "--language": language = args[++argIdx]; break;
         case "--batch-only": batchOnly = true; break;
         case "--max-clips": maxClips = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
-        case "--time-budget-minutes": timeBudgetMinutes = double.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
-        case "--min-passes": minPasses = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
+        case "--time-budget-minutes": timeBudgetMinutes = double.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); timeBudgetSet = true; break;
+        case "--min-passes": minPasses = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); minPassesSet = true; break;
         case "--max-passes": maxPasses = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); maxPassesSet = true; break;
         default: scenarioArgs.Add(args[argIdx]); break;
     }
@@ -73,7 +85,17 @@ if (BenchArgs.ValidateRepeats(repeats) is { } repeatsError)
 if (BenchArgs.ValidateMaxClips(maxClips) is { } maxClipsError) { Console.Error.WriteLine(maxClipsError); Environment.ExitCode = 2; return; }
 if (BenchArgs.ValidateTimeBudgetMinutes(timeBudgetMinutes) is { } budgetError) { Console.Error.WriteLine(budgetError); Environment.ExitCode = 2; return; }
 if (BenchArgs.ValidatePasses(minPasses, maxPasses) is { } passesError) { Console.Error.WriteLine(passesError); Environment.ExitCode = 2; return; }
-if (!maxPassesSet && repeats > 1) maxPasses = repeats;   // back-compat: old drivers pass --repeats N
+// --repeats back-compat (rule documented in the header above and on BenchArgs.ResolveRepeats):
+// alone it restores the old single-pass-with-N-repeats behavior exactly; with
+// --time-budget-minutes/--min-passes it is the pass cap; with --max-passes it is rejected.
+var repeatsResolution = BenchArgs.ResolveRepeats(
+    repeatsSet, repeats, timeBudgetSet, timeBudgetMinutes, minPassesSet, minPasses, maxPassesSet, maxPasses);
+if (repeatsResolution.Error is { } repeatsRuleError) { Console.Error.WriteLine(repeatsRuleError); Environment.ExitCode = 2; return; }
+timeBudgetMinutes = repeatsResolution.TimeBudgetMinutes;
+minPasses = repeatsResolution.MinPasses;
+maxPasses = repeatsResolution.MaxPasses;
+if (repeatsResolution.LegacyMode)
+    Console.WriteLine($"# legacy --repeats {repeats} (no convergence flags): exactly {repeats} pass(es) per clip, time budget disabled");
 // Runs AFTER the back-compat mapping, so a legacy --repeats N run is judged on its effective maxPasses.
 if (BenchArgs.ValidateStopCondition(maxPasses, timeBudgetMinutes) is { } stopError) { Console.Error.WriteLine(stopError); Environment.ExitCode = 2; return; }
 var requested = scenarioArgs.Count > 0 ? scenarioArgs.ToArray() : new[]
@@ -444,7 +466,7 @@ foreach (var scenario in requested)
 
                             // Fallback runs on the SECOND engine -- see the fallbackEngine comment above.
                             // fallbackEngine! : non-null by construction inside !batchOnly (see NULLABILITY note).
-                            var probe = new ProbeTranscriber(() => runFellBack = true, new EngineBatchTranscriber(fallbackEngine!));
+                            var probe = new ProbeTranscriber(() => runFellBack = true, new EngineBatchTranscriber(fallbackEngine!, language));
                             var nemLog = new ListLogger();
                             var streaming = new NemotronStreamingTranscriber(
                                 () => corpusEngine, probe, modelName, nemLog, attContextRight: 13, language: language);
@@ -755,10 +777,14 @@ sealed class ProbeTranscriber : ITranscriber
 sealed class EngineBatchTranscriber : ITranscriber
 {
     private readonly Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine _engine;
-    public EngineBatchTranscriber(Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine engine) => _engine = engine;
+    private readonly string? _language;
+    public EngineBatchTranscriber(Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine engine, string? language = null)
+    { _engine = engine; _language = language; }
     public string ModelName => "nemotron-batch";
+    // Same language hint as the streaming session and the batch parity decode:
+    // a fallback transcript must not differ from batch just because it lost the hint.
     public Task<TranscriptionResult> TranscribeAsync(ReadOnlyMemory<float> audio, CancellationToken ct)
-        => Task.FromResult(new TranscriptionResult(_engine.TranscribeBatch(audio.ToArray()), ModelName));
+        => Task.FromResult(new TranscriptionResult(_engine.TranscribeBatch(audio.ToArray(), _language), ModelName));
 }
 
 /// <summary>Per-clip accumulator for the corpus eval's multi-pass loop: latency and

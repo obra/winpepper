@@ -979,7 +979,8 @@ git commit -m "feat(bench): per-pass aggregation - latency percentiles, CPU s, p
   {
       public const string ResourceNote =
           "resources are process CPU time and peak working set only; GPU/Vulkan usage is not separately measured. " +
-          "RTF = processing time / audio duration (streaming: process CPU seconds; batch: batch transcribe wall time)";
+          "RTF = processing time / audio duration (streaming: streaming-replay process CPU seconds, batch parity decode excluded; batch: batch transcribe wall time). " +
+          "Streaming-mode peak memory includes a second bench-only fallback engine (~1 extra model of RAM) that batch-only runs do not load";
       public static readonly JsonSerializerOptions JsonOpts; // was private -> make public (Task 8 deserializes with it)
       public static EvalSummary Summarize(IReadOnlyList<ClipResult> clips,
           string mode = "streaming", double cpuSecondsTotal = 0, double peakMemoryMb = 0);
@@ -1083,7 +1084,8 @@ Expected: BUILD FAILS (new record parameters / overload / `ResourceNote` missing
 ```csharp
 public const string ResourceNote =
     "resources are process CPU time and peak working set only; GPU/Vulkan usage is not separately measured. " +
-    "RTF = processing time / audio duration (streaming: process CPU seconds; batch: batch transcribe wall time)";
+    "RTF = processing time / audio duration (streaming: streaming-replay process CPU seconds, batch parity decode excluded; batch: batch transcribe wall time). " +
+    "Streaming-mode peak memory includes a second bench-only fallback engine (~1 extra model of RAM) that batch-only runs do not load";
 
 public static readonly JsonSerializerOptions JsonOpts = new()
 {
@@ -1167,6 +1169,7 @@ git commit -m "feat(bench): results schema - mode, language, passes, convergence
   public static string? ValidateMaxClips(int maxClips);              // >= 0; 0 = all clips
   public static string? ValidateTimeBudgetMinutes(double minutes);   // >= 0; 0 = no budget
   public static string? ValidatePasses(int minPasses, int maxPasses);// min >= 1; max == 0 (unlimited) or >= min
+  public static string? ValidateStopCondition(int maxPasses, double timeBudgetMinutes); // rejects maxPasses == 0 && minutes == 0 (no stop condition at all)
 
   // ModelDirLayout
   public static class ModelDirLayout
@@ -1214,6 +1217,17 @@ public void ValidatePasses_accepts_valid_combinations(int min, int max)
 [InlineData(1, -1)]  // negative max
 public void ValidatePasses_rejects_invalid_combinations(int min, int max)
     => BenchArgs.ValidatePasses(min, max).ShouldNotBeNull();
+
+[Theory]
+[InlineData(1, 0.0)]    // bounded passes, no time budget
+[InlineData(0, 55.0)]   // unlimited passes, bounded time budget
+[InlineData(3, 10.0)]   // both bounded
+public void ValidateStopCondition_accepts_at_least_one_bound(int maxPasses, double budget)
+    => BenchArgs.ValidateStopCondition(maxPasses, budget).ShouldBeNull();
+
+[Fact]
+public void ValidateStopCondition_rejects_unlimited_passes_with_no_budget()
+    => BenchArgs.ValidateStopCondition(0, 0.0).ShouldNotBeNull();
 ```
 
 Create `tests/Winpepper.Asr.Tests/ModelDirLayoutTests.cs`:
@@ -1304,6 +1318,11 @@ public static string? ValidatePasses(int minPasses, int maxPasses)
         return $"--max-passes ({maxPasses}) must be 0 or >= --min-passes ({minPasses})";
     return null;
 }
+
+public static string? ValidateStopCondition(int maxPasses, double timeBudgetMinutes)
+    => maxPasses != 0 || timeBudgetMinutes != 0
+        ? null
+        : "--max-passes 0 (unlimited) with --time-budget-minutes 0 (no budget) leaves no stop condition; set at least one bound";
 ```
 
 Create `scripts/asr-latency-bench/ModelDirLayout.cs`:
@@ -1622,7 +1641,7 @@ git commit -m "feat(bench): compare scenario - aggregate per-model results.json 
 **Interfaces:**
 - Consumes: everything from Tasks 2–7:
   `ModelDirLayout.Resolve(string) -> Resolved(GgufPath, RuntimeDir)`;
-  `BenchArgs.ValidateMaxClips/ValidateTimeBudgetMinutes/ValidatePasses`;
+  `BenchArgs.ValidateMaxClips/ValidateTimeBudgetMinutes/ValidatePasses/ValidateStopCondition`;
   `engine.TranscribeBatch(float[], string?)`, `new NemotronStreamingTranscriber(engineProvider, batchFallback, modelName, log, attContextRight: 13, language: language)`;
   `ResourceUsage.Capture/CpuDelta/Rtf/ToMb`; `EvalPasses.Summarize(...) -> PassSummary`;
   `Convergence.Median/Evaluate/Converged`; `EvalResults.Summarize(clips, mode, cpuTotal, peakMb)` and 5-arg `ToJson`.
@@ -1666,6 +1685,8 @@ if (BenchArgs.ValidateMaxClips(maxClips) is { } maxClipsError) { Console.Error.W
 if (BenchArgs.ValidateTimeBudgetMinutes(timeBudgetMinutes) is { } budgetError) { Console.Error.WriteLine(budgetError); Environment.ExitCode = 2; return; }
 if (BenchArgs.ValidatePasses(minPasses, maxPasses) is { } passesError) { Console.Error.WriteLine(passesError); Environment.ExitCode = 2; return; }
 if (!maxPassesSet && repeats > 1) maxPasses = repeats;   // back-compat: old drivers pass --repeats N
+// AFTER the back-compat mapping (so a legacy --repeats N run is judged on its effective maxPasses):
+if (BenchArgs.ValidateStopCondition(maxPasses, timeBudgetMinutes) is { } stopError) { Console.Error.WriteLine(stopError); Environment.ExitCode = 2; return; }
 ```
 
 - [ ] **Step 2: Restructure the `corpus` case**
@@ -1717,6 +1738,14 @@ case "corpus":
 
     while (true)
     {
+        // Termination guard: failed clips are skipped forever, so once EVERY clip has
+        // errored no pass can add samples and convergence is unreachable -- stop instead
+        // of spinning until the time budget (or forever) appending trace entries.
+        if (tallies.Values.All(t => t.Error is not null))
+        {
+            Console.Error.WriteLine("# corpus: no runnable clips remain (all failed) -- stopping");
+            break;
+        }
         pass++;
         var passLatencies = new List<double>();   // this pass's speed metric samples (> 0)
         var passRtfs = new List<double>();
@@ -1740,6 +1769,7 @@ case "corpus":
                 var batchText = corpusEngine.TranscribeBatch(wavAudio, language);
                 swBatch.Stop();
                 tally.BatchMs.Add(swBatch.ElapsedMilliseconds);
+                var afterBatch = ResourceUsage.Capture();
 
                 var runText = batchText;
                 long finishMs = 0;
@@ -1757,11 +1787,17 @@ case "corpus":
                 }
 
                 var after = ResourceUsage.Capture();
-                var cpu = ResourceUsage.CpuDelta(before, after);
+                // CPU attribution: batch mode charges the batch decode; streaming mode charges
+                // ONLY the streaming replay (the batch parity decode is excluded), so CpuSeconds,
+                // CpuSecondsTotal, and streaming RTF are comparable across models and modes.
+                var cpu = batchOnly
+                    ? ResourceUsage.CpuDelta(before, afterBatch)
+                    : ResourceUsage.CpuDelta(afterBatch, after);
                 tally.CpuSeconds += cpu;
                 var audioSeconds = wavAudio.Length / 16000.0;
-                // RTF: batch = transcribe wall time / audio; streaming = process CPU s / audio
-                // (streaming wall time is real-time paced, so CPU is the honest processing cost).
+                // RTF: batch = transcribe wall time / audio; streaming = streaming-replay CPU s / audio
+                // (streaming wall time is real-time paced, so CPU is the honest processing cost;
+                // the parity decode is excluded by the attribution above).
                 var rtf = batchOnly
                     ? ResourceUsage.Rtf(swBatch.Elapsed.TotalSeconds, audioSeconds)
                     : ResourceUsage.Rtf(cpu, audioSeconds);
@@ -1796,6 +1832,9 @@ case "corpus":
         }
 
         var passEnd = ResourceUsage.Capture();
+        // Pass-level CpuSeconds is the whole-process cost of the pass (streaming passes
+        // include the parity decode) -- a per-pass diagnostic only; the comparable
+        // cross-model numbers are the per-clip attributions above.
         passSummaries.Add(EvalPasses.Summarize(pass, passLatencies, passRtfs, passWers,
             ResourceUsage.CpuDelta(passStart, passEnd), passEnd.PeakWorkingSetBytes,
             tallies.Values.Count(t => t.Error is not null)));

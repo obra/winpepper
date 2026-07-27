@@ -7,7 +7,7 @@
 
 **Goal:** Extend the ASR eval bench (`scripts/asr-latency-bench`, corpus mode) so three speech models — production `nemotron-streaming-en` (streaming), `nemotron-3.5-asr-streaming-0.6b` (streaming, requires `--language en-US`), and `Qwen3-ASR-1.7B` (batch-only) — can be profiled serially with per-run resource utilization, statistical convergence over repeated corpus passes, per-model result directories, and a comparison aggregator.
 
-**Architecture:** All new decision logic (convergence math, per-pass aggregation, resource math, model-dir resolution, comparison aggregation, arg validation) goes into BCL-only files under `scripts/asr-latency-bench/` that are `Compile Include`'d into `tests/Winpepper.Asr.Tests` — that is the established pattern that makes bench logic testable by the Linux gate. `Program.cs` (untestable by design) only wires tested pieces together: the corpus case gains a pass loop, a batch-only branch, and resource capture. The single production change is minimal: the transcribe.cpp binding gains the v0.1.3 `transcribe_run_params` struct so a `language` hint can be passed to `transcribe_run` / `transcribe_stream_begin` (today both receive `IntPtr.Zero`; passing `null` language keeps that byte-identical behavior, so the production model path is untouched). A new driver script runs one model per process (required anyway: transcribe.cpp pins one runtime dir per process) and writes to `artifacts/asr-eval/<model-name>/`.
+**Architecture:** All new decision logic (convergence math, per-pass aggregation, resource math, model-dir resolution, comparison aggregation, arg validation) goes into BCL-only files under `scripts/asr-latency-bench/` that are `Compile Include`'d into `tests/Winpepper.Asr.Tests` — that is the established pattern that makes bench logic testable by the Linux gate. `Program.cs` (untestable by design) only wires tested pieces together: the corpus case gains a pass loop, a batch-only branch, and resource capture. Production changes are two small, test-covered seams: (1) the transcribe.cpp binding gains the v0.1.3 `transcribe_run_params` struct so a `language` hint can be passed to `transcribe_run` / `transcribe_stream_begin` (today both receive `IntPtr.Zero`; passing `null` language keeps that byte-identical behavior, so the production model path is untouched), and (2) `TranscribeCppEngine.Load` gains a `batchOnly` flag that skips exactly the two streaming-only capability checks (`supports_streaming`, PKST ext) — validated necessity: v0.1.3's qwen3_asr family reports no streaming capability and rejects the PKST probe, so the unmodified gate refuses to load Qwen3-ASR at all (see Verified facts). The default (`batchOnly: false`) keeps the production path byte-identical. A new driver script runs one model per process (required anyway: transcribe.cpp pins one runtime dir per process) and writes to `artifacts/asr-eval/<model-name>/`.
 
 **Tech Stack:** .NET 9, xUnit v3 + Shouldly, System.Text.Json, System.Diagnostics.Process, bash driver over `powershell.exe` WSL→Windows interop, transcribe.cpp 0.1.3 native runtime.
 
@@ -27,7 +27,7 @@ Copied from the spec and the repo's binding conventions — every task's require
 - **Privacy (hard rule):** corpus WAVs/reference transcripts (`C:\Users\dan\winpepper-evals\corpus-v1`, 65 clips) and model files never land in git. `results.json` (contains transcript text) only ever goes under gitignored `artifacts/`. `results.md`, `comparison.json`, and any evidence doc contain numbers + clip ids only — no transcript/reference text. Unit tests use synthetic text only.
 - **`%LOCALAPPDATA%\winpepper` is READ-ONLY** (`/mnt/c/Users/dan/AppData/Local/winpepper`). Copy FROM it (e.g. runtime DLLs to the eval models dir); never write INTO it.
 - **BCL-only linked-file rule:** any file under `scripts/` that is `Compile Include`'d into `tests/Winpepper.Asr.Tests` must use only `System.*` types (no project/package references).
-- **Production code changes minimal:** only the language pass-through in `src/Winpepper.Asr` (Tasks 1–2), covered by the existing test suite plus new tests.
+- **Production code changes minimal:** only the language pass-through and the `batchOnly` load flag in `src/Winpepper.Asr` (Tasks 1–2), covered by the existing test suite plus new tests. Defaults (`language: null`, `batchOnly: false`) keep the production path byte-identical.
 - **Plain naming:** "model", "streaming" vs "batch", "passes", "converged". No invented jargon.
 - **Docs:** README.md untouched. The only markdown added is this plan and the evidence doc, both under `docs/plans/` (working/agent docs — allowed).
 - **Commits:** conventional style (`feat(...)`, `fix(...)`, `docs(...)`, `test(...)`), focused and atomic.
@@ -87,6 +87,14 @@ Copied from the spec and the repo's binding conventions — every task's require
     runtime/transcribe-native-windows-x86_64-cpu-vulkan/{transcribe.dll, contract.json, ggml-*.dll}
   ```
 - The bench project builds standalone: `dotnet build scripts/asr-latency-bench/AsrLatencyBench.csproj -c Release -p:EnableWindowsTargeting=true`. It is not built by `linux-tests.sh`, so every task that touches `Program.cs` includes an explicit Linux compile check.
+- Stage-2 load-bearing validation (2026-07-27; evidence in `.worktrees/.the-usual-logs/asr-model-comparison/`) established these additional facts:
+  - The INSTALLED production runtime matches the pinned contract: its `contract.json` is `{"version": "0.1.3", "header_hash": "86b16dd97ad1cb58", ...}` and `transcribe.dll`'s PE export table includes `transcribe_run_params_init` — the new P/Invoke will bind.
+  - `TranscribeCppEngine.Load`'s capability gate requires `supports_streaming != 0` AND PKST ext acceptance (`Load` step 8, ~`:154-160`). In v0.1.3, qwen3_asr fails BOTH: the family never sets `supports_streaming`, the Qwen3-ASR-1.7B gguf carries no `stt.capability.streaming` KV, and the arch's `.accepts_ext_kind` is `nullptr` (PKST probe deterministically false). Its sample rate (16000) and the contract checks pass. Hence the `batchOnly` load flag skips exactly those two checks and nothing else. qwen3_asr IS registered for batch `transcribe_run` (run/run_batch wired).
+  - The nemotron-3.5 gguf passes the FULL unmodified gate: `general.architecture=parakeet`, `stt.capability.streaming=True`, chunked_limited att-context menu `{0,3,6,13}` (13 valid; 1 is NOT in this model's menu), PKST accepted, all stream hooks wired.
+  - `run_params.language` is HONORED, not advisory: v0.1.3 validates it against `caps.languages` (unknown code ⇒ hard `TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE`; silent ignore is structurally impossible) and, for parakeet, feeds it as a prompt one-hot into the encoder on batch and streaming paths. The EXACT code `en-US` is required — bare `en` is rejected by the front-door gate. Tag stripping: 3.5's vocab control tokens are exactly the 39 `<ll-RR>` tags + `<blank>`, all stripped by the `keep_special_tags=false` default (fix shipped inside v0.1.3 via upstream PR #39; upstream's batch golden file predates it — never use it as reference text).
+  - Both candidate ggufs are complete on disk: nemotron-3.5 751,094,240 B (GGUF parse: expected == actual) and Qwen 2,185,030,624 B (matches its own tensor map exactly). Bit-level integrity has no checksum to verify — a corrupt file fails loud at model load in Task 12.
+  - Convergence baseline (existing corpus-v1 `results.json`, 65 clips, production model): per-clip median finish latencies have mean 132.6 ms, sd 32.8 ms ⇒ between-clip CV 0.2475. A "95% CI half-width of per-clip medians < 5% of mean" criterion is STRUCTURALLY UNREACHABLE on this corpus (observed ratio 0.0602; 0.0528 even in the infinite-pass limit — the CI is between clips at fixed n, so extra passes cannot shrink it). Task 3 therefore uses an across-pass stability rule, keeping the CI as a reported diagnostic. One pass ≈ 12–14 min (Σ audio 708.3 s), so ~4 passes fit the 55-min budget; the budget is checked between passes (≤ ~1 pass overshoot, ≪ the 7200 s driver timeout).
+  - A stale legacy `artifacts/asr-eval/results.json` (old single-model schema) exists in the MAIN checkout — the `compare` scenario reads only per-model SUBdirectories (`<root>/*/results.json`), never a root-level file.
 
 ## Scope Check
 
@@ -97,7 +105,7 @@ This is one subsystem (the eval bench plus its one engine seam), so one plan. Th
 | File | Status | Responsibility |
 |---|---|---|
 | `src/Winpepper.Asr/TranscribeCpp/TranscribeCppNative.cs` | Modify | Add `RunParams` struct (mirror of `transcribe_run_params`), `transcribe_run_params_init` P/Invoke, `ABI_RUN_PARAMS = 2` |
-| `src/Winpepper.Asr/TranscribeCpp/TranscribeCppEngine.cs` | Modify | ABI size gate for `RunParams`; build/pass run params when a language is given in `TranscribeBatch`/`BeginStream` |
+| `src/Winpepper.Asr/TranscribeCpp/TranscribeCppEngine.cs` | Modify | ABI size gate for `RunParams`; build/pass run params when a language is given in `TranscribeBatch`/`BeginStream`; `batchOnly` load flag skipping the streaming+PKST gate checks |
 | `src/Winpepper.Asr/TranscribeCpp/ITranscribeCppEngine.cs` | Modify | `BeginStream(int, string?)` / `TranscribeBatch(float[], string?)` optional language |
 | `src/Winpepper.Asr/Transcription/NemotronStreamingTranscriber.cs` | Modify | Optional `language` ctor param, forwarded to `BeginStream` |
 | `tests/Winpepper.Asr.Tests/TranscribeCpp/TranscribeCppStructLayoutTests.cs` | Modify | `RunParams` size/offset assertions |
@@ -252,6 +260,9 @@ git commit -m "feat(asr): bind transcribe.cpp run_params (ABI id 2) with size ga
   // ITranscribeCppEngine
   ITranscribeCppStream BeginStream(int attContextRight, string? language = null);
   string TranscribeBatch(float[] mono16k, string? language = null);
+  // TranscribeCppEngine static factory (batch-only load skips the streaming+PKST gate checks)
+  public static TranscribeCppEngine Load(string runtimeDir, string modelPath,
+      Action<string>? logWarning = null, bool batchOnly = false);
   // NemotronStreamingTranscriber ctor
   public NemotronStreamingTranscriber(
       Func<ITranscribeCppEngine> engineProvider,
@@ -261,7 +272,7 @@ git commit -m "feat(asr): bind transcribe.cpp run_params (ABI id 2) with size ga
       int attContextRight = 13,
       string? language = null)
   ```
-  Semantics: `language == null` ⇒ native calls receive `IntPtr.Zero` run params, byte-identical to today (production path unchanged).
+  Semantics: `language == null` ⇒ native calls receive `IntPtr.Zero` run params, byte-identical to today (production path unchanged). `batchOnly == false` (default) keeps the capability gate exactly as today; `batchOnly == true` skips ONLY the `supports_streaming` and PKST-ext checks — required for Qwen3-ASR, which fails both in v0.1.3 (see Verified facts) — and makes `BeginStream` throw loud.
 
 - [ ] **Step 1: Write the failing language-forwarding tests**
 
@@ -369,6 +380,8 @@ Do NOT change the lifetime handling of `pExt`/`pSp` (they must outlive the strea
 
 3f. `FakeTranscribeCppEngine.cs`: already updated in Step 1.
 
+3g. `TranscribeCppEngine.Load`: append the parameter `bool batchOnly = false`. When true, skip exactly the two streaming-only capability checks in the gate (the `supports_streaming == 0` throw and the PKST `transcribe_model_accepts_ext_kind` throw, currently ~`:154-160`), keeping every other gate step (contract/version, ABI struct sizes including the new `run_params` entry, sample rate) unchanged. Store it in a private `readonly bool _batchOnly` and make `BeginStream` throw `InvalidOperationException("engine was loaded batch-only; streaming is unavailable")` when set, so a mis-wired caller fails loud instead of hitting undefined native behavior. Extend the class doc comment with one line explaining why (validated: v0.1.3's qwen3_asr family reports no streaming capability and its `.accepts_ext_kind` is null, so the unmodified gate refuses a model that batch `transcribe_run` fully supports). This path is exercised for real by the Qwen proof run in Task 12.
+
 - [ ] **Step 4: Run to verify pass**
 
 ```bash
@@ -394,7 +407,7 @@ git add src/Winpepper.Asr/TranscribeCpp/ITranscribeCppEngine.cs \
         src/Winpepper.Asr/Transcription/NemotronStreamingTranscriber.cs \
         tests/Winpepper.Asr.Tests/Transcription/FakeTranscribeCppEngine.cs \
         tests/Winpepper.Asr.Tests/Transcription/NemotronStreamingTranscriberTests.cs
-git commit -m "feat(asr): optional language hint through TranscribeBatch/BeginStream (run_params)"
+git commit -m "feat(asr): optional language hint through TranscribeBatch/BeginStream (run_params); batch-only Load flag"
 ```
 
 ---
@@ -412,18 +425,21 @@ git commit -m "feat(asr): optional language hint through TranscribeBatch/BeginSt
   ```csharp
   namespace AsrLatencyBench;
   public sealed record ConvergencePoint(
-      int Pass, double MeanMs, double CiHalfWidthMs, double RatioToMean, bool Precise);
+      int Pass, double MeanMs, double CiHalfWidthMs, double RatioToMean,
+      double DeltaFromPrevious, bool Stable);
   public static class Convergence
   {
-      public const double PreciseRatio = 0.05;
+      public const double StableRatio = 0.02;
       public static double Mean(IReadOnlyList<double> values);
       public static double SampleStdDev(IReadOnlyList<double> values);   // n-1 denominator; 0 when n < 2
       public static double CiHalfWidth95(IReadOnlyList<double> values);  // 1.96 * sd / sqrt(n); 0 when n < 2
       public static double Median(IReadOnlyList<double> values);         // nearest-rank via EvalResults.Percentile
-      public static ConvergencePoint Evaluate(int pass, IReadOnlyList<double> perClipMedians);
-      public static bool Converged(IReadOnlyList<ConvergencePoint> trace); // last TWO points Precise
+      public static ConvergencePoint Evaluate(int pass, IReadOnlyList<double> perClipMedians,
+          double previousMeanMs);                                        // previousMeanMs <= 0 = "no previous pass"
+      public static bool Converged(IReadOnlyList<ConvergencePoint> trace); // last TWO points Stable
   }
   ```
+  **Convergence rule (validated against real data — do not revert to a CI-threshold exit):** the run has converged when the run-level mean of pooled per-clip median latencies changes by less than 2% (`StableRatio`) between consecutive passes, for two consecutive passes (`Stable` on the last two trace points; the first pass has no previous mean, so `converged` is reachable from pass 3). The 95% CI half-width and its ratio to the mean are still computed and reported on every point — as *diagnostics* of between-clip spread, not as the exit criterion. Rationale: the original criterion (CI ratio < 5%) was checked against the existing corpus-v1 baseline `results.json` and is structurally unreachable — the CI is computed BETWEEN clips at fixed n=65 with between-clip CV ≈ 0.25, giving ratio 0.060 observed and 0.053 even in the infinite-pass limit; extra passes only stabilize each clip's median, which is exactly what `DeltaFromPrevious` measures.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -467,41 +483,57 @@ public class ConvergenceTests
     }
 
     [Fact]
-    public void Evaluate_identical_medians_is_precise()
+    public void Evaluate_first_pass_has_no_previous_and_is_never_stable()
     {
-        var p = Convergence.Evaluate(3, new double[] { 100, 100, 100, 100 });
-        p.Pass.ShouldBe(3);
+        var p = Convergence.Evaluate(1, new double[] { 100, 100, 100, 100 }, previousMeanMs: 0);
+        p.Pass.ShouldBe(1);
         p.MeanMs.ShouldBe(100);
         p.CiHalfWidthMs.ShouldBe(0);
         p.RatioToMean.ShouldBe(0);
-        p.Precise.ShouldBeTrue();
+        p.DeltaFromPrevious.ShouldBe(double.PositiveInfinity);
+        p.Stable.ShouldBeFalse();
     }
 
     [Fact]
-    public void Evaluate_wide_spread_is_not_precise()
+    public void Evaluate_small_change_from_previous_pass_is_stable()
     {
-        // sd = 100/sqrt(... ) — ratio far above 0.05
-        var p = Convergence.Evaluate(1, new double[] { 50, 150 });
-        p.Precise.ShouldBeFalse();
+        var p = Convergence.Evaluate(2, new double[] { 99, 101 }, previousMeanMs: 100); // mean 100
+        p.DeltaFromPrevious.ShouldBe(0);
+        p.Stable.ShouldBeTrue();
     }
 
     [Fact]
-    public void Evaluate_zero_or_negative_mean_is_never_precise()
+    public void Evaluate_stability_threshold_is_two_percent_exclusive()
     {
-        Convergence.Evaluate(1, new double[] { 0, 0, 0 }).Precise.ShouldBeFalse();
+        Convergence.Evaluate(2, new double[] { 102, 102 }, previousMeanMs: 100).Stable.ShouldBeFalse(); // delta 0.02
+        Convergence.Evaluate(2, new double[] { 101, 101 }, previousMeanMs: 100).Stable.ShouldBeTrue();  // delta 0.01
     }
 
     [Fact]
-    public void Evaluate_single_clip_is_never_precise()
+    public void Evaluate_still_reports_ci_diagnostics()
+    {
+        var p = Convergence.Evaluate(2, new double[] { 90, 100, 110 }, previousMeanMs: 100); // sd 10, n 3
+        p.CiHalfWidthMs.ShouldBe(1.96 * 10 / Math.Sqrt(3), 1e-9);
+        p.RatioToMean.ShouldBe(1.96 * 10 / Math.Sqrt(3) / 100, 1e-9);
+    }
+
+    [Fact]
+    public void Evaluate_zero_or_negative_mean_is_never_stable()
+    {
+        Convergence.Evaluate(2, new double[] { 0, 0, 0 }, previousMeanMs: 100).Stable.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Evaluate_single_clip_is_never_stable()
     {
         // n < 2: no spread information, must not converge on it
-        Convergence.Evaluate(1, new double[] { 100 }).Precise.ShouldBeFalse();
+        Convergence.Evaluate(2, new double[] { 100 }, previousMeanMs: 100).Stable.ShouldBeFalse();
     }
 
     [Fact]
-    public void Converged_requires_two_consecutive_precise_points()
+    public void Converged_requires_two_consecutive_stable_points()
     {
-        ConvergencePoint P(int pass, bool precise) => new(pass, 100, precise ? 1 : 50, precise ? 0.01 : 0.5, precise);
+        ConvergencePoint P(int pass, bool stable) => new(pass, 100, 1, 0.01, stable ? 0.005 : 0.5, stable);
         Convergence.Converged(new[] { P(1, true) }).ShouldBeFalse();
         Convergence.Converged(new[] { P(1, false), P(2, true) }).ShouldBeFalse();
         Convergence.Converged(new[] { P(1, true), P(2, false) }).ShouldBeFalse();
@@ -530,16 +562,21 @@ namespace AsrLatencyBench;
 
 /// <summary>One pass's convergence measurement over the pooled per-clip medians
 /// of the mode's speed metric (streaming: post-stop latency ms; batch: batch
-/// transcribe ms). Precise = the 95% confidence-interval half-width of the mean
-/// is below 5% of the mean. The run has converged when two CONSECUTIVE passes
-/// are precise.</summary>
+/// transcribe ms). Stable = the mean changed by less than 2% from the previous
+/// pass's mean. The run has converged when two CONSECUTIVE passes are stable.
+/// CiHalfWidthMs/RatioToMean describe BETWEEN-CLIP spread and are reported as
+/// diagnostics only: on corpus-v1 the between-clip CV is ~0.25, so a CI-ratio
+/// exit criterion is structurally unreachable (validated against the baseline
+/// results.json) — extra passes stabilize per-clip medians, which is exactly
+/// what DeltaFromPrevious measures.</summary>
 public sealed record ConvergencePoint(
-    int Pass, double MeanMs, double CiHalfWidthMs, double RatioToMean, bool Precise);
+    int Pass, double MeanMs, double CiHalfWidthMs, double RatioToMean,
+    double DeltaFromPrevious, bool Stable);
 
 public static class Convergence
 {
-    /// <summary>CI half-width must be below this fraction of the mean.</summary>
-    public const double PreciseRatio = 0.05;
+    /// <summary>The mean must move by less than this fraction between passes.</summary>
+    public const double StableRatio = 0.02;
 
     public static double Mean(IReadOnlyList<double> values)
         => values.Count == 0 ? 0 : values.Average();
@@ -562,20 +599,26 @@ public static class Convergence
     public static double Median(IReadOnlyList<double> values)
         => EvalResults.Percentile(values.OrderBy(v => v).ToArray(), 0.5);
 
-    public static ConvergencePoint Evaluate(int pass, IReadOnlyList<double> perClipMedians)
+    /// <summary>previousMeanMs &lt;= 0 means "no previous pass" (first pass):
+    /// DeltaFromPrevious is Infinity and the point is never stable.</summary>
+    public static ConvergencePoint Evaluate(int pass, IReadOnlyList<double> perClipMedians,
+        double previousMeanMs)
     {
         var mean = Mean(perClipMedians);
         var half = CiHalfWidth95(perClipMedians);
         var ratio = mean <= 0 ? double.PositiveInfinity : half / mean;
-        var precise = perClipMedians.Count >= 2 && mean > 0 && ratio < PreciseRatio;
-        return new ConvergencePoint(pass, mean, half, ratio, precise);
+        var delta = mean > 0 && previousMeanMs > 0
+            ? Math.Abs(mean - previousMeanMs) / previousMeanMs
+            : double.PositiveInfinity;
+        var stable = perClipMedians.Count >= 2 && mean > 0 && delta < StableRatio;
+        return new ConvergencePoint(pass, mean, half, ratio, delta, stable);
     }
 
     public static bool Converged(IReadOnlyList<ConvergencePoint> trace)
-        => trace.Count >= 2 && trace[^1].Precise && trace[^2].Precise;
+        => trace.Count >= 2 && trace[^1].Stable && trace[^2].Stable;
 }
 ```
-NOTE: `RatioToMean` may be `double.PositiveInfinity`; JSON serialization of the trace must therefore serialize a finite value — `Evaluate` stays as-is, and Task 6's `ToJson` uses `JsonNumberHandling.AllowNamedFloatingPointLiterals` (spelled out there).
+NOTE: `RatioToMean` and `DeltaFromPrevious` may be `double.PositiveInfinity`; JSON serialization of the trace must therefore handle non-finite values — `Evaluate` stays as-is, and Task 6's `ToJson` uses `JsonNumberHandling.AllowNamedFloatingPointLiterals` (spelled out there).
 
 - [ ] **Step 4: Run to verify pass**
 
@@ -592,7 +635,7 @@ Expected: PASS, `Errors: 0`, `Failed: 0`.
 git add scripts/asr-latency-bench/Convergence.cs \
         tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj \
         tests/Winpepper.Asr.Tests/ConvergenceTests.cs
-git commit -m "feat(bench): convergence rule - 95% CI half-width below 5% of mean, two consecutive passes"
+git commit -m "feat(bench): convergence rule - mean of per-clip medians stable within 2% for two consecutive passes"
 ```
 
 ---
@@ -990,13 +1033,14 @@ public void ToJson_marks_mode_language_passes_converged_and_trace()
     var clips = Array.Empty<ClipResult>();
     var summary = EvalResults.Summarize(clips, mode: "batch");
     var passes = new[] { new PassSummary(1, 500, 900, 1000, 12.3, 2048.0, 0.4, 0.15, 0) };
-    var trace = new[] { new ConvergencePoint(1, 500, 20, 0.04, true) };
+    var trace = new[] { new ConvergencePoint(1, 500, 20, 0.04, double.PositiveInfinity, false) };
     var json = EvalResults.ToJson(info, clips, summary, passes, trace);
     json.ShouldContain("\"mode\": \"batch\"");
     json.ShouldContain("\"passes\"");
     json.ShouldContain("\"converged\": true");
     json.ShouldContain("\"convergenceTrace\"");
     json.ShouldContain("\"ciHalfWidthMs\"");
+    json.ShouldContain("\"deltaFromPrevious\"");
     json.ShouldContain("\"resourceNote\"");
     json.ShouldContain("\"cpuSeconds\"");
     json.ShouldContain("\"peakMemoryMb\"");
@@ -1015,7 +1059,7 @@ public void ToJson_streaming_mode_marks_streaming_and_language()
 [Fact]
 public void ToJson_serializes_infinite_ratio_without_throwing()
 {
-    var trace = new[] { new ConvergencePoint(1, 0, 0, double.PositiveInfinity, false) };
+    var trace = new[] { new ConvergencePoint(1, 0, 0, double.PositiveInfinity, double.PositiveInfinity, false) };
     var json = EvalResults.ToJson(
         new EvalRunInfo("c", "m", "0.1.3", "2026-07-27", 1),
         Array.Empty<ClipResult>(), EvalResults.Summarize(Array.Empty<ClipResult>()),
@@ -1346,7 +1390,7 @@ git commit -m "feat(bench): validators for max-clips/time-budget/passes and mode
       public static string ToJson(ComparisonReport report);         // EvalResults.JsonOpts; contains NO transcript text
   }
   ```
-  CLI: `AsrLatencyBench.dll compare --results-root <dir> --out <dir>` finds every `results.json` under `<dir>` (recursive), writes `<out>/comparison.json`, exit 2 when none found.
+  CLI: `AsrLatencyBench.dll compare --results-root <dir> --out <dir>` reads `<dir>/*/results.json` (immediate per-model subdirectories ONLY — validated: a stale root-level `results.json` from the old single-model driver exists in the main checkout and must never be ingested), writes `<out>/comparison.json`, exit 2 when none found.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1374,8 +1418,8 @@ public class EvalComparisonTests
         return new EvalReport(info, summary, clips,
             new[] { new PassSummary(1, 400, 400, 400, 1.0, 1400.0, 0.2, 0.25, 0),
                     new PassSummary(2, 400, 400, 400, 1.0, 1500.0, 0.2, 0.25, 0) },
-            new[] { new ConvergencePoint(1, 400, 10, 0.025, true),
-                    new ConvergencePoint(2, 400, 10, 0.025, true) });
+            new[] { new ConvergencePoint(1, 400, 10, 0.025, double.PositiveInfinity, false),
+                    new ConvergencePoint(2, 400, 10, 0.025, 0.0, true) });
     }
 
     [Fact]
@@ -1532,8 +1576,12 @@ case "compare":
         Console.WriteLine("compare: SKIPPED (--results-root not set)");
         break;
     }
+    // Per-model subdirs ONLY. A root-level results.json is stale output from the
+    // old single-model driver (one exists in the main checkout) — never ingest it.
     var files = Directory.Exists(resultsRoot)
-        ? Directory.GetFiles(resultsRoot, "results.json", SearchOption.AllDirectories)
+        ? Directory.GetDirectories(resultsRoot)
+            .Select(d => Path.Combine(d, "results.json"))
+            .Where(File.Exists)
             .OrderBy(f => f, StringComparer.Ordinal).ToArray()
         : Array.Empty<string>();
     if (files.Length == 0)
@@ -1645,8 +1693,10 @@ case "corpus":
     Console.WriteLine($"# corpus: model={modelName} mode={mode} language={language ?? "(none)"} " +
         $"maxClips={maxClips} minPasses={minPasses} maxPasses={maxPasses} timeBudgetMinutes={timeBudgetMinutes}");
 
+    // batchOnly Load skips the streaming+PKST capability checks (required for Qwen3-ASR,
+    // which v0.1.3 supports for batch only -- see Verified facts); default path unchanged.
     using var corpusEngine = Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
-        corpusRuntime, corpusGguf, msg => Console.WriteLine($"# nem-log: {msg}"));
+        corpusRuntime, corpusGguf, msg => Console.WriteLine($"# nem-log: {msg}"), batchOnly: batchOnly);
     // Streaming mode needs the SECOND engine as the fallback (compute-gate deadlock
     // otherwise -- keep the existing explanatory comment block verbatim).
     // Batch-only mode never opens a stream, so ONE engine suffices (saves ~1 model of RAM).
@@ -1756,10 +1806,13 @@ case "corpus":
             .Where(samples => samples.Count > 0)
             .Select(samples => Convergence.Median(samples.Select(ms => (double)ms).ToArray()))
             .ToArray();
-        trace.Add(Convergence.Evaluate(pass, medians));
+        var previousMean = trace.Count > 0 ? trace[^1].MeanMs : 0;
+        trace.Add(Convergence.Evaluate(pass, medians, previousMean));
         converged = pass >= minPasses && Convergence.Converged(trace);
         Console.WriteLine($"# corpus: pass {pass} done -- mean {trace[^1].MeanMs:F0} ms, " +
-            $"CI half-width {trace[^1].CiHalfWidthMs:F1} ms ({trace[^1].RatioToMean:P1}), precise={trace[^1].Precise}, converged={converged}");
+            $"CI half-width {trace[^1].CiHalfWidthMs:F1} ms ({trace[^1].RatioToMean:P1}, diagnostic), " +
+            $"delta {(double.IsFinite(trace[^1].DeltaFromPrevious) ? trace[^1].DeltaFromPrevious.ToString("P1") : "n/a")}, " +
+            $"stable={trace[^1].Stable}, converged={converged}");
 
         if (converged) break;
         if (maxPasses > 0 && pass >= maxPasses) break;
@@ -2141,7 +2194,7 @@ First verify the staged model exists (Task 10 output). If Task 10 reported `SKIP
   --model-name qwen3-asr-1.7b --batch-only \
   --max-clips 5 --max-passes 1
 ```
-Expected: exit 0; `artifacts/asr-eval/qwen3-asr-1.7b/results.json` exists. This model is a 1.7B audio-LLM — expect noticeably slower batch times and higher peak memory; allow ~30 min.
+Expected: exit 0; `artifacts/asr-eval/qwen3-asr-1.7b/results.json` exists. This model is a 1.7B audio-LLM — expect noticeably slower batch times and higher peak memory; allow ~30 min. This run is the real exercise of the `batchOnly` Load path (Task 2): the gate's streaming+PKST checks are skipped by design for this model — if Load still throws, the failure is elsewhere; do not weaken the remaining gate checks.
 
 - [ ] **Step 4: Sanity-check the three results files**
 
@@ -2181,7 +2234,7 @@ for m in c['models']:
 "
 rm -rf scripts/asr-latency-bench/bin scripts/asr-latency-bench/obj
 ```
-Expected: `comparison.json` lists the models that ran (3, or 2 + a note if Qwen was skipped), aligned rows, no transcript text (spot-check: `grep -c reference artifacts/asr-eval/comparison.json` finds no transcript strings — the only allowed hits are field names).
+Expected: `comparison.json` lists the models that ran (3, or 2 + a note if Qwen was skipped), aligned rows, no transcript text (spot-check: `grep -c reference artifacts/asr-eval/comparison.json` finds no transcript strings — the only allowed hits are field names). `compare` reads only `artifacts/asr-eval/<model>/results.json` subdirectory files — a stray root-level `results.json` (the old driver's legacy output; one exists in the main checkout) is ignored by design.
 
 - [ ] **Step 6: Write the evidence doc (numbers + clip ids ONLY)**
 
@@ -2209,14 +2262,16 @@ git status --short   # verify: no corpus/model/artifact files staged; .kata.toml
 **Spec coverage:**
 1. Model parameterization (`--model-dir`, `--model-name`, `--language`, `--batch-only`, mode marked in results) → Tasks 7, 9, 6.
 2. Resource utilization (CPU delta user+privileged, peak working set, RTF, per-pass aggregates, GPU-not-measured note) → Tasks 4, 5, 6, 9.
-3. Convergence mode (`--time-budget-minutes` default 55, `--min-passes 2`, 95% CI half-width of pooled per-clip medians < 5% of mean for two consecutive passes, WER-stability verification and flagging, passes/converged/per-pass aggregates/trace in JSON) → Tasks 3, 6, 9.
+3. Convergence mode (`--time-budget-minutes` default 55, `--min-passes 2`; converged = the run-level mean of pooled per-clip medians changes by < 2% between consecutive passes, for two consecutive passes — the original 95%-CI criterion was validated against the corpus-v1 baseline and found structurally unreachable (between-clip CV ≈ 0.25), so CI half-width is reported as a diagnostic only; WER-stability verification and flagging, passes/converged/per-pass aggregates/trace in JSON) → Tasks 3, 6, 9.
 4. Driver script with per-model output dirs → Task 11 (plus staging in Task 10).
 5. Comparison aggregator → Task 8.
 6. Proof: unit tests (convergence CI math ✓ Task 3, per-pass aggregation ✓ Task 5, batch-vs-streaming mode marking ✓ Task 6, comparison aggregation ✓ Task 8, plus resource math, validators, model-dir resolution, language forwarding) and three small Windows runs ✓ Task 12 with Qwen graceful-skip handling.
-7. nemotron-3.5 mandatory language: engine binding gains run-params language (Tasks 1–2, header-verified layout, ABI size gate fails loud on mismatch); att-context 13 is valid for both streaming models (3.5 supports {0,3,6,13}); tag stripping is the 0.1.3 default (`keep_special_tags=false`) — nothing to do.
+7. nemotron-3.5 mandatory language: engine binding gains run-params language (Tasks 1–2, header-verified layout, installed runtime verified as v0.1.3 with `transcribe_run_params_init` exported, ABI size gate fails loud on mismatch); language is honored by the runtime (validated: unknown codes hard-error, exact `en-US` required); att-context 13 is valid for both streaming models (3.5 supports {0,3,6,13}); tag stripping is the 0.1.3 default (`keep_special_tags=false`, validated to cover exactly 3.5's tag set) — nothing to do. Qwen3-ASR batch-only requires the `batchOnly` Load flag (validated: v0.1.3's qwen3_asr reports no streaming capability and rejects the PKST probe, so the unmodified gate refuses it) → Tasks 2, 9, 12.
 
 **No silent deferrals:** every user-facing behavior lands as production tooling behavior proven by the Task 12 real-model runs; stubs/fakes appear only in unit tests of pure logic, and each such piece is exercised for real in Task 12 (language → nemotron-3.5 run; batch-only → Qwen run; resources/convergence fields → Step 4 sanity checks; comparison → Step 5). The only conditional is the spec's own sanctioned graceful skip for an incomplete Qwen download, recorded in evidence. No UNRESOLVED COVERAGE GAPS.
 
 **Placeholder scan:** the two shorthand markers in Task 9's sketch (`FirstPass`, `CountedFailedBeforeThisPass`) are explicitly resolved in the "Implementation notes" that bind the inline form; existing-code blocks that "move unchanged" are anchored to exact current line ranges. No TBD/TODO items remain.
 
-**Type consistency:** `ConvergencePoint(Pass, MeanMs, CiHalfWidthMs, RatioToMean, Precise)` is used identically in Tasks 3, 6, 8, 9; `PassSummary` 9-field shape identical in Tasks 5, 6, 8, 9; `ClipResult` extensions (`BatchMsRuns`, `CpuSeconds`, `MeanRtf`, `TranscriptStable`) match between Tasks 6, 8 (tests), and 9 (construction); `BeginStream(int, string?)`/`TranscribeBatch(float[], string?)`/transcriber ctor match between Tasks 2 and 9; `ModelDirLayout.Resolved(GgufPath, RuntimeDir)` matches between Tasks 7 and 9; `EvalResults.JsonOpts` made public in Task 6 and consumed in Task 8.
+**Type consistency:** `ConvergencePoint(Pass, MeanMs, CiHalfWidthMs, RatioToMean, DeltaFromPrevious, Stable)` is used identically in Tasks 3, 6, 8, 9; `PassSummary` 9-field shape identical in Tasks 5, 6, 8, 9; `ClipResult` extensions (`BatchMsRuns`, `CpuSeconds`, `MeanRtf`, `TranscriptStable`) match between Tasks 6, 8 (tests), and 9 (construction); `BeginStream(int, string?)`/`TranscribeBatch(float[], string?)`/`Load(string, string, Action<string>?, bool batchOnly)`/transcriber ctor match between Tasks 2 and 9; `ModelDirLayout.Resolved(GgufPath, RuntimeDir)` matches between Tasks 7 and 9; `EvalResults.JsonOpts` made public in Task 6 and consumed in Task 8.
+
+**Stage-2 load-bearing validation (2026-07-27):** 15 assumptions surfaced and dispositioned (10 verified, 3 falsified → fixed in this revision, 3 accepted residual risks: decode determinism [detected at run time via `TranscriptStable`], streaming CPU-delta attribution [both wall and CPU RTF reported], host RAM headroom [loud recoverable failure]). The three falsified-and-fixed: Qwen fails the unmodified capability gate → `batchOnly` Load flag (Tasks 2, 9); CI-ratio convergence criterion structurally unreachable on corpus-v1 → across-pass stability rule (Task 3); stale legacy `artifacts/asr-eval/results.json` exists in the main checkout → `compare` scans per-model subdirs only (Task 8). Ledger: `.worktrees/.the-usual-logs/asr-model-comparison/load-bearing-ledger.md`.

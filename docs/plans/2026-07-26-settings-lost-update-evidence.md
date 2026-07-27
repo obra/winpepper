@@ -117,3 +117,31 @@ previously read live WinUI control state (ModelsPage AssemblyAi/Streaming
 toggles, RecordingPage Autostart toggle) now capture that state into a local
 BEFORE queueing, so no mutator reads UI state at all — flush-time execution is
 safe on any thread, including a racing debounce tick or a Dispose flush.
+
+## Windows gate (Task 4)
+
+`timeout 2700 ./scripts/windows-gate.sh` from WSL (2026-07-26), after cross-OS
+hygiene (`rm -rf src/*/bin src/*/obj tests/*/bin tests/*/obj`) and the host
+process poll (two consecutive zero `winpepper` dotnet.exe counts). Exit 0.
+Verbatim tail:
+
+```
+================ windows-gate summary ================
+Winpepper.App build: OK
+Winpepper.Asr.Tests (net9.0): OK     Winpepper.Asr.Tests  Total: 231, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 6.805s
+Winpepper.Audio.Tests (net9.0): OK     Winpepper.Audio.Tests  Total: 62, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.436s
+Winpepper.Audio.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Audio.Tests  Total: 64, Errors: 0, Failed: 0, Skipped: 1, Not Run: 0, Time: 0.472s
+Winpepper.Cleanup.Tests (net9.0): OK     Winpepper.Cleanup.Tests  Total: 106, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.895s
+Winpepper.Cleanup.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Cleanup.Tests  Total: 129, Errors: 0, Failed: 0, Skipped: 7, Not Run: 0, Time: 11.560s
+Winpepper.Core.Tests (net9.0): OK     Winpepper.Core.Tests  Total: 387, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.553s
+Winpepper.Corrections.Tests (net9.0): OK     Winpepper.Corrections.Tests  Total: 23, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.678s
+Winpepper.History.Tests (net9.0): OK     Winpepper.History.Tests  Total: 45, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.264s
+Winpepper.IntegrationTests (net9.0): OK     Winpepper.IntegrationTests  Total: 2, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.688s
+Winpepper.Models.Tests (net9.0): OK     Winpepper.Models.Tests  Total: 100, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.731s
+Winpepper.Platform.Tests (net9.0): OK     Winpepper.Platform.Tests  Total: 218, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 0.512s
+Winpepper.Platform.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Platform.Tests  Total: 222, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 2.295s
+grand total tests: 1589 (cross-check only; roughly ~1300+ across 12 runs -- record the actual number)
+GATE: GREEN
+```
+
+Actual grand total across the 12 runs: 1589 tests, 0 failed.

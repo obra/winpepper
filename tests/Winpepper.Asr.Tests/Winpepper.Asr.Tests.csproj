@@ -32,5 +32,6 @@
     <Compile Include="..\..\scripts\asr-latency-bench\Convergence.cs" Link="Bench\Convergence.cs" />
     <Compile Include="..\..\scripts\asr-latency-bench\ResourceUsage.cs" Link="Bench\ResourceUsage.cs" />
     <Compile Include="..\..\scripts\asr-latency-bench\EvalPasses.cs" Link="Bench\EvalPasses.cs" />
+    <Compile Include="..\..\scripts\asr-latency-bench\ModelDirLayout.cs" Link="Bench\ModelDirLayout.cs" />
   </ItemGroup>
 </Project>

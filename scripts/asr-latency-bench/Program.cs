@@ -25,6 +25,7 @@ string? nemotronRuntime = null;
 var gain = 1.0;
 var leadSilenceMs = 0;
 string? corpusDir = null;
+string? resultsRoot = null;
 var outDir = "artifacts/asr-eval-results"; // default INSIDE gitignored artifacts/: results.json contains transcript text, and a bare "asr-eval-results/" is NOT gitignored
 var repeats = 1;
 var scenarioArgs = new List<string>();
@@ -39,6 +40,7 @@ for (var argIdx = 0; argIdx < args.Length; argIdx++)
         case "--gain": gain = double.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
         case "--lead-silence-ms": leadSilenceMs = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
         case "--corpus": corpusDir = args[++argIdx]; break;
+        case "--results-root": resultsRoot = args[++argIdx]; break;
         case "--out": outDir = args[++argIdx]; break;
         case "--repeats": repeats = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
         default: scenarioArgs.Add(args[argIdx]); break;
@@ -472,6 +474,35 @@ foreach (var scenario in requested)
                 Console.Error.WriteLine($"# corpus: {evalSummary.FailedCount} clip(s) FAILED -- results written to {outDir}, exiting non-zero");
                 Environment.ExitCode = 1;
             }
+            break;
+        }
+        case "compare":
+        {
+            if (resultsRoot is null)
+            {
+                Console.WriteLine("compare: SKIPPED (--results-root not set)");
+                break;
+            }
+            // Per-model subdirs ONLY. A root-level results.json is stale output from the
+            // old single-model driver (one exists in the main checkout) — never ingest it.
+            var files = Directory.Exists(resultsRoot)
+                ? Directory.GetDirectories(resultsRoot)
+                    .Select(d => Path.Combine(d, "results.json"))
+                    .Where(File.Exists)
+                    .OrderBy(f => f, StringComparer.Ordinal).ToArray()
+                : Array.Empty<string>();
+            if (files.Length == 0)
+            {
+                Console.Error.WriteLine($"compare: no results.json found under {resultsRoot}");
+                Environment.ExitCode = 2;
+                break;
+            }
+            var reports = files.Select(f => EvalComparison.Parse(File.ReadAllText(f))).ToList();
+            var comparison = EvalComparison.Build(reports, DateTime.UtcNow.ToString("yyyy-MM-dd"));
+            Directory.CreateDirectory(outDir);
+            var comparisonPath = Path.Combine(outDir, "comparison.json");
+            File.WriteAllText(comparisonPath, EvalComparison.ToJson(comparison));
+            Console.WriteLine($"compare: wrote {comparisonPath} ({reports.Count} models: {string.Join(", ", comparison.Models.Select(m => m.Model))})");
             break;
         }
         default:

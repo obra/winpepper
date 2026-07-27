@@ -916,7 +916,7 @@ public static class EvalPasses
             CpuSeconds: Math.Round(cpuSeconds, 3),
             PeakMemoryMb: Math.Round(ResourceUsage.ToMb(peakWorkingSetBytes), 1),
             MeanRtf: rtfs.Count == 0 ? 0 : Math.Round(rtfs.Average(), 4),
-            MeanWer: wers.Count == 0 ? null : wers.Average(),
+            MeanWer: wers.Count == 0 ? null : Math.Round(wers.Average(), 4),
             FailedCount: failedCount);
     }
 }
@@ -2048,7 +2048,7 @@ Create `scripts/run-asr-model-eval-windows.sh` (structure copied from `scripts/r
 #          [--language <code>] [--batch-only] [--time-budget-minutes N] [--min-passes N] [--max-passes N] [--max-clips N]
 #   e.g. ./scripts/run-asr-model-eval-windows.sh /mnt/c/Users/dan/winpepper-evals/corpus-v1 \
 #          --model-dir /mnt/c/Users/dan/winpepper-evals/models/nemotron-3.5-asr-streaming-0.6b \
-#          --model-name nemotron-3.5-asr-streaming-0.6b --language en-US --max-clips 5 --max-passes 1
+#          --model-name nemotron-3.5-asr-streaming-0.6b --language en-US --max-clips 5 --min-passes 1 --max-passes 1
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CORPUS_WSL="${1:?usage: run-asr-model-eval-windows.sh <corpus-dir> --model-dir <dir> --model-name <name> [options]}"
@@ -2162,7 +2162,7 @@ git commit -m "feat(scripts): per-model ASR eval driver writing to artifacts/asr
 - (Run outputs land only under gitignored `artifacts/asr-eval/`)
 
 **Interfaces:**
-- Consumes: everything. This is the system-level proof required by the spec: one small run per model (5 clips, 1 pass), NOT full hour-long profiles.
+- Consumes: everything. This is the system-level proof required by the spec: one small run per model (5 clips, 1 pass), NOT full hour-long profiles. Every proof command passes `--min-passes 1` explicitly: the bench defaults `minPasses` to 2 and `BenchArgs.ValidatePasses` rejects `maxPasses < minPasses` (exit 2), so `--max-passes 1` alone would fail arg validation before loading a model.
 
 - [ ] **Step 1: Proof run — production model (streaming)**
 
@@ -2170,7 +2170,7 @@ git commit -m "feat(scripts): per-model ASR eval driver writing to artifacts/asr
 ./scripts/run-asr-model-eval-windows.sh /mnt/c/Users/dan/winpepper-evals/corpus-v1 \
   --model-dir /mnt/c/Users/dan/AppData/Local/winpepper/models/nemotron-streaming-en \
   --model-name nemotron-streaming-en \
-  --max-clips 5 --max-passes 1
+  --max-clips 5 --min-passes 1 --max-passes 1
 ```
 (The production dir READ-ONLY satisfies `ModelDirLayout.Resolve`: one gguf at root + `runtime/transcribe-native-windows-x86_64-cpu-vulkan/transcribe.dll`. The extra `.tar.gz` files at its root are not `*.gguf` so they don't trip the exactly-one rule.)
 Expected: exit 0; `artifacts/asr-eval/nemotron-streaming-en/results.json` exists. Timeout guidance: allow ~15–20 min (build + model load + 5 real-time-paced clips).
@@ -2181,7 +2181,7 @@ Expected: exit 0; `artifacts/asr-eval/nemotron-streaming-en/results.json` exists
 ./scripts/run-asr-model-eval-windows.sh /mnt/c/Users/dan/winpepper-evals/corpus-v1 \
   --model-dir /mnt/c/Users/dan/winpepper-evals/models/nemotron-3.5-asr-streaming-0.6b \
   --model-name nemotron-3.5-asr-streaming-0.6b --language en-US \
-  --max-clips 5 --max-passes 1
+  --max-clips 5 --min-passes 1 --max-passes 1
 ```
 Expected: exit 0; `artifacts/asr-eval/nemotron-3.5-asr-streaming-0.6b/results.json` exists. If the native library rejects the run params (ABI gate throw at Load or `TRANSCRIBE_ERR_*` at run), STOP and re-verify the `RunParams` layout against `/tmp/transcribe-0.1.3.h` before proceeding — do not paper over it.
 
@@ -2192,7 +2192,7 @@ First verify the staged model exists (Task 10 output). If Task 10 reported `SKIP
 ./scripts/run-asr-model-eval-windows.sh /mnt/c/Users/dan/winpepper-evals/corpus-v1 \
   --model-dir /mnt/c/Users/dan/winpepper-evals/models/qwen3-asr-1.7b \
   --model-name qwen3-asr-1.7b --batch-only \
-  --max-clips 5 --max-passes 1
+  --max-clips 5 --min-passes 1 --max-passes 1
 ```
 Expected: exit 0; `artifacts/asr-eval/qwen3-asr-1.7b/results.json` exists. This model is a 1.7B audio-LLM — expect noticeably slower batch times and higher peak memory; allow ~30 min. This run is the real exercise of the `batchOnly` Load path (Task 2): the gate's streaming+PKST checks are skipped by design for this model — if Load still throws, the failure is elsewhere; do not weaken the remaining gate checks.
 
@@ -2222,6 +2222,10 @@ Also confirm `passes` and `convergenceTrace` arrays exist with 1 entry each: `py
 - [ ] **Step 5: Run the comparison aggregator over the three runs**
 
 ```bash
+# Clean Windows-built intermediates BEFORE any Linux build (AGENTS.md CS0006 rule):
+# Steps 1-3 built the bench (and src/Winpepper.Asr via ProjectReference) with the
+# Windows SDK over the UNC path, so bin/obj hold Windows-side MSBuild state.
+rm -rf scripts/asr-latency-bench/bin scripts/asr-latency-bench/obj src/*/bin src/*/obj
 export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"
 dotnet build scripts/asr-latency-bench/AsrLatencyBench.csproj -c Release -p:EnableWindowsTargeting=true
 dotnet exec scripts/asr-latency-bench/bin/Release/net9.0/AsrLatencyBench.dll compare \
@@ -2232,7 +2236,6 @@ c = json.load(open('artifacts/asr-eval/comparison.json'))
 for m in c['models']:
     print(m['model'], m['mode'], m['passes'], m['converged'], m['meanWer'], m['latencyP50Ms'], m['cpuSecondsTotal'], m['peakMemoryMb'])
 "
-rm -rf scripts/asr-latency-bench/bin scripts/asr-latency-bench/obj
 ```
 Expected: `comparison.json` lists the models that ran (3, or 2 + a note if Qwen was skipped), aligned rows, no transcript text (spot-check: `grep -c reference artifacts/asr-eval/comparison.json` finds no transcript strings — the only allowed hits are field names). `compare` reads only `artifacts/asr-eval/<model>/results.json` subdirectory files — a stray root-level `results.json` (the old driver's legacy output; one exists in the main checkout) is ignored by design.
 

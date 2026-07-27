@@ -32,4 +32,21 @@ public class TranscribeCppStructLayoutTests
         Assert.Equal(16, (int)Marshal.OffsetOf<TranscribeCppNative.StreamUpdate>("input_received_ms"));
         Assert.Equal(40, (int)Marshal.OffsetOf<TranscribeCppNative.StreamUpdate>("committed_changed"));
     }
+
+    [Fact]
+    public void RunParams_layout_matches_transcribe_h_v013()
+    {
+        Assert.Equal(64, Marshal.SizeOf<TranscribeCppNative.RunParams>());
+        Assert.Equal(0, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.struct_size)));
+        Assert.Equal(8, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.task)));
+        Assert.Equal(12, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.timestamps)));
+        Assert.Equal(16, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.pnc)));
+        Assert.Equal(20, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.itn)));
+        Assert.Equal(24, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.language)));
+        Assert.Equal(32, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.target_language)));
+        Assert.Equal(40, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.keep_special_tags)));
+        Assert.Equal(48, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.family)));
+        Assert.Equal(56, (int)Marshal.OffsetOf<TranscribeCppNative.RunParams>(nameof(TranscribeCppNative.RunParams.spec_k_drafts)));
+        Assert.Equal(2, TranscribeCppNative.ABI_RUN_PARAMS);
+    }
 }

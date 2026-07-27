@@ -10,7 +10,7 @@ namespace Winpepper.Asr.TranscribeCpp;
 ///     &lt;runtimeDir&gt;\transcribe.dll (process-wide, first runtimeDir wins);
 ///  3. log callback install (static delegate, process lifetime);
 ///  4. native version string gate (must equal 0.1.3);
-///  5. ABI struct-size gate for every marshaled struct (non-short-circuit,
+///  5. ABI struct-size gate for all 6 marshaled structs (non-short-circuit,
 ///     all mismatches reported);
 ///  6. transcribe_init_backends(runtimeDir) — REQUIRED before model load
 ///     (GGML_BACKEND_DL build; ggml-*.dll live in runtimeDir);
@@ -126,6 +126,7 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
             Abi(TranscribeCppNative.ABI_CAPABILITIES, Marshal.SizeOf<TranscribeCppNative.Capabilities>(), "capabilities");
             Abi(TranscribeCppNative.ABI_STREAM_UPDATE, Marshal.SizeOf<TranscribeCppNative.StreamUpdate>(), "stream_update");
             Abi(TranscribeCppNative.ABI_STREAM_TEXT, Marshal.SizeOf<TranscribeCppNative.StreamText>(), "stream_text");
+            Abi(TranscribeCppNative.ABI_RUN_PARAMS, Marshal.SizeOf<TranscribeCppNative.RunParams>(), "run_params");
             if (mismatches.Count > 0)
                 throw new TranscribeCppException("ABI struct size mismatch: " + string.Join("; ", mismatches));
 

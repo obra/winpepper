@@ -24,7 +24,7 @@ internal static class TranscribeCppNative
 
     // transcribe_abi_struct ids
     public const int ABI_MODEL_LOAD_PARAMS = 0, ABI_STREAM_PARAMS = 3, ABI_CAPABILITIES = 4,
-                     ABI_STREAM_UPDATE = 9, ABI_STREAM_TEXT = 10;
+                     ABI_STREAM_UPDATE = 9, ABI_STREAM_TEXT = 10, ABI_RUN_PARAMS = 2;
 
     // ---- structs (offsets runtime-verified by the spike; see plan table) ----
 
@@ -89,6 +89,26 @@ internal static class TranscribeCppNative
         [FieldOffset(48)] public IntPtr translate_target_languages;
     }
 
+    /// <summary>Mirror of struct transcribe_run_params (transcribe.h v0.1.3, ABI id 2).
+    /// x64: 4-byte C enums, 8-byte pointers, 1-byte bool at 40 (7 pad), total 64 bytes.
+    /// language/target_language are caller-owned UTF-8; the library copies them before
+    /// transcribe_run / transcribe_stream_begin RETURNS (header-documented), so buffers
+    /// may be freed immediately after the call.</summary>
+    [StructLayout(LayoutKind.Explicit, Size = 64)]
+    public struct RunParams
+    {
+        [FieldOffset(0)]  public ulong  struct_size;
+        [FieldOffset(8)]  public int    task;               // transcribe_task
+        [FieldOffset(12)] public int    timestamps;         // transcribe_timestamp_kind
+        [FieldOffset(16)] public int    pnc;                // transcribe_pnc_mode
+        [FieldOffset(20)] public int    itn;                // transcribe_itn_mode
+        [FieldOffset(24)] public IntPtr language;           // const char* UTF-8; Zero = autodetect/model default
+        [FieldOffset(32)] public IntPtr target_language;    // const char*; Zero
+        [FieldOffset(40)] public byte   keep_special_tags;  // C bool; 0 = strip tags (default)
+        [FieldOffset(48)] public IntPtr family;             // const struct transcribe_ext*
+        [FieldOffset(56)] public int    spec_k_drafts;
+    }
+
     // struct transcribe_parakeet_stream_ext { transcribe_ext ext; i32 att_context_right; }
     // sizeof(transcribe_ext) == 16 ({u64,u32} tail-padded), so att_context_right
     // is at OFFSET 16 and total size is 24. No ABI id exists for family exts —
@@ -137,6 +157,8 @@ internal static class TranscribeCppNative
     public static extern void transcribe_model_free(IntPtr model);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
     public static extern void transcribe_capabilities_init(ref Capabilities c);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+    public static extern void transcribe_run_params_init(ref RunParams p);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
     public static extern int transcribe_model_get_capabilities(IntPtr model, ref Capabilities c);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]

@@ -20,16 +20,25 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
     private readonly ModelParams _params;
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
     private readonly uint? _samplingSeed;
+    private readonly string _promptFormat;
 
     /// <param name="samplingSeed">Optional fixed sampling seed. Null (production)
     /// keeps LLamaSharp's default random seed; the prompt eval suite pins it for
     /// determinism on top of the temp-0.1 sampling.</param>
+    /// <param name="promptFormat">Prompt format id from
+    /// <c>ModelDescriptor.PromptFormat</c> (see <see cref="CleanupPromptFormatter"/>).
+    /// Defaults to chatml, the format of the registry-default qwen model.</param>
     public LlamaCleanupBackend(string modelPath, ILogger<LlamaCleanupBackend> log,
                                 int contextSize = 4096, int gpuLayerCount = 999,
-                                uint? samplingSeed = null)
+                                uint? samplingSeed = null,
+                                string promptFormat = CleanupPromptFormatter.ChatMl)
     {
         _log = log;
         _samplingSeed = samplingSeed;
+        // Fail at construction, not mid-dictation: an unknown format id would
+        // otherwise produce silently wrong prompts.
+        CleanupPromptFormatter.Validate(promptFormat);
+        _promptFormat = promptFormat;
         _params = new ModelParams(modelPath)
         {
             ContextSize = (uint)contextSize,
@@ -46,7 +55,7 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
         try
         {
             _log.LogDebug("Pre-warming cleanup LLM context...");
-            await GenerateAsync("You are a helpful assistant.", "Hello.",
+            await GenerateAsync("You are a helpful assistant.", "Hello.", "Hello.",
                 maxNewTokens: 4, temperature: 0.1f, ct).ConfigureAwait(false);
             _log.LogDebug("Cleanup LLM pre-warm complete.");
         }
@@ -57,42 +66,51 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
     }
 
     public async Task<string> GenerateAsync(string systemPrompt, string userPrompt,
-        int maxNewTokens, float temperature, CancellationToken ct)
+        string rawTranscript, int maxNewTokens, float temperature, CancellationToken ct)
     {
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            // Bug-3 fix-(iv): hand the model a real ChatML system turn
+            // Bug-3 fix-(iv): hand the model a real system turn
             // (instructions/examples) separate from the user turn (transcript),
             // so it cleans the transcript instead of continuing the few-shot
-            // block. We build ChatML ourselves (Qwen2.5's template) and disable
-            // StatelessExecutor.ApplyTemplate, which only knows how to wrap a
-            // single user message.
-            var templated =
-                "<|im_start|>system\n" + systemPrompt + "<|im_end|>\n" +
-                "<|im_start|>user\n" + userPrompt + "<|im_end|>\n" +
-                "<|im_start|>assistant\n";
+            // block. We build the template ourselves (per-model shape from
+            // CleanupPromptFormatter, unit-tested on the Linux gate) and
+            // disable StatelessExecutor.ApplyTemplate, which only knows how to
+            // wrap a single user message. Raw-completion formats ignore the
+            // system/user prompts and frame the raw transcript directly.
+            var plan = CleanupPromptFormatter.Build(
+                _promptFormat, systemPrompt, userPrompt, rawTranscript);
+            maxNewTokens = CleanupPromptFormatter.ApplyMinNewTokensFloor(
+                maxNewTokens, plan.MinNewTokensFloor);
 
             var executor = new StatelessExecutor(_weights, _params, _log)
             {
                 ApplyTemplate = false,
             };
+            // Greedy (raw-io): temperature 0 makes llama.cpp's temp sampler
+            // keep only the max-logit candidate, i.e. greedy decoding, while
+            // still supporting the repetition penalty (GreedySamplingPipeline
+            // has no penalty support). TopP/TopK are no-ops under greedy: the
+            // argmax token always survives both filters.
             var pipeline = new DefaultSamplingPipeline
             {
-                Temperature = temperature,
+                Temperature = plan.Greedy ? 0f : temperature,
                 TopP = 0.95f,
                 TopK = 40,
+                // Default 1f = no penalty, matching the pre-formatter behavior.
+                RepeatPenalty = plan.RepetitionPenalty ?? 1f,
             };
             if (_samplingSeed is { } seed) pipeline.Seed = seed;
             var inferenceParams = new InferenceParams
             {
                 MaxTokens = maxNewTokens,
-                AntiPrompts = new List<string> { "<|im_end|>", "</USER-INPUT>", "<USER-INPUT>", "<BASE-PROMPT>" },
+                AntiPrompts = plan.AntiPrompts.ToList(),
                 SamplingPipeline = pipeline,
             };
 
             var sb = new StringBuilder();
-            await foreach (var token in executor.InferAsync(templated, inferenceParams, ct).ConfigureAwait(false))
+            await foreach (var token in executor.InferAsync(plan.PromptText, inferenceParams, ct).ConfigureAwait(false))
             {
                 sb.Append(token);
                 if (sb.Length > maxNewTokens * 8) // hard char cap as belt-and-braces

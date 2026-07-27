@@ -133,15 +133,16 @@ switch (scenario)
             return;
         }
 
-        Console.WriteLine($"# latency: model={resolution.ResolvedName} statements={statements.Count} " +
-            $"passes={a.Passes} seed={a.Seed} timeoutMs={a.TimeoutMs}");
+        Console.WriteLine($"# latency: model={resolution.ResolvedName} promptFormat={resolution.PromptFormat} " +
+            $"statements={statements.Count} passes={a.Passes} seed={a.Seed} timeoutMs={a.TimeoutMs}");
         Console.WriteLine($"# latency: gguf={resolution.GgufPath}");
 
         // Model load and warm are timed once, SEPARATELY, and recorded in the
         // run info -- never in per-statement samples.
         var swLoad = Stopwatch.StartNew();
         using var backend = new LlamaCleanupBackend(
-            resolution.GgufPath, NullLogger<LlamaCleanupBackend>.Instance, samplingSeed: (uint)a.Seed);
+            resolution.GgufPath, NullLogger<LlamaCleanupBackend>.Instance, samplingSeed: (uint)a.Seed,
+            promptFormat: resolution.PromptFormat);
         swLoad.Stop();
         var swWarm = Stopwatch.StartNew();
         await backend.WarmAsync(CancellationToken.None);
@@ -191,6 +192,7 @@ switch (scenario)
 
         var info = new BenchRunInfo(
             Model: resolution.ResolvedName,
+            PromptFormat: resolution.PromptFormat,
             DateUtc: DateTime.UtcNow.ToString("yyyy-MM-dd"),
             Passes: a.Passes,
             Seed: a.Seed,

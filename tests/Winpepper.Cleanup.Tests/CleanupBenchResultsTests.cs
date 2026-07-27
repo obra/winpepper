@@ -25,8 +25,9 @@ public sealed class CleanupBenchResultsTests
             Error: error);
 
     private static readonly BenchRunInfo Info = new(
-        Model: "qwen2.5-0.5b-instruct-q4_k_m", DateUtc: "2026-07-27", Passes: 3, Seed: 42,
-        TimeoutMs: 15_000, ModelLoadMs: 1234, WarmMs: 567, StatementsSource: "statements.jsonl + 18 eval cases");
+        Model: "qwen2.5-0.5b-instruct-q4_k_m", PromptFormat: "chatml", DateUtc: "2026-07-27",
+        Passes: 3, Seed: 42, TimeoutMs: 15_000, ModelLoadMs: 1234, WarmMs: 567,
+        StatementsSource: "statements.jsonl + 18 eval cases");
 
     // ---- percentile math -------------------------------------------------------
 
@@ -127,6 +128,7 @@ public sealed class CleanupBenchResultsTests
         var md = CleanupBenchResults.ToMarkdown(Info, statements, summary);
 
         md.ShouldContain("qwen2.5-0.5b-instruct-q4_k_m");
+        md.ShouldContain("prompt format: `chatml`");
         md.ShouldContain("| 3f2a1b4c5d6e7f8091a2b3c4d5e6f708 | 42 | 9 | 812 790 801 | Llm | - |");
         md.ShouldContain("seed: 42");
         md.ShouldContain("timeout: 15000 ms");
@@ -156,6 +158,7 @@ public sealed class CleanupBenchResultsTests
         json.ShouldContain("\"outputRuns\"");
         json.ShouldContain("\"callMsRuns\"");
         json.ShouldContain($"\"model\": \"qwen2.5-0.5b-instruct-q4_k_m\"");
+        json.ShouldContain("\"promptFormat\": \"chatml\"");
         json.ShouldContain("boom");                                  // error detail json-only
     }
 

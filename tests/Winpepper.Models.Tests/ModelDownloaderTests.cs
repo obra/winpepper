@@ -57,6 +57,23 @@ public class ModelDownloaderTests : IDisposable
     };
 
     [Fact]
+    public async Task DownloadAsync_ManualInstallOnlyDescriptor_ThrowsWithoutTouchingTheNetwork()
+    {
+        var manual = OneFileDescriptor() with { Name = "manual-model", ManualInstallOnly = true };
+        var http = new FakeRangeClient(); // no responses registered: any HTTP use would throw differently
+        var downloader = new ModelDownloader(http);
+
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() =>
+            downloader.DownloadAsync(manual, _root,
+                new SyncProgress<DownloadProgress>(_ => { }), CancellationToken.None));
+
+        ex.Message.ShouldContain("manual-model");
+        ex.Message.ShouldContain("manual-install only");
+        Directory.Exists(Path.Combine(_root, manual.InstallDirRelative)).ShouldBeFalse(
+            "the downloader must not create install directories for manual-only models");
+    }
+
+    [Fact]
     public async Task DownloadAsync_HappyPath_WritesAllFiles_AndReports100Percent()
     {
         var fake = new FakeRangeClient();

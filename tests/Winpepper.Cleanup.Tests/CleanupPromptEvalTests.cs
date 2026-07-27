@@ -62,7 +62,7 @@ public abstract class CleanupEvalModelFixture : IDisposable
         }
 
         _backend = new LlamaCleanupBackend(ggufPath, new NullLogger<LlamaCleanupBackend>(),
-            samplingSeed: 42);
+            samplingSeed: 42, promptFormat: descriptor.PromptFormat);
         // Warm once so the first case doesn't pay cold-start cost inside the
         // production 15s timeout budget.
         _backend.WarmAsync(CancellationToken.None).GetAwaiter().GetResult();

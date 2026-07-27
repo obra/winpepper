@@ -20,6 +20,21 @@ public class CleanupModelPathResolverTests
             Root, "cleanup", "qwen2.5-0.5b-instruct-q4_k_m", "qwen2.5-0.5b-instruct-q4_k_m.gguf"));
         resolution.ResolvedName.ShouldBe("qwen2.5-0.5b-instruct-q4_k_m");
         resolution.FellBackToDefault.ShouldBeFalse();
+        resolution.PromptFormat.ShouldBe("chatml");
+    }
+
+    [Theory]
+    [InlineData("qwen2.5-0.5b-instruct-q4_k_m", "chatml")]
+    [InlineData("lfm2.5-1.2b-instruct-q4_k_m", "chatml")]
+    [InlineData("granite-4.0-1b-q4_k_m", "granite")]
+    [InlineData("sotto-cleanup-lfm25-350m-q8_0", "raw-io")]
+    public void Resolve_CarriesTheDescriptorsPromptFormat(string name, string expectedFormat)
+    {
+        var resolution = CleanupModelPathResolver.Resolve(new ModelRegistry(), Root, name);
+
+        resolution.ResolvedName.ShouldBe(name);
+        resolution.PromptFormat.ShouldBe(expectedFormat);
+        resolution.GgufPath.ShouldNotBeNull();
     }
 
     [Fact]

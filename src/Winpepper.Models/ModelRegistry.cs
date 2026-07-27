@@ -99,6 +99,67 @@ public sealed class ModelRegistry
             },
             new ModelDescriptor
             {
+                Name = "lfm2.5-1.2b-instruct-q4_k_m",
+                Kind = ModelKind.Cleanup,
+                DisplayName = "LFM2.5 1.2B Instruct (Q4_K_M GGUF)",
+                InstallDirRelative = Path.Combine("cleanup", "lfm2.5-1.2b-instruct-q4_k_m"),
+                PromptFormat = "chatml",
+                Files = new[]
+                {
+                    new ModelFile
+                    {
+                        RelativePath = "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+                        Url = "https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+                        Sha256 = "b1b3de114215d9507409a662a501a631095a479a419584e8a2ded6304b19b4f5",
+                        SizeBytes = 730_895_168,
+                    },
+                },
+            },
+            new ModelDescriptor
+            {
+                Name = "granite-4.0-1b-q4_k_m",
+                Kind = ModelKind.Cleanup,
+                DisplayName = "Granite 4.0 1B (Q4_K_M GGUF)",
+                InstallDirRelative = Path.Combine("cleanup", "granite-4.0-1b-q4_k_m"),
+                PromptFormat = "granite",
+                Files = new[]
+                {
+                    new ModelFile
+                    {
+                        RelativePath = "granite-4.0-1b-Q4_K_M.gguf",
+                        Url = "https://huggingface.co/ibm-granite/granite-4.0-1b-GGUF/resolve/main/granite-4.0-1b-Q4_K_M.gguf",
+                        Sha256 = "22ec0f9cc99a90185312de3c882c84e7bd6789bdd050389844380a01a831d7f1",
+                        SizeBytes = 1_023_645_440,
+                    },
+                },
+            },
+            new ModelDescriptor
+            {
+                // No public GGUF exists for this model: we convert it locally
+                // and place the file by hand, so it is manual-install only and
+                // the downloader/missing-models paths skip it.
+                Name = "sotto-cleanup-lfm25-350m-q8_0",
+                Kind = ModelKind.Cleanup,
+                DisplayName = "Sotto Cleanup LFM2.5 350M (Q8_0 GGUF)",
+                InstallDirRelative = Path.Combine("cleanup", "sotto-cleanup-lfm25-350m-q8_0"),
+                PromptFormat = "raw-io",
+                ManualInstallOnly = true,
+                Files = new[]
+                {
+                    new ModelFile
+                    {
+                        RelativePath = "sotto-cleanup-lfm25-350m-q8_0.gguf",
+                        // Manual install: no download URL exists.
+                        Url = "",
+                        // Locally converted from juanquivilla/sotto-cleanup-lfm25-350m (MIT)
+                        // via llama.cpp convert_hf_to_gguf.py --outtype q8_0 (2026-07-27).
+                        Sha256 = "67113c655d523ea682ff30488900fb62415835d391ce77cd1cb97dff2f5d962d",
+                        SizeBytes = 379215808,
+                    },
+                },
+            },
+            new ModelDescriptor
+            {
                 Name = StreamingAsrName,
                 Kind = ModelKind.StreamingAsr,
                 DisplayName = "Nemotron Speech Streaming (0.6B, Q8_0 GGUF, English)",

@@ -22,9 +22,12 @@ public sealed record StatementResult(
     string? Error = null);
 
 /// <summary>Run-level facts. Model load and warm are timed once, separately,
-/// and never counted in per-statement samples.</summary>
+/// and never counted in per-statement samples. <see cref="PromptFormat"/> is
+/// the resolved descriptor's prompt-format id so results record WHICH template
+/// produced the numbers.</summary>
 public sealed record BenchRunInfo(
     string Model,
+    string PromptFormat,
     string DateUtc,
     int Passes,
     int Seed,
@@ -107,7 +110,7 @@ public static class CleanupBenchResults
         var sb = new StringBuilder();
         sb.AppendLine("# Cleanup LLM latency bench");
         sb.AppendLine();
-        sb.AppendLine($"- model: `{info.Model}`");
+        sb.AppendLine($"- model: `{info.Model}` (prompt format: `{info.PromptFormat}`)");
         sb.AppendLine($"- date: {info.DateUtc}, passes: {info.Passes}, seed: {info.Seed}, timeout: {info.TimeoutMs} ms");
         sb.AppendLine($"- model load: {info.ModelLoadMs} ms, warm: {info.WarmMs} ms (timed once, excluded from per-statement samples)");
         sb.AppendLine($"- statements: {info.StatementsSource}");

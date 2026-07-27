@@ -35,7 +35,8 @@ public sealed class LlamaCleanupRerunService : ICleanupRerunService
 
         using var backend = new LlamaCleanupBackend(
             input.ModelPath,
-            _loggerFactory.CreateLogger<LlamaCleanupBackend>());
+            _loggerFactory.CreateLogger<LlamaCleanupBackend>(),
+            promptFormat: input.PromptFormat);
 
         var runner = new CleanupRunner(
             backend,

@@ -58,12 +58,15 @@ public class ModelRegistryTests
     [Fact]
     public void Every_File_Has_NonEmptyUrl_And_PositiveSize_And_64charSha()
     {
+        // Manual-install-only descriptors (locally converted GGUFs) have no
+        // download source, so an empty URL is the honest value there; every
+        // downloadable descriptor must still declare a real https URL.
         var r = new ModelRegistry();
         foreach (var d in r.All)
         {
             foreach (var f in d.Files)
             {
-                f.Url.ShouldMatch("^https://");
+                if (!d.ManualInstallOnly) f.Url.ShouldMatch("^https://");
                 f.SizeBytes.ShouldBeGreaterThan(0);
                 f.Sha256.Length.ShouldBe(64);
             }

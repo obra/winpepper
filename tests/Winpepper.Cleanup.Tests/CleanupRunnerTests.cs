@@ -26,6 +26,21 @@ public class CleanupRunnerTests
     // pre-existing LLM/fallback behavior.
 
     [Fact]
+    public async Task Run_ForwardsTheUnwrappedRawTranscriptToTheBackend()
+    {
+        // Raw-completion prompt formats (CleanupPromptFormatter.RawIo) consume
+        // the raw transcript directly; the runner must hand the backend the
+        // UNWRAPPED text alongside the PromptBuilder outputs.
+        var backend = new FakeLlamaCleanupBackend { Output = "Hello, my name is Crispy." };
+        var runner = NewRunner(backend);
+        await runner.RunAsync("hello my name is crispy",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        backend.LastRawTranscript.ShouldBe("hello my name is crispy");
+        backend.LastUserPrompt.ShouldBe("<USER-INPUT>\nhello my name is crispy\n</USER-INPUT>");
+    }
+
+    [Fact]
     public async Task Run_LlmEchoesPromptScaffold_FallsBackToRawTranscript()
     {
         var garbage = "<OUTPUT>\nI think we should just ship it tomorrow.\n</OUTPUT>Human: I think we should just ship it tomorrow.";

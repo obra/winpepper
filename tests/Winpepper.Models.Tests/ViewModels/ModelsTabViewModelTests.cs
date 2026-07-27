@@ -48,6 +48,38 @@ public class ModelsTabViewModelTests : IDisposable
     }
 
     [Fact]
+    public void IsSelectedDownloadable_FalseForManualInstallOnlySelection_TrueOtherwise()
+    {
+        var registry = new ModelRegistry();
+        var vm = new ModelsTabViewModel(registry, _root, new FakeDownloader(),
+            currentAsrName: "parakeet-tdt-0.6b-v3",
+            currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
+            promoteAsr: _ => { }, promoteCleanup: _ => { });
+
+        vm.CleanupCard.IsSelectedDownloadable.ShouldBeTrue();
+
+        vm.CleanupCard.SelectedName = "sotto-cleanup-lfm25-350m-q8_0";
+        vm.CleanupCard.IsSelectedDownloadable.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task DownloadMissingAsync_ManualInstallOnlySelection_IsSkippedGracefully()
+    {
+        var registry = new ModelRegistry();
+        var fake = new FakeDownloader();
+        var vm = new ModelsTabViewModel(registry, _root, fake,
+            currentAsrName: "parakeet-tdt-0.6b-v3",
+            currentCleanupName: "sotto-cleanup-lfm25-350m-q8_0",
+            promoteAsr: _ => { }, promoteCleanup: _ => { });
+
+        await vm.DownloadMissingAsync(CancellationToken.None);
+
+        // ASR still routes through provisioning; the manual-only cleanup model
+        // never reaches the downloader (nothing to download).
+        fake.DownloadedNames.ShouldBe(["parakeet-tdt-0.6b-v3"]);
+    }
+
+    [Fact]
     public async Task DownloadMissingAsync_OnlyEnqueuesMissingSelected()
     {
         var registry = new ModelRegistry();

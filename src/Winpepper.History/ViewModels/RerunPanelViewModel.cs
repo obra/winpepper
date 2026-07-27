@@ -21,6 +21,13 @@ public sealed class RerunPanelViewModel : INotifyPropertyChanged
     /// </summary>
     public string SelectedModelPath { get; set; } = "";
 
+    /// <summary>
+    /// Prompt format id of the selected model (ModelDescriptor.PromptFormat).
+    /// Only meaningful on the cleanup panel; defaults to chatml, the format of
+    /// the registry-default cleanup model.
+    /// </summary>
+    public string SelectedModelPromptFormat { get; set; } = "chatml";
+
     private string _rerunText = "";
     public string RerunText
     {

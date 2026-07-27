@@ -17,6 +17,8 @@
 #   --model <registry-key>   cleanup model to bench (default: registry cleanup default)
 #   --passes N               passes per statement (default: 3)
 #   --statements <wsl-path>  use an existing statements JSONL; skips the export step
+#   --models-root <wsl-path> alternate models root passed to the latency scenario
+#                            (default: %LOCALAPPDATA%\winpepper\models on the host)
 #   --exec-timeout-s N       timeout for the latency run (default: 7200 -- 100+
 #                            statements x 3 passes x up to 15 s can exceed an hour)
 #   (any other args are passed through to the latency scenario)
@@ -26,6 +28,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL=""
 PASSES=3
 STATEMENTS_WSL=""
+MODELS_ROOT_WSL=""
 EXEC_TIMEOUT=7200
 PASSTHRU=()
 while [[ $# -gt 0 ]]; do
@@ -33,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --model) MODEL="${2:?--model requires a value}"; shift 2 ;;
     --passes) PASSES="${2:?--passes requires a value}"; shift 2 ;;
     --statements) STATEMENTS_WSL="${2:?--statements requires a value}"; shift 2 ;;
+    --models-root) MODELS_ROOT_WSL="${2:?--models-root requires a value}"; shift 2 ;;
     --exec-timeout-s) EXEC_TIMEOUT="${2:?--exec-timeout-s requires a value}"; shift 2 ;;
     *) PASSTHRU+=("$1"); shift ;;
   esac
@@ -50,6 +54,13 @@ if [[ -n "$STATEMENTS_WSL" ]]; then
   STATEMENTS_WIN="$(wslpath -w "$STATEMENTS_WSL")"
 else
   STATEMENTS_WIN=""   # resolved to the %TEMP% staging path inside the PS steps
+fi
+
+if [[ -n "$MODELS_ROOT_WSL" ]]; then
+  [[ -d "$MODELS_ROOT_WSL" ]] || { echo "run-cleanup-bench-windows: models root not found: $MODELS_ROOT_WSL" >&2; exit 2; }
+  MODELS_ROOT_WIN="$(wslpath -w "$MODELS_ROOT_WSL")"
+else
+  MODELS_ROOT_WIN=""  # resolved to %LOCALAPPDATA%\winpepper\models inside the PS step
 fi
 
 ps_run() { # ps_run <timeout_s> <logfile> <ps-command>
@@ -100,8 +111,10 @@ ps_run "$EXEC_TIMEOUT" "$OUT/latency.log" "
   Set-Location (Join-Path \$env:TEMP 'winpepper-cleanup-bench')
   \$stmts = '$STATEMENTS_WIN'
   if (-not \$stmts) { \$stmts = Join-Path \$env:TEMP 'winpepper-cleanup-bench\\statements.jsonl' }
+  \$modelsRoot = '$MODELS_ROOT_WIN'
+  if (-not \$modelsRoot) { \$modelsRoot = Join-Path \$env:LOCALAPPDATA 'winpepper\\models' }
   dotnet exec CleanupLatencyBench.dll latency --statements \$stmts --include-eval-cases \
-    --models-root (Join-Path \$env:LOCALAPPDATA 'winpepper\\models') \
+    --models-root \$modelsRoot \
     --passes $PASSES $model_arg ${PASSTHRU[*]:-} --out \$res" || latency_status=$?
 
 # Collect results back (results.json contains transcript text -- artifacts/ is gitignored).

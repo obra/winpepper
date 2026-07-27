@@ -7,11 +7,14 @@ namespace Winpepper.Models;
 /// when a non-empty requested name did not match the resolved descriptor
 /// (unknown name, or a name of the wrong kind), so callers can surface the
 /// silent fallback baked into <see cref="ModelRegistry.ResolveOrDefault"/>.
+/// <see cref="PromptFormat"/> is the resolved descriptor's prompt-format id,
+/// so backend construction sites never pair a model with the wrong template.
 /// </summary>
 public sealed record CleanupModelResolution(
     string? GgufPath,
     string ResolvedName,
-    bool FellBackToDefault);
+    bool FellBackToDefault,
+    string PromptFormat);
 
 /// <summary>
 /// Pure resolver from a requested cleanup-model name to the absolute path of
@@ -33,6 +36,6 @@ public static class CleanupModelPathResolver
         var path = gguf is null
             ? null
             : Path.Combine(modelsRoot, descriptor.InstallDirRelative, gguf.RelativePath);
-        return new CleanupModelResolution(path, descriptor.Name, fellBack);
+        return new CleanupModelResolution(path, descriptor.Name, fellBack, descriptor.PromptFormat);
     }
 }

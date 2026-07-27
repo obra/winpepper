@@ -200,7 +200,8 @@ public sealed class AppShell : IDisposable
             if (cleanupResolution.GgufPath is { } modelFile && File.Exists(modelFile))
             {
                 var backend = new Winpepper.Cleanup.LlamaCleanupBackend(modelFile,
-                    factory.CreateLogger<Winpepper.Cleanup.LlamaCleanupBackend>());
+                    factory.CreateLogger<Winpepper.Cleanup.LlamaCleanupBackend>(),
+                    promptFormat: cleanupResolution.PromptFormat);
                 cleanup = new Winpepper.Cleanup.CleanupRunner(backend,
                     factory.CreateLogger<Winpepper.Cleanup.CleanupRunner>());
             }

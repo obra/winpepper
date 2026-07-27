@@ -47,6 +47,30 @@ public class MissingModelsResolverTests : IDisposable
     }
 
     [Fact]
+    public void FindMissing_Never_Returns_ManualInstallOnly_Models_EvenWhenSelectedAndMissing()
+    {
+        var resolver = new MissingModelsResolver();
+        var manual = Desc("manual", "manual") with { ManualInstallOnly = true };
+        var registry = new[] { Desc("a", "a"), manual };
+
+        var missing = resolver.FindMissing(registry, _root, new[] { "a", "manual" });
+
+        missing.Select(m => m.Name).ShouldBe(new[] { "a" });
+    }
+
+    [Fact]
+    public void FindMissing_SottoManualInstall_IsSkipped_WithTheRealRegistry()
+    {
+        var registry = new ModelRegistry();
+        var resolver = new MissingModelsResolver();
+
+        var missing = resolver.FindMissing(
+            registry.All, _root, new[] { "sotto-cleanup-lfm25-350m-q8_0" });
+
+        missing.ShouldBeEmpty();
+    }
+
+    [Fact]
     public void FindMissing_Only_Considers_NamesInScope()
     {
         var resolver = new MissingModelsResolver();

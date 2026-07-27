@@ -24,6 +24,24 @@ public sealed record ModelDescriptor
 
     public required IReadOnlyList<ModelFile> Files { get; init; }
 
+    /// <summary>
+    /// Cleanup-LLM prompt format id (see <c>Winpepper.Cleanup.CleanupPromptFormatter</c>:
+    /// "chatml", "granite", "raw-io"). Only meaningful for
+    /// <see cref="ModelKind.Cleanup"/> descriptors; defaults to chatml, the
+    /// format of the registry-default qwen model.
+    /// </summary>
+    public string PromptFormat { get; init; } = "chatml";
+
+    /// <summary>
+    /// True when the model has no downloadable source (e.g. a locally
+    /// converted GGUF): the downloader refuses it and
+    /// <see cref="MissingModelsResolver"/> never selects it, but once the
+    /// user places the files under <see cref="InstallDirRelative"/>,
+    /// <see cref="IsFullyInstalled"/>, path resolution, eval and bench treat
+    /// it like any other model.
+    /// </summary>
+    public bool ManualInstallOnly { get; init; }
+
     /// <summary>Sum of file sizes in bytes.</summary>
     public long TotalSizeBytes => Files.Sum(f => f.SizeBytes);
 

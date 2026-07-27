@@ -51,6 +51,7 @@ public sealed class HistoryDetailViewModel : INotifyPropertyChanged
                     RawTranscript = entry.RawTranscript,
                     ModelName = CleanupPanel!.SelectedModelName,
                     ModelPath = CleanupPanel!.SelectedModelPath,
+                    PromptFormat = CleanupPanel!.SelectedModelPromptFormat,
                     CustomBasePrompt = CleanupCustomPrompt,
                     IncludeWindowContext = IncludeWindowContextInRerun,
                     WindowContextText = "",

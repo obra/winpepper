@@ -40,6 +40,7 @@ public class LlamaCleanupBackendIntegrationTests
         var result = await backend.GenerateAsync(
             systemPrompt: "You repeat the user's sentence back exactly.",
             userPrompt: "Hello, world.",
+            rawTranscript: "Hello, world.",
             maxNewTokens: 32,
             temperature: 0.1f,
             ct: CancellationToken.None);

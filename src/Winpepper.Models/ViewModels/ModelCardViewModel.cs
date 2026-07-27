@@ -51,6 +51,14 @@ public sealed class ModelCardViewModel : INotifyPropertyChanged
     public bool IsSelectedInstalled =>
         SelectedDescriptor?.IsFullyInstalled(_installRoot) ?? false;
 
+    /// <summary>
+    /// False when the selected model is manual-install only (no download
+    /// source): the download paths skip it, and the UI can bind this to
+    /// explain why "Download" won't fetch it.
+    /// </summary>
+    public bool IsSelectedDownloadable =>
+        !(SelectedDescriptor?.ManualInstallOnly ?? false);
+
     public ObservableCollection<DownloadProgress> ProgressByFile { get; } = new();
 
     public void ReportProgress(DownloadProgress progress)

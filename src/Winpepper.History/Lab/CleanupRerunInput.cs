@@ -14,6 +14,14 @@ public sealed class CleanupRerunInput
     public required string ModelPath { get; init; }
 
     /// <summary>
+    /// Prompt format id of the picked model (ModelDescriptor.PromptFormat:
+    /// "chatml", "granite", "raw-io"). The rerun service hands this to
+    /// <c>LlamaCleanupBackend</c> so the experiment uses the same template the
+    /// production pipeline would. Defaults to chatml (the registry default).
+    /// </summary>
+    public string PromptFormat { get; init; } = "chatml";
+
+    /// <summary>
     /// Override the base prompt for this run. Empty string means "use the
     /// built-in default" — the rerun service maps this to
     /// <c>CleanupProfile.Ordinary</c>; a non-empty string maps to

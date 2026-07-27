@@ -29,6 +29,22 @@ public class ModelDescriptorTests
     }
 
     [Fact]
+    public void Defaults_PromptFormatIsChatMl_AndNotManualInstallOnly()
+    {
+        var d = new ModelDescriptor
+        {
+            Name = "test",
+            Kind = ModelKind.Cleanup,
+            DisplayName = "Test",
+            InstallDirRelative = "test",
+            Files = Array.Empty<ModelFile>(),
+        };
+
+        d.PromptFormat.ShouldBe("chatml");
+        d.ManualInstallOnly.ShouldBeFalse();
+    }
+
+    [Fact]
     public void IsFullyInstalled_False_When_AnyFileMissing()
     {
         using var temp = new TempDir();

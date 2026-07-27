@@ -48,6 +48,16 @@ public sealed class ModelDownloader
     public async Task DownloadAsync(ModelDescriptor descriptor, string installRoot,
                                     IProgress<DownloadProgress> progress, CancellationToken ct)
     {
+        // Fail-loud backstop: manual-install-only descriptors have no download
+        // source (MissingModelsResolver filters them out of every download
+        // path, so reaching here is a programming error, not a user action).
+        if (descriptor.ManualInstallOnly)
+        {
+            throw new InvalidOperationException(
+                $"Model '{descriptor.Name}' is manual-install only (no download URL); " +
+                $"place its files under '{descriptor.InstallDirRelative}' by hand.");
+        }
+
         var modelDir = Path.Combine(installRoot, descriptor.InstallDirRelative);
         Directory.CreateDirectory(modelDir);
 

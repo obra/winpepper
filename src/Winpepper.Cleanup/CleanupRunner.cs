@@ -116,7 +116,7 @@ public sealed class CleanupRunner
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeoutCts.CancelAfter(options.Timeout);
-            raw = await _backend.GenerateAsync(systemPrompt, userPrompt, maxTokens, options.Temperature, timeoutCts.Token)
+            raw = await _backend.GenerateAsync(systemPrompt, userPrompt, rawTranscript, maxTokens, options.Temperature, timeoutCts.Token)
                                 .ConfigureAwait(false);
             chosenPath = CleanupPath.Llm;
         }

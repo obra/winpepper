@@ -71,3 +71,49 @@ Why this failure was expected: `DebouncedSettingsWriter` snapshots the whole
 `store.Save(...)` between construction and the unrelated `WindowWidth` flush is
 therefore silently reverted — `CleanupModelName` comes back as the boot-time
 default `"qwen2.5-0.5b-instruct-q4_k_m"` instead of `"promoted-model"`.
+
+## Write-authority audit (Task 4)
+
+All commands run from the worktree root after the Task 4 edits.
+
+1. All `.Save(` callers in `src/`:
+
+```
+$ grep -rn "\.Save(" --include="*.cs" src/
+src/Winpepper.Core/Settings/DebouncedSettingsWriter.cs:121:                    _store.Save(after);
+src/Winpepper.App/Views/ModelsPage.xaml.cs:231:            keyStore.Save(key.Trim());
+src/Winpepper.App/Views/ModelsPage.xaml.cs:266:                    keyStore.Save(typed.Trim());          // typed key is valid -> save it
+src/Winpepper.App/Hosting/AppShell.cs:88:            store.Save(settings);
+src/Winpepper.App/Hosting/AppShell.cs:161:            (_, _) => { /* Plan 2 wires CorrectionStore.Save() here */ });
+```
+
+Exactly the expected set: the writer's own `_store.Save(after)` (single runtime
+authority), the documented pre-writer boot repair in `AppShell.Create()`
+(AppShell.cs:88 — was :83 before the 5-line comment added above it), two
+`keyStore.Save(...)` hits (DPAPI API-key store, NOT settings.json, out of
+scope; were :218/:253 pre-edit, shifted by the toggle-capture expansion), and
+one comment at AppShell.cs:161 (was :155). The former direct-save bypasses at
+ModelsPage:46 and HistoryDetailPage:73 are GONE.
+
+2. MainWindow needs no change (already uses the writer):
+
+```
+$ grep -n "SettingsWriter.QueueAndFlushAsync" src/Winpepper.App/Views/MainWindow.xaml.cs
+58:            _ = _shell.SettingsWriter.QueueAndFlushAsync(
+```
+
+3. No mutator reads live control state inside the lambda:
+
+```
+$ grep -rn "Toggle.IsOn })" --include="*.cs" src/
+(no hits — exit code 1)
+```
+
+Note for the review gate: ModelsPage/HistoryDetailPage/RecordingPage/AppShell
+edits are Windows-only WinUI code — not compilable on Linux; hand-verified
+against the plan's code blocks and type-checked by windows-gate.sh below. One
+behavioral note: mutators now execute at flush time; the four lambdas that
+previously read live WinUI control state (ModelsPage AssemblyAi/Streaming
+toggles, RecordingPage Autostart toggle) now capture that state into a local
+BEFORE queueing, so no mutator reads UI state at all — flush-time execution is
+safe on any thread, including a racing debounce tick or a Dispose flush.

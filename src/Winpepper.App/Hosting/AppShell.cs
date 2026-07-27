@@ -80,6 +80,11 @@ public sealed class AppShell : IDisposable
                 "Unknown ASR model {ConfiguredModel}; restored default {DefaultModel}",
                 settings.AsrModelName, modelsServices.AsrDescriptor.Name);
             settings = settings with { AsrModelName = modelsServices.AsrDescriptor.Name };
+            // Boot-time validity repair — the ONE sanctioned direct save:
+            // it runs before the DebouncedSettingsWriter exists (below),
+            // and the writer re-loads from disk at every flush, so this
+            // can neither clobber nor be clobbered. ALL runtime settings
+            // writes go through SettingsWriter (single write authority).
             store.Save(settings);
         }
         var nemotronHolder = new NemotronEngineHolder(
@@ -92,7 +97,8 @@ public sealed class AppShell : IDisposable
             modelsServices.Registry, modelsServices.ModelsRoot, modelsServices);
         var asrSelection = new Winpepper.Core.Settings.AsrModelSelectionSlot();
         asrSelection.Publish(settings.AsrModelName); // seed with the persisted boot value
-        var writer = new DebouncedSettingsWriter(store);
+        var writer = new DebouncedSettingsWriter(store,
+            log: factory.CreateLogger("Winpepper.App.Settings"));
 
         var uiThread = new DispatcherQueueUiThread(DispatcherQueue.GetForCurrentThread());
         var engine = new SessionEngine();

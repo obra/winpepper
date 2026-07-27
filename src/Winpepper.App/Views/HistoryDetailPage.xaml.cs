@@ -53,7 +53,6 @@ public sealed partial class HistoryDetailPage : Page
 
         var history = App.Shell!.HistoryServices;
         var models = App.Shell!.ModelsServices;
-        var settings = App.Shell!.SettingsStore;
 
         AvailableAsrModels = models.Registry.ByKind(ModelKind.Asr).ToList();
         AvailableCleanupModels = models.Registry.ByKind(ModelKind.Cleanup).ToList();
@@ -69,8 +68,8 @@ public sealed partial class HistoryDetailPage : Page
             },
             promoteCleanupDefault: name =>
             {
-                var s = settings.Load();
-                settings.Save(s with { CleanupModelName = name });
+                var shell = App.Shell!;
+                _ = shell.SettingsWriter.QueueAndFlushAsync(s2 => s2 with { CleanupModelName = name }); // durability
             });
 
         OriginalTranscriptText.Text = ViewModel.OriginalTranscript;

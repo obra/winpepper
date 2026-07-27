@@ -114,4 +114,109 @@ public class DebouncedSettingsWriterTests : IDisposable
         final.CleanupEnabled.ShouldBeFalse();              // FAILS at HEAD
         final.WindowWidth.ShouldBe(999);                   // passes at HEAD
     }
+
+    [Fact]
+    public async Task Flush_Applies_Queued_Mutators_In_Order()
+    {
+        var store = new SettingsStore(_path);
+        using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+        writer.Queue(s => s with { MicDeviceId = "a" });
+        writer.Queue(s => s with { MicDeviceId = s.MicDeviceId + "b" });
+        await writer.FlushAsync();
+        new SettingsStore(_path).Load().MicDeviceId.ShouldBe("ab");
+    }
+
+    [Fact]
+    public async Task Flush_QueuedMutator_Wins_Over_OutOfBand_Write_On_The_Same_Field()
+    {
+        // A queued mutator is newer intent than an out-of-band write to the
+        // SAME field: replay-on-fresh-load applies it last, so it wins.
+        // Accepted edge (verified during planning): a hand edit of
+        // settings.json landing during the <=400 ms debounce window loses a
+        // same-field conflict to the queued mutator — after Task 4 no in-app
+        // runtime conflict pair exists at all, so this pins the writer's
+        // deterministic replay contract, not a live product conflict.
+        var store = new SettingsStore(_path);
+        store.Save(new AppSettings());
+        using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+        store.Save(store.Load() with { CleanupModelName = "out-of-band" });
+        await writer.QueueAndFlushAsync(s => s with { CleanupModelName = "queued-wins" });
+        new SettingsStore(_path).Load().CleanupModelName.ShouldBe("queued-wins");
+    }
+
+    [Fact]
+    public void Dispose_Flush_Preserves_OutOfBand_Changes()
+    {
+        // App shutdown flushes via Dispose (AppShell.cs:580). At HEAD that
+        // alone clobbered a direct save even with no intervening toggle.
+        var store = new SettingsStore(_path);
+        store.Save(new AppSettings());
+        var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+        writer.Queue(s => s with { WindowWidth = 777 });
+        store.Save(store.Load() with { CleanupEnabled = false }); // out-of-band, after queueing
+        writer.Dispose(); // synchronous flush
+
+        var final = new SettingsStore(_path).Load();
+        final.WindowWidth.ShouldBe(777);
+        final.CleanupEnabled.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Flush_SkipsAndKeepsMutations_WhenSettingsFileIsUnreadable()
+    {
+        // A DIRECTORY at the settings path is a deterministic, cross-platform
+        // "file exists but cannot be read": File.ReadAllText on it throws
+        // UnauthorizedAccessException on both Windows and Linux under .NET 9
+        // (and TryLoadCurrent also returns false for a persistent
+        // IOException, should a runtime surface it that way). Note
+        // File.Exists is FALSE for a directory — which is exactly why
+        // TryLoadCurrent reads without Load()'s File.Exists pre-check.
+        // The flush must SKIP (write nothing) and KEEP the queued mutation.
+        var store = new SettingsStore(_path);
+        Directory.CreateDirectory(_path);
+        try
+        {
+            using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+            writer.Queue(s => s with { MicDeviceId = "kept-mutation" });
+            await writer.FlushAsync(); // degraded load -> flush skipped
+
+            Directory.Exists(_path).ShouldBeTrue(); // still the directory
+            File.Exists(_path).ShouldBeFalse();     // nothing was written
+
+            Directory.Delete(_path);                // path is healthy again
+            store.Save(new AppSettings { WindowWidth = 555 });
+
+            await writer.FlushAsync();              // the KEPT mutation now applies
+
+            var final = new SettingsStore(_path).Load();
+            final.MicDeviceId.ShouldBe("kept-mutation");
+            final.WindowWidth.ShouldBe(555); // applied over the fresh valid file
+        }
+        finally
+        {
+            if (Directory.Exists(_path)) Directory.Delete(_path, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Flush_AppliesRemainingMutators_WhenOneThrows()
+    {
+        // One bad lambda must not destroy sibling changes: the thrower is
+        // DROPPED, the rest of the batch still applies, and the writer
+        // stays usable. (Task 3 adds the ERR log line for the drop.)
+        var store = new SettingsStore(_path);
+        using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+        writer.Queue(s => s with { MicDeviceId = "x-applied" });          // m1: field X
+        writer.Queue(s => throw new InvalidOperationException("boom"));   // m2: dropped
+        writer.Queue(s => s with { WindowWidth = 424 });                  // m3: field Y — must still apply
+        await writer.FlushAsync();
+
+        var final = new SettingsStore(_path).Load();
+        final.MicDeviceId.ShouldBe("x-applied");
+        final.WindowWidth.ShouldBe(424);
+
+        // Writer still usable after a throwing mutator.
+        await writer.QueueAndFlushAsync(s => s with { WindowHeight = 200 });
+        new SettingsStore(_path).Load().WindowHeight.ShouldBe(200);
+    }
 }

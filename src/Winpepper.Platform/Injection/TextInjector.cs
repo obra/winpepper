@@ -54,12 +54,49 @@ public sealed class TextInjector
         catch { return 0; }
     }
 
-    public bool TryInject(string text)
+    /// <summary>
+    /// Interruptible paste: types the text in chunks of
+    /// <see cref="ChunkCodeUnits"/> UTF-16 code units, pausing
+    /// <see cref="InterChunkPauseMs"/> between chunks (pacing is what makes
+    /// the guard able to observe a human halt gesture at all -- an unpaced
+    /// loop is queue-insertion-fast and finishes in milliseconds) and
+    /// checking before every chunk that (a) no physical modifier has gone
+    /// down (the leading edge of Alt+Tab -- injected Unicode is delivered
+    /// with the current physical modifier state applied) and (b) the window
+    /// that was foreground when this method was entered is STILL foreground.
+    /// If either check trips, the remaining chunks are not sent and
+    /// <see cref="InjectionRunOutcome.Interrupted"/> is returned so the
+    /// caller can hold the WHOLE original text as a pending paste.
+    /// The baseline is captured at method entry -- BEFORE the modifier-release
+    /// wait (up to 1500 ms) -- so a focus change during that wait is caught
+    /// before the first keystroke. The modifier check cannot re-trip on the
+    /// prelude's own timeout: NeutralizeHeldModifiers synthesizes KEYUPs, so
+    /// after it returns the observable modifier state is up. Fail-open: if
+    /// the foreground window cannot be determined (probe returns 0), the
+    /// HWND guard is disabled and the paste proceeds exactly as it did
+    /// before this feature.
+    /// </summary>
+    public InjectionRunOutcome TryInjectGuarded(string text)
     {
-        if (string.IsNullOrEmpty(text)) return true;
+        if (string.IsNullOrEmpty(text)) return InjectionRunOutcome.Completed;
+
+        var hwndAtSendStart = _foregroundHwnd();
         NeutralizeHeldModifiers();
-        return _sendChunk(text);
+        var chunks = InjectionChunker.Split(text, ChunkCodeUnits);
+        var outcome = GuardedInjectionRun.Execute(
+            chunks,
+            hwndAtSendStart,
+            _foregroundHwnd,
+            _sendChunk,
+            modifierHeld: () => ModifierGuard.AnyDown(_isKeyDown),
+            pauseBetweenChunks: () => _sleep(InterChunkPauseMs));
+        if (outcome == InjectionRunOutcome.Interrupted)
+            _log.LogInformation("Injection interrupted: foreground window or physical modifier state changed mid-paste");
+        return outcome;
     }
+
+    public bool TryInject(string text)
+        => TryInjectGuarded(text) == InjectionRunOutcome.Completed;
 
     private void NeutralizeHeldModifiers()
     {

@@ -55,6 +55,15 @@ public sealed partial class StatusPillWindow : Window
 
         // Step 3: AppWindow tweaks for frameless top-most.
         var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(_hwnd));
+
+        // Same real app icon as MainWindow. The pill is borderless and hidden
+        // from switchers today, so this is latent-proofing: some Windows
+        // builds still surface a window icon in Alt-Tab/taskbar variants.
+        // System.IO qualified: this file also sees Microsoft.UI.Xaml.Shapes.Path.
+        var iconPath = System.IO.Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+        if (System.IO.File.Exists(iconPath))
+            appWindow.SetIcon(iconPath);
+
         appWindow.IsShownInSwitchers = false;
         if (appWindow.Presenter is OverlappedPresenter p)
         {

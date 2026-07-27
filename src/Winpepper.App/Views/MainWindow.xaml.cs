@@ -1,4 +1,5 @@
 #if WINDOWS
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Winpepper.App.Hosting;
@@ -14,6 +15,16 @@ public sealed partial class MainWindow : Window
         _shell = shell;
         InitializeComponent();
         Title = "Winpepper";
+
+        // Title-bar icon: WinUI 3 unpackaged apps show the generic Windows
+        // icon unless AppWindow.SetIcon is called explicitly — the csproj
+        // <ApplicationIcon> only stamps the exe resource, not the window.
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "AppIcon.ico");
+        if (File.Exists(iconPath))
+            AppWindow.SetIcon(iconPath);
+        else
+            _shell.LogFactory.CreateLogger<MainWindow>()
+                .LogWarning("App icon asset missing: {IconPath}", iconPath);
 
         // Mica gives the shell the standard Windows 11 layered backdrop. It
         // can fail on older systems (no DWM/composition support), in which

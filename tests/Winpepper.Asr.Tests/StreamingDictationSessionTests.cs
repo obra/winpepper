@@ -259,8 +259,14 @@ public class StreamingDictationSessionTests
         var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
 
         result.ShouldBeNull(); // caller's late batch path takes over (bounded)
-        transcriber.Session.Disposed.ShouldBeTrue();
         session.DrainTimedOut.ShouldBeTrue(); // keys the null-return contract
+        // The dispose now runs in the BACKGROUND (it must never block
+        // FinishAsync); for this socket-style fake it aborts the wedged push,
+        // which is what lets the pump exit — so pump completion implies the
+        // dispose ran.
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        transcriber.Session.Disposed.ShouldBeTrue();
     }
 
     [Fact]
@@ -320,8 +326,9 @@ public class StreamingDictationSessionTests
             drainDeadline: TimeSpan.FromMilliseconds(200));
         session.OnFrame(new float[800]); // the pump wedges on this push, permanently
 
-        // Takes ~5 s: the internal DisposeAsync also bounds its pump wait before
-        // abandoning (nothing can unwedge this fake until the test does).
+        // Returns at the drain deadline: the abandoned session's dispose is
+        // scheduled in the background instead of being awaited inline
+        // (nothing can unwedge this fake until the test does).
         var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
 
         result.ShouldBeNull();
@@ -335,5 +342,73 @@ public class StreamingDictationSessionTests
         await session.PumpCompletion.WaitAsync(TimeSpan.FromSeconds(5),
             TestContext.Current.CancellationToken);
         session.PumpCompletion.IsCompleted.ShouldBeTrue();
+    }
+
+    // Models the NATIVE wedge from the 11:18:34 incident (Bug B): PushAsync
+    // hangs inside what is really one synchronous P/Invoke, and DisposeAsync
+    // BLOCKS behind the same per-session native gate until that call returns —
+    // dispose cannot interrupt a P/Invoke; it can only queue behind the lock
+    // (NemotronStreamingTranscriber.Session._nativeGate).
+    private sealed class NativeGateWedgedTranscriber : IStreamingTranscriber
+    {
+        public string ModelName => "native-gate-wedged";
+        public NativeGateWedgedSession Session { get; } = new();
+        public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
+            => Task.FromResult<IStreamingTranscriptionSession>(Session);
+
+        public sealed class NativeGateWedgedSession : IStreamingTranscriptionSession
+        {
+            private readonly TaskCompletionSource _wedge = new();
+            private readonly TaskCompletionSource _disposeDone = new();
+
+            /// <summary>Completes when DisposeAsync actually finished (i.e. the
+            /// wedged native call returned and the gate was released).</summary>
+            public Task DisposeCompletion => _disposeDone.Task;
+
+            public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
+                => await _wedge.Task; // the wedged native feed
+
+            public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
+                => throw new InvalidOperationException("FinishAsync must not run on a wedged session");
+
+            public async ValueTask DisposeAsync()
+            {
+                await _wedge.Task; // lock(_nativeGate): dispose queues behind the in-flight call
+                _disposeDone.TrySetResult();
+            }
+
+            public void Unwedge() => _wedge.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task WedgedNativePush_FinishReturnsPromptly_DisposeIsDeferredBehindThePump()
+    {
+        var transcriber = new NativeGateWedgedTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromMilliseconds(200));
+        session.OnFrame(new float[800]); // the pump wedges on this push
+
+        // Bounded by the drain deadline + a small epsilon, NOT by the blocked
+        // dispose: on the pre-fix code this call NEVER returns (FinishAsync
+        // inline-awaited a DisposeAsync that is itself stuck behind the wedged
+        // native call), so the 3 s guard below trips.
+        var result = await session
+            .FinishAsync(new float[800], TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(3), TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue();
+        session.PumpCompletion.IsCompleted.ShouldBeFalse();           // pump orphaned inside the native call
+        transcriber.Session.DisposeCompletion.IsCompleted.ShouldBeFalse(); // dispose queued behind that call
+
+        transcriber.Session.Unwedge(); // the native call finally returns
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        // ...and only now can the (background) dispose complete.
+        await transcriber.Session.DisposeCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
 }

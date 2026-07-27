@@ -38,4 +38,7 @@ internal static partial class SendInputNative
 
     [LibraryImport("user32.dll", SetLastError = true)]
     public static partial uint SendInput(uint nInputs, [In] INPUT[] pInputs, int cbSize);
+
+    [LibraryImport("user32.dll", SetLastError = true)]
+    public static partial IntPtr GetForegroundWindow();
 }

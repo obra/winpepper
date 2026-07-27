@@ -9,23 +9,60 @@ public sealed class TextInjector
     private const int ModifierWaitTimeoutMs = 1500;
     private const int ModifierWaitPollMs = 15;
 
+    /// <summary>UTF-16 code units per guarded send chunk (Task: mid-paste focus fallback).</summary>
+    internal const int ChunkCodeUnits = 32;
+
+    /// <summary>
+    /// Pause between guarded send chunks. Load-bearing (validation ledger, A1):
+    /// SendInput is queue-insertion (~µs per call), so an UNPACED loop finishes
+    /// in single-digit milliseconds and the mid-paste guard could never observe
+    /// a human focus change. 20 ms/chunk ≈ 1600 code units/s -- far faster than
+    /// any typist, slow enough that a long paste spans the human reaction
+    /// window (a 1000-unit paste ≈ 0.6 s).
+    /// </summary>
+    internal const int InterChunkPauseMs = 20;
+
     private readonly ILogger<TextInjector> _log;
     private readonly Func<int, bool> _isKeyDown;
+    private readonly Func<long> _foregroundHwnd;
+    private readonly Func<string, bool> _sendChunk;
+    private readonly Action<int> _sleep;
 
-    public TextInjector(ILogger<TextInjector> log, Func<int, bool>? isKeyDown = null)
+    public TextInjector(
+        ILogger<TextInjector> log,
+        Func<int, bool>? isKeyDown = null,
+        Func<long>? foregroundHwnd = null,
+        Func<string, bool>? sendChunk = null,
+        Action<int>? sleep = null)
     {
         _log = log;
         _isKeyDown = isKeyDown ?? DefaultKeyProbe;
+        _foregroundHwnd = foregroundHwnd ?? DefaultForegroundProbe;
+        _sendChunk = sendChunk ?? SendChunkViaSendInput;
+        _sleep = sleep ?? Thread.Sleep;
     }
 
     private static bool DefaultKeyProbe(int vk)
         => OperatingSystem.IsWindows()
            && (Winpepper.Platform.Hotkeys.KeyboardHookNative.GetAsyncKeyState(vk) & 0x8000) != 0;
 
+    /// <summary>Foreground HWND as Int64; 0 when unknown (non-Windows, or the call fails).</summary>
+    private static long DefaultForegroundProbe()
+    {
+        if (!OperatingSystem.IsWindows()) return 0;
+        try { return SendInputNative.GetForegroundWindow().ToInt64(); }
+        catch { return 0; }
+    }
+
     public bool TryInject(string text)
     {
         if (string.IsNullOrEmpty(text)) return true;
+        NeutralizeHeldModifiers();
+        return _sendChunk(text);
+    }
 
+    private void NeutralizeHeldModifiers()
+    {
         // A physically-held modifier (e.g. Ctrl still down from the dictation
         // chord, or held while clicking the pending-paste pill) is applied by
         // the target app to every injected character — turning the text into
@@ -46,8 +83,11 @@ public sealed class TextInjector
                 _log.LogWarning("Modifier neutralization partial send: requested {Req}, sent {Sent}",
                     releases.Length, released);
         }
+    }
 
-        var inputs = BuildKeyDownUpInputs(ToCodeUnits(text));
+    private bool SendChunkViaSendInput(string chunk)
+    {
+        var inputs = BuildKeyDownUpInputs(ToCodeUnits(chunk));
         var sent = SendInputNative.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<SendInputNative.INPUT>());
         if (sent != (uint)inputs.Length)
         {

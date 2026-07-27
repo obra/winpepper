@@ -19,7 +19,13 @@ public class DebouncedSettingsWriterTests : IDisposable
         var store = new SettingsStore(_path);
         using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromMilliseconds(50));
         for (var i = 0; i < 20; i++)
-            writer.Queue(s => s with { MicDeviceId = $"dev{i}" });
+        {
+            // Mutators now execute at FLUSH time (mutator-replay fix), and a
+            // for-loop variable is a single shared variable — without this
+            // per-iteration copy every deferred mutator would read i == 20.
+            var id = $"dev{i}";
+            writer.Queue(s => s with { MicDeviceId = id });
+        }
 
         // Poll for the debounced write to land. 50 ms debounce + the file
         // write itself usually settles in ~100 ms, but a contended CI runner
@@ -71,5 +77,41 @@ public class DebouncedSettingsWriterTests : IDisposable
         await Task.Delay(50);
         var loaded = new SettingsStore(_path).Load();
         loaded.MicDeviceId.ShouldBe("disposed");
+    }
+
+    [Fact]
+    public async Task Flush_PreservesChangesWrittenOutsideTheWriter()
+    {
+        // The shape of the production outage that lost 327 dictations
+        // (7/25-7/26):
+        // 1. app boots (writer constructed over the settings file),
+        // 2. settings.json changes OUT-OF-BAND -- in production this was a
+        //    direct edit of the file flipping cleanupEnabled (all in-app
+        //    write paths were excluded by the forensics; the in-app
+        //    ModelsPage/HistoryDetailPage direct saves are latent same-class
+        //    bugs, closed in Task 4, but were NOT this outage's writer) --
+        //    modeled here as a direct SettingsStore.Save of two fields,
+        // 3. an UNRELATED write (MainWindow resize) flushes the writer,
+        //    whose stale construction-time snapshot reverts step 2. That
+        //    revert is the CONFIRMED perpetuating mechanism (two observed
+        //    revert signatures with no app restart between).
+        // The out-of-band changes must survive step 3: replay over a fresh
+        // load survives ANY out-of-band write.
+        var store = new SettingsStore(_path);
+        store.Save(new AppSettings());
+        using var writer = new DebouncedSettingsWriter(store); // HEAD snapshots disk here
+
+        store.Save(store.Load() with
+        {
+            CleanupModelName = "promoted-model",
+            CleanupEnabled = false
+        }); // out-of-band write (same class as a hand edit of settings.json, or the latent ModelsPage:46 / HistoryDetailPage:73 bypasses)
+
+        await writer.QueueAndFlushAsync(s => s with { WindowWidth = 999 }); // MainWindow resize
+
+        var final = store.Load();
+        final.CleanupModelName.ShouldBe("promoted-model"); // FAILS at HEAD
+        final.CleanupEnabled.ShouldBeFalse();              // FAILS at HEAD
+        final.WindowWidth.ShouldBe(999);                   // passes at HEAD
     }
 }

@@ -16,7 +16,15 @@ design (shipped in `docs/plans/2026-07-26-midpaste-focus-fallback.md`, merged
 7bd039d). (1) Retune the pacing constants in `TextInjector` from 32 code
 units/20 ms to 8 code units/5 ms — an identical 1600 units/s feed rate, but
 the per-chunk guard runs 4× more often, so the accepted ≤1-chunk in-flight
-residual (prior ledger AD-1) shrinks from ≤32 to ≤8 code units. (2) Add a
+residual (prior ledger AD-1) shrinks from ≤32 to ≤8 code units. The 5 ms
+pace is DELIVERED by a new `PacingWaiter` (Win32 high-resolution waitable
+timer + `Thread.Sleep` fail-safe) wired as `TextInjector`'s production
+`sleep` default: direct measurement on the gate host (bleed-hardening
+ledger, V1/V6) falsified the assumption that `Thread.Sleep(5)` waits ~5 ms —
+it quantizes to ~15.5 ms (and the shipped 32/20 tuning really waits
+~31 ms/chunk ≈ 1030 units/s), while the high-res timer waits a measured
+5.22–5.37 ms ≈ 1500 units/s. All pure logic and all tests keep using the
+injected `sleep` seam. (2) Add a
 pure `MouseButtonGuard` (VK_LBUTTON/VK_RBUTTON/VK_MBUTTON via the existing
 injectable `isKeyDown` seam), consumed in two places: a new *release-wait
 prelude* in `TryInjectGuarded` (never start typing while a button is
@@ -31,9 +39,14 @@ behind delegate seams, xUnit v3 + Shouldly (no mocking library).
 
 ## Global Constraints
 
-- **Feed rate floor:** effective paste feed rate must never drop below the
-  1600 code units/s design point (`ChunkCodeUnits * 1000 / InterChunkPauseMs
-  >= 1600` — pinned by a test in Task 1).
+- **Feed rate floor:** the NOMINAL design point stays 1600 code units/s
+  (`ChunkCodeUnits * 1000 / InterChunkPauseMs >= 1600` — pinned by a test in
+  Task 1), and the DELIVERED rate must never regress below the shipped
+  tuning's measured reality (~1020–1040 units/s; ledger B2). Measured on the
+  gate host, `PacingWaiter` at 8/5 delivers ~1490–1530 units/s (ledger B1) —
+  ~45% faster than shipped. Raw `Thread.Sleep` CANNOT pace 5 ms (~15.5 ms
+  actual → ~513 units/s; ledger V1): never swap the waiter back to a bare
+  sleep.
 - **Full-text pending semantics:** interruption always parks the ENTIRE
   transcription, never a remainder. `Winpepper.Core` (`PendingPasteState`,
   `SessionViewModel`, `SessionStage`) is NOT modified by this plan.
@@ -67,9 +80,13 @@ get past it, do not move it to "known limitations":
 
 1. **Pacing reliability:** evidence that 8-char chunks with 5 ms pacing
    materially changes injection reliability or atomicity — in particular, if
-   the Windows pacing sentinel test (Task 1, Step 7) fails, meaning
-   `Thread.Sleep(5)` quantizes to the legacy ~15.6 ms timer resolution and
-   the real feed rate drops below the 1600 units/s floor.
+   the Windows pacing sentinel test (Task 1, Step 8) fails. NOTE: raw
+   `Thread.Sleep(5)` quantizing to ~15.6 ms is now a MEASURED FACT (ledger
+   V1), already designed around via `PacingWaiter`; the sentinel therefore
+   measures the production `PacingWaiter` primitive (measured 5.22–5.37 ms;
+   ledger B1). A red sentinel means the high-res timer path is not engaging
+   on the gate host and the feed has collapsed to ~513 units/s — STOP and
+   report; do not widen the threshold or swap in a spin-wait.
 2. **Pill-click safety:** evidence that the per-chunk mouse-button check
    cannot distinguish the pill-retry click case safely (e.g. the release-wait
    prelude still self-cancels or livelocks the pill paste).
@@ -80,14 +97,17 @@ get past it, do not move it to "known limitations":
 
 | File | Change | Responsibility |
 |---|---|---|
-| `src/Winpepper.Platform/Injection/TextInjector.cs` | Modify | Constants 32/20 → 8/5; doc updates; mouse release-wait prelude; composed per-chunk predicate; `_sleep` seam fix; log messages |
+| `src/Winpepper.Platform/Injection/TextInjector.cs` | Modify | Constants 32/20 → 8/5; production sleep default → `PacingWaiter.Wait`; doc updates; mouse release-wait prelude; composed per-chunk predicate; `_sleep` seam fix; log messages |
+| `src/Winpepper.Platform/Injection/PacingWaiter.cs` | **Create** | Production pacing primitive: high-res waitable timer with `Thread.Sleep` fail-safe (ledger V1/B1) |
+| `src/Winpepper.Platform/Injection/PacingWaiterNative.cs` | **Create** | kernel32 P/Invoke surface for the waitable timer (mirrors `SendInputNative` style) |
 | `src/Winpepper.Platform/Injection/MouseButtonGuard.cs` | **Create** | Pure static mouse-button probe (`MouseButtonVks`, `AnyDown`) — deliberately separate from `ModifierGuard` |
 | `src/Winpepper.Platform/Injection/GuardedInjectionRun.cs` | Modify | Rename `modifierHeld` → `physicalInputDown`; doc covers mouse buttons |
 | `tests/Winpepper.Platform.Tests/Injection/TextInjectorGuardedTests.cs` | Modify | Retuned assertions; seam-fix test; mouse prelude/halt/fail-open tests |
 | `tests/Winpepper.Platform.Tests/Injection/MouseButtonGuardTests.cs` | **Create** | Unit tests for the new guard |
 | `tests/Winpepper.Platform.Tests/Injection/InjectionChunkerTests.cs` | Modify | Surrogate-safety case at the production chunk size 8 |
 | `tests/Winpepper.Platform.Tests/Injection/GuardedInjectionRunTests.cs` | Modify | Named-argument update for the rename |
-| `tests/Winpepper.Platform.Tests/Injection/InterChunkPacingWindowsTests.cs` | **Create** | Windows-gate sentinel: `Thread.Sleep(5)` really is ~5 ms (HALT condition 1 detector) |
+| `tests/Winpepper.Platform.Tests/Injection/PacingWaiterTests.cs` | **Create** | Cross-platform smoke tests for the waiter (non-positive no-op; fallback actually waits) |
+| `tests/Winpepper.Platform.Tests/Injection/InterChunkPacingWindowsTests.cs` | **Create** | Windows-gate sentinel: the production `PacingWaiter.Wait(5)` really waits ~5 ms (HALT condition 1 detector) |
 | `src/Winpepper.App/Hosting/PipelineHost.cs` | Modify | Comment/log accuracy only ("focus or modifier" → also mouse button). `#if WINDOWS`; compile proven by the Windows gate |
 
 **Not touched (verified by repo-wide sweep):** `InjectionChunker.cs` (chunk
@@ -101,12 +121,49 @@ unrelated (RIFF `chunkSize` in `WavWriter.cs`, audio bits-per-sample,
 ## Design rationale (load-bearing facts an implementer must know)
 
 - **Why 8/5 preserves throughput:** 8 units per 5 ms = 32 units per 20 ms =
-  1600 code units/s. The documented "1000-unit paste ≈ 0.6 s" claim stays
-  true verbatim. What changes: 125 `SendInput` calls per 1000 units instead
-  of 32 (each call now carries 16 INPUT structs — 8 code units × down+up —
-  instead of 64), and the guard checks run 4× more often. Per-chunk probe
-  cost (`GetForegroundWindow` ≈ 11 ns, `GetAsyncKeyState` comparable) totals
-  a few microseconds per paste — negligible.
+  1600 code units/s NOMINAL. What changes: 125 `SendInput` calls per 1000
+  units instead of 32 (each call now carries 16 INPUT structs — 8 code units
+  × down+up — instead of 64), and the guard checks run 4× more often. The
+  aggregate event rate is IDENTICAL (3200 INPUT events/s in both tunings —
+  ledger A4), so the drain-rate premise behind the ≤1-in-flight-chunk bleed
+  model is unchanged. Per-chunk probe cost (`GetForegroundWindow` ≈ 11 ns,
+  `GetAsyncKeyState` comparable) totals a few microseconds per paste —
+  negligible.
+- **Why `Thread.Sleep` cannot deliver the pace (measured — ledger V1/V6/B1/B2):**
+  on the gate host (Win11 26200, .NET 9.0.18), `Thread.Sleep(5)` averaged
+  15.49–15.72 ms (legacy ~15.625 ms quantum; 360/360 samples ≥ 10 ms) —
+  .NET 9 has NO managed high-resolution sleep (dotnet/runtime #67088 open).
+  Even the shipped `Thread.Sleep(20)` really waits ~30.8–31.4 ms, so the
+  shipped tuning's true feed is ~1020–1040 units/s, not 1600. A high-res
+  waitable timer (`CreateWaitableTimerExW` + `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`,
+  Win10 1803+ — below our 19041 TFM floor) measured 5.22–5.37 ms per 5 ms
+  wait WITHOUT `timeBeginPeriod` (0/240 samples ≥ 10 ms) → ~1490–1530
+  units/s, ~45% faster than shipped reality. `timeBeginPeriod(1)` was
+  considered and rejected: still only ~5.4–5.6 ms (~1450 units/s), global
+  power impact, and Win11 revokes raised resolution for occluded windows —
+  the waitable timer needs none of it. Hence `PacingWaiter` as the
+  production `sleep` default, with `Thread.Sleep` as a fail-safe (coarser
+  pacing, nothing breaks, sentinel turns red).
+- **Mouse-halt coverage boundary (ledger A8):** `GetAsyncKeyState` reads as
+  "up" (returns 0) when the foreground window belongs to a higher-integrity
+  (elevated) process or the desktop is not active — the mouse halt is
+  silently inactive for clicks INTO elevated windows. This is fail-open by
+  design; the HWND check (unaffected — `GetForegroundWindow` is not blanked)
+  still halts one chunk later, and `SendInput` is itself UIPI-blocked, so
+  text cannot bleed into an elevated window anyway. Smoke tests must use
+  non-elevated targets. Also: a slow third-party low-level mouse hook can
+  delay the async up-transition by a few polls (abort direction — safe), and
+  touchpad tap-to-click can synthesize presses shorter than the 5 ms probe
+  cadence (missed by the 0x8000 bit; HWND backstop catches the switch).
+- **Accepted-by-design (assumption ledger, `acceptable`):** (a) ANY physical
+  button-down mid-run halts, even a same-window click (caret/scrollbar) —
+  the false-positive is benign and recoverable (full text parked, pill
+  re-click pastes) and the alternative (confirming a subsequent HWND change)
+  would forfeit the pre-flip early halt that is the feature's purpose.
+  (b) The mouse release-wait prelude applies to ALL paste entry points
+  (hotkey Hold/Toggle arms too): typing while the user physically holds a
+  button is exactly as unsafe there, and the shipped modifier prelude
+  already applies to all paths.
 - **Why the pill click would self-cancel without a prelude:** the pill's
   click handler is wired to `PointerPressed` (the button-DOWN edge,
   `StatusPillWindow.xaml:13`) and `PipelineHost.TryPastePending` runs
@@ -160,6 +217,13 @@ dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform
 
 (Substitute `-class` per task; drop it to run the whole assembly.)
 
+Note (ledger V5): the `-class` filter also runs that class's PRE-EXISTING
+tests — an expected-FAIL run shows the predicted failures alongside the
+class's other passing tests (e.g. `Total: 10, Failed: 3`). Tests added in a
+NEW class need a matching `-class` argument or they silently won't run.
+Line anchors throughout this plan are approximate (they drift as tasks
+land) — always anchor on the QUOTED code, not the line number.
+
 Pre-commit gate (MANDATORY before every commit):
 
 ```bash
@@ -170,21 +234,27 @@ Expected: exit 0 and final line `LINUX SUITE: GREEN`.
 
 ---
 
-### Task 1: Retune guarded chunking to 8 code units / 5 ms
+### Task 1: Retune guarded chunking to 8 code units / 5 ms — on a real 5 ms pacing primitive
 
 **Files:**
-- Modify: `src/Winpepper.Platform/Injection/TextInjector.cs:12-23`
-- Modify: `tests/Winpepper.Platform.Tests/Injection/TextInjectorGuardedTests.cs:25-30,42,95,105-107`
+- Modify: `src/Winpepper.Platform/Injection/TextInjector.cs:12-23` (constants)
+  and the ctor's sleep default (`_sleep = sleep ?? Thread.Sleep;`, ~line 42)
+- Modify: `tests/Winpepper.Platform.Tests/Injection/TextInjectorGuardedTests.cs:25-30,43,111,128-132`
 - Modify: `tests/Winpepper.Platform.Tests/Injection/InjectionChunkerTests.cs` (append one test)
+- Create: `src/Winpepper.Platform/Injection/PacingWaiterNative.cs`
+- Create: `src/Winpepper.Platform/Injection/PacingWaiter.cs`
+- Create: `tests/Winpepper.Platform.Tests/Injection/PacingWaiterTests.cs`
 - Create: `tests/Winpepper.Platform.Tests/Injection/InterChunkPacingWindowsTests.cs`
 
 **Interfaces:**
 - Consumes: `TextInjector.ChunkCodeUnits` / `TextInjector.InterChunkPauseMs`
   (`internal const int`, visible to tests via `InternalsVisibleTo`),
   `InjectionChunker.Split(string text, int chunkSize)`.
-- Produces: `TextInjector.ChunkCodeUnits == 8`, `TextInjector.InterChunkPauseMs == 5`.
-  Later tasks rely on these exact values in sleep-sequence assertions
-  (inter-chunk pauses of `5`).
+- Produces: `TextInjector.ChunkCodeUnits == 8`, `TextInjector.InterChunkPauseMs == 5`,
+  and `PacingWaiter.Wait(int)` (internal static) as `TextInjector`'s
+  production `sleep` default. Later tasks rely on the constants in
+  sleep-sequence assertions (inter-chunk pauses of `5`); every test injects
+  its own `sleep`, so the default swap changes no test expectations.
 
 - [ ] **Step 1: Update the chunk-size-sensitive tests to the new design point (failing first)**
 
@@ -203,7 +273,7 @@ to:
         sent.Count.ShouldBe(10); // ChunkCodeUnits = 8 => ten chunks of 8
 ```
 
-Change the stale comment on line 42 (in
+Change the stale comment on line 43 (in
 `Guarded_FocusChange_MidSend_Interrupts_AndStopsSending`) from:
 
 ```csharp
@@ -217,14 +287,14 @@ to:
 ```
 
 Change the identical stale comment in `Guarded_ModifierPressed_MidSend_Interrupts`
-(line 95) the same way:
+(line 111) the same way:
 
 ```csharp
         var text = new string('a', 96); // 12 chunks of 8
 ```
 
 In `Guarded_Paces_Between_Chunks_Only` change the comment and assertion
-(lines 105 and 107) from:
+(lines ~128 and ~132) from:
 
 ```csharp
         var text = new string('a', 96); // 3 chunks => exactly 2 inter-chunk pauses
@@ -305,10 +375,13 @@ with:
     /// Pause between guarded send chunks. Load-bearing (validation ledger, A1):
     /// SendInput is queue-insertion (~µs per call), so an UNPACED loop finishes
     /// in single-digit milliseconds and the mid-paste guard could never observe
-    /// a human focus change. 5 ms per 8-unit chunk ≈ 1600 code units/s -- the
-    /// same feed rate as the original 32/20 ms tuning (a 1000-unit paste
-    /// ≈ 0.6 s), but the guard now runs 4x more often, shrinking the
-    /// worst-case bleed into a newly focused window from ~32 to ~8 units.
+    /// a human focus change. 5 ms per 8-unit chunk = 1600 code units/s nominal
+    /// -- the same design point as the original 32/20 ms tuning -- and the
+    /// guard now runs 4x more often, shrinking the worst-case bleed into a
+    /// newly focused window from ~32 to ~8 units. The 5 ms pace is real only
+    /// through PacingWaiter (the production sleep default): Thread.Sleep(5)
+    /// measurably quantizes to ~15.5 ms (bleed-hardening ledger, V1), which
+    /// would throttle the feed to ~513 units/s.
     /// </summary>
     internal const int InterChunkPauseMs = 5;
 ```
@@ -345,7 +418,174 @@ dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform
 
 Expected: PASS (chunker behavior is unchanged; this locks the 8-unit case).
 
-- [ ] **Step 6: Create the Windows pacing sentinel (HALT condition 1 detector)**
+- [ ] **Step 6: Create `PacingWaiter` — the real 5 ms pacing primitive (failing test first)**
+
+Raw `Thread.Sleep(5)` was MEASURED at ~15.5 ms on the gate host (bleed-
+hardening ledger V1 — .NET 9 has no managed high-resolution sleep), so the
+production pace comes from a high-resolution waitable timer (measured
+5.22–5.37 ms per 5 ms wait, no `timeBeginPeriod`; ledger B1/B3).
+
+Create `tests/Winpepper.Platform.Tests/Injection/PacingWaiterTests.cs`:
+
+```csharp
+using System.Diagnostics;
+using Shouldly;
+using Winpepper.Platform.Injection;
+using Xunit;
+
+namespace Winpepper.Platform.Tests.Injection;
+
+public sealed class PacingWaiterTests
+{
+    [Fact]
+    public void Wait_NonPositive_ReturnsImmediately()
+    {
+        var sw = Stopwatch.StartNew();
+        PacingWaiter.Wait(0);
+        PacingWaiter.Wait(-5);
+        sw.Stop();
+        sw.ElapsedMilliseconds.ShouldBeLessThan(50);
+    }
+
+    [Fact]
+    public void Wait_ActuallyWaits_OnEveryPlatform()
+    {
+        // On Windows this exercises the high-res timer path; elsewhere the
+        // Thread.Sleep fallback. Either way Wait(25) must actually block.
+        var sw = Stopwatch.StartNew();
+        PacingWaiter.Wait(25);
+        sw.Stop();
+        sw.ElapsedMilliseconds.ShouldBeGreaterThanOrEqualTo(15);
+    }
+}
+```
+
+Build to verify it fails (`CS0103: The name 'PacingWaiter' does not exist`),
+then create `src/Winpepper.Platform/Injection/PacingWaiterNative.cs`:
+
+```csharp
+using System.Runtime.InteropServices;
+
+namespace Winpepper.Platform.Injection;
+
+/// <summary>
+/// kernel32 surface for the high-resolution waitable timer used by
+/// <see cref="PacingWaiter"/>. CREATE_WAITABLE_TIMER_HIGH_RESOLUTION is
+/// supported on Windows 10 1803+ (below the app's 10.0.19041 TFM floor).
+/// Same LibraryImport style as <see cref="SendInputNative"/> — compiles on
+/// both TFMs; only ever invoked behind OperatingSystem.IsWindows().
+/// </summary>
+internal static partial class PacingWaiterNative
+{
+    public const uint CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x00000002;
+    public const uint TIMER_ALL_ACCESS = 0x001F0003;
+    public const uint WAIT_OBJECT_0 = 0;
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    public static partial IntPtr CreateWaitableTimerExW(
+        IntPtr timerAttributes, IntPtr timerName, uint flags, uint desiredAccess);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool SetWaitableTimer(
+        IntPtr timer, in long dueTime, int period,
+        IntPtr completionRoutine, IntPtr argToCompletionRoutine,
+        [MarshalAs(UnmanagedType.Bool)] bool resume);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    public static partial uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [LibraryImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool CloseHandle(IntPtr handle);
+}
+```
+
+and `src/Winpepper.Platform/Injection/PacingWaiter.cs`:
+
+```csharp
+namespace Winpepper.Platform.Injection;
+
+/// <summary>
+/// Production pacing primitive for the guarded injection send (the default
+/// behind TextInjector's injectable sleep seam). Thread.Sleep CANNOT pace
+/// 5 ms: measured on the Windows gate host it quantizes to the legacy
+/// ~15.6 ms timer resolution (Sleep(5) ≈ 15.5 ms avg; even the shipped
+/// Sleep(20) really waited ~31 ms), which would throttle the 8-unit/5 ms
+/// feed to ~513 code units/s (bleed-hardening ledger, V1). A high-resolution
+/// waitable timer (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, Win10 1803+)
+/// measured 5.2–5.4 ms per 5 ms wait WITHOUT raising the process timer
+/// resolution (no timeBeginPeriod; ledger B1/B3) — so it is not exposed to
+/// the Win11 occluded-window resolution revocation a raised-resolution
+/// Sleep would risk. Fail-safe: if the timer cannot be created or set, falls
+/// back to Thread.Sleep — pacing gets coarser (feed slower) but nothing
+/// breaks, and the Windows-gate sentinel (InterChunkPacingWindowsTests)
+/// turns red.
+/// </summary>
+internal static class PacingWaiter
+{
+    public static void Wait(int ms)
+    {
+        if (ms <= 0) return;
+        if (!OperatingSystem.IsWindows() || !TryHighResolutionWait(ms))
+            Thread.Sleep(ms);
+    }
+
+    private static bool TryHighResolutionWait(int ms)
+    {
+        var timer = PacingWaiterNative.CreateWaitableTimerExW(
+            IntPtr.Zero, IntPtr.Zero,
+            PacingWaiterNative.CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+            PacingWaiterNative.TIMER_ALL_ACCESS);
+        if (timer == IntPtr.Zero) return false;
+        try
+        {
+            var dueTime = -(long)ms * 10_000; // negative = relative, 100 ns units
+            if (!PacingWaiterNative.SetWaitableTimer(
+                    timer, in dueTime, 0, IntPtr.Zero, IntPtr.Zero, false))
+                return false;
+            return PacingWaiterNative.WaitForSingleObject(timer, (uint)ms + 1000)
+                   == PacingWaiterNative.WAIT_OBJECT_0;
+        }
+        finally
+        {
+            PacingWaiterNative.CloseHandle(timer);
+        }
+    }
+}
+```
+
+Run:
+
+```bash
+dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform.Tests.dll -notrait "Platform=Windows" -class "Winpepper.Platform.Tests.Injection.PacingWaiterTests"
+```
+
+Expected: PASS, 2 tests, 0 failed (Linux exercises the `Thread.Sleep`
+fallback; the Windows high-res path is proven by the Step 8 sentinel on the
+gate).
+
+- [ ] **Step 7: Wire `PacingWaiter` as TextInjector's production sleep default**
+
+In `src/Winpepper.Platform/Injection/TextInjector.cs`, in the constructor,
+change:
+
+```csharp
+        _sleep = sleep ?? Thread.Sleep;
+```
+
+to:
+
+```csharp
+        _sleep = sleep ?? PacingWaiter.Wait;
+```
+
+Re-run the `TextInjectorGuardedTests` command from Step 2. Expected: PASS,
+0 failed — every test injects its own `sleep`, so nothing changes on Linux;
+the default only matters in production and is proven on the Windows gate.
+
+- [ ] **Step 8: Create the Windows pacing sentinel (HALT condition 1 detector)**
 
 Create `tests/Winpepper.Platform.Tests/Injection/InterChunkPacingWindowsTests.cs`:
 
@@ -359,40 +599,43 @@ namespace Winpepper.Platform.Tests.Injection;
 
 /// <summary>
 /// Windows-host sentinel for the 5 ms inter-chunk pause. The guarded send
-/// paces with Thread.Sleep(InterChunkPauseMs); on .NET 8+ / Windows 10 1803+
-/// the runtime uses a high-resolution waitable timer, so Sleep(5) should wake
-/// in single-digit milliseconds regardless of the legacy ~15.6 ms timer
-/// quantum. If this test FAILS on the Windows gate, the real feed rate has
-/// dropped below the 1600 code units/s design floor (a 1000-unit paste would
-/// take ~2 s and stall the UI thread that long on a pill click). That is a
-/// fundamental problem with the 8/5 retune: STOP and report -- do not widen
-/// this threshold or swap in a spin-wait without explicit approval.
+/// paces through PacingWaiter (TextInjector's production sleep default),
+/// whose high-resolution waitable timer measured 5.22-5.37 ms per 5 ms wait
+/// on the gate host (bleed-hardening ledger, B1) -- raw Thread.Sleep(5) is
+/// NOT usable (measured ~15.5 ms; ledger V1). If this test FAILS on the
+/// Windows gate, the high-res timer path is not engaging (creation/set
+/// failure => Thread.Sleep fallback at ~15.6 ms) and the real feed rate has
+/// collapsed to ~513 code units/s (a 1000-unit paste would take ~2 s and
+/// stall the UI thread that long on a pill click). That is HALT CONDITION 1:
+/// STOP and report -- do not widen this threshold or swap in a spin-wait
+/// without explicit approval.
 /// </summary>
 [Trait("Platform", "Windows")]
 public sealed class InterChunkPacingWindowsTests
 {
     [Fact]
-    public void Sleep5ms_AverageStaysNearRequest_HighResolutionTimer()
+    public void PacingWaiter_5ms_AverageStaysNearRequest_HighResolutionTimer()
     {
         if (!OperatingSystem.IsWindows()) return;
 
         // Warm-up (JIT + timer state).
-        for (var i = 0; i < 5; i++) Thread.Sleep(TextInjector.InterChunkPauseMs);
+        for (var i = 0; i < 5; i++) PacingWaiter.Wait(TextInjector.InterChunkPauseMs);
 
         const int iterations = 40;
         var sw = Stopwatch.StartNew();
-        for (var i = 0; i < iterations; i++) Thread.Sleep(TextInjector.InterChunkPauseMs);
+        for (var i = 0; i < iterations; i++) PacingWaiter.Wait(TextInjector.InterChunkPauseMs);
         sw.Stop();
 
         var avgMs = sw.Elapsed.TotalMilliseconds / iterations;
-        // 5 ms requested; generous jitter allowance, but strictly below the
-        // ~15.6 ms legacy quantum that would break the feed-rate floor.
+        // Measured 5.22-5.37 ms avg on the gate host (0/240 samples >= 10 ms;
+        // ledger B1). 10 ms cleanly separates the high-res path from the
+        // ~15.6 ms legacy-quantum fallback that would break the feed floor.
         avgMs.ShouldBeLessThan(10.0);
     }
 }
 ```
 
-- [ ] **Step 7: Verify the sentinel is excluded on Linux and the whole assembly is green**
+- [ ] **Step 9: Verify the sentinel is excluded on Linux and the whole assembly is green**
 
 ```bash
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
@@ -400,9 +643,10 @@ dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform
 ```
 
 Expected: PASS, 0 failed (the sentinel is trait-filtered out on Linux; it
-runs on the Windows gate in Task 5).
+runs on the Windows gate in Task 5. `PacingWaiterTests` runs here and
+passes via the fallback path).
 
-- [ ] **Step 8: Full Linux suite, then commit**
+- [ ] **Step 10: Full Linux suite, then commit**
 
 ```bash
 ./scripts/linux-tests.sh
@@ -412,17 +656,25 @@ Expected: `LINUX SUITE: GREEN`, exit 0.
 
 ```bash
 git add src/Winpepper.Platform/Injection/TextInjector.cs \
+        src/Winpepper.Platform/Injection/PacingWaiter.cs \
+        src/Winpepper.Platform/Injection/PacingWaiterNative.cs \
         tests/Winpepper.Platform.Tests/Injection/TextInjectorGuardedTests.cs \
         tests/Winpepper.Platform.Tests/Injection/InjectionChunkerTests.cs \
+        tests/Winpepper.Platform.Tests/Injection/PacingWaiterTests.cs \
         tests/Winpepper.Platform.Tests/Injection/InterChunkPacingWindowsTests.cs
-git commit -m "feat(injection): retune guarded paste to 8-unit chunks at 5 ms
+git commit -m "feat(injection): retune guarded paste to 8-unit chunks at a real 5 ms pace
 
-Same 1600 code units/s feed rate as the 32/20 tuning, but the per-chunk
-halt guard now runs 4x more often -- worst-case mid-paste bleed into a
-newly focused window drops from ~32 to ~8 code units (hardens AD-1).
-Adds a design-point invariant test (feed-rate floor + bleed bound), a
-surrogate-safety case at the production chunk size, and a Windows-gate
-sentinel proving Thread.Sleep(5) wakes near-request on the host.
+Nominal feed rate stays at the 1600 code units/s design point, and the
+per-chunk halt guard now runs 4x more often -- worst-case mid-paste bleed
+into a newly focused window drops from ~32 to ~8 code units (hardens
+AD-1). Thread.Sleep cannot deliver the pace (measured ~15.5 ms for
+Sleep(5) on the gate host; even the shipped 32/20 tuning really waited
+~31 ms/chunk = ~1030 units/s), so the production sleep default becomes
+PacingWaiter: a high-resolution waitable timer (measured 5.2-5.4 ms,
+~1500 units/s -- 45% faster than shipped reality) with a Thread.Sleep
+fail-safe. Adds a design-point invariant test, a surrogate-safety case
+at the production chunk size, waiter fallback tests, and a Windows-gate
+sentinel proving the production waiter wakes near-request on the host.
 
 Linux suite green."
 ```
@@ -1060,7 +1312,7 @@ comments/log strings and runs the full gates.
 
 Three string edits and two comment edits (no logic changes):
 
-In `TryPastePending` (~line 56), change:
+In `TryPastePending` (~line 414), change:
 
 ```csharp
             _log.LogInformation(
@@ -1074,7 +1326,7 @@ to:
                 "Pending paste interrupted (focus, modifier, or mouse-button change); slot kept with full text for another click");
 ```
 
-In the hold arm (`HotkeyEventKind.HoldUp`, ~lines 697–708 of the current
+In the hold arm (`HotkeyEventKind.HoldUp`, ~lines 708–744 of the current
 file), change the comment:
 
 ```csharp
@@ -1103,8 +1355,8 @@ to:
 
 Make the identical comment + log edits in the toggle arm
 (`HotkeyEventKind.Toggle` — the byte-identical block with `final2`/`outcome2`
-locals). Use grep to find every remaining occurrence and confirm none are
-missed:
+locals, ~lines 1093–1127). Use grep to find every remaining occurrence and
+confirm none are missed:
 
 ```bash
 grep -rn "focus or modifier" src/
@@ -1143,23 +1395,30 @@ proving the PipelineHost and injection changes compile on
 `net9.0-windows` — and runs all test DLLs including the Windows-trait
 tests).
 
-**This run executes `InterChunkPacingWindowsTests.Sleep5ms_AverageStaysNearRequest_HighResolutionTimer`
-for the first time.** If it FAILS: this is HALT CONDITION 1 — the 5 ms pause
-quantizes to the legacy timer resolution and the feed-rate floor is broken.
-STOP and report per the halt conditions at the top of this plan. Do not
-widen the threshold, do not swap in a spin-wait, do not proceed.
+**This run executes `InterChunkPacingWindowsTests.PacingWaiter_5ms_AverageStaysNearRequest_HighResolutionTimer`
+for the first time in the gate's test-host process.** The same primitive
+already measured 5.22–5.37 ms in standalone host probes (ledger B1), so a
+PASS is expected. If it FAILS: this is HALT CONDITION 1 — the high-res timer
+path is not engaging in this process and the pace has collapsed to the
+~15.6 ms legacy quantum. STOP and report per the halt conditions at the top
+of this plan. Do not widen the threshold, do not swap in a spin-wait, do not
+proceed.
 
 - [ ] **Step 4: Manual Windows smoke checklist (behavioral proof for the `#if WINDOWS` glue)**
 
 Perform on the Windows host with the freshly built app:
 
 1. Dictate a long sentence (>200 chars) into Notepad; let it complete —
-   full text lands, pacing feels instant (~0.6 s per 1000 chars, same as
-   before the change).
+   full text lands, pacing feels instant (~0.65–0.7 s per 1000 chars —
+   slightly FASTER than before the change: the shipped tuning actually ran
+   ~1 s per 1000 chars due to sleep quantization, ledger B2).
 2. Dictate a long sentence, then click into a DIFFERENT window mid-paste —
    typing stops with visibly fewer stray characters in the new window than
    the old ~dozen-plus (bound is now ~8), pill shows "Click to paste",
-   clicking it pastes the FULL text.
+   clicking it pastes the FULL text. Use a NON-elevated target window:
+   clicks into elevated windows are invisible to the mouse probe (fail-open
+   by design, ledger A8 — the HWND check still halts one chunk later, and
+   SendInput cannot type into elevated windows anyway).
 3. Dictate, Alt+Tab mid-paste — still halts early (modifier path unchanged),
    full text parked.
 4. Click the pending pill normally — the full text pastes into the focused
@@ -1169,9 +1428,13 @@ Perform on the Windows host with the freshly built app:
 6. Click the pending pill and keep the button held >2 s — nothing is typed,
    the pill stays in "Click to paste"; release and click again — full text
    pastes (timeout-abort path keeps the slot).
+7. Double-click the pending pill quickly — at worst the first paste is
+   benignly interrupted with the slot kept; a follow-up single click pastes
+   the full text (ledger A7 — no livelock, no lost text).
 
-If item 4 or 5 fails (pill click self-cancels or loops): HALT CONDITION 2 —
-stop and report. If item 2 shows no bleed reduction: HALT CONDITION 3.
+If item 4 or 5 fails (pill click self-cancels or loops), or item 7 livelocks
+(repeated clicking never pastes): HALT CONDITION 2 — stop and report. If
+item 2 shows no bleed reduction: HALT CONDITION 3.
 
 ---
 
@@ -1204,6 +1467,9 @@ Checked the plan against the spec from a fresh read:
    `SendInput`, `Thread.Sleep`) are exercised end-to-end by the Windows gate
    build + the Task 5 smoke checklist — same verification gradient the
    shipped predecessor feature used. No stubs awaiting replacement.
+   (`PacingWaiter`'s Windows high-res path is likewise seam-independent
+   production code, proven by the Task 1 Step 8 sentinel on the Windows gate
+   and by direct host measurement during validation — ledger B1.)
 3. **Placeholder scan:** no TBDs, no "add error handling", every code step
    shows the code, every command shows expected output.
 4. **Type consistency:** `MouseButtonGuard.AnyDown(Func<int,bool>)` (Task 2)

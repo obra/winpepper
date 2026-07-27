@@ -149,5 +149,27 @@ public class FallbackStreamingTranscriberTests
         configError.ShouldNotBeNull();
     }
 
+    [Fact]
+    public async Task PushAfterDispose_IsANoOp_AndNeverReachesTheDisposedInner()
+    {
+        var primary = new FakeStreamingTranscriber("assemblyai/universal-streaming");
+        var local = FakeTranscriber.Returning("local", "LOCAL");
+        var f = Wrap(primary, local);
+
+        var session = await f.StartSessionAsync(TestContext.Current.CancellationToken);
+        await session.DisposeAsync(); // the pipeline abandons the dictation
+
+        // The coordinator's pump legitimately drains queued frames after an
+        // abandon (it pushes via its own local reference). That must be a
+        // benign no-op — not a push into the DISPOSED inner socket session,
+        // whose ObjectDisposedException would poison _failure and log a
+        // spurious WRN (and is a latent fallback-conversion trap if the
+        // finish/dispose ordering ever changes).
+        await session.PushAsync(new float[800], TestContext.Current.CancellationToken);
+
+        primary.LastSession!.Pushes.ShouldBe(0);
+        primary.LastSession.Disposed.ShouldBeTrue();
+    }
+
     private sealed class UnreachableException : Exception { }
 }

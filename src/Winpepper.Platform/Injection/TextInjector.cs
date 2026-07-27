@@ -9,18 +9,27 @@ public sealed class TextInjector
     private const int ModifierWaitTimeoutMs = 1500;
     private const int ModifierWaitPollMs = 15;
 
-    /// <summary>UTF-16 code units per guarded send chunk (Task: mid-paste focus fallback).</summary>
-    internal const int ChunkCodeUnits = 32;
+    /// <summary>
+    /// UTF-16 code units per guarded send chunk. Also the worst-case bleed
+    /// bound: at most ~one in-flight chunk can land in a newly focused window
+    /// when the user switches mid-paste (mid-paste focus fallback, AD-1 --
+    /// hardened from 32 to 8 by the bleed-hardening task).
+    /// </summary>
+    internal const int ChunkCodeUnits = 8;
 
     /// <summary>
     /// Pause between guarded send chunks. Load-bearing (validation ledger, A1):
     /// SendInput is queue-insertion (~µs per call), so an UNPACED loop finishes
     /// in single-digit milliseconds and the mid-paste guard could never observe
-    /// a human focus change. 20 ms/chunk ≈ 1600 code units/s -- far faster than
-    /// any typist, slow enough that a long paste spans the human reaction
-    /// window (a 1000-unit paste ≈ 0.6 s).
+    /// a human focus change. 5 ms per 8-unit chunk = 1600 code units/s nominal
+    /// -- the same design point as the original 32/20 ms tuning -- and the
+    /// guard now runs 4x more often, shrinking the worst-case bleed into a
+    /// newly focused window from ~32 to ~8 units. The 5 ms pace is real only
+    /// through PacingWaiter (the production sleep default): Thread.Sleep(5)
+    /// measurably quantizes to ~15.5 ms (bleed-hardening ledger, V1), which
+    /// would throttle the feed to ~513 units/s.
     /// </summary>
-    internal const int InterChunkPauseMs = 20;
+    internal const int InterChunkPauseMs = 5;
 
     private readonly ILogger<TextInjector> _log;
     private readonly Func<int, bool> _isKeyDown;
@@ -39,7 +48,7 @@ public sealed class TextInjector
         _isKeyDown = isKeyDown ?? DefaultKeyProbe;
         _foregroundHwnd = foregroundHwnd ?? DefaultForegroundProbe;
         _sendChunk = sendChunk ?? SendChunkViaSendInput;
-        _sleep = sleep ?? Thread.Sleep;
+        _sleep = sleep ?? PacingWaiter.Wait;
     }
 
     private static bool DefaultKeyProbe(int vk)

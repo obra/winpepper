@@ -27,7 +27,7 @@ public class TextInjectorGuardedTests
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 
         string.Concat(sent).ShouldBe(text);
-        sent.Count.ShouldBe(3); // ChunkCodeUnits = 32 => 32 + 32 + 16
+        sent.Count.ShouldBe(10); // ChunkCodeUnits = 8 => ten chunks of 8
     }
 
     [Fact]
@@ -40,7 +40,7 @@ public class TextInjectorGuardedTests
         var injector = NewInjector(
             () => ++probes <= 2 ? 42L : 99L,
             c => { sent.Add(c); return true; });
-        var text = new string('a', 96); // 3 chunks of 32
+        var text = new string('a', 96); // 12 chunks of 8
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Interrupted);
 
@@ -108,7 +108,7 @@ public class TextInjectorGuardedTests
             foregroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; },
             sleep: _ => { });
-        var text = new string('a', 96); // 3 chunks of 32
+        var text = new string('a', 96); // 12 chunks of 8
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Interrupted);
 
@@ -125,11 +125,11 @@ public class TextInjectorGuardedTests
             foregroundHwnd: () => 42,
             sendChunk: _ => true,
             sleep: sleeps.Add);
-        var text = new string('a', 96); // 3 chunks => exactly 2 inter-chunk pauses
+        var text = new string('a', 96); // 12 chunks => exactly 11 inter-chunk pauses
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 
-        sleeps.ShouldBe(new[] { 20, 20 }); // TextInjector.InterChunkPauseMs
+        sleeps.ShouldBe(new[] { 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5 }); // 11 x TextInjector.InterChunkPauseMs
     }
 
     [Fact]
@@ -141,5 +141,17 @@ public class TextInjectorGuardedTests
         var probes = 0;
         var moving = NewInjector(() => ++probes == 1 ? 42L : 99L, _ => true);
         moving.TryInject("hi").ShouldBeFalse();
+    }
+
+    [Fact]
+    public void DesignPoint_FeedRateFloor_And_BleedBound()
+    {
+        // Spec constraint: the effective feed rate must never drop below the
+        // original 1600 code units/s design point, and the worst-case bleed
+        // into a newly focused window (<= 1 in-flight chunk, prior ledger
+        // AD-1, hardened by this task) must not regress past 8 code units.
+        (TextInjector.ChunkCodeUnits * 1000 / TextInjector.InterChunkPauseMs)
+            .ShouldBeGreaterThanOrEqualTo(1600);
+        TextInjector.ChunkCodeUnits.ShouldBeLessThanOrEqualTo(8);
     }
 }

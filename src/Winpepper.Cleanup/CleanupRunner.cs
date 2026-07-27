@@ -94,13 +94,20 @@ public sealed class CleanupRunner
         //    messages separately. Bug-3 fix-(iv): a proper system role stops the
         //    0.5B model pattern-completing the examples.
         var basePrompt = BasePrompts.ForProfile(options.Profile, options.CustomBasePrompt);
-        var systemPrompt = PromptBuilder.BuildSystem(basePrompt, corrections, windowContext);
+        var systemPrompt = PromptBuilder.BuildSystem(basePrompt, corrections, windowContext, out var wcTruncation);
         var userPrompt = PromptBuilder.BuildUser(rawTranscript);
         var assembled = systemPrompt + "\n\n" + userPrompt;
+        if (wcTruncation.Truncated)
+        {
+            _log.LogWarning("Window context truncated from {OriginalChars} to {RetainedChars} chars to fit the prompt budget",
+                wcTruncation.OriginalLength, wcTruncation.RetainedLength);
+        }
 
         // 3) Compute the max-new-tokens budget per spec §5.5.
         var maxTokens = Math.Min(options.MaxNewTokensCap, (int)Math.Ceiling(rawTranscript.Length * 2.0));
         if (maxTokens < 1) maxTokens = 1;
+        _log.LogDebug("Cleanup prompt budget: system {SystemChars} chars, user {UserChars} chars, maxNewTokens {MaxTokens}",
+            systemPrompt.Length, userPrompt.Length, maxTokens);
 
         // 4) Call the backend with a timeout token.
         string raw;

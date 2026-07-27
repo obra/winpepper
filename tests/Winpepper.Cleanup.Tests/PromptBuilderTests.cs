@@ -85,6 +85,33 @@ public class PromptBuilderTests
     }
 
     [Fact]
+    public void BuildSystem_LongWindowContext_ReportsTruncation()
+    {
+        var sys = PromptBuilder.BuildSystem("BASE", CorrectionsData.Empty,
+            new string('x', 40_000), out var truncation);
+
+        truncation.Truncated.ShouldBeTrue();
+        truncation.OriginalLength.ShouldBe(40_000);
+        truncation.RetainedLength.ShouldBe(PromptBuilder.WindowContextMaxChars);
+        // The overload must produce the same prompt text as the base method.
+        sys.ShouldBe(PromptBuilder.BuildSystem("BASE", CorrectionsData.Empty, new string('x', 40_000)));
+    }
+
+    [Fact]
+    public void BuildSystem_ShortWindowContext_ReportsNoTruncation()
+    {
+        PromptBuilder.BuildSystem("BASE", CorrectionsData.Empty, "WINDOW", out var truncation);
+        truncation.Truncated.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void BuildSystem_NullWindowContext_ReportsNoTruncation()
+    {
+        PromptBuilder.BuildSystem("BASE", CorrectionsData.Empty, null, out var truncation);
+        truncation.Truncated.ShouldBeFalse();
+    }
+
+    [Fact]
     public void BuildUser_WrapsAndTrimsTranscript()
     {
         PromptBuilder.BuildUser("  hello world  ")

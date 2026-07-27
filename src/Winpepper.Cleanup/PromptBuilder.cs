@@ -24,6 +24,18 @@ public static class PromptBuilder
         string basePrompt,
         CorrectionsData corrections,
         string? windowContext)
+        => BuildSystem(basePrompt, corrections, windowContext, out _);
+
+    /// <summary>
+    /// Same as <see cref="BuildSystem(string, CorrectionsData, string?)"/> but
+    /// also reports whether (and by how much) the window context was truncated,
+    /// so callers can log it instead of losing screen context silently.
+    /// </summary>
+    public static string BuildSystem(
+        string basePrompt,
+        CorrectionsData corrections,
+        string? windowContext,
+        out WindowContextTruncation truncation)
     {
         var sb = new StringBuilder(capacity: 8192);
 
@@ -49,7 +61,7 @@ public static class PromptBuilder
             sb.Append("\n</CORRECTION-HINTS>");
         }
 
-        var truncated = TruncateWindowContext(windowContext);
+        var truncated = TruncateWindowContext(windowContext, out truncation);
         if (!string.IsNullOrEmpty(truncated))
         {
             sb.Append("\n\n<OCR-RULES>\n")
@@ -68,11 +80,26 @@ public static class PromptBuilder
     public static string BuildUser(string userInput)
         => "<USER-INPUT>\n" + (userInput ?? string.Empty).Trim() + "\n</USER-INPUT>";
 
-    private static string? TruncateWindowContext(string? raw)
+    private static string? TruncateWindowContext(string? raw, out WindowContextTruncation truncation)
     {
+        truncation = default;
         if (string.IsNullOrWhiteSpace(raw)) return null;
         var trimmed = raw!.Trim();
         if (trimmed.Length <= WindowContextMaxChars) return trimmed;
+        truncation = new WindowContextTruncation(
+            Truncated: true,
+            OriginalLength: trimmed.Length,
+            RetainedLength: WindowContextMaxChars);
         return trimmed.Substring(0, WindowContextMaxChars);
     }
 }
+
+/// <summary>
+/// Whether (and by how much) the window-context body was cut to fit the
+/// <see cref="PromptBuilder.WindowContextMaxChars"/> budget. Lengths are
+/// measured after trimming. <c>default</c> means "not truncated".
+/// </summary>
+public readonly record struct WindowContextTruncation(
+    bool Truncated,
+    int OriginalLength,
+    int RetainedLength);

@@ -183,18 +183,33 @@ public sealed class AppShell : IDisposable
         try
         {
             // Plan 2's LlamaCleanupBackend (line 2141) is constructed with the path to
-            // the .gguf file (not the directory). The cleanup model lives at
-            // <Root>/models/cleanup/<name>.gguf. We pick the first .gguf in that dir.
-            var cleanupModelDir = Path.Combine(AppPaths.Root, "models", "cleanup");
-            var modelFile = Directory.Exists(cleanupModelDir)
-                ? Directory.EnumerateFiles(cleanupModelDir, "*.gguf", SearchOption.AllDirectories).FirstOrDefault()
-                : null;
-            if (modelFile is not null)
+            // the .gguf file (not the directory). Cleanup models install to
+            // <Root>/models/cleanup/<key>/<file>.gguf; the registry plus the user's
+            // CleanupModelName setting decide which one to load (unknown names fall
+            // back to the registry default, mirroring the ASR repair above), so the
+            // model loaded here always matches the name PipelineHost stamps on
+            // history records.
+            var cleanupResolution = Winpepper.Models.CleanupModelPathResolver.Resolve(
+                modelsServices.Registry, modelsServices.ModelsRoot, settings.CleanupModelName);
+            if (cleanupResolution.FellBackToDefault)
+            {
+                factory.CreateLogger("Winpepper.App").LogWarning(
+                    "Unknown cleanup model {ConfiguredModel}; using default {DefaultModel}",
+                    settings.CleanupModelName, cleanupResolution.ResolvedName);
+            }
+            if (cleanupResolution.GgufPath is { } modelFile && File.Exists(modelFile))
             {
                 var backend = new Winpepper.Cleanup.LlamaCleanupBackend(modelFile,
                     factory.CreateLogger<Winpepper.Cleanup.LlamaCleanupBackend>());
                 cleanup = new Winpepper.Cleanup.CleanupRunner(backend,
                     factory.CreateLogger<Winpepper.Cleanup.CleanupRunner>());
+            }
+            else
+            {
+                factory.CreateLogger("Winpepper.App").LogWarning(
+                    "Cleanup model {ModelName} not installed (expected {ExpectedPath}); falling back to raw transcripts.",
+                    cleanupResolution.ResolvedName,
+                    cleanupResolution.GgufPath ?? "<descriptor declares no .gguf file>");
             }
         }
         catch (Exception ex)

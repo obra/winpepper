@@ -69,6 +69,37 @@ public class CleanupRunnerTests
     }
 
     [Fact]
+    public async Task Run_WindowContextOverBudget_LogsTruncationWarning()
+    {
+        var log = new CollectingLogger<CleanupRunner>();
+        var runner = new CleanupRunner(
+            new FakeLlamaCleanupBackend { Output = "Hello there world now." }, log);
+        var options = DefaultOptions() with { WindowContextEnabled = true };
+        var context = Task.FromResult<string?>(
+            new string('x', PromptBuilder.WindowContextMaxChars + 1_000));
+
+        await runner.RunAsync("um hello there world now",
+            CorrectionsData.Empty, context, options, CancellationToken.None);
+
+        log.Warnings.ShouldContain(w => w.Contains("truncated", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task Run_WindowContextWithinBudget_LogsNoTruncationWarning()
+    {
+        var log = new CollectingLogger<CleanupRunner>();
+        var runner = new CleanupRunner(
+            new FakeLlamaCleanupBackend { Output = "Hello there world now." }, log);
+        var options = DefaultOptions() with { WindowContextEnabled = true };
+        var context = Task.FromResult<string?>("small window context");
+
+        await runner.RunAsync("um hello there world now",
+            CorrectionsData.Empty, context, options, CancellationToken.None);
+
+        log.Warnings.ShouldBeEmpty();
+    }
+
+    [Fact]
     public async Task Run_LlmReturnsCleanText_UsesLlmPath()
     {
         var runner = NewRunner(new FakeLlamaCleanupBackend { Output = "Hello world." });

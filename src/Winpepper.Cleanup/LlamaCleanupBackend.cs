@@ -95,7 +95,12 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
             await foreach (var token in executor.InferAsync(templated, inferenceParams, ct).ConfigureAwait(false))
             {
                 sb.Append(token);
-                if (sb.Length > maxNewTokens * 8) break; // hard char cap as belt-and-braces
+                if (sb.Length > maxNewTokens * 8) // hard char cap as belt-and-braces
+                {
+                    _log.LogWarning("Cleanup generation hit the hard char cap ({Chars} chars > {MaxTokens} maxNewTokens * 8); output truncated mid-stream",
+                        sb.Length, maxNewTokens);
+                    break;
+                }
             }
             return sb.ToString();
         }

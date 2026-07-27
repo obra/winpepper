@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Windows TFM: LlamaCleanupBackend is #if WINDOWS (LLamaSharp Vulkan backend).
+         Deliberately NOT in winpepper.sln, same as scripts/asr-latency-bench. -->
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>CleanupLatencyBench</RootNamespace>
+    <AssemblyName>CleanupLatencyBench</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Corrections\Winpepper.Corrections.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Models\Winpepper.Models.csproj" />
+  </ItemGroup>
+</Project>

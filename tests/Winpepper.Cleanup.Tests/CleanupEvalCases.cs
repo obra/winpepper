@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using CleanupLatencyBench;
 using Shouldly;
 using Winpepper.Models;
 
@@ -120,51 +121,42 @@ public static class CleanupEvalCases
         return false;
     }
 
+    // Raw dictation texts live in the BCL-only shared statements file
+    // (scripts/cleanup-latency-bench/CleanupEvalStatements.cs) so the cleanup
+    // latency bench replays the exact same texts -- SINGLE SOURCE OF TRUTH.
+    // CleanupEvalStatementsTests guards that both sets stay in lockstep.
     private static IReadOnlyList<CleanupEvalCase> Build() => new[]
     {
         // ---- Chatbot traps ------------------------------------------------
-        Trap("trap-synonym-question", "What is a synonym for whisper?",
-             "synonym", "whisper"),
-        Trap("trap-joke-request", "Tell me a joke about programming.",
-             "joke", "programming"),
-        Trap("trap-email-help", "Can you help me write an email to my boss about the project deadline?",
-             "email", "boss", "deadline"),
-        Trap("trap-summarize-command", "Summarize the key points from yesterday's meeting.",
-             "summarize", "meeting"),
-        Case("trap-todo-command", "Create a todo list for my week.", (raw, cleaned) =>
+        Trap("trap-synonym-question", "synonym", "whisper"),
+        Trap("trap-joke-request", "joke", "programming"),
+        Trap("trap-email-help", "email", "boss", "deadline"),
+        Trap("trap-summarize-command", "summarize", "meeting"),
+        Case("trap-todo-command", (raw, cleaned) =>
         {
             RetainsContent(raw, cleaned, 0.6);
             KeepPattern(cleaned, @"\bto[- ]?do\b", "todo");
             KeepWord(cleaned, "week");
         }),
-        Trap("trap-git-question", "How do I revert the last commit in git?",
-             "revert", "commit", "git"),
-        Trap("trap-poem-request", "Please write a short poem about the ocean.",
-             "poem", "ocean"),
-        Trap("trap-repeat-request", "Hey can you repeat that back to me?",
-             "repeat", "back"),
+        Trap("trap-git-question", "revert", "commit", "git"),
+        Trap("trap-poem-request", "poem", "ocean"),
+        Trap("trap-repeat-request", "repeat", "back"),
 
         // ---- Self-correction ----------------------------------------------
-        Case("corr-recipient-scratch",
-             "Send the report to Becca scratch that send it to Pete before the meeting.",
-             (raw, cleaned) =>
+        Case("corr-recipient-scratch", (raw, cleaned) =>
         {
             KeepWord(cleaned, "Pete");
             DropWord(cleaned, "Becca");
             KeepWord(cleaned, "report");
         }),
-        Case("corr-deadline-nevermind",
-             "The deadline is Tuesday no wait never mind the deadline is Thursday for the launch.",
-             (raw, cleaned) =>
+        Case("corr-deadline-nevermind", (raw, cleaned) =>
         {
             KeepWord(cleaned, "Thursday");
             DropWord(cleaned, "Tuesday");
             KeepWord(cleaned, "deadline");
             KeepWord(cleaned, "launch");
         }),
-        Case("corr-absent-nothing-deleted",
-             "That last change broke the build so revert it and rerun the tests.",
-             (raw, cleaned) =>
+        Case("corr-absent-nothing-deleted", (raw, cleaned) =>
         {
             // No self-correction command spoken: nothing may be deleted.
             RetainsContent(raw, cleaned, 0.8);
@@ -172,9 +164,7 @@ public static class CleanupEvalCases
             KeepWord(cleaned, "build");
             KeepWord(cleaned, "tests");
         }),
-        Case("corr-registry-example",
-             "write me a function called add_numbers no wait scratch that call it sum",
-             (raw, cleaned) =>
+        Case("corr-registry-example", (raw, cleaned) =>
         {
             KeepWord(cleaned, "sum");
             DropPattern(cleaned, @"add[_ ]?numbers", "add_numbers");
@@ -182,9 +172,7 @@ public static class CleanupEvalCases
         }),
 
         // ---- Filler removal -----------------------------------------------
-        Case("filler-um-youknow",
-             "So um the meeting is like at 3pm you know on Tuesday afternoon.",
-             (raw, cleaned) =>
+        Case("filler-um-youknow", (raw, cleaned) =>
         {
             DropWord(cleaned, "um");
             DropWord(cleaned, "you know");
@@ -192,9 +180,7 @@ public static class CleanupEvalCases
             KeepPattern(cleaned, "3", "3 (the time)");
             KeepWord(cleaned, "Tuesday");
         }),
-        Case("filler-basically-um",
-             "Basically we just need to um finalize the budget report by Friday morning.",
-             (raw, cleaned) =>
+        Case("filler-basically-um", (raw, cleaned) =>
         {
             DropWord(cleaned, "um");
             DropWord(cleaned, "basically");
@@ -202,9 +188,7 @@ public static class CleanupEvalCases
             KeepWord(cleaned, "budget");
             KeepWord(cleaned, "Friday");
         }),
-        Case("filler-uh-sortof",
-             "I think we should uh sort of reconsider the whole design you know.",
-             (raw, cleaned) =>
+        Case("filler-uh-sortof", (raw, cleaned) =>
         {
             DropWord(cleaned, "uh");
             DropWord(cleaned, "sort of");
@@ -212,9 +196,7 @@ public static class CleanupEvalCases
             KeepWord(cleaned, "reconsider");
             KeepWord(cleaned, "design");
         }),
-        Case("filler-um-uh-server",
-             "The server is um down again and uh we need to restart it right now.",
-             (raw, cleaned) =>
+        Case("filler-um-uh-server", (raw, cleaned) =>
         {
             DropWord(cleaned, "um");
             DropWord(cleaned, "uh");
@@ -223,9 +205,7 @@ public static class CleanupEvalCases
         }),
 
         // ---- Guards ---------------------------------------------------------
-        Case("guard-embedded-question",
-             "In my presentation I will ask the audience what is a synonym for happy and see what they say.",
-             (raw, cleaned) =>
+        Case("guard-embedded-question", (raw, cleaned) =>
         {
             // Echoes trap phrasing but IS legit content: reproduce, don't answer.
             RetainsContent(raw, cleaned, 0.7);
@@ -234,11 +214,7 @@ public static class CleanupEvalCases
             KeepWord(cleaned, "presentation");
             KeepWord(cleaned, "audience");
         }),
-        Case("guard-long-multisentence",
-             "Okay so um first I want to thank everyone for joining the call today. " +
-             "We covered the quarterly numbers and honestly they look better than expected. " +
-             "Next week we need to finalize the hiring plan and uh send the summary to the leadership team before Friday.",
-             (raw, cleaned) =>
+        Case("guard-long-multisentence", (raw, cleaned) =>
         {
             // Full reproduction: high retention and plausible length ratio.
             RetainsContent(raw, cleaned, 0.75);
@@ -255,16 +231,21 @@ public static class CleanupEvalCases
     // ---- builders ---------------------------------------------------------
 
     /// <summary>Every case, whatever its family, must not come back as a
-    /// chatbot answer; family-specific checks are layered on top.</summary>
-    private static CleanupEvalCase Case(string name, string raw, Action<string, string> verify) =>
-        new(name, raw, cleaned =>
+    /// chatbot answer; family-specific checks are layered on top. The raw
+    /// transcript is looked up by name in the shared statements file
+    /// (throws loudly on a case/statement mismatch).</summary>
+    private static CleanupEvalCase Case(string name, Action<string, string> verify)
+    {
+        var raw = CleanupEvalStatements.RawFor(name);
+        return new(name, raw, cleaned =>
         {
             NotChatbot(raw, cleaned);
             verify(raw, cleaned);
         });
+    }
 
-    private static CleanupEvalCase Trap(string name, string raw, params string[] keepWords) =>
-        Case(name, raw, (r, cleaned) =>
+    private static CleanupEvalCase Trap(string name, params string[] keepWords) =>
+        Case(name, (r, cleaned) =>
         {
             RetainsContent(r, cleaned, 0.6);
             foreach (var w in keepWords) KeepWord(cleaned, w);

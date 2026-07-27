@@ -17,4 +17,13 @@
     <ProjectReference Include="..\..\src\Winpepper.Corrections\Winpepper.Corrections.csproj" />
     <ProjectReference Include="..\..\src\Winpepper.Models\Winpepper.Models.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Linked-file rule (docs/plans/2026-07-26-asr-eval-framework.md): pure-logic
+         bench files under scripts/ are BCL-only and compiled into this test
+         project so the Linux gate covers them. -->
+    <Compile Include="..\..\scripts\cleanup-latency-bench\CleanupBenchArgs.cs" Link="Bench\CleanupBenchArgs.cs" />
+    <Compile Include="..\..\scripts\cleanup-latency-bench\CleanupBenchStatements.cs" Link="Bench\CleanupBenchStatements.cs" />
+    <Compile Include="..\..\scripts\cleanup-latency-bench\CleanupBenchResults.cs" Link="Bench\CleanupBenchResults.cs" />
+    <Compile Include="..\..\scripts\cleanup-latency-bench\CleanupEvalStatements.cs" Link="Bench\CleanupEvalStatements.cs" />
+  </ItemGroup>
 </Project>

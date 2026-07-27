@@ -10,6 +10,23 @@ public sealed class TextInjector
     private const int ModifierWaitPollMs = 15;
 
     /// <summary>
+    /// How long to wait for a physically-held mouse button to be released
+    /// before the guarded send starts. The pending-paste pill fires on
+    /// PointerPressed (the button-DOWN edge) and TryPastePending runs
+    /// synchronously inside that handler, so at entry the initiating button
+    /// is still down -- without this wait the mouse half of the halt
+    /// predicate would self-cancel every pill click (deterministically, not
+    /// as a race). GetAsyncKeyState reads physical device state, so the
+    /// release is observable even though the blocked UI thread never pumps
+    /// the pointer-up message. Unlike modifiers there is no safe
+    /// neutralization on timeout (a synthesized button-up would fabricate a
+    /// click), so a button still held past this budget aborts the run and
+    /// the text stays pending.
+    /// </summary>
+    private const int MouseWaitTimeoutMs = 1500;
+    private const int MouseWaitPollMs = 15;
+
+    /// <summary>
     /// UTF-16 code units per guarded send chunk. Also the worst-case bleed
     /// bound: at most ~one in-flight chunk can land in a newly focused window
     /// when the user switches mid-paste (mid-paste focus fallback, AD-1 --
@@ -71,19 +88,27 @@ public sealed class TextInjector
     /// loop is queue-insertion-fast and finishes in milliseconds) and
     /// checking before every chunk that (a) no physical modifier has gone
     /// down (the leading edge of Alt+Tab -- injected Unicode is delivered
-    /// with the current physical modifier state applied) and (b) the window
+    /// with the current physical modifier state applied), (b) no physical
+    /// mouse button has gone down (the leading edge of a click-to-switch --
+    /// the button is down BEFORE the foreground flips), and (c) the window
     /// that was foreground when this method was entered is STILL foreground.
-    /// If either check trips, the remaining chunks are not sent and
+    /// If any check trips, the remaining chunks are not sent and
     /// <see cref="InjectionRunOutcome.Interrupted"/> is returned so the
     /// caller can hold the WHOLE original text as a pending paste.
-    /// The baseline is captured at method entry -- BEFORE the modifier-release
-    /// wait (up to 1500 ms) -- so a focus change during that wait is caught
-    /// before the first keystroke. The modifier check cannot re-trip on the
-    /// prelude's own timeout: NeutralizeHeldModifiers synthesizes KEYUPs, so
-    /// after it returns the observable modifier state is up. Fail-open: if
-    /// the foreground window cannot be determined (probe returns 0), the
-    /// HWND guard is disabled and the paste proceeds exactly as it did
-    /// before this feature.
+    /// The baseline is captured at method entry -- BEFORE the modifier
+    /// release-wait (up to 1500 ms) and the mouse release-wait (up to
+    /// 1500 ms) -- so a focus change during either wait is caught before the
+    /// first keystroke. The modifier check cannot re-trip on its prelude's
+    /// timeout: NeutralizeHeldModifiers synthesizes KEYUPs, so after it
+    /// returns the observable modifier state is up. The mouse check cannot
+    /// self-trip on the pill click that requested the paste: the mouse
+    /// prelude waits for the initiating button's release before the run
+    /// starts, and a button still held past the timeout ABORTS the run
+    /// (Interrupted; the pending slot keeps the full text) because there is
+    /// no safe mouse neutralization -- a synthesized button-up would
+    /// fabricate a click. Fail-open: if the foreground window cannot be
+    /// determined (probe returns 0) the HWND guard is disabled, and a
+    /// key/button probe that cannot observe reports "up" and never halts.
     /// </summary>
     public InjectionRunOutcome TryInjectGuarded(string text)
     {
@@ -91,16 +116,28 @@ public sealed class TextInjector
 
         var hwndAtSendStart = _foregroundHwnd();
         NeutralizeHeldModifiers();
+        // Mouse prelude: never START typing while a button is physically
+        // down (the pill click that requested this paste is the common
+        // case). Timeout => abort, keep the text pending -- never spray.
+        if (!ModifierGuard.WaitForRelease(() => MouseButtonGuard.AnyDown(_isKeyDown),
+                MouseWaitTimeoutMs, MouseWaitPollMs, _sleep))
+        {
+            _log.LogInformation(
+                "Mouse button still held {Timeout}ms after injection was requested; not typing -- text stays pending",
+                MouseWaitTimeoutMs);
+            return InjectionRunOutcome.Interrupted;
+        }
         var chunks = InjectionChunker.Split(text, ChunkCodeUnits);
         var outcome = GuardedInjectionRun.Execute(
             chunks,
             hwndAtSendStart,
             _foregroundHwnd,
             _sendChunk,
-            modifierHeld: () => ModifierGuard.AnyDown(_isKeyDown),
+            physicalInputDown: () => ModifierGuard.AnyDown(_isKeyDown)
+                                     || MouseButtonGuard.AnyDown(_isKeyDown),
             pauseBetweenChunks: () => _sleep(InterChunkPauseMs));
         if (outcome == InjectionRunOutcome.Interrupted)
-            _log.LogInformation("Injection interrupted: foreground window or physical modifier state changed mid-paste");
+            _log.LogInformation("Injection interrupted: foreground window, physical modifier, or mouse button state changed mid-paste");
         return outcome;
     }
 

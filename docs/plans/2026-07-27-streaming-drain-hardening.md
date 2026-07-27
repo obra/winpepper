@@ -7,7 +7,7 @@
 
 **Goal:** Fix two confirmed bugs in the streaming dictation coordinator: (A) a NullReferenceException race where the pump dereferences the nullable `_session` field that a concurrent abandon nulls, and (B) a post-stop "10 s bounded" drain that is not actually bounded (FinishAsync inline-awaits a session dispose that blocks behind a wedged native P/Invoke) and that pointlessly waits the full deadline when zero pushes ever completed.
 
-**Architecture:** All coordinator changes live in `StreamingDictationSession` (per-dictation glue between the audio frame channel and a streaming session). The pump captures its session in a local so field-nulling can never NRE it. The abandon paths (FinishAsync drain-timeout and DisposeAsync) never await a session dispose inline; instead a background chain disposes immediately (which aborts socket-style sessions and unwedges their pumps) and re-disposes after the pump exits (covering the pump-assigned-the-session-late race; for native sessions the dispose queues behind the session's native gate until the wedged P/Invoke returns — by design, since dispose cannot interrupt a P/Invoke). A volatile flag tracks whether any push ever completed; zero-push finishes use a short 1.5 s drain deadline because there is no streamed-latency win to preserve. A dispose guard is added to `FallbackStreamingTranscriber`'s session (the nemotron session already has one). Slow nemotron native calls (begin/feed/finalize) log a WRN with duration.
+**Architecture:** All coordinator changes live in `StreamingDictationSession` (per-dictation glue between the audio frame channel and a streaming session). The pump captures its session in a local so field-nulling can never NRE it, and treats a canceled-token push mid-drain as benign teardown (PipelineHost cancels the run CTS before disposing the streaming session). The abandon paths (FinishAsync drain-timeout and DisposeAsync) never await a session dispose inline; instead a background chain disposes immediately (which aborts socket-style sessions and unwedges their pumps) and re-disposes after the pump exits (covering the pump-assigned-the-session-late race; for native sessions the dispose queues behind the session's native gate until the wedged P/Invoke returns — by design, since dispose cannot interrupt a P/Invoke). Volatile flags track whether the session started and whether any push ever completed; finishes with zero completed pushes on a session that actually STARTED use a short 1.5 s drain deadline because there is no streamed-latency win to preserve (a session still starting — cloud connect is designed-bounded at 10 s, a cold factory load takes seconds — keeps the full deadline). A dispose guard is added to `FallbackStreamingTranscriber`'s session (the nemotron session already has one). Slow nemotron native calls (begin/feed/finalize) log a WRN with duration on completion PLUS an in-flight WRN when the threshold crosses while the call is still running (a permanent wedge would otherwise leave zero log evidence).
 
 **Tech Stack:** C# / .NET 9 (`net9.0`), xUnit v3 (in-process runner via `dotnet exec`), Shouldly, `Microsoft.Extensions.Logging`. No new dependencies.
 
@@ -84,6 +84,8 @@ public Task PumpCompletion => _pump;
 
 **Context (confirmed root cause):** The pump does `_session = await transcriber.StartSessionAsync(ct);` then dereferences the **nullable field** `_session` on every loop iteration. The abandon path (`DisposeSessionAsync`, `StreamingDictationSession.cs:141-147`) nulls `_session` concurrently. `_frames.Writer.TryComplete()` does not stop the pump immediately — `ReadAllAsync` still yields already-queued frames — so the pump's next iteration NREs, which is caught and logged as WRN `"streaming dictation pump failed"` (noise that masks real pump errors; observed 3× in the incident log).
 
+A second door to the same WRN (surfaced during plan validation): PipelineHost's teardown cancels the run CTS (`PipelineHost.cs:1259`) BEFORE disposing the streaming session (`:1270`), and nemotron's `PushAsync` checks `ct` (`NemotronStreamingTranscriber.cs:84`) before its `_disposed` guard (`:87`) — so a canceled-ct push mid-drain throws `OperationCanceledException` into the same generic catch. The fix treats that as benign teardown too. (The other abandon paths — silence-drop, user-cancel, drain-timeout — never cancel the token; the contract is unchanged for them.)
+
 - [ ] **Step 1: Create the shared capturing logger**
 
 Create `tests/Winpepper.Asr.Tests/CapturingLogger.cs`:
@@ -149,6 +151,10 @@ In `tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs`, add after the 
 
             public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
             {
+                // Models nemotron: ct is checked BEFORE any disposed guard
+                // (NemotronStreamingTranscriber.cs:84 vs :87), so a canceled-ct
+                // push mid-drain throws OCE.
+                ct.ThrowIfCancellationRequested();
                 if (Interlocked.Increment(ref _pushes) == 1)
                 {
                     _firstPushStarted.TrySetResult();
@@ -192,6 +198,31 @@ In `tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs`, add after the 
         transcriber.Session.PushCount.ShouldBe(3);
         log.Warnings.ShouldBeEmpty();
     }
+
+    [Fact]
+    public async Task TeardownCancel_MidDrain_IsBenign_NoPumpFailureWarning()
+    {
+        var log = new CapturingLogger();
+        var transcriber = new BlocksFirstPushTranscriber();
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            log, cts.Token);
+        session.OnFrame(new float[10]);
+        session.OnFrame(new float[10]);
+        await transcriber.Session.FirstPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        cts.Cancel();                 // PipelineHost teardown cancels _runCts FIRST (:1259)...
+        await session.DisposeAsync(); // ...THEN disposes the streaming session (:1270)
+
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        // The canceled-ct push mid-drain is ordinary teardown, not a pump
+        // failure — no "streaming dictation pump failed" noise.
+        log.Warnings.ShouldBeEmpty();
+    }
 ```
 
 - [ ] **Step 3: Run the test to verify it fails**
@@ -205,7 +236,7 @@ dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll
   -notrait "Platform=Windows" -class Winpepper.Asr.Tests.StreamingDictationSessionTests
 ```
 
-Expected: `AbandonWithQueuedFrames_PumpDrainsWithoutError` FAILS — `PushCount` is 1 (not 3) and/or `Warnings` contains `streaming dictation pump failed` (the NRE was caught and logged). All other tests in the class PASS.
+Expected: `AbandonWithQueuedFrames_PumpDrainsWithoutError` FAILS — `PushCount` is 1 (not 3) and/or `Warnings` contains `streaming dictation pump failed` (the NRE was caught and logged). `TeardownCancel_MidDrain_IsBenign_NoPumpFailureWarning` also FAILS — pre-fix the pump either NREs on the nulled field or throws OCE from the canceled-ct push; both land in the generic catch and log the WRN. All other tests in the class PASS.
 
 - [ ] **Step 4: Implement the local capture**
 
@@ -232,11 +263,28 @@ with:
                     await session.PushAsync(frame, ct);
 ```
 
+Also insert, immediately BEFORE the pump's existing `catch (Exception ex)` clause (line 53), a benign-teardown catch:
+
+```csharp
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // Ordinary teardown, not a pump failure: PipelineHost
+                    // cancels the run CTS BEFORE disposing the streaming
+                    // session, and a session may check ct before its own
+                    // disposed guard (nemotron does) — so a canceled-ct push
+                    // can surface mid-drain. The `when` guard keeps OCEs with
+                    // an UNcancelled ct (e.g. a dispose-aborted cloud send)
+                    // classified exactly as before.
+                }
+```
+
+(Do NOT drain with `CancellationToken.None` instead — that would make teardown-time cloud sends uncancellable.)
+
 - [ ] **Step 5: Verify the push-after-dispose posture of both production sessions (read-only)**
 
 Confirm (do not change code in this step):
 - `NemotronStreamingTranscriber.cs:82-113` — `PushAsync` takes `lock (_nativeGate)` and returns `ValueTask.CompletedTask` when `_disposed || _corrupt` (line 87). Push-after-dispose is a **safe no-op**. Nothing to add.
-- `FallbackStreamingTranscriber.cs:81-97` — its `Session.PushAsync` has **no** dispose guard: after `DisposeAsync` it re-enters `_inner.PushAsync` on the disposed inner (AssemblyAI socket) session; a resulting throw is swallowed into `_failure`, which silently forces the local-batch path and fires the user-facing "cloud unavailable" toast. **Not benign** — Task 2 adds the guard. (This ordering is deliberate: Task 1's fix makes the pump *more* likely to push after dispose, so the guard lands immediately after in Task 2.)
+- `FallbackStreamingTranscriber.cs:81-97` — its `Session.PushAsync` has **no** dispose guard: after `DisposeAsync` it re-enters `_inner.PushAsync` on the disposed inner (AssemblyAI socket) session, which deterministically throws `ObjectDisposedException` (BCL websocket guard); the throw is swallowed into `_failure` and logged as a spurious WRN (`:95`). Verified during plan validation: this canNOT reach the user-facing "cloud unavailable" toast — the toast fires only in the wrapper's `FinishAsync` (`:129`), and every coordinator path finishes BEFORE disposing (or abandons without finishing), so the poisoned `_failure` is inert log noise (the same class of noise as Bug A) plus a latent trap if the finish/dispose ordering ever changes. **Still not a benign no-op** — Task 2 adds the guard as parity/hygiene. (This ordering is deliberate: Task 1's fix makes the pump *more* likely to push after dispose, so the guard lands immediately after in Task 2.)
 
 - [ ] **Step 6: Run the whole test class to verify green**
 
@@ -265,13 +313,14 @@ git commit -m "fix(asr): pump pushes via a local session reference, not the null
 
 **Files:**
 - Modify: `src/Winpepper.Asr/Transcription/FallbackStreamingTranscriber.cs:68-137` (inner `Session`)
+- Modify: `src/Winpepper.Asr/Transcription/IStreamingTranscriber.cs:15-16` (state the push-after-dispose contract on the interface)
 - Test: `tests/Winpepper.Asr.Tests/FallbackStreamingTranscriberTests.cs`
 
 **Interfaces:**
 - Consumes: the coordinator pump behavior from Task 1 (queued frames may be pushed into an already-disposed session).
 - Produces: `FallbackStreamingTranscriber.Session.PushAsync` is a benign no-op after `DisposeAsync` (parity with the nemotron session). No public API change.
 
-**Context:** Without the guard, a post-dispose push lands on the disposed inner `AssemblyAiStreamingSession`, whose throw is swallowed into `_failure` — converting a working cloud dictation into a local-fallback one (plus toast) because of a lifecycle race, not a network failure.
+**Context (framing corrected during plan validation):** Without the guard, a post-dispose push lands on the disposed inner `AssemblyAiStreamingSession`, whose deterministic `ObjectDisposedException` is swallowed into `_failure` and logged as a spurious WRN (`FallbackStreamingTranscriber.cs:95`). Today that poisoning is otherwise inert — every coordinator path finishes before disposing, so it cannot reach `FinishAsync`'s fallback/toast path — making this a parity/log-noise fix (nemotron already has the guard), not a user-facing bug fix. It also removes a latent fallback-conversion trap should the finish/dispose ordering ever change, and makes the interface contract explicit.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -291,8 +340,9 @@ In `tests/Winpepper.Asr.Tests/FallbackStreamingTranscriberTests.cs`, add (using 
         // The coordinator's pump legitimately drains queued frames after an
         // abandon (it pushes via its own local reference). That must be a
         // benign no-op — not a push into the DISPOSED inner socket session,
-        // whose throw would poison _failure and silently convert a working
-        // cloud dictation into a local-fallback one.
+        // whose ObjectDisposedException would poison _failure and log a
+        // spurious WRN (and is a latent fallback-conversion trap if the
+        // finish/dispose ordering ever changes).
         await session.PushAsync(new float[800], TestContext.Current.CancellationToken);
 
         primary.LastSession!.Pushes.ShouldBe(0);
@@ -361,6 +411,22 @@ with:
         }
 ```
 
+Then state the contract where implementers will see it (plan validation showed it was convention-only — `BatchStreamingAdapter` satisfies it by accident, and a future implementation could silently break it). In `src/Winpepper.Asr/Transcription/IStreamingTranscriber.cs:15-16`, replace the `PushAsync` doc comment:
+
+```csharp
+    /// <summary>Feed mono 16 kHz float samples captured during recording. May do
+    /// heavy work (inference / network sends) — callers pump from a background task.</summary>
+```
+
+with:
+
+```csharp
+    /// <summary>Feed mono 16 kHz float samples captured during recording. May do
+    /// heavy work (inference / network sends) — callers pump from a background task.
+    /// CONTRACT: a push arriving after DisposeAsync must be a benign no-op — the
+    /// coordinator's pump legitimately drains queued frames after an abandon.</summary>
+```
+
 - [ ] **Step 4: Run the test class to verify green**
 
 Same commands as Step 2. Expected: ALL tests in `FallbackStreamingTranscriberTests` PASS.
@@ -377,6 +443,7 @@ Expected: `Errors: 0, Failed: 0`.
 
 ```bash
 git add src/Winpepper.Asr/Transcription/FallbackStreamingTranscriber.cs \
+        src/Winpepper.Asr/Transcription/IStreamingTranscriber.cs \
         tests/Winpepper.Asr.Tests/FallbackStreamingTranscriberTests.cs
 git commit -m "fix(asr): make FallbackStreamingTranscriber push-after-dispose a benign no-op"
 ```
@@ -395,6 +462,8 @@ git commit -m "fix(asr): make FallbackStreamingTranscriber push-after-dispose a 
 - Produces: `private Task ScheduleAbandonedSessionDispose()` — used again verbatim by this task's two call sites; Task 4 does not touch it. `FinishAsync`'s drain-timeout path returns null within the drain deadline + scheduling epsilon (never blocked by session dispose). `DisposeAsync` worst case ≈ 6 s (5 s pump bound + 1 s grace), and ≈ 0 s when `DrainTimedOut` is already set. `DisposeSessionAsync` becomes `Interlocked.Exchange`-based (idempotent + race-safe).
 
 **Design note (spec conformance):** The spec says "schedule the actual session.DisposeAsync() to run in the background once the pump task completes." The background chain implemented here disposes **immediately** in the background *and again* after the pump exits. The immediate attempt is required to preserve the existing socket-abort semantics (for cloud sessions, dispose is *what unwedges* a wedged send — the existing `WedgedPush_...` test models exactly that); for native sessions the immediate attempt simply queues behind the session's `_nativeGate` **in the background** and therefore completes only after the pump's wedged P/Invoke returns — which is precisely the spec's "dispose runs once the pump completes" behavior, enforced by the gate rather than by scheduling. The post-pump re-dispose covers the pump-assigned-the-session-late race with a real happens-before edge. Nothing caller-facing ever awaits any of it.
+
+Validated during planning (native memory safety): the chain's `transcribe_session_free` cannot race a shared native model free — the orphan guard's deferred disposals are `ParakeetSession` objects (ONNX Runtime, a disjoint native library; `PipelineHost.cs:243`/`:1281`), and the transcribe.cpp engine is never freed in production (`TranscribeCppEngine.Dispose` has no production callers; `NemotronEngineHolder` documents the engine as never freed). Upstream `transcribe.h` forbids freeing the model before all its sessions are freed, so that never-freed invariant is load-bearing: any future nemotron model unload/swap must be routed through the orphan guard (or an equivalent chain-completion gate) before this design is safe to extend.
 
 - [ ] **Step 1: Write the failing test (spec test 2 — wedged native push)**
 
@@ -667,7 +736,9 @@ Confirm the deferred dispose preserves the safety contract — no code changes e
 2. Every streaming release site follows `null field → await streaming.DisposeAsync() → NoteStreamingReleased(streaming)` (stop-arm finally `:567-571`/`:952-956`, silence-drop `:523-529`/`:908-914`, cancel `:808-814`, teardown `:1270-1276`) — ordering is preserved because our `DisposeAsync` still returns only after scheduling the chain, and `PumpCompletion` semantics are untouched (the pump completes exactly when it did before: the immediate background dispose preserves the socket-abort unwedge timing).
 3. `DrainTimedOut` has **no** production reader — PipelineHost branches purely on `maybeTranscription is null` (`:574`/`:959`) — so the late path is reached exactly as before, just *sooner* (that is the fix). The late path's `TryEnsureAsrModel` (`:593`/`:978`) remains safe because `NoteStreamingReleased` at `:571`/`:956` registered the orphaned pump BEFORE it runs, and `TryEnsureAsrModel`'s Swap branch routes the old engine's dispose through `_orphanGuard.RunOrDefer` (`:243`).
 
-If any of these three facts does not hold as described, STOP and re-assess before proceeding (do not silently adapt).
+4. The abandon chain cannot produce a native use-after-free: `_orphanGuard.RunOrDefer`'s production call sites (`:243`, `:1281`) dispose only `ParakeetSession` (ONNX Runtime — a different native library from transcribe.dll), and `TranscribeCppEngine.Dispose` has no production callers (`NemotronEngineHolder` never frees the engine) — so the chain's deferred `transcribe_session_free` never races a model free.
+
+If any of these four facts does not hold as described, STOP and re-assess before proceeding (do not silently adapt).
 
 - [ ] **Step 7: Run the full Asr test project**
 
@@ -695,9 +766,9 @@ git commit -m "fix(asr): never block FinishAsync/DisposeAsync behind a wedged se
 
 **Interfaces:**
 - Consumes: Task 3's `FinishAsync` shape (`var deadline = _drainDeadline;` + `ScheduleAbandonedSessionDispose()`); Task 3's `NativeGateWedgedTranscriber` fake (reused by the first test below).
-- Produces: `private volatile bool _anyPushCompleted;` set by the pump after each successful `PushAsync`; `private static readonly TimeSpan ZeroPushDrainDeadline = TimeSpan.FromSeconds(1.5);`. Behavior: effective drain deadline = `_anyPushCompleted ? _drainDeadline : min(_drainDeadline, ZeroPushDrainDeadline)`. The `min` keeps every existing 200 ms-deadline test exactly as it was.
+- Produces: `private volatile bool _anyPushCompleted;` set by the pump after each successful `PushAsync`; `private volatile bool _sessionStarted;` set by the pump right after `StartSessionAsync` completes; `private static readonly TimeSpan ZeroPushDrainDeadline = TimeSpan.FromSeconds(1.5);`. Behavior: effective drain deadline = `_anyPushCompleted || !_sessionStarted ? _drainDeadline : min(_drainDeadline, ZeroPushDrainDeadline)` — the shortcut applies only when the session actually STARTED and still completed zero pushes. (Plan validation falsified the simpler push-only keying: healthy by-design paths in FRONT of the first push can exceed 1.5 s — cloud connect is designed-bounded at 10 s, `FallbackStreamingTranscriber.cs:35,50-54`, and the pump awaits it before any push; a cold local factory load takes seconds — so a still-starting session keeps the full deadline instead of being systematically converted to local batch.) The `min` keeps every existing 200 ms-deadline test exactly as it was.
 
-- [ ] **Step 1: Write the two failing tests**
+- [ ] **Step 1: Write the three tests (one failing, two pins)**
 
 In `tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs`, add `using System.Diagnostics;` to the file's using directives, then add after the Task 3 test:
 
@@ -791,9 +862,51 @@ In `tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs`, add `using Sys
         await session.PumpCompletion.WaitAsync(
             TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
+
+    // A healthy session still STARTING at stop time must keep the FULL drain
+    // deadline: cloud connect is designed-bounded at 10 s and a cold local
+    // factory load takes seconds — both sit in FRONT of the first push. The
+    // zero-push shortcut exists to cut pointless waiting on a session that
+    // started and then wedged, not to abandon one never given a chance to
+    // start (which would systematically convert healthy dictations to local
+    // batch).
+    private sealed class NeverStartsTranscriber : IStreamingTranscriber
+    {
+        private readonly TaskCompletionSource<IStreamingTranscriptionSession> _tcs = new();
+        public string ModelName => "never-starts";
+        public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct) => _tcs.Task;
+        public void Release() => _tcs.TrySetCanceled(); // let the orphaned pump exit
+    }
+
+    [Fact]
+    public async Task SessionStillStarting_AtFinish_KeepsTheFullDrainDeadline()
+    {
+        var transcriber = new NeverStartsTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromSeconds(3)); // full deadline, above the 1.5 s short one
+        session.OnFrame(new float[800]); // queued; the pump is still inside StartSessionAsync
+
+        var finishSw = Stopwatch.StartNew();
+        var result = await session
+            .FinishAsync(new float[800], TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        finishSw.Stop();
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue();
+        // The FULL 3 s deadline applied — a still-starting session must not be
+        // short-circuited by the zero-push shortcut (0.5 s margin absorbs slop).
+        finishSw.Elapsed.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(2.5));
+
+        transcriber.Release();
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
 ```
 
-- [ ] **Step 2: Run the tests to verify the first fails (and the second passes)**
+- [ ] **Step 2: Run the tests to verify the first fails (and the pins pass)**
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/streaming-drain-hardening
@@ -804,7 +917,7 @@ dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll
   -notrait "Platform=Windows" -class Winpepper.Asr.Tests.StreamingDictationSessionTests
 ```
 
-Expected: `ZeroCompletedPushes_AtFinish_UsesTheShortDrainDeadline` FAILS with a `TimeoutException` from the 10 s guard (the code waits the full 30 s). `StreamingUnderway_AtFinish_KeepsTheFullDrainDeadline` PASSES already (it pins the behavior the implementation must not break). All other tests PASS.
+Expected: `ZeroCompletedPushes_AtFinish_UsesTheShortDrainDeadline` FAILS with a `TimeoutException` from the 10 s guard (the code waits the full 30 s). `StreamingUnderway_AtFinish_KeepsTheFullDrainDeadline` and `SessionStillStarting_AtFinish_KeepsTheFullDrainDeadline` PASS already (they pin the behavior the implementation must not break). All other tests PASS.
 
 - [ ] **Step 3: Implement the short deadline**
 
@@ -818,15 +931,24 @@ In `src/Winpepper.Asr/Transcription/StreamingDictationSession.cs`:
     /// would have to process ALL queued audio during the drain anyway, and the
     /// caller's late batch path on fullAudio produces an equivalent transcript
     /// (the session itself logs "Streamed latency win lost" when it falls
-    /// back) — so waiting the full deadline buys the user nothing. Kept above
-    /// 1 s so a session that is merely slow to start still gets a fair chance
-    /// to drain.</summary>
+    /// back) — so waiting the full deadline buys the user nothing. Applies
+    /// ONLY once the session actually started: a session still starting at
+    /// stop time (cloud connect is designed-bounded at 10 s; a cold factory
+    /// load takes seconds) keeps the full deadline — abandoning it early would
+    /// trade a healthy dictation for a local batch one.</summary>
     private static readonly TimeSpan ZeroPushDrainDeadline = TimeSpan.FromSeconds(1.5);
 
+    private volatile bool _sessionStarted;   // written by the pump, read by FinishAsync
     private volatile bool _anyPushCompleted; // written by the pump, read by FinishAsync
 ```
 
-**3b.** In the pump (Task 1's shape), replace:
+**3b.** In the pump (Task 1's shape), add the started flag immediately after `_session = session;`:
+
+```csharp
+                _sessionStarted = true; // keys FinishAsync's drain-deadline choice (with _anyPushCompleted)
+```
+
+then replace:
 
 ```csharp
                 await foreach (var frame in _frames.Reader.ReadAllAsync(CancellationToken.None))
@@ -852,7 +974,10 @@ with:
 with:
 
 ```csharp
-        var deadline = _anyPushCompleted
+        // Short-circuit ONLY a session that actually started and still
+        // completed zero pushes; a session still starting (cloud connect,
+        // cold factory load) keeps the full deadline.
+        var deadline = _anyPushCompleted || !_sessionStarted
             ? _drainDeadline
             : TimeSpan.FromTicks(Math.Min(_drainDeadline.Ticks, ZeroPushDrainDeadline.Ticks));
 ```
@@ -861,7 +986,7 @@ with:
 
 - [ ] **Step 4: Run the test class to verify green**
 
-Same commands as Step 2. Expected: ALL tests in `StreamingDictationSessionTests` PASS (the class now includes two multi-second tests: ~1.5 s and ~3 s).
+Same commands as Step 2. Expected: ALL tests in `StreamingDictationSessionTests` PASS (the class now includes three multi-second tests: ~1.5 s and two ~3 s).
 
 - [ ] **Step 5: Run the full Asr test project**
 
@@ -890,9 +1015,11 @@ git commit -m "fix(asr): use a short drain deadline when zero pushes completed b
 
 **Interfaces:**
 - Consumes: `CapturingLogger` from Task 1 (`tests/Winpepper.Asr.Tests/CapturingLogger.cs`); `ITranscribeCppStream { string? Feed(float[] samples, int count); (string Text, bool WasTruncated) Finalize(); }`.
-- Produces: new optional constructor parameter on `NemotronStreamingTranscriber`: `TimeSpan? nativeCallWarnAfter = null` (default 3 s) — appended LAST so `AppShell.cs` and the bench need no changes. WRN template: `"nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns"` with `Op` ∈ `"stream begin"`, `"stream feed"`, `"stream finalize"`.
+- Produces: new optional constructor parameter on `NemotronStreamingTranscriber`: `TimeSpan? nativeCallWarnAfter = null` (default 3 s) — appended LAST so `AppShell.cs` and the bench need no changes. TWO WRN templates with `Op` ∈ `"stream begin"`, `"stream feed"`, `"stream finalize"`: on completion, `"nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns"`; in flight when the threshold crosses, `"nemotron native {Op} still running after {ThresholdMs} ms; the streaming pump is stalled until it returns"`.
 
-**Context:** WHY the incident's native call took ~15 s is environmental and not determinable from managed code; per systematic-debugging the correct move is bounded handling (Tasks 3–4) plus observability so future wedges are diagnosable from the log alone. The instrumentation lives in `NemotronStreamingTranscriber.Session` — the layer that already brackets every native call and already has `_log?` (`TranscribeCppEngine`/`NativeStream` have no logger seam at all). Cost: one `Stopwatch` + one closure per 160 ms audio chunk — negligible next to the inference the call performs.
+**Context:** WHY the incident's native call took ~15 s is environmental and not determinable from managed code; per systematic-debugging the correct move is bounded handling (Tasks 3–4) plus observability so future wedges are diagnosable from the log alone. The instrumentation lives in `NemotronStreamingTranscriber.Session` — the layer that already brackets every native call and already has `_log?` (`TranscribeCppEngine`/`NativeStream` have no logger seam at all). Cost: one `Stopwatch` + one closure + one armed `Task.Delay` per 160 ms audio chunk — negligible next to the inference the call performs.
+
+A completion-time-only bracket is not enough (plan validation, LB8): nothing guarantees a wedged P/Invoke ever returns (upstream `transcribe.h` gives no return-time bound and mid-encoder abort is unsupported), and a permanent wedge — or one the user kills the process over — would leave ZERO log evidence, the exact silent state this fix targets. A permanent wedge also holds `_computeGate` forever, silently batch-degrading every later local dictation until restart; the in-flight watchdog WRN is the only diagnostic for that state. So `TimedNativeCall` also arms a watchdog that logs while the call is still stuck.
 
 - [ ] **Step 1: Add the `FeedDelay` knob to the shared fake engine**
 
@@ -945,6 +1072,28 @@ In `tests/Winpepper.Asr.Tests/Transcription/NemotronStreamingTranscriberTests.cs
 
         Assert.Equal("hello world final", result.Text);
         Assert.DoesNotContain(log.Warnings, w => w.Contains("nemotron native"));
+    }
+
+    [Fact]
+    public async Task Wedged_native_call_logs_a_still_running_warning_before_it_returns()
+    {
+        // A permanent wedge (or one the user kills the process over) would
+        // leave ZERO log evidence from a completion-time-only bracket — the
+        // in-flight watchdog is what makes that state diagnosable. 400 ms vs
+        // a 50 ms threshold gives the watchdog ample margin to fire.
+        var engine = new FakeTranscribeCppEngine { FeedDelay = TimeSpan.FromMilliseconds(400) };
+        var log = new CapturingLogger();
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
+            log, nativeCallWarnAfter: TimeSpan.FromMilliseconds(50));
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // exactly one native feed
+
+        Assert.Contains(log.Warnings,
+            w => w.Contains("nemotron native stream feed still running after"));
+        Assert.Contains(log.Warnings,
+            w => w.Contains("nemotron native stream feed took"));
     }
 ```
 
@@ -1020,21 +1169,37 @@ Pass it through `StartSessionAsync` into the `Session` (line 45–47):
         /// <summary>Native streaming calls are synchronous P/Invokes that
         /// cannot be cancelled or interrupted; when one wedges, the streaming
         /// pump stalls until it returns and the coordinator's drain deadline
-        /// fires (observed: a call stuck >=15 s in the wild). Log the duration
-        /// when a call completes after taking abnormally long, so future
-        /// wedges are diagnosable from the log alone.</summary>
+        /// fires (observed: a call stuck >=15 s in the wild). Log twice: an
+        /// IN-FLIGHT warning when the threshold crosses while the call is
+        /// still stuck (a permanent wedge — or one the user kills the process
+        /// over — would otherwise leave zero log evidence, and it also holds
+        /// the compute gate, silently batch-degrading every later local
+        /// dictation), and the duration on completion, so future wedges are
+        /// diagnosable from the log alone.</summary>
         private T TimedNativeCall<T>(string op, Func<T> call)
         {
             var nativeSw = Stopwatch.StartNew();
+            using var watchdogCts = new CancellationTokenSource();
+            _ = WarnWhenStillRunningAsync(op, watchdogCts.Token);
             try { return call(); }
             finally
             {
+                watchdogCts.Cancel();
                 nativeSw.Stop();
                 if (nativeSw.Elapsed >= _nativeCallWarnAfter)
                     _log?.LogWarning(
                         "nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns",
                         op, (int)nativeSw.ElapsedMilliseconds);
             }
+        }
+
+        private async Task WarnWhenStillRunningAsync(string op, CancellationToken ct)
+        {
+            try { await Task.Delay(_nativeCallWarnAfter, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; } // the call completed in time
+            _log?.LogWarning(
+                "nemotron native {Op} still running after {ThresholdMs} ms; the streaming pump is stalled until it returns",
+                op, (int)_nativeCallWarnAfter.TotalMilliseconds);
         }
 ```
 
@@ -1076,7 +1241,7 @@ dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll
   -notrait "Platform=Windows" -class Winpepper.Asr.Tests.Transcription.NemotronStreamingTranscriberTests
 ```
 
-(If the `-class` filter reports 0 tests, the file's namespace differs — run the whole DLL instead and check the two new test names.) Expected: both new tests PASS, all existing Nemotron tests PASS.
+(If the `-class` filter reports 0 tests, the file's namespace differs — run the whole DLL instead and check the three new test names.) Expected: all three new tests PASS, all existing Nemotron tests PASS.
 
 - [ ] **Step 6: Run the full Asr test project**
 
@@ -1134,12 +1299,12 @@ Do not run it concurrently with `linux-tests.sh`. This plan's execute stage stop
 ## Self-Review (performed while writing this plan)
 
 **1. Spec coverage:**
-- Fix A local-capture → Task 1 (pump code + failing test 1: dispose/abandon with queued frames → pump completes, no pumpError warning, no NRE).
-- Fix A "verify both implementations tolerate PushAsync-after-Dispose; add a guard only if one doesn't" → Task 1 Step 5 (nemotron verified safe, evidence cited) + Task 2 (Fallback session lacks the guard → guard added with test).
+- Fix A local-capture → Task 1 (pump code + failing test 1: dispose/abandon with queued frames → pump completes, no pumpError warning, no NRE; plus the validation-surfaced second door — teardown cancels the run CTS before disposing — closed by a benign `catch (OperationCanceledException) when (ct.IsCancellationRequested)` with its own failing test).
+- Fix A "verify both implementations tolerate PushAsync-after-Dispose; add a guard only if one doesn't" → Task 1 Step 5 (nemotron verified safe, evidence cited; Fallback framing corrected during validation: the unguarded post-dispose push is WRN log noise + a latent trap, not a reachable toast) + Task 2 (guard added with test, and the push-after-dispose contract stated on `IStreamingTranscriptionSession.PushAsync` so it stops being convention-only).
 - Fix B1 (no inline dispose await on drain timeout; DrainTimedOut; prompt null; background dispose keyed to pump exit; PumpCompletion contract preserved; PipelineHost audit; DisposeAsync abandon path made consistent) → Task 3 (impl + failing test 2 + read-only audit with explicit stop-if-false facts).
-- Fix B2 (zero-push short deadline, 1–2 s constant with rationale) → Task 4 (1.5 s constant + failing test 3 + a pin test that the full deadline still applies when streaming was underway).
+- Fix B2 (zero-push short deadline, 1–2 s constant with rationale) → Task 4 (1.5 s constant keyed on `_anyPushCompleted || !_sessionStarted` — validation falsified push-only keying (cloud connect is designed-bounded at 10 s, cold factory loads take seconds, both in front of the first push) — + failing test 3 + two pin tests: full deadline when streaming was underway, and full deadline while the session is still starting).
 - Fix B3 (correct the cloud-only "disposing aborts the socket" comments) → Task 3 Steps 3a/3b/3d (class summary, timeout handler, DisposeAsync doc) and 3f (retires the stale "late path must NOT ensure" comment).
-- Fix B4 (WRN + duration for slow native begin/feed/finish, cheap Stopwatch) → Task 5.
+- Fix B4 (WRN + duration for slow native begin/feed/finish, cheap Stopwatch) → Task 5 (completion-time duration WRN plus an in-flight watchdog WRN — validation showed nothing guarantees a wedged P/Invoke returns, and a completion-only bracket would leave a permanent wedge with zero log evidence).
 - Spec tests 1/2/3 → Tasks 1/3/4 respectively; "keep existing tests green" → every task runs the full Asr project; two existing tests amended in Task 3 with intent preserved; Task 6 runs the whole Linux suite.
 - Repo conventions (xUnit v3 runner, no `dotnet test`, Windows gate before push, no mixed bin/obj, commit style) → Global Constraints + per-task commands + Task 6.
 
@@ -1147,4 +1312,4 @@ Do not run it concurrently with `linux-tests.sh`. This plan's execute stage stop
 
 **2. Placeholder scan:** No TBDs; every code step shows the code; every run step shows the command and expected outcome.
 
-**3. Type consistency:** `ScheduleAbandonedSessionDispose()` (Task 3) is referenced by name in Tasks 3/4 only; `deadline` local introduced in Task 3 Step 3b is the exact line Task 4 Step 3c replaces; `_anyPushCompleted`/`ZeroPushDrainDeadline` appear only in Task 4; `CapturingLogger.Warnings` is `IReadOnlyList<string>` and both consumers (Tasks 1, 5) only enumerate/assert-contains; `nativeCallWarnAfter` is appended as the LAST optional parameter so `Make()`/`AppShell`/bench call sites compile unchanged; fakes' member names (`FirstPushStarted`, `SecondPushStarted`, `DisposeCompletion`, `Unwedge`, `PushCount`) are used consistently within their single task each.
+**3. Type consistency:** `ScheduleAbandonedSessionDispose()` (Task 3) is referenced by name in Tasks 3/4 only; `deadline` local introduced in Task 3 Step 3b is the exact line Task 4 Step 3c replaces; `_anyPushCompleted`/`_sessionStarted`/`ZeroPushDrainDeadline` appear only in Task 4; the pump's OCE catch (Task 1) sits before the generic catch Task 4's flag-write does not disturb; `CapturingLogger.Warnings` is `IReadOnlyList<string>` and both consumers (Tasks 1, 5) only enumerate/assert-contains; `nativeCallWarnAfter` is appended as the LAST optional parameter so `Make()`/`AppShell`/bench call sites compile unchanged; `WarnWhenStillRunningAsync` is private to `Session` and referenced only by `TimedNativeCall`; fakes' member names (`FirstPushStarted`, `SecondPushStarted`, `DisposeCompletion`, `Unwedge`, `PushCount`, `NeverStartsTranscriber.Release`) are used consistently within their single task each.

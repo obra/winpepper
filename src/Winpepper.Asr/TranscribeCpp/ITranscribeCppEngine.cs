@@ -21,10 +21,14 @@ public interface ITranscribeCppEngine : IDisposable
     /// flight per model (see Global Constraints). Throws TranscribeCppException
     /// if the gate cannot be acquired within 5 s (previous dictation's stream
     /// not yet disposed) — callers fall back to batch.
-    /// attContextRight in encoder frames: {13,6,1,0} = {1040,480,80,0} ms.</summary>
-    ITranscribeCppStream BeginStream(int attContextRight);
+    /// attContextRight in encoder frames: {13,6,1,0} = {1040,480,80,0} ms.
+    /// language: optional source-language hint (BCP-47-ish, e.g. "en-US");
+    /// null = model default/autodetect.</summary>
+    ITranscribeCppStream BeginStream(int attContextRight, string? language = null);
     /// <summary>Offline single-utterance transcription on a dedicated native
     /// session (bench parity reference; not used by the app pipeline). Holds
-    /// the same compute gate for the duration of the call.</summary>
-    string TranscribeBatch(float[] mono16k);
+    /// the same compute gate for the duration of the call.
+    /// language: optional source-language hint (BCP-47-ish, e.g. "en-US");
+    /// null = model default/autodetect.</summary>
+    string TranscribeBatch(float[] mono16k, string? language = null);
 }

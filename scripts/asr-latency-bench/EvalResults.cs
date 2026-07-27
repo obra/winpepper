@@ -23,10 +23,19 @@ public sealed record ClipResult(
     bool Truncated,         // true when ANY run's native engine reported truncation
     bool TrimmedSilent,
     string BatchParityDiff,
-    string? Error = null); // non-null = per-clip failure row (empty texts, null metrics); text goes to results.json only
+    string? Error = null, // non-null = per-clip failure row (empty texts, null metrics); text goes to results.json only
+    IReadOnlyList<long>? BatchMsRuns = null,   // whole-file batch transcribe ms per pass
+    double CpuSeconds = 0,                     // total process CPU s this clip, all passes
+    double MeanRtf = 0,
+    bool TranscriptStable = true);             // scored transcript identical across passes
 
 public sealed record EvalRunInfo(
-    string Corpus, string SpeechModel, string TranscribeCppVersion, string DateUtc, int Repeats);
+    string Corpus, string SpeechModel, string TranscribeCppVersion, string DateUtc, int Repeats,
+    string Mode = "streaming",                 // "streaming" | "batch"
+    string? Language = null,
+    int Passes = 1,
+    bool Converged = false,
+    string ResourceNote = EvalResults.ResourceNote);
 
 public sealed record EvalSummary(
     int ClipCount,
@@ -41,9 +50,16 @@ public sealed record EvalSummary(
     int TruncatedCount,
     int SilentClipCount,
     int SilentPassCount,
-    int FailedCount);
+    int FailedCount,
+    double CpuSecondsTotal = 0,
+    double PeakMemoryMb = 0,
+    double MeanRtf = 0,
+    int UnstableTranscriptCount = 0);
 
-public sealed record EvalReport(EvalRunInfo Info, EvalSummary Summary, IReadOnlyList<ClipResult> Clips);
+public sealed record EvalReport(
+    EvalRunInfo Info, EvalSummary Summary, IReadOnlyList<ClipResult> Clips,
+    IReadOnlyList<PassSummary>? Passes = null,
+    IReadOnlyList<ConvergencePoint>? ConvergenceTrace = null);
 
 /// <summary>
 /// Corpus eval aggregation and rendering. results.md deliberately contains NO
@@ -53,10 +69,16 @@ public sealed record EvalReport(EvalRunInfo Info, EvalSummary Summary, IReadOnly
 /// </summary>
 public static class EvalResults
 {
-    private static readonly JsonSerializerOptions JsonOpts = new()
+    public const string ResourceNote =
+        "resources are process CPU time and peak working set only; GPU/Vulkan usage is not separately measured. " +
+        "RTF = processing time / audio duration (streaming: streaming-replay process CPU seconds, batch parity decode excluded; batch: batch transcribe wall time). " +
+        "Streaming-mode peak memory includes a second bench-only fallback engine (~1 extra model of RAM) that batch-only runs do not load";
+
+    public static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = true,
+        NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals,
     };
 
     public static double Percentile(IReadOnlyList<double> sortedAscending, double q)
@@ -66,13 +88,18 @@ public static class EvalResults
         return sortedAscending[Math.Clamp(idx, 0, sortedAscending.Count - 1)];
     }
 
-    public static EvalSummary Summarize(IReadOnlyList<ClipResult> clips)
+    public static EvalSummary Summarize(IReadOnlyList<ClipResult> clips,
+        string mode = "streaming", double cpuSecondsTotal = 0, double peakMemoryMb = 0)
     {
         var wers = clips.Where(c => c.Wer is not null).Select(c => c.Wer!.Value).OrderBy(v => v).ToArray();
         var cers = clips.Where(c => c.Cer is not null).Select(c => c.Cer!.Value).ToArray();
         // 0 ms runs are silent-trimmed clips that never reached FinishAsync; exclude them.
-        var latencies = clips.SelectMany(c => c.FinishMsRuns).Where(ms => ms > 0)
+        var latencySource = mode == "batch"
+            ? clips.SelectMany(c => c.BatchMsRuns ?? Array.Empty<long>())
+            : clips.SelectMany(c => c.FinishMsRuns);
+        var latencies = latencySource.Where(ms => ms > 0)
             .Select(ms => (double)ms).OrderBy(v => v).ToArray();
+        var rtfs = clips.Where(c => c.MeanRtf > 0).Select(c => c.MeanRtf).ToArray();
         var silent = clips.Where(c => c.ExpectedSilent).ToArray();
         return new EvalSummary(
             ClipCount: clips.Count,
@@ -87,11 +114,19 @@ public static class EvalResults
             TruncatedCount: clips.Count(c => c.Truncated),
             SilentClipCount: silent.Length,
             SilentPassCount: silent.Count(c => c.SilentPass == true),
-            FailedCount: clips.Count(c => c.Error is not null));
+            FailedCount: clips.Count(c => c.Error is not null),
+            CpuSecondsTotal: Math.Round(cpuSecondsTotal, 3),
+            PeakMemoryMb: Math.Round(peakMemoryMb, 1),
+            MeanRtf: rtfs.Length == 0 ? 0 : Math.Round(rtfs.Average(), 4),
+            UnstableTranscriptCount: clips.Count(c => !c.TranscriptStable));
     }
 
     public static string ToJson(EvalRunInfo info, IReadOnlyList<ClipResult> clips, EvalSummary summary)
         => JsonSerializer.Serialize(new EvalReport(info, summary, clips), JsonOpts);
+
+    public static string ToJson(EvalRunInfo info, IReadOnlyList<ClipResult> clips, EvalSummary summary,
+        IReadOnlyList<PassSummary> passes, IReadOnlyList<ConvergencePoint> convergenceTrace)
+        => JsonSerializer.Serialize(new EvalReport(info, summary, clips, passes, convergenceTrace), JsonOpts);
 
     public static string ToMarkdown(EvalRunInfo info, IReadOnlyList<ClipResult> clips, EvalSummary summary)
     {
@@ -101,6 +136,9 @@ public static class EvalResults
         sb.AppendLine($"- speech model: `{info.SpeechModel}`");
         sb.AppendLine($"- transcribe.cpp: `{info.TranscribeCppVersion}`");
         sb.AppendLine($"- date: {info.DateUtc}, repeats: {info.Repeats}");
+        sb.AppendLine($"- mode: {info.Mode}{(info.Language is null ? "" : $" (language {info.Language})")}");
+        sb.AppendLine($"- passes: {info.Passes}, converged: {(info.Converged ? "yes" : "no")}");
+        sb.AppendLine($"- CPU: {summary.CpuSecondsTotal:F1} s total, peak memory: {summary.PeakMemoryMb:F0} MB, mean RTF: {summary.MeanRtf:F3}");
         sb.AppendLine();
         sb.AppendLine("| clip | audio (s) | WER | CER | silent | post-stop ms (runs) | fellBack (runs) | truncated | error |");
         sb.AppendLine("|---|---|---|---|---|---|---|---|---|");

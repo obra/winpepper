@@ -10,7 +10,7 @@ namespace Winpepper.Asr.TranscribeCpp;
 ///     &lt;runtimeDir&gt;\transcribe.dll (process-wide, first runtimeDir wins);
 ///  3. log callback install (static delegate, process lifetime);
 ///  4. native version string gate (must equal 0.1.3);
-///  5. ABI struct-size gate for every marshaled struct (non-short-circuit,
+///  5. ABI struct-size gate for all 6 marshaled structs (non-short-circuit,
 ///     all mismatches reported);
 ///  6. transcribe_init_backends(runtimeDir) — REQUIRED before model load
 ///     (GGML_BACKEND_DL build; ggml-*.dll live in runtimeDir);
@@ -27,6 +27,10 @@ namespace Winpepper.Asr.TranscribeCpp;
 /// dispose); TranscribeBatch holds it per call. A 5 s acquire timeout turns a
 /// stuck predecessor into a TranscribeCppException (=> batch fallback), never
 /// a deadlock.
+/// Load(batchOnly: true) skips only the streaming capability checks (validated:
+/// v0.1.3's qwen3_asr family reports no streaming capability and its
+/// .accepts_ext_kind is null, so the unmodified gate refuses a model that batch
+/// transcribe_run fully supports); BeginStream then throws loud.
 /// </summary>
 public sealed class TranscribeCppEngine : ITranscribeCppEngine
 {
@@ -47,17 +51,19 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
     // lifetime; TranscribeBatch per call.
     private readonly SemaphoreSlim _computeGate = new(1, 1);
     private static readonly TimeSpan s_gateTimeout = TimeSpan.FromSeconds(5);
+    private readonly bool _batchOnly;
     private bool _disposed;
 
     public string ModelName { get; }
 
-    private TranscribeCppEngine(IntPtr model, string modelName)
+    private TranscribeCppEngine(IntPtr model, string modelName, bool batchOnly)
     {
         _model = model;
         ModelName = modelName;
+        _batchOnly = batchOnly;
     }
 
-    public static TranscribeCppEngine Load(string runtimeDir, string modelPath, Action<string>? logWarning = null)
+    public static TranscribeCppEngine Load(string runtimeDir, string modelPath, Action<string>? logWarning = null, bool batchOnly = false)
     {
         // 1. contract gate — pure file IO, safe on any OS, BEFORE LoadLibrary.
         var contractPath = Path.Combine(runtimeDir, "contract.json");
@@ -126,6 +132,7 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
             Abi(TranscribeCppNative.ABI_CAPABILITIES, Marshal.SizeOf<TranscribeCppNative.Capabilities>(), "capabilities");
             Abi(TranscribeCppNative.ABI_STREAM_UPDATE, Marshal.SizeOf<TranscribeCppNative.StreamUpdate>(), "stream_update");
             Abi(TranscribeCppNative.ABI_STREAM_TEXT, Marshal.SizeOf<TranscribeCppNative.StreamText>(), "stream_text");
+            Abi(TranscribeCppNative.ABI_RUN_PARAMS, Marshal.SizeOf<TranscribeCppNative.RunParams>(), "run_params");
             if (mismatches.Count > 0)
                 throw new TranscribeCppException("ABI struct size mismatch: " + string.Join("; ", mismatches));
 
@@ -151,15 +158,15 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
             var stCaps = TranscribeCppNative.transcribe_model_get_capabilities(model, ref caps);
             if (stCaps != 0)
                 throw new TranscribeCppException($"get_capabilities failed: {TranscribeCppNative.Status(stCaps)}");
-            if (caps.supports_streaming == 0)
+            if (!batchOnly && caps.supports_streaming == 0)
                 throw new TranscribeCppException("model does not support streaming");
             if (caps.native_sample_rate != 16000)
                 throw new TranscribeCppException($"model native_sample_rate is {caps.native_sample_rate}, require 16000");
-            if (!TranscribeCppNative.transcribe_model_accepts_ext_kind(
+            if (!batchOnly && !TranscribeCppNative.transcribe_model_accepts_ext_kind(
                     model, TranscribeCppNative.EXT_SLOT_STREAM, TranscribeCppNative.EXT_KIND_PARAKEET_STREAM))
                 throw new TranscribeCppException("model rejects the PKST stream extension");
 
-            return new TranscribeCppEngine(model, NemotronStreamingModel.Name);
+            return new TranscribeCppEngine(model, NemotronStreamingModel.Name, batchOnly);
         }
         catch
         {
@@ -168,9 +175,34 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
         }
     }
 
-    public ITranscribeCppStream BeginStream(int attContextRight)
+    /// <summary>Marshals a transcribe_run_params carrying a language hint. Returns
+    /// (Zero, Zero) for a null language so callers pass IntPtr.Zero exactly as before.
+    /// Free with FreeRunParams immediately after the native call returns — the header
+    /// guarantees run params and their strings are copied before transcribe_run /
+    /// transcribe_stream_begin return.</summary>
+    private static (IntPtr Params, IntPtr Lang) AllocRunParams(string? language)
+    {
+        if (language is null) return (IntPtr.Zero, IntPtr.Zero);
+        var rp = new TranscribeCppNative.RunParams();
+        TranscribeCppNative.transcribe_run_params_init(ref rp);
+        var pLang = Marshal.StringToCoTaskMemUTF8(language);
+        rp.language = pLang;
+        var pRp = Marshal.AllocHGlobal(Marshal.SizeOf<TranscribeCppNative.RunParams>());
+        Marshal.StructureToPtr(rp, pRp, fDeleteOld: false);
+        return (pRp, pLang);
+    }
+
+    private static void FreeRunParams((IntPtr Params, IntPtr Lang) rp)
+    {
+        if (rp.Params != IntPtr.Zero) Marshal.FreeHGlobal(rp.Params);
+        if (rp.Lang != IntPtr.Zero) Marshal.FreeCoTaskMem(rp.Lang);
+    }
+
+    public ITranscribeCppStream BeginStream(int attContextRight, string? language = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_batchOnly)
+            throw new InvalidOperationException("engine was loaded batch-only; streaming is unavailable");
         // One compute in flight per model: hold the gate for the stream's
         // lifetime. A previous dictation's stream normally disposes in ms; a
         // 5 s timeout means a stuck one degrades to batch, never corrupts.
@@ -179,7 +211,7 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
                 "another transcription is still active on the engine (compute gate timeout)");
         try
         {
-            return BeginStreamHoldingGate(attContextRight);
+            return BeginStreamHoldingGate(attContextRight, language);
         }
         catch
         {
@@ -188,7 +220,7 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
         }
     }
 
-    private ITranscribeCppStream BeginStreamHoldingGate(int attContextRight)
+    private ITranscribeCppStream BeginStreamHoldingGate(int attContextRight, string? language)
     {
         var st = TranscribeCppNative.transcribe_session_init(_model, IntPtr.Zero, out var session);
         if (st != 0)
@@ -210,7 +242,10 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
                 sp.family = pExt;
                 pSp = Marshal.AllocHGlobal(Marshal.SizeOf<TranscribeCppNative.StreamParams>());
                 Marshal.StructureToPtr(sp, pSp, false);
-                var stBegin = TranscribeCppNative.transcribe_stream_begin(session, IntPtr.Zero, pSp);
+                var runParams = AllocRunParams(language);
+                int stBegin;
+                try { stBegin = TranscribeCppNative.transcribe_stream_begin(session, runParams.Params, pSp); }
+                finally { FreeRunParams(runParams); }
                 if (stBegin != 0)
                     throw new TranscribeCppException($"stream_begin failed: {TranscribeCppNative.Status(stBegin)}");
             }
@@ -228,7 +263,7 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
         }
     }
 
-    public string TranscribeBatch(float[] mono16k)
+    public string TranscribeBatch(float[] mono16k, string? language = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (mono16k.Length == 0) return "";
@@ -242,7 +277,10 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
                 throw new TranscribeCppException($"session_init failed: {TranscribeCppNative.Status(st)}");
             try
             {
-                var stRun = TranscribeCppNative.transcribe_run(session, mono16k, mono16k.Length, IntPtr.Zero);
+                var runParams = AllocRunParams(language);
+                int stRun;
+                try { stRun = TranscribeCppNative.transcribe_run(session, mono16k, mono16k.Length, runParams.Params); }
+                finally { FreeRunParams(runParams); }
                 if (stRun != 0)
                     throw new TranscribeCppException($"transcribe_run failed: {TranscribeCppNative.Status(stRun)}");
                 // Copy immediately — pointer dies with the session.

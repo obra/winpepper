@@ -22,26 +22,29 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
     private readonly ITranscriber _batchFallback;
     private readonly ILogger? _log;
     private readonly int _attContextRight;
+    private readonly string? _language;
 
     public NemotronStreamingTranscriber(
         Func<ITranscribeCppEngine> engineProvider,
         ITranscriber batchFallback,
         string modelName,
         ILogger? log = null,
-        int attContextRight = 13)
+        int attContextRight = 13,
+        string? language = null)
     {
         _engineProvider = engineProvider;
         _batchFallback = batchFallback;
         ModelName = modelName;
         _log = log;
         _attContextRight = attContextRight;
+        _language = language;
     }
 
     public string ModelName { get; }
 
     public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
         => Task.FromResult<IStreamingTranscriptionSession>(
-            new Session(_engineProvider, _batchFallback, ModelName, _attContextRight, _log));
+            new Session(_engineProvider, _batchFallback, ModelName, _attContextRight, _language, _log));
 
     private sealed class Session : IStreamingTranscriptionSession
     {
@@ -49,6 +52,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private readonly ITranscriber _batchFallback;
         private readonly string _modelName;
         private readonly int _attContextRight;
+        private readonly string? _language;
         private readonly ILogger? _log;
 
         private readonly float[] _buffer = new float[FeedChunkSamples];
@@ -65,12 +69,13 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private bool _disposed;
 
         public Session(Func<ITranscribeCppEngine> engineProvider, ITranscriber batchFallback,
-            string modelName, int attContextRight, ILogger? log)
+            string modelName, int attContextRight, string? language, ILogger? log)
         {
             _engineProvider = engineProvider;
             _batchFallback = batchFallback;
             _modelName = modelName;
             _attContextRight = attContextRight;
+            _language = language;
             _log = log;
         }
 
@@ -179,7 +184,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
 
         private void EnsureStream()
         {
-            _stream ??= _engineProvider().BeginStream(_attContextRight);
+            _stream ??= _engineProvider().BeginStream(_attContextRight, _language);
         }
 
         private void MarkCorrupt(string where, Exception e)

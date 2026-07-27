@@ -6,6 +6,15 @@
 // compute/network edge replaced by a documented delay model (the local ONNX
 // model cannot run on Linux). real-remote-* scenarios hit the real AssemblyAI
 // API and run only when ASSEMBLYAI_API_KEY is set.
+//
+// --repeats rule (corpus scenario; see BenchArgs.ResolveRepeats):
+//   * --repeats N with NO convergence flag (--time-budget-minutes / --min-passes /
+//     --max-passes): legacy pre-convergence semantics -- each clip runs exactly N
+//     times (min-passes = max-passes = N, time budget disabled). Old drivers that
+//     pass only --repeats get the old bounded run, not a multi-pass convergence run.
+//   * --repeats N with --time-budget-minutes and/or --min-passes: N is the pass cap
+//     (same as --max-passes N); convergence semantics apply.
+//   * --repeats together with --max-passes: rejected -- both set the pass cap.
 using System.Diagnostics;
 using AsrLatencyBench;
 using Microsoft.Extensions.Logging;
@@ -25,8 +34,20 @@ string? nemotronRuntime = null;
 var gain = 1.0;
 var leadSilenceMs = 0;
 string? corpusDir = null;
+string? resultsRoot = null;
 var outDir = "artifacts/asr-eval-results"; // default INSIDE gitignored artifacts/: results.json contains transcript text, and a bare "asr-eval-results/" is NOT gitignored
 var repeats = 1;
+var repeatsSet = false;
+string? modelNameArg = null;
+string? language = null;
+var batchOnly = false;
+var maxClips = 0;
+var timeBudgetMinutes = 55.0;
+var timeBudgetSet = false;
+var minPasses = 2;
+var minPassesSet = false;
+var maxPasses = 0;
+var maxPassesSet = false;
 var scenarioArgs = new List<string>();
 for (var argIdx = 0; argIdx < args.Length; argIdx++)
 {
@@ -39,8 +60,16 @@ for (var argIdx = 0; argIdx < args.Length; argIdx++)
         case "--gain": gain = double.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
         case "--lead-silence-ms": leadSilenceMs = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
         case "--corpus": corpusDir = args[++argIdx]; break;
+        case "--results-root": resultsRoot = args[++argIdx]; break;
         case "--out": outDir = args[++argIdx]; break;
-        case "--repeats": repeats = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
+        case "--repeats": repeats = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); repeatsSet = true; break;
+        case "--model-name": modelNameArg = args[++argIdx]; break;
+        case "--language": language = args[++argIdx]; break;
+        case "--batch-only": batchOnly = true; break;
+        case "--max-clips": maxClips = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); break;
+        case "--time-budget-minutes": timeBudgetMinutes = double.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); timeBudgetSet = true; break;
+        case "--min-passes": minPasses = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); minPassesSet = true; break;
+        case "--max-passes": maxPasses = int.Parse(args[++argIdx], System.Globalization.CultureInfo.InvariantCulture); maxPassesSet = true; break;
         default: scenarioArgs.Add(args[argIdx]); break;
     }
 }
@@ -53,6 +82,22 @@ if (BenchArgs.ValidateRepeats(repeats) is { } repeatsError)
     Environment.ExitCode = 2;
     return;
 }
+if (BenchArgs.ValidateMaxClips(maxClips) is { } maxClipsError) { Console.Error.WriteLine(maxClipsError); Environment.ExitCode = 2; return; }
+if (BenchArgs.ValidateTimeBudgetMinutes(timeBudgetMinutes) is { } budgetError) { Console.Error.WriteLine(budgetError); Environment.ExitCode = 2; return; }
+if (BenchArgs.ValidatePasses(minPasses, maxPasses) is { } passesError) { Console.Error.WriteLine(passesError); Environment.ExitCode = 2; return; }
+// --repeats back-compat (rule documented in the header above and on BenchArgs.ResolveRepeats):
+// alone it restores the old single-pass-with-N-repeats behavior exactly; with
+// --time-budget-minutes/--min-passes it is the pass cap; with --max-passes it is rejected.
+var repeatsResolution = BenchArgs.ResolveRepeats(
+    repeatsSet, repeats, timeBudgetSet, timeBudgetMinutes, minPassesSet, minPasses, maxPassesSet, maxPasses);
+if (repeatsResolution.Error is { } repeatsRuleError) { Console.Error.WriteLine(repeatsRuleError); Environment.ExitCode = 2; return; }
+timeBudgetMinutes = repeatsResolution.TimeBudgetMinutes;
+minPasses = repeatsResolution.MinPasses;
+maxPasses = repeatsResolution.MaxPasses;
+if (repeatsResolution.LegacyMode)
+    Console.WriteLine($"# legacy --repeats {repeats} (no convergence flags): exactly {repeats} pass(es) per clip, time budget disabled");
+// Runs AFTER the back-compat mapping, so a legacy --repeats N run is judged on its effective maxPasses.
+if (BenchArgs.ValidateStopCondition(maxPasses, timeBudgetMinutes) is { } stopError) { Console.Error.WriteLine(stopError); Environment.ExitCode = 2; return; }
 var requested = scenarioArgs.Count > 0 ? scenarioArgs.ToArray() : new[]
 {
     "sim-local-batch", "sim-local-stream",
@@ -301,23 +346,39 @@ foreach (var scenario in requested)
         }
         case "corpus":
         {
-            if (corpusDir is null || nemotronModel is null || nemotronRuntime is null)
+            // ---- resolve model inputs: --model-dir wins over --nemotron-model/--nemotron-runtime
+            var corpusGguf = nemotronModel;
+            var corpusRuntime = nemotronRuntime;
+            if (modelDir is not null && corpusDir is not null && (nemotronModel is null || nemotronRuntime is null))
             {
-                Console.WriteLine("corpus: SKIPPED (requires --corpus, --nemotron-model and --nemotron-runtime)");
+                var resolved = ModelDirLayout.Resolve(modelDir);
+                corpusGguf = resolved.GgufPath;
+                corpusRuntime = resolved.RuntimeDir;
+            }
+            if (corpusDir is null || corpusGguf is null || corpusRuntime is null)
+            {
+                Console.WriteLine("corpus: SKIPPED (need --corpus plus --model-dir or --nemotron-model/--nemotron-runtime)");
                 break;
             }
             var manifestPath = Path.Combine(corpusDir, "manifest.json");
-            if (!File.Exists(manifestPath) || !File.Exists(nemotronModel)
-                || !File.Exists(Path.Combine(nemotronRuntime, "transcribe.dll")))
+            if (!File.Exists(manifestPath) || !File.Exists(corpusGguf)
+                || !File.Exists(Path.Combine(corpusRuntime, "transcribe.dll")))
             {
                 Console.WriteLine("corpus: SKIPPED (manifest, model or runtime not found)");
                 break;
             }
-            var manifest = AsrEvalCorpus.CorpusManifest.Load(manifestPath);
+
+            var modelName = modelNameArg ?? Path.GetFileNameWithoutExtension(corpusGguf);
+            var mode = batchOnly ? "batch" : "streaming";
+            Console.WriteLine($"# corpus: model={modelName} mode={mode} language={language ?? "(none)"} " +
+                $"maxClips={maxClips} minPasses={minPasses} maxPasses={maxPasses} timeBudgetMinutes={timeBudgetMinutes}");
+
+            // batchOnly Load skips the streaming+PKST capability checks (required for Qwen3-ASR,
+            // which transcribe.cpp v0.1.3 supports for batch only); default path unchanged.
             using var corpusEngine = Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
-                nemotronRuntime, nemotronModel, msg => Console.WriteLine($"# nem-log: {msg}"));
-            // SECOND engine instance (same model + runtime, its OWN compute gate),
-            // used ONLY as the streaming sessions' batch fallback via
+                corpusRuntime, corpusGguf, msg => Console.WriteLine($"# nem-log: {msg}"), batchOnly: batchOnly);
+            // Streaming mode needs a SECOND engine instance (same model + runtime, its
+            // OWN compute gate), used ONLY as the streaming sessions' batch fallback via
             // EngineBatchTranscriber. Do NOT "simplify" this back to one engine:
             // during FinishAsync the primary engine's native stream still HOLDS the
             // engine-wide SemaphoreSlim(1,1) compute gate (acquired
@@ -328,140 +389,257 @@ foreach (var scenario in requested)
             // A same-engine fallback awaited inside FinishAsync would stall 5 s at the
             // gate wait (TranscribeCppEngine.cs:235) and throw TranscribeCppException
             // on EVERY fallback clip. Cost: ~700 MB extra model RAM, bench-only, accepted.
-            using var fallbackEngine = Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
-                nemotronRuntime, nemotronModel, msg => Console.WriteLine($"# nem-fallback-log: {msg}"));
-            Console.WriteLine($"# corpus: engines loaded (primary + fallback), {manifest.Entries.Count} manifest entries, repeats={repeats}");
+            // Batch-only mode never opens a stream, so ONE engine suffices (saves ~1 model of RAM).
+            // NULLABILITY: this conditional makes fallbackEngine a TranscribeCppEngine?, and
+            // Directory.Build.props sets <WarningsAsErrors>nullable</WarningsAsErrors>, so any
+            // unguarded use is a BUILD ERROR (CS8604). Flow analysis cannot correlate batchOnly
+            // with the null-ness, so the sole use site -- inside the `if (!batchOnly)` block,
+            // where non-null is guaranteed by construction -- must use the null-forgiving
+            // operator: `new EngineBatchTranscriber(fallbackEngine!)`.
+            using var fallbackEngine = batchOnly ? null : Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
+                corpusRuntime, corpusGguf, msg => Console.WriteLine($"# nem-fallback-log: {msg}"));
 
-            var clipResults = new List<ClipResult>();
-            foreach (var entry in manifest.Entries.Where(e => !e.Exclude))
+            var manifest = AsrEvalCorpus.CorpusManifest.Load(manifestPath);
+            var entries = manifest.Entries.Where(e => !e.Exclude).ToList();
+            if (maxClips > 0) entries = entries.Take(maxClips).ToList();
+
+            // ---- per-clip accumulators, pooled across passes
+            var tallies = entries.ToDictionary(e => e.Id, e => new ClipTally());
+            var passSummaries = new List<PassSummary>();
+            var trace = new List<ConvergencePoint>();
+            var runClock = Stopwatch.StartNew();
+            var pass = 0;
+            var converged = false;
+
+            while (true)
             {
-                // One bad clip must not destroy the whole eval: any per-clip failure
-                // (including a null coordinator result) becomes an error row, and
-                // results.json/results.md are still written after the loop.
-                try
+                // Termination guard: failed clips are skipped forever, so once EVERY clip has
+                // errored no pass can add samples and convergence is unreachable -- stop instead
+                // of spinning until the time budget (or forever) appending trace entries.
+                if (tallies.Values.All(t => t.Error is not null))
                 {
-                    var wavAudio = BenchAudio.ReadMono16k(Path.Combine(corpusDir, entry.WavPath));
-                    var refPath = AsrEvalCorpus.ReferencePlanner.ReferencePath(corpusDir, entry);
-                    var hasReference = File.Exists(refPath);
-                    var referenceText = hasReference ? File.ReadAllText(refPath).Trim() : "";
-
-                    // (a) batch parity reference: the PRIMARY engine, offline over the
-                    //     full clip. Gate-safe: it runs before any streaming session
-                    //     exists on this engine, so its compute gate is free.
-                    var batchText = corpusEngine.TranscribeBatch(wavAudio);
-
-                    // (b) production passes silence-trimmed audio to FinishAsync (PipelineHost.cs:554);
-                    //     streamed frames stay untrimmed -- same asymmetry as production.
-                    var trimResult = Winpepper.Audio.SilenceTrimmer.Trim(wavAudio);
-
-                    var streamText = "";
-                    var fellBackCount = 0;
-                    var truncated = false;
-                    var finishRuns = new List<long>();
-                    for (var run = 0; run < repeats; run++)
-                    {
-                        var runFellBack = false;
-                        // Fallback runs on the SECOND engine -- see the fallbackEngine comment above.
-                        var probe = new ProbeTranscriber(() => runFellBack = true, new EngineBatchTranscriber(fallbackEngine));
-                        var nemLog = new ListLogger();
-                        var streaming = new NemotronStreamingTranscriber(
-                            () => corpusEngine, probe, "nemotron-streaming-en", nemLog);
-                        await using var session = StreamingDictationSession.Start(
-                            _ => Task.FromResult<IStreamingTranscriber?>(streaming),
-                            NullLogger.Instance, CancellationToken.None, TimeSpan.FromSeconds(10));
-
-                        // Production sends one ~500 ms preroll burst at session start, then
-                        // steady 50 ms frames (WarmWasapiRecorder.cs:144-147, PipelineHost.cs:455).
-                        // Stopwatch-scheduled pacing: steady frame s is due at s*50 ms, so
-                        // cumulative timing stays true to real time (no Task.Delay drift).
-                        var segments = EvalFraming.Segments(wavAudio.Length);
-                        var pacer = Stopwatch.StartNew();
-                        for (var s = 0; s < segments.Count; s++)
-                        {
-                            if (s > 0)
-                            {
-                                var waitMs = s * 50L - pacer.ElapsedMilliseconds;
-                                if (waitMs > 0) await Task.Delay((int)waitMs);
-                            }
-                            var (segOffset, segLength) = segments[s];
-                            session.OnFrame(wavAudio.AsMemory(segOffset, segLength));
-                        }
-
-                        long finishMs;
-                        string runText;
-                        if (trimResult.IsSilent)
-                        {
-                            // Production drops silent dictations before transcription
-                            // (PipelineHost TrimForTranscription returns null): no text, no latency sample.
-                            runText = "";
-                            finishMs = 0;
-                        }
-                        else
-                        {
-                            var swFinish = Stopwatch.StartNew();
-                            var finishResult = await session.FinishAsync(trimResult.Trimmed, CancellationToken.None);
-                            swFinish.Stop();
-                            if (finishResult is null)
-                                throw new InvalidOperationException(
-                                    $"corpus[{entry.Id}]: no transcript from coordinator"); // caught below -> error row, run continues
-                            runText = finishResult.Text;
-                            finishMs = swFinish.ElapsedMilliseconds;
-                        }
-                        finishRuns.Add(finishMs);
-                        // Accuracy text comes from the first run; EVERY run contributes a
-                        // latency sample AND its fallback/truncation flags (a clip that fell
-                        // back only on run 3 of 5 still reports fellBack, with the count).
-                        if (run == 0) streamText = runText;
-                        if (runFellBack) fellBackCount++;
-                        truncated |= nemLog.Lines.Any(l => l.Contains("was_truncated", StringComparison.OrdinalIgnoreCase));
-                    }
-                    var fellBack = fellBackCount > 0;
-
-                    double? wer = null;
-                    double? cer = null;
-                    bool? silentPass = null;
-                    if (entry.ExpectedSilent)
-                    {
-                        silentPass = EvalMetrics.SilentPass(streamText);
-                    }
-                    else if (hasReference)
-                    {
-                        wer = EvalMetrics.Wer(referenceText, streamText).Rate;
-                        cer = EvalMetrics.Cer(referenceText, streamText).Rate;
-                    }
-                    var parityDiff = TranscriptDiff.Summarize(batchText, streamText).Describe();
-                    clipResults.Add(new ClipResult(
-                        entry.Id, wavAudio.Length / 16000.0, entry.ExpectedSilent, hasReference,
-                        referenceText, streamText, batchText, wer, cer, silentPass,
-                        finishRuns, fellBack, fellBackCount, truncated, trimResult.IsSilent, parityDiff));
-                    Console.WriteLine($"# corpus[{entry.Id}]: fellBack={fellBackCount}/{repeats} truncated={truncated} " +
-                        $"wer={(wer is null ? "n/a" : wer.Value.ToString("F3"))} finishMs={finishRuns[0]} parity: {parityDiff}");
+                    Console.Error.WriteLine("# corpus: no runnable clips remain (all failed) -- stopping");
+                    break;
                 }
-                catch (Exception ex)
+                pass++;
+                var passLatencies = new List<double>();   // this pass's speed metric samples (> 0)
+                var passRtfs = new List<double>();
+                var passWers = new List<double>();
+                var passStart = ResourceUsage.Capture();
+
+                foreach (var entry in entries)
+                {
+                    var tally = tallies[entry.Id];
+                    if (tally.Error is not null) continue;   // a clip that failed once stays failed
+                    // One bad clip must not destroy the whole eval: any per-clip failure
+                    // (including a null coordinator result) becomes an error row, and
+                    // results.json/results.md are still written after the loop.
+                    try
+                    {
+                        var wavAudio = BenchAudio.ReadMono16k(Path.Combine(corpusDir, entry.WavPath));
+                        var refPath = AsrEvalCorpus.ReferencePlanner.ReferencePath(corpusDir, entry);
+                        var hasReference = File.Exists(refPath);
+                        var referenceText = hasReference ? File.ReadAllText(refPath).Trim() : "";
+                        var before = ResourceUsage.Capture();
+
+                        // (a) whole-file batch transcribe (parity reference in streaming mode;
+                        //     THE speed metric in batch mode). Untrimmed audio, as today.
+                        //     Gate-safe: it runs before any streaming session exists on this
+                        //     engine, so its compute gate is free.
+                        var swBatch = Stopwatch.StartNew();
+                        var batchText = corpusEngine.TranscribeBatch(wavAudio, language);
+                        swBatch.Stop();
+                        tally.BatchMs.Add(swBatch.ElapsedMilliseconds);
+                        var afterBatch = ResourceUsage.Capture();
+
+                        var runText = batchText;
+                        long finishMs = 0;
+                        var runFellBack = false;
+                        var runTruncated = false;
+                        var runTrimmedSilent = false;
+                        if (!batchOnly)
+                        {
+                            // (b) production passes silence-trimmed audio to FinishAsync (PipelineHost.cs:554);
+                            //     streamed frames stay untrimmed -- same asymmetry as production.
+                            var trimResult = Winpepper.Audio.SilenceTrimmer.Trim(wavAudio);
+                            runTrimmedSilent = trimResult.IsSilent;
+
+                            // Fallback runs on the SECOND engine -- see the fallbackEngine comment above.
+                            // fallbackEngine! : non-null by construction inside !batchOnly (see NULLABILITY note).
+                            var probe = new ProbeTranscriber(() => runFellBack = true, new EngineBatchTranscriber(fallbackEngine!, language));
+                            var nemLog = new ListLogger();
+                            var streaming = new NemotronStreamingTranscriber(
+                                () => corpusEngine, probe, modelName, nemLog, attContextRight: 13, language: language);
+                            await using var session = StreamingDictationSession.Start(
+                                _ => Task.FromResult<IStreamingTranscriber?>(streaming),
+                                NullLogger.Instance, CancellationToken.None, TimeSpan.FromSeconds(10));
+
+                            // Production sends one ~500 ms preroll burst at session start, then
+                            // steady 50 ms frames (WarmWasapiRecorder.cs:144-147, PipelineHost.cs:455).
+                            // Stopwatch-scheduled pacing: steady frame s is due at s*50 ms, so
+                            // cumulative timing stays true to real time (no Task.Delay drift).
+                            var segments = EvalFraming.Segments(wavAudio.Length);
+                            var pacer = Stopwatch.StartNew();
+                            for (var s = 0; s < segments.Count; s++)
+                            {
+                                if (s > 0)
+                                {
+                                    var waitMs = s * 50L - pacer.ElapsedMilliseconds;
+                                    if (waitMs > 0) await Task.Delay((int)waitMs);
+                                }
+                                var (segOffset, segLength) = segments[s];
+                                session.OnFrame(wavAudio.AsMemory(segOffset, segLength));
+                            }
+
+                            if (trimResult.IsSilent)
+                            {
+                                // Production drops silent dictations before transcription
+                                // (PipelineHost TrimForTranscription returns null): no text, no latency sample.
+                                runText = "";
+                                finishMs = 0;
+                            }
+                            else
+                            {
+                                var swFinish = Stopwatch.StartNew();
+                                var finishResult = await session.FinishAsync(trimResult.Trimmed, CancellationToken.None);
+                                swFinish.Stop();
+                                if (finishResult is null)
+                                    throw new InvalidOperationException(
+                                        $"corpus[{entry.Id}]: no transcript from coordinator"); // caught below -> error row, run continues
+                                runText = finishResult.Text;
+                                finishMs = swFinish.ElapsedMilliseconds;
+                            }
+                            runTruncated = nemLog.Lines.Any(l => l.Contains("was_truncated", StringComparison.OrdinalIgnoreCase));
+                            if (finishMs > 0) tally.FinishMs.Add(finishMs);
+                        }
+
+                        var after = ResourceUsage.Capture();
+                        // CPU attribution: batch mode charges the batch decode; streaming mode charges
+                        // ONLY the streaming replay (the batch parity decode is excluded), so CpuSeconds,
+                        // CpuSecondsTotal, and streaming RTF are comparable across models and modes.
+                        var cpu = batchOnly
+                            ? ResourceUsage.CpuDelta(before, afterBatch)
+                            : ResourceUsage.CpuDelta(afterBatch, after);
+                        tally.CpuSeconds += cpu;
+                        var clipAudioSeconds = wavAudio.Length / 16000.0;
+                        // RTF: batch = transcribe wall time / audio; streaming = streaming-replay CPU s / audio
+                        // (streaming wall time is real-time paced, so CPU is the honest processing cost;
+                        // the parity decode is excluded by the attribution above).
+                        var rtf = batchOnly
+                            ? ResourceUsage.Rtf(swBatch.Elapsed.TotalSeconds, clipAudioSeconds)
+                            : ResourceUsage.Rtf(cpu, clipAudioSeconds);
+                        tally.Rtfs.Add(rtf);
+                        passRtfs.Add(rtf);
+                        var speedMs = batchOnly ? swBatch.ElapsedMilliseconds : finishMs;
+                        if (speedMs > 0) passLatencies.Add(speedMs);
+
+                        if (pass == 1)
+                        {
+                            tally.AudioSeconds = clipAudioSeconds;
+                            tally.HasReference = hasReference;
+                            tally.Reference = referenceText;
+                            tally.BatchText = batchText;
+                            tally.StreamText = batchOnly ? "" : runText;
+                            // Accuracy is scored once, on pass 1, on the mode's transcript:
+                            // batch mode scores batchText, streaming scores the stream text.
+                            tally.ScoredText = batchOnly ? batchText : runText;
+                            tally.TrimmedSilent = runTrimmedSilent;
+                            // Batch-only mode has no stream text, hence no parity diff.
+                            tally.ParityDiff = batchOnly ? "" : TranscriptDiff.Summarize(batchText, runText).Describe();
+                            if (entry.ExpectedSilent)
+                            {
+                                tally.SilentPass = EvalMetrics.SilentPass(tally.ScoredText);
+                            }
+                            else if (hasReference)
+                            {
+                                tally.Wer = EvalMetrics.Wer(referenceText, tally.ScoredText).Rate;
+                                tally.Cer = EvalMetrics.Cer(referenceText, tally.ScoredText).Rate;
+                            }
+                        }
+                        else if (!string.Equals(batchOnly ? batchText : runText, tally.ScoredText, StringComparison.Ordinal))
+                        {
+                            tally.TranscriptStable = false;   // deterministic decode should make this impossible
+                            Console.Error.WriteLine($"# corpus[{entry.Id}]: transcript changed on pass {pass} -- decode not deterministic?");
+                        }
+                        if (tally.Wer is not null) passWers.Add(tally.Wer.Value);
+                        tally.FellBack |= runFellBack;
+                        if (runFellBack) tally.FellBackCount++;
+                        tally.Truncated |= runTruncated;
+                    }
+                    catch (Exception ex)
+                    {
+                        tally.Error = $"{ex.GetType().Name}: {ex.Message}";
+                        Console.Error.WriteLine($"corpus[{entry.Id}] ERROR: {tally.Error}");
+                    }
+                }
+
+                var passEnd = ResourceUsage.Capture();
+                // Pass-level CpuSeconds is the whole-process cost of the pass (streaming passes
+                // include the parity decode) -- a per-pass diagnostic only; the comparable
+                // cross-model numbers are the per-clip attributions above.
+                passSummaries.Add(EvalPasses.Summarize(pass, passLatencies, passRtfs, passWers,
+                    ResourceUsage.CpuDelta(passStart, passEnd), passEnd.PeakWorkingSetBytes,
+                    tallies.Values.Count(t => t.Error is not null)));
+
+                // convergence over pooled per-clip medians of the mode's speed metric
+                var medians = tallies.Values
+                    .Select(t => batchOnly ? t.BatchMs : t.FinishMs)
+                    .Where(samples => samples.Count > 0)
+                    .Select(samples => Convergence.Median(samples.Select(ms => (double)ms).ToArray()))
+                    .ToArray();
+                var previousMean = trace.Count > 0 ? trace[^1].MeanMs : 0;
+                trace.Add(Convergence.Evaluate(pass, medians, previousMean));
+                converged = pass >= minPasses && Convergence.Converged(trace);
+                Console.WriteLine($"# corpus: pass {pass} done -- mean {trace[^1].MeanMs:F0} ms, " +
+                    $"CI half-width {trace[^1].CiHalfWidthMs:F1} ms ({trace[^1].RatioToMean:P1}, diagnostic), " +
+                    $"delta {(double.IsFinite(trace[^1].DeltaFromPrevious) ? trace[^1].DeltaFromPrevious.ToString("P1") : "n/a")}, " +
+                    $"stable={trace[^1].Stable}, converged={converged}");
+
+                if (converged) break;
+                if (maxPasses > 0 && pass >= maxPasses) break;
+                if (timeBudgetMinutes > 0 && runClock.Elapsed >= TimeSpan.FromMinutes(timeBudgetMinutes)) break;
+            }
+
+            // ---- build ClipResults from tallies (order = entries order)
+            var clipResults = entries.Select(e =>
+            {
+                var t = tallies[e.Id];
+                if (t.Error is not null && t.FinishMs.Count == 0 && t.BatchMs.Count == 0)
                 {
                     // Error row: empty texts/metrics; the exception text goes only to
                     // results.json (gitignored artifacts/) and the run log -- results.md
                     // shows an ERROR marker and counts, never the message.
-                    clipResults.Add(new ClipResult(
-                        entry.Id, 0.0, entry.ExpectedSilent, HasReference: false,
-                        Reference: "", StreamText: "", BatchText: "", Wer: null, Cer: null, SilentPass: null,
-                        FinishMsRuns: Array.Empty<long>(), FellBack: false, FellBackCount: 0, Truncated: false,
-                        TrimmedSilent: false, BatchParityDiff: "",
-                        Error: $"{ex.GetType().Name}: {ex.Message}"));
-                    Console.Error.WriteLine($"# corpus[{entry.Id}]: FAILED {ex.GetType().Name}: {ex.Message}");
+                    return new ClipResult(e.Id, 0, e.ExpectedSilent, false, "", "", "", null, null, null,
+                        Array.Empty<long>(), false, 0, false, false, "", t.Error);
                 }
-            }
+                return new ClipResult(
+                    e.Id, t.AudioSeconds, e.ExpectedSilent, t.HasReference,
+                    t.Reference, t.StreamText, t.BatchText,
+                    t.Wer, t.Cer, t.SilentPass,
+                    t.FinishMs, t.FellBack, t.FellBackCount, t.Truncated, t.TrimmedSilent,
+                    t.ParityDiff, t.Error,
+                    BatchMsRuns: t.BatchMs,
+                    CpuSeconds: Math.Round(t.CpuSeconds, 3),
+                    MeanRtf: t.Rtfs.Count == 0 ? 0 : Math.Round(t.Rtfs.Average(), 4),
+                    TranscriptStable: t.TranscriptStable);
+            }).ToList();
 
+            var totalCpu = clipResults.Sum(c => c.CpuSeconds);
+            var peakMb = ResourceUsage.ToMb(ResourceUsage.Capture().PeakWorkingSetBytes);
             var runInfo = new EvalRunInfo(
                 Path.GetFileName(Path.TrimEndingDirectorySeparator(corpusDir)),
-                Path.GetFileNameWithoutExtension(nemotronModel),
+                modelName,
                 Winpepper.Asr.TranscribeCpp.TranscribeCppContract.RequiredVersion,
                 DateTime.UtcNow.ToString("yyyy-MM-dd"),
-                repeats);
-            var evalSummary = EvalResults.Summarize(clipResults);
+                pass,                             // Repeats now records completed passes
+                Mode: mode, Language: language, Passes: pass, Converged: converged);
+            var evalSummary = EvalResults.Summarize(clipResults, mode, totalCpu, peakMb);
+            if (evalSummary.UnstableTranscriptCount > 0)
+                Console.Error.WriteLine($"corpus: WARNING {evalSummary.UnstableTranscriptCount} clip(s) changed transcript across passes (expected deterministic decode)");
             // ALWAYS write both files -- even when clips failed -- then report failures.
             Directory.CreateDirectory(outDir);
-            File.WriteAllText(Path.Combine(outDir, "results.json"), EvalResults.ToJson(runInfo, clipResults, evalSummary));
+            File.WriteAllText(Path.Combine(outDir, "results.json"),
+                EvalResults.ToJson(runInfo, clipResults, evalSummary, passSummaries, trace));
             var resultsMd = EvalResults.ToMarkdown(runInfo, clipResults, evalSummary);
             File.WriteAllText(Path.Combine(outDir, "results.md"), resultsMd);
             Console.WriteLine();
@@ -469,9 +647,38 @@ foreach (var scenario in requested)
             if (evalSummary.FailedCount > 0)
             {
                 // Results are already on disk; the non-zero exit only flags the failures.
-                Console.Error.WriteLine($"# corpus: {evalSummary.FailedCount} clip(s) FAILED -- results written to {outDir}, exiting non-zero");
+                Console.Error.WriteLine($"corpus: {evalSummary.FailedCount} clip(s) FAILED");
                 Environment.ExitCode = 1;
             }
+            break;
+        }
+        case "compare":
+        {
+            if (resultsRoot is null)
+            {
+                Console.WriteLine("compare: SKIPPED (--results-root not set)");
+                break;
+            }
+            // Per-model subdirs ONLY. A root-level results.json is stale output from the
+            // old single-model driver (one exists in the main checkout) — never ingest it.
+            var files = Directory.Exists(resultsRoot)
+                ? Directory.GetDirectories(resultsRoot)
+                    .Select(d => Path.Combine(d, "results.json"))
+                    .Where(File.Exists)
+                    .OrderBy(f => f, StringComparer.Ordinal).ToArray()
+                : Array.Empty<string>();
+            if (files.Length == 0)
+            {
+                Console.Error.WriteLine($"compare: no results.json found under {resultsRoot}");
+                Environment.ExitCode = 2;
+                break;
+            }
+            var reports = files.Select(f => EvalComparison.Parse(File.ReadAllText(f))).ToList();
+            var comparison = EvalComparison.Build(reports, DateTime.UtcNow.ToString("yyyy-MM-dd"));
+            Directory.CreateDirectory(outDir);
+            var comparisonPath = Path.Combine(outDir, "comparison.json");
+            File.WriteAllText(comparisonPath, EvalComparison.ToJson(comparison));
+            Console.WriteLine($"compare: wrote {comparisonPath} ({reports.Count} models: {string.Join(", ", comparison.Models.Select(m => m.Model))})");
             break;
         }
         default:
@@ -570,10 +777,29 @@ sealed class ProbeTranscriber : ITranscriber
 sealed class EngineBatchTranscriber : ITranscriber
 {
     private readonly Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine _engine;
-    public EngineBatchTranscriber(Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine engine) => _engine = engine;
+    private readonly string? _language;
+    public EngineBatchTranscriber(Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine engine, string? language = null)
+    { _engine = engine; _language = language; }
     public string ModelName => "nemotron-batch";
+    // Same language hint as the streaming session and the batch parity decode:
+    // a fallback transcript must not differ from batch just because it lost the hint.
     public Task<TranscriptionResult> TranscribeAsync(ReadOnlyMemory<float> audio, CancellationToken ct)
-        => Task.FromResult(new TranscriptionResult(_engine.TranscribeBatch(audio.ToArray()), ModelName));
+        => Task.FromResult(new TranscriptionResult(_engine.TranscribeBatch(audio.ToArray(), _language), ModelName));
+}
+
+/// <summary>Per-clip accumulator for the corpus eval's multi-pass loop: latency and
+/// batch-ms samples, CPU/RTF attribution, and the pass-1 texts/metrics that later
+/// passes are checked against. A non-null Error permanently retires the clip.</summary>
+sealed class ClipTally
+{
+    public double AudioSeconds; public bool HasReference; public bool TrimmedSilent;
+    public string Reference = ""; public string StreamText = ""; public string BatchText = "";
+    public string ScoredText = "";                    // pass-1 transcript of the scored mode
+    public double? Wer; public double? Cer; public bool? SilentPass;
+    public List<long> FinishMs = new(); public List<long> BatchMs = new();
+    public double CpuSeconds; public List<double> Rtfs = new();
+    public bool FellBack; public int FellBackCount; public bool Truncated;
+    public bool TranscriptStable = true; public string? Error; public string ParityDiff = "";
 }
 
 /// <summary>Collects NemotronStreamingTranscriber log lines so the corpus eval can

@@ -383,8 +383,8 @@ public sealed class PipelineHost : IDisposable
     /// Paste the held pending text into whatever field is focused NOW (the
     /// user's explicit choice via the pill click). Uses the normal injection
     /// path. On success the VM consumes the slot and hides the pill; on failure
-    /// the pending slot is kept (NotifyPasteAttempted(false)) so the pill stays
-    /// in its click-to-paste state and the user simply clicks again — no toast,
+    /// OR a mid-paste focus change the pending slot is kept (full text) so the
+    /// user simply clicks again — no toast,
     /// no clipboard clobbering (consumer policy: the pill IS the surface).
     /// Returns true when the paste succeeded. Runs on the UI thread.
     /// </summary>
@@ -392,8 +392,11 @@ public sealed class PipelineHost : IDisposable
     {
         if (!_vm.HasPendingPaste) return false;
         var text = Winpepper.Core.InjectionText.ForPaste(_vm.PendingPasteText);
-        var injected = !string.IsNullOrWhiteSpace(text) && _injector.TryInject(text);
-        if (!injected)
+        var outcome = string.IsNullOrWhiteSpace(text)
+            ? Winpepper.Platform.Injection.InjectionRunOutcome.SendFailed
+            : _injector.TryInjectGuarded(text);
+        var injected = outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
+        if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.SendFailed)
         {
             // Slot is kept below; the pill stays clickable for a retry.
             _errorBus.Report(
@@ -403,6 +406,12 @@ public sealed class PipelineHost : IDisposable
         }
         if (injected)
             _log.LogInformation("Pending paste injected");
+        else if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
+            // Focus moved mid-paste during the pill-click retry too: the slot
+            // still holds the FULL original text, so the next click re-pastes
+            // all of it. Not an error -- no ErrorBus report.
+            _log.LogInformation(
+                "Pending paste interrupted (focus or modifier change); slot kept with full text for another click");
         else
             _log.LogWarning("Pending paste injection failed");
 
@@ -705,8 +714,24 @@ public sealed class PipelineHost : IDisposable
                     else
                     {
                         var toType = Winpepper.Core.InjectionText.ForPaste(final);
-                        injected = _injector.TryInject(toType);
-                        if (!injected)
+                        var outcome = _injector.TryInjectGuarded(toType);
+                        injected = outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
+                        if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
+                        {
+                            // Focus moved to another window (or a halt-gesture
+                            // modifier went down) while the keystrokes
+                            // were still going out: stop typing and hold the WHOLE
+                            // transcription as a pending paste (never just the
+                            // remainder -- a torn partial paste in the old window
+                            // means the user re-pastes ALL of it where they want it).
+                            // Not an error: no ErrorBus report, no toast, no
+                            // clipboard clobbering -- the pill is the surface.
+                            _vm.EnterPendingPaste(final, _targetAtStart);
+                            _log.LogInformation(
+                                "Injection interrupted (focus or modifier change); held full text as pending paste ({Chars} chars)",
+                                final.Length);
+                        }
+                        else if (!injected)
                         {
                             // Injection failed (SendInput refused). Consumer policy:
                             // no toast, no clipboard clobbering — hold the text as a
@@ -1074,8 +1099,24 @@ public sealed class PipelineHost : IDisposable
                         else
                         {
                             var toType2 = Winpepper.Core.InjectionText.ForPaste(final2);
-                            injected2 = _injector.TryInject(toType2);
-                            if (!injected2)
+                            var outcome2 = _injector.TryInjectGuarded(toType2);
+                            injected2 = outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
+                            if (outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
+                            {
+                                // Focus moved to another window (or a halt-gesture
+                                // modifier went down) while the keystrokes
+                                // were still going out: stop typing and hold the WHOLE
+                                // transcription as a pending paste (never just the
+                                // remainder -- a torn partial paste in the old window
+                                // means the user re-pastes ALL of it where they want it).
+                                // Not an error: no ErrorBus report, no toast, no
+                                // clipboard clobbering -- the pill is the surface.
+                                _vm.EnterPendingPaste(final2, _targetAtStart);
+                                _log.LogInformation(
+                                    "Injection interrupted (focus or modifier change); held full text as pending paste ({Chars} chars)",
+                                    final2.Length);
+                            }
+                            else if (!injected2)
                             {
                                 // See hold path: failure -> pending click-to-paste,
                                 // no toast, no clipboard clobbering.

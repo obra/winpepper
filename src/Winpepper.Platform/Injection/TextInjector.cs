@@ -9,23 +9,97 @@ public sealed class TextInjector
     private const int ModifierWaitTimeoutMs = 1500;
     private const int ModifierWaitPollMs = 15;
 
+    /// <summary>UTF-16 code units per guarded send chunk (Task: mid-paste focus fallback).</summary>
+    internal const int ChunkCodeUnits = 32;
+
+    /// <summary>
+    /// Pause between guarded send chunks. Load-bearing (validation ledger, A1):
+    /// SendInput is queue-insertion (~µs per call), so an UNPACED loop finishes
+    /// in single-digit milliseconds and the mid-paste guard could never observe
+    /// a human focus change. 20 ms/chunk ≈ 1600 code units/s -- far faster than
+    /// any typist, slow enough that a long paste spans the human reaction
+    /// window (a 1000-unit paste ≈ 0.6 s).
+    /// </summary>
+    internal const int InterChunkPauseMs = 20;
+
     private readonly ILogger<TextInjector> _log;
     private readonly Func<int, bool> _isKeyDown;
+    private readonly Func<long> _foregroundHwnd;
+    private readonly Func<string, bool> _sendChunk;
+    private readonly Action<int> _sleep;
 
-    public TextInjector(ILogger<TextInjector> log, Func<int, bool>? isKeyDown = null)
+    public TextInjector(
+        ILogger<TextInjector> log,
+        Func<int, bool>? isKeyDown = null,
+        Func<long>? foregroundHwnd = null,
+        Func<string, bool>? sendChunk = null,
+        Action<int>? sleep = null)
     {
         _log = log;
         _isKeyDown = isKeyDown ?? DefaultKeyProbe;
+        _foregroundHwnd = foregroundHwnd ?? DefaultForegroundProbe;
+        _sendChunk = sendChunk ?? SendChunkViaSendInput;
+        _sleep = sleep ?? Thread.Sleep;
     }
 
     private static bool DefaultKeyProbe(int vk)
         => OperatingSystem.IsWindows()
            && (Winpepper.Platform.Hotkeys.KeyboardHookNative.GetAsyncKeyState(vk) & 0x8000) != 0;
 
-    public bool TryInject(string text)
+    /// <summary>Foreground HWND as Int64; 0 when unknown (non-Windows, or the call fails).</summary>
+    private static long DefaultForegroundProbe()
     {
-        if (string.IsNullOrEmpty(text)) return true;
+        if (!OperatingSystem.IsWindows()) return 0;
+        try { return SendInputNative.GetForegroundWindow().ToInt64(); }
+        catch { return 0; }
+    }
 
+    /// <summary>
+    /// Interruptible paste: types the text in chunks of
+    /// <see cref="ChunkCodeUnits"/> UTF-16 code units, pausing
+    /// <see cref="InterChunkPauseMs"/> between chunks (pacing is what makes
+    /// the guard able to observe a human halt gesture at all -- an unpaced
+    /// loop is queue-insertion-fast and finishes in milliseconds) and
+    /// checking before every chunk that (a) no physical modifier has gone
+    /// down (the leading edge of Alt+Tab -- injected Unicode is delivered
+    /// with the current physical modifier state applied) and (b) the window
+    /// that was foreground when this method was entered is STILL foreground.
+    /// If either check trips, the remaining chunks are not sent and
+    /// <see cref="InjectionRunOutcome.Interrupted"/> is returned so the
+    /// caller can hold the WHOLE original text as a pending paste.
+    /// The baseline is captured at method entry -- BEFORE the modifier-release
+    /// wait (up to 1500 ms) -- so a focus change during that wait is caught
+    /// before the first keystroke. The modifier check cannot re-trip on the
+    /// prelude's own timeout: NeutralizeHeldModifiers synthesizes KEYUPs, so
+    /// after it returns the observable modifier state is up. Fail-open: if
+    /// the foreground window cannot be determined (probe returns 0), the
+    /// HWND guard is disabled and the paste proceeds exactly as it did
+    /// before this feature.
+    /// </summary>
+    public InjectionRunOutcome TryInjectGuarded(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return InjectionRunOutcome.Completed;
+
+        var hwndAtSendStart = _foregroundHwnd();
+        NeutralizeHeldModifiers();
+        var chunks = InjectionChunker.Split(text, ChunkCodeUnits);
+        var outcome = GuardedInjectionRun.Execute(
+            chunks,
+            hwndAtSendStart,
+            _foregroundHwnd,
+            _sendChunk,
+            modifierHeld: () => ModifierGuard.AnyDown(_isKeyDown),
+            pauseBetweenChunks: () => _sleep(InterChunkPauseMs));
+        if (outcome == InjectionRunOutcome.Interrupted)
+            _log.LogInformation("Injection interrupted: foreground window or physical modifier state changed mid-paste");
+        return outcome;
+    }
+
+    public bool TryInject(string text)
+        => TryInjectGuarded(text) == InjectionRunOutcome.Completed;
+
+    private void NeutralizeHeldModifiers()
+    {
         // A physically-held modifier (e.g. Ctrl still down from the dictation
         // chord, or held while clicking the pending-paste pill) is applied by
         // the target app to every injected character — turning the text into
@@ -46,8 +120,11 @@ public sealed class TextInjector
                 _log.LogWarning("Modifier neutralization partial send: requested {Req}, sent {Sent}",
                     releases.Length, released);
         }
+    }
 
-        var inputs = BuildKeyDownUpInputs(ToCodeUnits(text));
+    private bool SendChunkViaSendInput(string chunk)
+    {
+        var inputs = BuildKeyDownUpInputs(ToCodeUnits(chunk));
         var sent = SendInputNative.SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<SendInputNative.INPUT>());
         if (sent != (uint)inputs.Length)
         {

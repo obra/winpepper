@@ -132,4 +132,76 @@ public sealed class EvalResultsTests
         md.ShouldContain("Failed: 1");
         md.ShouldNotContain("secret failure details"); // exception text stays out of results.md
     }
+
+    [Fact]
+    public void Summarize_batch_mode_pools_batch_times()
+    {
+        var clip = new ClipResult(
+            "c1", 10.0, false, true, "ref text", "", "batch text",
+            0.1, 0.05, null,
+            FinishMsRuns: Array.Empty<long>(),
+            FellBack: false, FellBackCount: 0, Truncated: false, TrimmedSilent: false,
+            BatchParityDiff: "", Error: null,
+            BatchMsRuns: new long[] { 800, 1200 },
+            CpuSeconds: 3.5, MeanRtf: 0.4, TranscriptStable: true);
+        var s = EvalResults.Summarize(new[] { clip }, mode: "batch", cpuSecondsTotal: 3.5, peakMemoryMb: 1234.5);
+        s.LatencyP50Ms.ShouldBe(800);
+        s.LatencyMaxMs.ShouldBe(1200);
+        s.CpuSecondsTotal.ShouldBe(3.5);
+        s.PeakMemoryMb.ShouldBe(1234.5);
+        s.MeanRtf.ShouldBe(0.4);
+    }
+
+    [Fact]
+    public void Summarize_counts_unstable_transcripts()
+    {
+        ClipResult Clip(string id, bool stable) => new(
+            id, 5.0, false, true, "ref", "hyp", "hyp", 0.0, 0.0, null,
+            new long[] { 100 }, false, 0, false, false, "", null,
+            BatchMsRuns: new long[] { 100 }, CpuSeconds: 1, MeanRtf: 0.1, TranscriptStable: stable);
+        var s = EvalResults.Summarize(new[] { Clip("a", true), Clip("b", false) });
+        s.UnstableTranscriptCount.ShouldBe(1);
+    }
+
+    [Fact]
+    public void ToJson_marks_mode_language_passes_converged_and_trace()
+    {
+        var info = new EvalRunInfo("corpus-v1", "qwen3-asr-1.7b", "0.1.3", "2026-07-27", 1,
+            Mode: "batch", Language: null, Passes: 3, Converged: true);
+        var clips = Array.Empty<ClipResult>();
+        var summary = EvalResults.Summarize(clips, mode: "batch");
+        var passes = new[] { new PassSummary(1, 500, 900, 1000, 12.3, 2048.0, 0.4, 0.15, 0) };
+        var trace = new[] { new ConvergencePoint(1, 500, 20, 0.04, double.PositiveInfinity, false) };
+        var json = EvalResults.ToJson(info, clips, summary, passes, trace);
+        json.ShouldContain("\"mode\": \"batch\"");
+        json.ShouldContain("\"passes\"");
+        json.ShouldContain("\"converged\": true");
+        json.ShouldContain("\"convergenceTrace\"");
+        json.ShouldContain("\"ciHalfWidthMs\"");
+        json.ShouldContain("\"deltaFromPrevious\"");
+        json.ShouldContain("\"resourceNote\"");
+        json.ShouldContain("\"cpuSeconds\"");
+        json.ShouldContain("\"peakMemoryMb\"");
+    }
+
+    [Fact]
+    public void ToJson_streaming_mode_marks_streaming_and_language()
+    {
+        var info = new EvalRunInfo("corpus-v1", "nemotron-3.5-asr-streaming-0.6b", "0.1.3", "2026-07-27", 1,
+            Mode: "streaming", Language: "en-US");
+        var json = EvalResults.ToJson(info, Array.Empty<ClipResult>(), EvalResults.Summarize(Array.Empty<ClipResult>()));
+        json.ShouldContain("\"mode\": \"streaming\"");
+        json.ShouldContain("\"language\": \"en-US\"");
+    }
+
+    [Fact]
+    public void ToJson_serializes_infinite_ratio_without_throwing()
+    {
+        var trace = new[] { new ConvergencePoint(1, 0, 0, double.PositiveInfinity, double.PositiveInfinity, false) };
+        var json = EvalResults.ToJson(
+            new EvalRunInfo("c", "m", "0.1.3", "2026-07-27", 1),
+            Array.Empty<ClipResult>(), EvalResults.Summarize(Array.Empty<ClipResult>()),
+            Array.Empty<PassSummary>(), trace);
+        json.ShouldContain("\"Infinity\"");
+    }
 }

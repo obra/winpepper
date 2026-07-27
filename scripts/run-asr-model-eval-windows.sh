@@ -57,11 +57,11 @@ rm -rf "$HERE"/scripts/asr-latency-bench/bin "$HERE"/scripts/asr-latency-bench/o
        "$HERE"/src/*/bin "$HERE"/src/*/obj
 
 echo "=== [2/4] Build bench (Windows dotnet, Release) ==="
-bench_csproj="$UNC_ROOT"'\\scripts\\asr-latency-bench\\AsrLatencyBench.csproj'
+bench_csproj="$UNC_ROOT"'\scripts\asr-latency-bench\AsrLatencyBench.csproj'
 ps_run 1800 "$OUT/build.log" "dotnet build '$bench_csproj' -c Release"
 
-echo "=== [3/4] Stage bench output to %TEMP%\\\\winpepper-asr-eval ==="
-bench_bin="$UNC_ROOT"'\\scripts\\asr-latency-bench\\bin\\Release\\net9.0'
+echo "=== [3/4] Stage bench output to %TEMP%\\winpepper-asr-eval ==="
+bench_bin="$UNC_ROOT"'\scripts\asr-latency-bench\bin\Release\net9.0'
 ps_run 300 "$OUT/stage.log" "
   \$dst = Join-Path \$env:TEMP 'winpepper-asr-eval'
   if (Test-Path \$dst) { Remove-Item -Recurse -Force \$dst }
@@ -83,7 +83,7 @@ ps_run 7200 "$OUT/corpus.log" "
   dotnet exec AsrLatencyBench.dll corpus $BENCH_FLAGS --out \$res" || corpus_status=$?
 
 # Collect results (results.json contains transcript text -- artifacts/ is gitignored).
-WIN_TEMP_WSL="$(wslpath "$(wslpath "$PS" -NoProfile -Command 'Write-Output $env:TEMP' | tr -d '\r')")"
+WIN_TEMP_WSL="$(wslpath "$("$PS" -NoProfile -Command 'Write-Output $env:TEMP' | tr -d '\r')")"
 RESULTS_WSL="$WIN_TEMP_WSL/winpepper-asr-eval-results-$MODEL_NAME"
 if [[ ! -f "$RESULTS_WSL/results.json" ]]; then
   echo "run-asr-model-eval-windows: FAILED -- expected $RESULTS_WSL/results.json but no results were produced." >&2

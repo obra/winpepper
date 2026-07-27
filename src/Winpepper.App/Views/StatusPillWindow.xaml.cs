@@ -117,14 +117,18 @@ public sealed partial class StatusPillWindow : Window
                 void OnLoaded(object s, RoutedEventArgs e)
                 {
                     root.Loaded -= OnLoaded;
-                    if (!_previewActive) appWindow.Hide(); // don't hide an active preview
+                    // Don't hide an active preview, and don't hide a pill a REAL
+                    // state transition has already shown: realization can complete
+                    // AFTER the pipeline showed the pill (e.g. a session starting
+                    // during startup), and this one-shot hide must lose that race.
+                    if (!_previewActive && !_visible) appWindow.Hide();
                 }
-                if (root.IsLoaded) { if (!_previewActive) appWindow.Hide(); }
+                if (root.IsLoaded) { if (!_previewActive && !_visible) appWindow.Hide(); }
                 else { root.Loaded += OnLoaded; }
             }
             else
             {
-                this.DispatcherQueue.TryEnqueue(() => appWindow.Hide());
+                this.DispatcherQueue.TryEnqueue(() => { if (!_previewActive && !_visible) appWindow.Hide(); });
             }
         });
     }

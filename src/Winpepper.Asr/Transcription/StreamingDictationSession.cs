@@ -31,6 +31,21 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     private IStreamingTranscriptionSession? _session;
     private Exception? _pumpError;
 
+    /// <summary>Drain bound applied when ZERO pushes completed by stop time.
+    /// In that state streaming has no latency win to preserve: the engine
+    /// would have to process ALL queued audio during the drain anyway, and the
+    /// caller's late batch path on fullAudio produces an equivalent transcript
+    /// (the session itself logs "Streamed latency win lost" when it falls
+    /// back) — so waiting the full deadline buys the user nothing. Applies
+    /// ONLY once the session actually started: a session still starting at
+    /// stop time (cloud connect is designed-bounded at 10 s; a cold factory
+    /// load takes seconds) keeps the full deadline — abandoning it early would
+    /// trade a healthy dictation for a local batch one.</summary>
+    private static readonly TimeSpan ZeroPushDrainDeadline = TimeSpan.FromSeconds(1.5);
+
+    private volatile bool _sessionStarted;   // written by the pump, read by FinishAsync
+    private volatile bool _anyPushCompleted; // written by the pump, read by FinishAsync
+
     private StreamingDictationSession(
         Func<CancellationToken, Task<IStreamingTranscriber?>> transcriberFactory,
         ILogger log,
@@ -52,6 +67,7 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                 }
                 var session = await transcriber.StartSessionAsync(ct);
                 _session = session;
+                _sessionStarted = true; // keys FinishAsync's drain-deadline choice (with _anyPushCompleted)
                 // Push via the LOCAL reference, never the nullable field: an
                 // abandon (silence-drop / cancel / drain timeout) nulls
                 // _session concurrently with this loop, and completing the
@@ -59,7 +75,10 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                 // are already queued. Pushing into a disposed session is a
                 // benign no-op by session contract.
                 await foreach (var frame in _frames.Reader.ReadAllAsync(CancellationToken.None))
+                {
                     await session.PushAsync(frame, ct);
+                    _anyPushCompleted = true; // keys FinishAsync's drain-deadline choice
+                }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -114,7 +133,12 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     public async Task<TranscriptionResult?> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
     {
         _frames.Writer.TryComplete();
-        var deadline = _drainDeadline;
+        // Short-circuit ONLY a session that actually started and still
+        // completed zero pushes; a session still starting (cloud connect,
+        // cold factory load) keeps the full deadline.
+        var deadline = _anyPushCompleted || !_sessionStarted
+            ? _drainDeadline
+            : TimeSpan.FromTicks(Math.Min(_drainDeadline.Ticks, ZeroPushDrainDeadline.Ticks));
         try
         {
             await _pump.WaitAsync(deadline, ct); // TimeoutException on a wedged drain

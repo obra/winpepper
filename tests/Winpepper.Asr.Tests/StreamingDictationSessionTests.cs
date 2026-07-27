@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using Winpepper.Asr.Transcription;
@@ -409,6 +410,138 @@ public class StreamingDictationSessionTests
             TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
         // ...and only now can the (background) dispose complete.
         await transcriber.Session.DisposeCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task ZeroCompletedPushes_AtFinish_UsesTheShortDrainDeadline()
+    {
+        var transcriber = new NativeGateWedgedTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromSeconds(30)); // the FULL deadline: must NOT be waited out
+        session.OnFrame(new float[800]); // the pump wedges on the FIRST push — zero pushes ever complete
+
+        // Zero completed pushes at stop time means there is no streamed-latency
+        // win to preserve — the short deadline applies, not the 30 s one. The
+        // 10 s guard sits between the two so the wrong branch fails loudly.
+        var result = await session
+            .FinishAsync(new float[800], TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue();
+
+        transcriber.Session.Unwedge(); // let the orphaned pump exit cleanly
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    // First push completes (streaming genuinely underway), the SECOND wedges —
+    // the zero-push shortcut must NOT apply and the full deadline must hold.
+    private sealed class WedgesOnSecondPushTranscriber : IStreamingTranscriber
+    {
+        public string ModelName => "wedges-on-second-push";
+        public WedgingSession Session { get; } = new();
+        public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
+            => Task.FromResult<IStreamingTranscriptionSession>(Session);
+
+        public sealed class WedgingSession : IStreamingTranscriptionSession
+        {
+            private readonly TaskCompletionSource _wedge = new();
+            private readonly TaskCompletionSource _secondPushStarted = new();
+            private int _pushes;
+
+            /// <summary>The second push starting proves the first COMPLETED —
+            /// and therefore that the coordinator observed a completed push.</summary>
+            public Task SecondPushStarted => _secondPushStarted.Task;
+
+            public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
+            {
+                if (Interlocked.Increment(ref _pushes) == 1) return; // first push succeeds
+                _secondPushStarted.TrySetResult();
+                await _wedge.Task;
+            }
+
+            public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
+                => throw new InvalidOperationException("FinishAsync must not run on a wedged session");
+
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+
+            public void Unwedge() => _wedge.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task StreamingUnderway_AtFinish_KeepsTheFullDrainDeadline()
+    {
+        var transcriber = new WedgesOnSecondPushTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromSeconds(3)); // full deadline, above the 1.5 s short one
+        session.OnFrame(new float[800]); // completes
+        session.OnFrame(new float[800]); // wedges
+        await transcriber.Session.SecondPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var finishSw = Stopwatch.StartNew();
+        var result = await session
+            .FinishAsync(new float[800], TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        finishSw.Stop();
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue();
+        // The FULL 3 s deadline applied — not the 1.5 s zero-push shortcut
+        // (0.5 s margin absorbs timer slop).
+        finishSw.Elapsed.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(2.5));
+
+        transcriber.Session.Unwedge();
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    // A healthy session still STARTING at stop time must keep the FULL drain
+    // deadline: cloud connect is designed-bounded at 10 s and a cold factory
+    // load takes seconds — both sit in FRONT of the first push. The
+    // zero-push shortcut exists to cut pointless waiting on a session that
+    // started and then wedged, not to abandon one never given a chance to
+    // start (which would systematically convert healthy dictations to local
+    // batch).
+    private sealed class NeverStartsTranscriber : IStreamingTranscriber
+    {
+        private readonly TaskCompletionSource<IStreamingTranscriptionSession> _tcs = new();
+        public string ModelName => "never-starts";
+        public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct) => _tcs.Task;
+        public void Release() => _tcs.TrySetCanceled(); // let the orphaned pump exit
+    }
+
+    [Fact]
+    public async Task SessionStillStarting_AtFinish_KeepsTheFullDrainDeadline()
+    {
+        var transcriber = new NeverStartsTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromSeconds(3)); // full deadline, above the 1.5 s short one
+        session.OnFrame(new float[800]); // queued; the pump is still inside StartSessionAsync
+
+        var finishSw = Stopwatch.StartNew();
+        var result = await session
+            .FinishAsync(new float[800], TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        finishSw.Stop();
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue();
+        // The FULL 3 s deadline applied — a still-starting session must not be
+        // short-circuited by the zero-push shortcut (0.5 s margin absorbs slop).
+        finishSw.Elapsed.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromSeconds(2.5));
+
+        transcriber.Release();
+        await session.PumpCompletion.WaitAsync(
             TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
 }

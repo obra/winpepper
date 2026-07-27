@@ -361,13 +361,24 @@ public class StreamingDictationSessionTests
         {
             private readonly TaskCompletionSource _wedge = new();
             private readonly TaskCompletionSource _disposeDone = new();
+            private readonly TaskCompletionSource _firstPushStarted = new();
 
             /// <summary>Completes when DisposeAsync actually finished (i.e. the
             /// wedged native call returned and the gate was released).</summary>
             public Task DisposeCompletion => _disposeDone.Task;
 
+            /// <summary>Completes when the pump ENTERED the first (wedged) push.
+            /// The pump sets its session-started flag BEFORE the push loop, so
+            /// awaiting this guarantees the coordinator observed a started
+            /// session — without it FinishAsync can race the pump's Task.Run
+            /// startup and classify the session as still starting.</summary>
+            public Task FirstPushStarted => _firstPushStarted.Task;
+
             public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
-                => await _wedge.Task; // the wedged native feed
+            {
+                _firstPushStarted.TrySetResult();
+                await _wedge.Task; // the wedged native feed
+            }
 
             public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
                 => throw new InvalidOperationException("FinishAsync must not run on a wedged session");
@@ -422,6 +433,13 @@ public class StreamingDictationSessionTests
             NullLogger.Instance, TestContext.Current.CancellationToken,
             drainDeadline: TimeSpan.FromSeconds(30)); // the FULL deadline: must NOT be waited out
         session.OnFrame(new float[800]); // the pump wedges on the FIRST push — zero pushes ever complete
+        // The shortcut applies only to a STARTED session, so the coordinator
+        // must observe _sessionStarted before FinishAsync reads it. Without
+        // this wait FinishAsync races the pump's Task.Run startup: on a
+        // loaded machine the pump hasn't run yet, the session classifies as
+        // still starting, and the FULL 30 s deadline (correctly) applies.
+        await transcriber.Session.FirstPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         // Zero completed pushes at stop time means there is no streamed-latency
         // win to preserve — the short deadline applies, not the 30 s one. The

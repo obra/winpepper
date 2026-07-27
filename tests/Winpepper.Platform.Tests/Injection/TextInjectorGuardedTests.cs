@@ -154,4 +154,29 @@ public class TextInjectorGuardedTests
             .ShouldBeGreaterThanOrEqualTo(1600);
         TextInjector.ChunkCodeUnits.ShouldBeLessThanOrEqualTo(8);
     }
+
+    [Fact]
+    public void Guarded_ModifierWait_UsesInjectedSleep_NeverWallClock()
+    {
+        // The modifier-release prelude must poll through the injected sleep
+        // seam (_sleep), not Thread.Sleep -- virtual-time tests depend on it.
+        var sleeps = new List<int>();
+        var held = true;
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: vk => vk == 0x11 && held, // Ctrl held...
+            foregroundHwnd: () => 42,
+            sendChunk: _ => true,
+            sleep: ms =>
+            {
+                sleeps.Add(ms);
+                if (sleeps.Count >= 2) held = false; // ...released after 2 polls
+            });
+
+        // "hi" = 1 chunk => no inter-chunk pauses; the only sleeps are the
+        // two 15 ms modifier-wait polls, recorded through the seam.
+        injector.TryInjectGuarded("hi").ShouldBe(InjectionRunOutcome.Completed);
+
+        sleeps.ShouldBe(new[] { 15, 15 });
+    }
 }

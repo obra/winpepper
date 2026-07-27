@@ -116,7 +116,7 @@ public sealed class TextInjector
         // if the user keeps holding, synthesize releases (KEYUP only — never
         // re-press, so their eventual physical release is a harmless no-op).
         if (!ModifierGuard.WaitForRelease(() => ModifierGuard.AnyDown(_isKeyDown),
-                ModifierWaitTimeoutMs, ModifierWaitPollMs, Thread.Sleep))
+                ModifierWaitTimeoutMs, ModifierWaitPollMs, _sleep))
         {
             var held = ModifierGuard.HeldModifiers(_isKeyDown);
             _log.LogInformation(

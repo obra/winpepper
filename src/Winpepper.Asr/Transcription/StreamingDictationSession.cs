@@ -20,6 +20,9 @@ namespace Winpepper.Asr.Transcription;
 /// the socket (which unwedges its pump), but disposing a native session cannot
 /// interrupt an in-flight P/Invoke — it only prevents further use and frees
 /// native state once the call returns — so no caller-facing path ever awaits it.
+/// Invariant: callers never invoke FinishAsync/DisposeAsync concurrently
+/// (PipelineHost enforces this via grab-and-null ownership transfer), which is
+/// what the remaining plain <c>_session</c> reads rely on.
 /// </summary>
 public sealed class StreamingDictationSession : IAsyncDisposable
 {
@@ -166,10 +169,10 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         // Captured on the pump task; rethrow via ExceptionDispatchInfo so the
         // original stack trace survives this cross-thread rethrow.
         if (_pumpError is not null) ExceptionDispatchInfo.Capture(_pumpError).Throw();
-        if (_session is null) return null;
-        var result = await _session.FinishAsync(fullAudio, ct);
-        await _session.DisposeAsync();
-        _session = null;
+        var session = _session;
+        if (session is null) return null;
+        var result = await session.FinishAsync(fullAudio, ct);
+        await DisposeSessionAsync();
         return result;
     }
 

@@ -85,9 +85,12 @@ public sealed class FallbackStreamingTranscriber : IStreamingTranscriber
             // session): the coordinator's pump may legitimately drain queued
             // frames after the pipeline abandoned the dictation. Without this
             // guard the push lands on the DISPOSED inner socket session, whose
-            // throw would poison _failure and silently force the local-batch
-            // path (plus the user-facing "cloud unavailable" toast) on a
-            // lifecycle race rather than a real network failure.
+            // ObjectDisposedException would poison _failure and log a spurious
+            // WRN. Today that poisoning is inert — every coordinator path
+            // finishes BEFORE disposing, so it never reaches FinishAsync's
+            // fallback path — but it is a latent fallback-conversion trap
+            // (local-batch result plus the user-facing "cloud unavailable"
+            // toast) if the finish/dispose ordering ever changes.
             if (_disposed || _failure is not null || _inner is null) return;
             try
             {

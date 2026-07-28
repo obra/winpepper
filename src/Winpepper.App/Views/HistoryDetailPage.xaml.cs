@@ -127,6 +127,7 @@ public sealed partial class HistoryDetailPage : Page
             ViewModel.CleanupPanel.SelectedModelPath =
                 file is null ? "" : Path.Combine(dir, file.RelativePath);
             ViewModel.CleanupPanel.SelectedModelPromptFormat = d.PromptFormat;
+            ViewModel.CleanupPanel.SelectedModelOmitPromptExample = d.OmitPromptExample;
         }
     }
 

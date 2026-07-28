@@ -101,6 +101,38 @@ public sealed class CleanupBenchArgsTests
         a.OutDir.ShouldBe("artifacts/cleanup-bench-results");
         a.Seed.ShouldBe(42);
         a.TimeoutMs.ShouldBe(15_000);
+        a.Verbose.ShouldBeFalse();
+        a.GpuLayers.ShouldBe(999);
+    }
+
+    [Fact]
+    public void ParseLatency_Verbose_Parses()
+    {
+        var a = CleanupBenchArgs.ParseLatency(new[]
+            { "--statements", "s.jsonl", "--models-root", "m", "--verbose" });
+
+        a.Error.ShouldBeNull();
+        a.Verbose.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void ParseLatency_GpuLayers_Parses()
+    {
+        var a = CleanupBenchArgs.ParseLatency(new[]
+            { "--statements", "s.jsonl", "--models-root", "m", "--gpu-layers", "0" });
+
+        a.Error.ShouldBeNull();
+        a.GpuLayers.ShouldBe(0);
+    }
+
+    [Fact]
+    public void ParseLatency_NegativeGpuLayers_Errors()
+    {
+        var a = CleanupBenchArgs.ParseLatency(new[]
+            { "--statements", "s.jsonl", "--models-root", "m", "--gpu-layers", "-1" });
+
+        a.Error.ShouldNotBeNull();
+        a.Error.ShouldContain("--gpu-layers");
     }
 
     [Fact]

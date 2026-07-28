@@ -22,6 +22,13 @@ public sealed class CleanupRerunInput
     public string PromptFormat { get; init; } = "chatml";
 
     /// <summary>
+    /// From ModelDescriptor.OmitPromptExample: use the example-free default
+    /// base prompt for models that echo the worked example instead of
+    /// cleaning. Mirrors the production pipeline's per-model behavior.
+    /// </summary>
+    public bool OmitPromptExample { get; init; }
+
+    /// <summary>
     /// Override the base prompt for this run. Empty string means "use the
     /// built-in default" — the rerun service maps this to
     /// <c>CleanupProfile.Ordinary</c>; a non-empty string maps to

@@ -40,7 +40,8 @@ public sealed class LlamaCleanupRerunService : ICleanupRerunService
 
         var runner = new CleanupRunner(
             backend,
-            _loggerFactory.CreateLogger<CleanupRunner>());
+            _loggerFactory.CreateLogger<CleanupRunner>(),
+            omitPromptExample: input.OmitPromptExample);
 
         var result = await runner.RunAsync(
             rawTranscript: input.RawTranscript,

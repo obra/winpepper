@@ -37,6 +37,21 @@ public class CleanupModelPathResolverTests
         resolution.GgufPath.ShouldNotBeNull();
     }
 
+    [Theory]
+    // lfm2.5 echoes the default prompt's worked example instead of cleaning
+    // (2026-07-27 evidence, see ModelRegistry); qwen NEEDS the example.
+    [InlineData("qwen2.5-0.5b-instruct-q4_k_m", false)]
+    [InlineData("lfm2.5-1.2b-instruct-q4_k_m", true)]
+    [InlineData("granite-4.0-1b-q4_k_m", false)]
+    [InlineData("sotto-cleanup-lfm25-350m-q8_0", false)]
+    public void Resolve_CarriesTheDescriptorsOmitPromptExample(string name, bool expected)
+    {
+        var resolution = CleanupModelPathResolver.Resolve(new ModelRegistry(), Root, name);
+
+        resolution.ResolvedName.ShouldBe(name);
+        resolution.OmitPromptExample.ShouldBe(expected);
+    }
+
     [Fact]
     public void Resolve_NullName_ResolvesKindDefault_WithoutFallbackFlag()
     {

@@ -104,6 +104,11 @@ public sealed class ModelRegistry
                 DisplayName = "LFM2.5 1.2B Instruct (Q4_K_M GGUF)",
                 InstallDirRelative = Path.Combine("cleanup", "lfm2.5-1.2b-instruct-q4_k_m"),
                 PromptFormat = "chatml",
+                // Evidence 2026-07-27 (CPU llama.cpp, vendor template): with the
+                // worked example present this model echoes the example output
+                // verbatim for unrelated transcripts (84% FallbackImplausible on
+                // the latency bench); with it removed it cleans correctly.
+                OmitPromptExample = true,
                 Files = new[]
                 {
                     new ModelFile

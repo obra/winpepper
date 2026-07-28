@@ -134,6 +134,7 @@ switch (scenario)
         }
 
         Console.WriteLine($"# latency: model={resolution.ResolvedName} promptFormat={resolution.PromptFormat} " +
+            $"omitPromptExample={resolution.OmitPromptExample} gpuLayers={a.GpuLayers} " +
             $"statements={statements.Count} passes={a.Passes} seed={a.Seed} timeoutMs={a.TimeoutMs}");
         Console.WriteLine($"# latency: gguf={resolution.GgufPath}");
 
@@ -141,7 +142,10 @@ switch (scenario)
         // run info -- never in per-statement samples.
         var swLoad = Stopwatch.StartNew();
         using var backend = new LlamaCleanupBackend(
-            resolution.GgufPath, NullLogger<LlamaCleanupBackend>.Instance, samplingSeed: (uint)a.Seed,
+            resolution.GgufPath,
+            a.Verbose ? new StderrLogger<LlamaCleanupBackend>() : NullLogger<LlamaCleanupBackend>.Instance,
+            gpuLayerCount: a.GpuLayers,
+            samplingSeed: (uint)a.Seed,
             promptFormat: resolution.PromptFormat);
         swLoad.Stop();
         var swWarm = Stopwatch.StartNew();
@@ -149,7 +153,9 @@ switch (scenario)
         swWarm.Stop();
         Console.WriteLine($"# latency: model load {swLoad.ElapsedMilliseconds} ms, warm {swWarm.ElapsedMilliseconds} ms");
 
-        var runner = new CleanupRunner(backend, NullLogger<CleanupRunner>.Instance);
+        var runner = new CleanupRunner(backend,
+            a.Verbose ? new StderrLogger<CleanupRunner>() : NullLogger<CleanupRunner>.Instance,
+            omitPromptExample: resolution.OmitPromptExample);
         var options = new CleanupOptions { Timeout = TimeSpan.FromMilliseconds(a.TimeoutMs) };
 
         var tallies = statements.Select(s => new StatementTally(s)).ToList();
@@ -173,6 +179,7 @@ switch (scenario)
                     tally.ElapsedMs.Add((long)result.Elapsed.TotalMilliseconds);
                     tally.Paths.Add(result.Path.ToString());
                     tally.Outputs.Add(result.CleanedText);
+                    tally.RawModelOutputs.Add(result.RawModelOutput);
                 }
                 catch (Exception ex)
                 {
@@ -188,6 +195,7 @@ switch (scenario)
             CleanupBenchResults.WordCount(t.Statement.Text),
             t.Statement.Text,
             t.CallMs, t.ElapsedMs, t.Paths, t.Outputs,
+            t.RawModelOutputs,
             t.Error)).ToList();
 
         var info = new BenchRunInfo(
@@ -233,7 +241,8 @@ static void PrintUsage()
           CleanupLatencyBench export-statements --history-dir <dir> --out <file.jsonl> [--max N]
           CleanupLatencyBench latency --statements <file.jsonl> [--include-eval-cases]
                               --models-root <dir> [--model <registry-key>] [--passes N]
-                              [--out <dir>] [--seed N] [--timeout-ms N]
+                              [--out <dir>] [--seed N] [--timeout-ms N] [--verbose]
+                              [--gpu-layers N]  (0 = CPU inference; default 999 = full GPU offload)
         """);
 }
 
@@ -247,5 +256,23 @@ sealed class StatementTally
     public List<long> ElapsedMs { get; } = new();
     public List<string> Paths { get; } = new();
     public List<string> Outputs { get; } = new();
+    public List<string> RawModelOutputs { get; } = new();
     public string? Error { get; set; }
+}
+
+/// <summary>Minimal console logger for --verbose: surfaces CleanupRunner's
+/// guard-rejection warnings (with output previews) and backend logs on stderr
+/// without pulling in a console-logging package. Results stay on stdout.</summary>
+sealed class StderrLogger<T> : Microsoft.Extensions.Logging.ILogger<T>
+{
+    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+    public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) =>
+        logLevel >= Microsoft.Extensions.Logging.LogLevel.Debug;
+    public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId,
+        TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+    {
+        if (!IsEnabled(logLevel)) return;
+        Console.Error.WriteLine($"[{logLevel}] {typeof(T).Name}: {formatter(state, exception)}"
+            + (exception is null ? "" : $" :: {exception}"));
+    }
 }

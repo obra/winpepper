@@ -203,7 +203,8 @@ public sealed class AppShell : IDisposable
                     factory.CreateLogger<Winpepper.Cleanup.LlamaCleanupBackend>(),
                     promptFormat: cleanupResolution.PromptFormat);
                 cleanup = new Winpepper.Cleanup.CleanupRunner(backend,
-                    factory.CreateLogger<Winpepper.Cleanup.CleanupRunner>());
+                    factory.CreateLogger<Winpepper.Cleanup.CleanupRunner>(),
+                    omitPromptExample: cleanupResolution.OmitPromptExample);
             }
             else
             {

@@ -11,13 +11,20 @@ namespace Winpepper.Cleanup.Tests;
 // prompt (CleanupRunner + BasePrompts.Default via CleanupOptions defaults)
 // over the fixed dictation cases in CleanupEvalCases and asserts behavior.
 //
-// Registry-driven and parallel: each ModelKind.Cleanup entry in ModelRegistry
-// occupies one pre-provisioned slot class below. Distinct classes are distinct
-// xUnit collections, so per-model runs execute concurrently while the ~18
-// cases within a model share one loaded backend (class fixture). A new
-// registry entry automatically fills the next slot with ZERO test edits;
-// CleanupEvalCasesTests.Registry_CleanupModels_FitWithinEvalSlots fails loudly
-// when the registry outgrows the provisioned slots.
+// Registry-driven, one pre-provisioned slot class per ModelKind.Cleanup entry
+// below. The ~18 cases within a model share one loaded backend (class
+// fixture). A new registry entry automatically fills the next slot with ZERO
+// test edits; CleanupEvalCasesTests.Registry_CleanupModels_FitWithinEvalSlots
+// fails loudly when the registry outgrows the provisioned slots.
+//
+// SERIAL, not parallel: all slot classes share one non-parallel collection.
+// The slots were originally distinct implicit collections so models ran
+// concurrently -- fine while only one registry model was installed, but with
+// 3+ real GGUFs installed xUnit initializes the class fixtures concurrently
+// and parallel LLamaSharp/Vulkan model loads crash natively (fatal error in
+// FixtureMappingManager.InitializeAsync, 2026-07-27; same failure family as
+// the 0xC0000005 documented on LlamaCleanupBackendIntegrationTests). A single
+// GPU serializes the work anyway, so parallel slots bought no wall time.
 //
 // Determinism: the fixture pins the sampling seed (LlamaCleanupBackend's
 // samplingSeed ctor parameter, eval-only; production keeps a random seed) on
@@ -174,10 +181,14 @@ public abstract class CleanupPromptEvalTestsBase
     }
 }
 
-// One sealed class per registry slot. Each is its own implicit xUnit
-// collection, so xUnit runs the models in parallel while cases within a model
-// reuse the one loaded backend.
+// One sealed class per registry slot, all in ONE non-parallel collection so
+// model loads (class fixtures) never overlap on the native Vulkan loader --
+// see the header comment. Cases within a model reuse the one loaded backend.
 
+[CollectionDefinition("cleanup-eval-models-serial", DisableParallelization = true)]
+public sealed class CleanupEvalModelsSerialCollection { }
+
+[Collection("cleanup-eval-models-serial")]
 public sealed class CleanupPromptEvalModelSlot0 : CleanupPromptEvalTestsBase, IClassFixture<CleanupEvalModelFixture0>
 {
     public CleanupPromptEvalModelSlot0(CleanupEvalModelFixture0 fx) : base(fx) { }
@@ -193,6 +204,7 @@ public sealed class CleanupPromptEvalModelSlot0 : CleanupPromptEvalTestsBase, IC
     }
 }
 
+[Collection("cleanup-eval-models-serial")]
 public sealed class CleanupPromptEvalModelSlot1 : CleanupPromptEvalTestsBase, IClassFixture<CleanupEvalModelFixture1>
 {
     public CleanupPromptEvalModelSlot1(CleanupEvalModelFixture1 fx) : base(fx) { }
@@ -208,6 +220,7 @@ public sealed class CleanupPromptEvalModelSlot1 : CleanupPromptEvalTestsBase, IC
     }
 }
 
+[Collection("cleanup-eval-models-serial")]
 public sealed class CleanupPromptEvalModelSlot2 : CleanupPromptEvalTestsBase, IClassFixture<CleanupEvalModelFixture2>
 {
     public CleanupPromptEvalModelSlot2(CleanupEvalModelFixture2 fx) : base(fx) { }
@@ -223,6 +236,7 @@ public sealed class CleanupPromptEvalModelSlot2 : CleanupPromptEvalTestsBase, IC
     }
 }
 
+[Collection("cleanup-eval-models-serial")]
 public sealed class CleanupPromptEvalModelSlot3 : CleanupPromptEvalTestsBase, IClassFixture<CleanupEvalModelFixture3>
 {
     public CleanupPromptEvalModelSlot3(CleanupEvalModelFixture3 fx) : base(fx) { }

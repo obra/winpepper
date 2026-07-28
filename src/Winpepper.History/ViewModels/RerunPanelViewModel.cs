@@ -28,6 +28,13 @@ public sealed class RerunPanelViewModel : INotifyPropertyChanged
     /// </summary>
     public string SelectedModelPromptFormat { get; set; } = "chatml";
 
+    /// <summary>
+    /// From ModelDescriptor.OmitPromptExample: whether the selected cleanup
+    /// model needs the example-free default base prompt (models that echo the
+    /// worked example instead of cleaning). Mirrors the production pipeline.
+    /// </summary>
+    public bool SelectedModelOmitPromptExample { get; set; }
+
     private string _rerunText = "";
     public string RerunText
     {

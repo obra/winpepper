@@ -33,6 +33,17 @@ public sealed record ModelDescriptor
     public string PromptFormat { get; init; } = "chatml";
 
     /// <summary>
+    /// True for cleanup models that pattern-complete the worked example
+    /// embedded in the default base prompt instead of cleaning the transcript
+    /// (LFM2.5-1.2B returned the example output verbatim for unrelated
+    /// dictations). When set, <c>CleanupRunner</c> uses the example-free
+    /// default prompt (<c>BasePrompts.DefaultNoExample</c>). The registry
+    /// default qwen model NEEDS the example (bug-3 fix-(iv)), so this
+    /// defaults to false.
+    /// </summary>
+    public bool OmitPromptExample { get; init; }
+
+    /// <summary>
     /// True when the model has no downloadable source (e.g. a locally
     /// converted GGUF): the downloader refuses it and
     /// <see cref="MissingModelsResolver"/> never selects it, but once the

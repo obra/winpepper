@@ -14,11 +14,18 @@ public sealed class CleanupRunner
 {
     private readonly ILlamaCleanupBackend _backend;
     private readonly ILogger<CleanupRunner> _log;
+    private readonly bool _omitPromptExample;
 
-    public CleanupRunner(ILlamaCleanupBackend backend, ILogger<CleanupRunner> log)
+    /// <param name="omitPromptExample">From
+    /// <c>ModelDescriptor.OmitPromptExample</c>: use the example-free default
+    /// base prompt for models that echo the worked example instead of cleaning
+    /// (see <see cref="BasePrompts.DefaultNoExample"/>).</param>
+    public CleanupRunner(ILlamaCleanupBackend backend, ILogger<CleanupRunner> log,
+        bool omitPromptExample = false)
     {
         _backend = backend;
         _log = log;
+        _omitPromptExample = omitPromptExample;
     }
 
     /// <summary>
@@ -93,7 +100,7 @@ public sealed class CleanupRunner
         // 2) Build the system (instructions/hints/OCR) and user (transcript)
         //    messages separately. Bug-3 fix-(iv): a proper system role stops the
         //    0.5B model pattern-completing the examples.
-        var basePrompt = BasePrompts.ForProfile(options.Profile, options.CustomBasePrompt);
+        var basePrompt = BasePrompts.ForProfile(options.Profile, options.CustomBasePrompt, _omitPromptExample);
         var systemPrompt = PromptBuilder.BuildSystem(basePrompt, corrections, windowContext, out var wcTruncation);
         var userPrompt = PromptBuilder.BuildUser(rawTranscript);
         var assembled = systemPrompt + "\n\n" + userPrompt;

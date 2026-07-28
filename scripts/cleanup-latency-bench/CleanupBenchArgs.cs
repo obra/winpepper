@@ -24,6 +24,8 @@ public sealed record LatencyArgs(
     string OutDir,
     int Seed,
     int TimeoutMs,
+    bool Verbose,
+    int GpuLayers,
     string? Error);
 
 /// <summary>
@@ -36,6 +38,11 @@ public static class CleanupBenchArgs
     public const int DefaultPasses = 3;
     public const int DefaultSeed = 42;
     public const int DefaultTimeoutMs = 15_000;
+
+    // Matches LlamaCleanupBackend's default (offload everything to the GPU).
+    // --gpu-layers 0 forces CPU inference through the SAME production backend,
+    // isolating GPU/Vulkan numeric issues from template/model issues.
+    public const int DefaultGpuLayers = 999;
 
     // Default INSIDE gitignored artifacts/: results.json contains transcript
     // text, and a bare "cleanup-bench-results/" would NOT be gitignored.
@@ -87,6 +94,8 @@ public static class CleanupBenchArgs
         var outDir = DefaultOutDir;
         var seed = DefaultSeed;
         var timeoutMs = DefaultTimeoutMs;
+        var verbose = false;
+        var gpuLayers = DefaultGpuLayers;
 
         for (var i = 0; i < args.Count; i++)
         {
@@ -123,6 +132,16 @@ public static class CleanupBenchArgs
                     if (!TryTakeValue(args, ref i, out var tv)) return LatencyError("--timeout-ms requires a value");
                     if (!TryParseInt(tv, out timeoutMs)) return LatencyError($"--timeout-ms must be an integer, got '{tv}'");
                     break;
+                case "--verbose":
+                    // Wires a real console logger into the backend/runner so
+                    // CleanupRunner's guard-rejection warnings (with output
+                    // previews) become visible during debugging runs.
+                    verbose = true;
+                    break;
+                case "--gpu-layers":
+                    if (!TryTakeValue(args, ref i, out var gl)) return LatencyError("--gpu-layers requires a value");
+                    if (!TryParseInt(gl, out gpuLayers)) return LatencyError($"--gpu-layers must be an integer, got '{gl}'");
+                    break;
                 default:
                     return LatencyError($"unknown latency argument '{args[i]}'");
             }
@@ -134,12 +153,13 @@ public static class CleanupBenchArgs
         // The sampling seed is forwarded to LlamaCleanupBackend as a uint.
         if (seed < 0) return LatencyError($"--seed must be >= 0, got {seed}");
         if (timeoutMs < 1) return LatencyError($"--timeout-ms must be >= 1, got {timeoutMs}");
+        if (gpuLayers < 0) return LatencyError($"--gpu-layers must be >= 0, got {gpuLayers}");
         return new LatencyArgs(statementsFile, includeEvalCases, modelsRoot, model,
-            passes, outDir, seed, timeoutMs, Error: null);
+            passes, outDir, seed, timeoutMs, verbose, gpuLayers, Error: null);
 
         static LatencyArgs LatencyError(string message) =>
             new(null, false, null, null, DefaultPasses, DefaultOutDir, DefaultSeed,
-                DefaultTimeoutMs, Error: message);
+                DefaultTimeoutMs, Verbose: false, GpuLayers: DefaultGpuLayers, Error: message);
     }
 
     private static bool TryTakeValue(IReadOnlyList<string> args, ref int i, out string value)

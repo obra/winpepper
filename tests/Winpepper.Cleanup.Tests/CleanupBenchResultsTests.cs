@@ -22,6 +22,7 @@ public sealed class CleanupBenchResultsTests
             ElapsedMsRuns: callMs ?? new long[] { 100 },
             PathRuns: paths ?? new[] { "Llm" },
             OutputRuns: new[] { $"{SecretMarker} cleaned output words" },
+            RawModelOutputRuns: new[] { $"{SecretMarker} raw model output words" },
             Error: error);
 
     private static readonly BenchRunInfo Info = new(
@@ -156,6 +157,9 @@ public sealed class CleanupBenchResultsTests
         json.ShouldContain(SecretMarker);                            // full transcripts present
         json.ShouldContain("\"inputText\"");
         json.ShouldContain("\"outputRuns\"");
+        // Pre-guard model output: on fallback paths outputRuns is the raw
+        // input, so this field is the only visibility into rejected outputs.
+        json.ShouldContain("\"rawModelOutputRuns\"");
         json.ShouldContain("\"callMsRuns\"");
         json.ShouldContain($"\"model\": \"qwen2.5-0.5b-instruct-q4_k_m\"");
         json.ShouldContain("\"promptFormat\": \"chatml\"");

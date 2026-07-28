@@ -14,7 +14,8 @@ public sealed record CleanupModelResolution(
     string? GgufPath,
     string ResolvedName,
     bool FellBackToDefault,
-    string PromptFormat);
+    string PromptFormat,
+    bool OmitPromptExample = false);
 
 /// <summary>
 /// Pure resolver from a requested cleanup-model name to the absolute path of
@@ -36,6 +37,7 @@ public static class CleanupModelPathResolver
         var path = gguf is null
             ? null
             : Path.Combine(modelsRoot, descriptor.InstallDirRelative, gguf.RelativePath);
-        return new CleanupModelResolution(path, descriptor.Name, fellBack, descriptor.PromptFormat);
+        return new CleanupModelResolution(
+            path, descriptor.Name, fellBack, descriptor.PromptFormat, descriptor.OmitPromptExample);
     }
 }

@@ -19,6 +19,11 @@ public sealed record StatementResult(
     IReadOnlyList<long> ElapsedMsRuns,   // runner-reported CleanupResult.Elapsed, per pass
     IReadOnlyList<string> PathRuns,      // CleanupPath name, per pass
     IReadOnlyList<string> OutputRuns,    // cleaned output text, per pass (results.json only)
+    // Raw (pre-guard) model output, per pass (results.json only). On fallback
+    // paths OutputRuns holds the raw input, so this is the ONLY place the
+    // rejected model output is visible -- essential for diagnosing why a
+    // model's outputs trip the plausibility guards.
+    IReadOnlyList<string>? RawModelOutputRuns = null,
     string? Error = null);
 
 /// <summary>Run-level facts. Model load and warm are timed once, separately,

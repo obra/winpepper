@@ -41,6 +41,23 @@ public class CleanupRunnerTests
     }
 
     [Fact]
+    public async Task Run_OmitPromptExample_SendsTheExampleFreeDefaultPrompt()
+    {
+        // Models flagged ModelDescriptor.OmitPromptExample (LFM2.5-1.2B) echo
+        // the worked example instead of cleaning; the runner must build the
+        // system prompt from BasePrompts.DefaultNoExample for them.
+        var backend = new FakeLlamaCleanupBackend { Output = "Hello, my name is Crispy." };
+        var runner = new CleanupRunner(backend, new NullLogger<CleanupRunner>(),
+            omitPromptExample: true);
+        await runner.RunAsync("hello my name is crispy",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        backend.LastSystemPrompt.ShouldNotBeNull();
+        backend.LastSystemPrompt!.ShouldContain(BasePrompts.DefaultNoExample);
+        backend.LastSystemPrompt!.ShouldNotContain("Output: " + BasePrompts.DefaultExampleOutputs[0]);
+    }
+
+    [Fact]
     public async Task Run_LlmEchoesPromptScaffold_FallsBackToRawTranscript()
     {
         var garbage = "<OUTPUT>\nI think we should just ship it tomorrow.\n</OUTPUT>Human: I think we should just ship it tomorrow.";

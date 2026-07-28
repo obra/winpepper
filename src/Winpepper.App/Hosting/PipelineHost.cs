@@ -406,6 +406,15 @@ public sealed class PipelineHost : IDisposable
         }
         if (injected)
             _log.LogInformation("Pending paste injected");
+        else if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.BlockedElevated)
+            // The clicked-into window is elevated: UIPI would have silently
+            // dropped every keystroke while reporting success (the exact
+            // failure this check exists for -- previously the slot was
+            // consumed and the text lost). Nothing was typed; the slot keeps
+            // the FULL text and the pill copy tells the user to focus a
+            // normal window first. Not an error -- no ErrorBus report.
+            _log.LogInformation(
+                "Pending paste blocked: foreground window is elevated; slot kept with full text");
         else if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
             // Focus moved mid-paste during the pill-click retry too: the slot
             // still holds the FULL original text, so the next click re-pastes
@@ -414,6 +423,16 @@ public sealed class PipelineHost : IDisposable
                 "Pending paste interrupted (focus, modifier, or mouse-button change); slot kept with full text for another click");
         else
             _log.LogWarning("Pending paste injection failed");
+
+        // Keep the pill copy in sync with the LATEST attempt: an elevated
+        // block shows the admin-window copy; any other kept-slot outcome
+        // restores the default "Click to paste" (the previous attempt may
+        // have set the admin copy).
+        if (!injected)
+            _vm.ShowPendingPasteStatus(
+                outcome == Winpepper.Platform.Injection.InjectionRunOutcome.BlockedElevated
+                    ? Winpepper.Core.Pending.PendingPasteReason.ElevatedTarget
+                    : Winpepper.Core.Pending.PendingPasteReason.Interrupted);
 
         return _vm.NotifyPasteAttempted(injected);
     }
@@ -729,6 +748,19 @@ public sealed class PipelineHost : IDisposable
                             _vm.EnterPendingPaste(final, _targetAtStart);
                             _log.LogInformation(
                                 "Injection interrupted (focus, modifier, or mouse-button change); held full text as pending paste ({Chars} chars)",
+                                final.Length);
+                        }
+                        else if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.BlockedElevated)
+                        {
+                            // The target window is elevated: UIPI silently
+                            // drops SendInput while reporting success, so
+                            // nothing was typed. Park the WHOLE transcription
+                            // and explain via the pill copy. Not an error:
+                            // no ErrorBus report, no toast.
+                            _vm.EnterPendingPaste(final, _targetAtStart,
+                                Winpepper.Core.Pending.PendingPasteReason.ElevatedTarget);
+                            _log.LogInformation(
+                                "Injection blocked: foreground window is elevated; held full text as pending paste ({Chars} chars)",
                                 final.Length);
                         }
                         else if (!injected)
@@ -1114,6 +1146,19 @@ public sealed class PipelineHost : IDisposable
                                 _vm.EnterPendingPaste(final2, _targetAtStart);
                                 _log.LogInformation(
                                     "Injection interrupted (focus, modifier, or mouse-button change); held full text as pending paste ({Chars} chars)",
+                                    final2.Length);
+                            }
+                            else if (outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.BlockedElevated)
+                            {
+                                // The target window is elevated: UIPI silently
+                                // drops SendInput while reporting success, so
+                                // nothing was typed. Park the WHOLE transcription
+                                // and explain via the pill copy. Not an error:
+                                // no ErrorBus report, no toast.
+                                _vm.EnterPendingPaste(final2, _targetAtStart,
+                                    Winpepper.Core.Pending.PendingPasteReason.ElevatedTarget);
+                                _log.LogInformation(
+                                    "Injection blocked: foreground window is elevated; held full text as pending paste ({Chars} chars)",
                                     final2.Length);
                             }
                             else if (!injected2)

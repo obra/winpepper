@@ -3,18 +3,21 @@ namespace Winpepper.Platform.Injection;
 /// <summary>
 /// Production pacing primitive for the guarded injection send (the default
 /// behind TextInjector's injectable sleep seam). Thread.Sleep CANNOT pace
-/// 5 ms: measured on the Windows gate host it quantizes to the legacy
-/// ~15.6 ms timer resolution (Sleep(5) ≈ 15.5 ms avg; even the shipped
-/// Sleep(20) really waited ~31 ms), which would throttle the 8-unit/5 ms
-/// feed to ~513 code units/s (bleed-hardening ledger, V1). A high-resolution
-/// waitable timer (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, Win10 1803+)
-/// measured 5.2–5.4 ms per 5 ms wait WITHOUT raising the process timer
-/// resolution (no timeBeginPeriod; ledger B1/B3) — so it is not exposed to
-/// the Win11 occluded-window resolution revocation a raised-resolution
-/// Sleep would risk. Fail-safe: if the timer cannot be created or set, falls
-/// back to Thread.Sleep — pacing gets coarser (feed slower) but nothing
-/// breaks, and the Windows-gate sentinel (InterChunkPacingWindowsTests)
-/// turns red.
+/// millisecond-precise waits: measured on the Windows gate host it quantizes
+/// to the legacy ~15.6 ms timer resolution (Sleep(5) averaged ~15.5 ms; even
+/// the old shipped Sleep(20) really waited ~31 ms; bleed-hardening ledger,
+/// V1). A high-resolution waitable timer
+/// (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, Win10 1803+) measured 5.2-5.4 ms
+/// per 5 ms wait WITHOUT raising the process timer resolution (no
+/// timeBeginPeriod; ledger B1/B3) -- so it is not exposed to the Win11
+/// occluded-window resolution revocation a raised-resolution Sleep would
+/// risk. At the current 14 ms production pause
+/// (TextInjector.InterChunkPauseMs, render-rate pacing) the Thread.Sleep
+/// fail-safe (~15.6 ms) overshoots by only ~11%, but the high-res timer
+/// keeps the pace deliberate, and the fixed 5 ms probe in
+/// InterChunkPacingWindowsTests still proves the fast path engages on the
+/// gate host. Fail-safe: if the timer cannot be created or set, falls back
+/// to Thread.Sleep -- pacing gets coarser (feed slower) but nothing breaks.
 /// </summary>
 internal static class PacingWaiter
 {

@@ -129,7 +129,7 @@ public class TextInjectorGuardedTests
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 
-        sleeps.ShouldBe(new[] { 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5 }); // 11 x TextInjector.InterChunkPauseMs
+        sleeps.ShouldBe(new[] { 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14 }); // 11 x TextInjector.InterChunkPauseMs (render-rate pace)
     }
 
     [Fact]
@@ -144,14 +144,22 @@ public class TextInjectorGuardedTests
     }
 
     [Fact]
-    public void DesignPoint_FeedRateFloor_And_BleedBound()
+    public void DesignPoint_FeedRateCeiling_And_BleedBound()
     {
-        // Spec constraint: the effective feed rate must never drop below the
-        // original 1600 code units/s design point, and the worst-case bleed
-        // into a newly focused window (<= 1 in-flight chunk, prior ledger
-        // AD-1, hardened by this task) must not regress past 8 code units.
-        (TextInjector.ChunkCodeUnits * 1000 / TextInjector.InterChunkPauseMs)
-            .ShouldBeGreaterThanOrEqualTo(1600);
+        // Spec constraint (paste-path-hardening, 2026-07-27): the nominal
+        // feed rate must stay AT OR BELOW TargetFeedUnitsPerSecond so the
+        // queued-but-undelivered backlog cannot grow against slow-rendering
+        // apps (~600 chars/s claimed render rate) -- a mid-paste window
+        // switch then leaks at most the true in-flight chunk. The pause is
+        // CEILING-derived for exactly this reason: truncating division gave
+        // 13 ms = ~615 units/s, ABOVE the target (stage-2 ledger A1). This
+        // DELIBERATELY SUPERSEDES the bleed-hardening plan's ">= 1600"
+        // floor (owner-approved). The feed must not collapse either, and
+        // the worst-case bleed bound (<= 1 in-flight chunk, prior ledger
+        // AD-1) must not regress past 8 code units.
+        var nominalFeed = TextInjector.ChunkCodeUnits * 1000 / TextInjector.InterChunkPauseMs; // 571 at 8/14ms
+        nominalFeed.ShouldBeLessThanOrEqualTo(TextInjector.TargetFeedUnitsPerSecond); // never exceed the render-rate target
+        nominalFeed.ShouldBeGreaterThanOrEqualTo(500); // sanity floor: still responsive in fast apps
         TextInjector.ChunkCodeUnits.ShouldBeLessThanOrEqualTo(8);
     }
 
@@ -204,8 +212,8 @@ public class TextInjectorGuardedTests
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 
         string.Concat(sent).ShouldBe(text);
-        // Three 15 ms release-wait polls, then the single 5 ms inter-chunk pause.
-        sleeps.ShouldBe(new[] { 15, 15, 15, 5 });
+        // Three 15 ms release-wait polls, then the single 14 ms inter-chunk pause.
+        sleeps.ShouldBe(new[] { 15, 15, 15, 14 });
     }
 
     [Fact]
@@ -281,6 +289,88 @@ public class TextInjectorGuardedTests
         var sent = new List<string>();
         var injector = NewInjector(() => 42, c => { sent.Add(c); return true; });
         var text = new string('a', 80);
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        string.Concat(sent).ShouldBe(text);
+    }
+
+    [Fact]
+    public void Guarded_ElevatedForeground_BlocksBeforeAnyKeystrokeOrWait()
+    {
+        // UIPI pre-check (paste-path-hardening): SendInput into an elevated
+        // window is silently dropped while reporting success, so the run
+        // must not start at all. The block must land BEFORE the modifier
+        // and mouse release-wait preludes (no sleeps) and before any send.
+        // isKeyDown reports everything held to prove no prelude ran.
+        var sent = new List<string>();
+        var sleeps = new List<int>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => true,
+            foregroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: sleeps.Add,
+            foregroundElevation: _ => ForegroundElevation.Elevated);
+
+        injector.TryInjectGuarded("text for an admin window")
+            .ShouldBe(InjectionRunOutcome.BlockedElevated);
+
+        sent.ShouldBeEmpty();
+        sleeps.ShouldBeEmpty(); // blocked before the release-wait preludes
+    }
+
+    [Fact]
+    public void Guarded_ElevationUnknown_FailsOpen_AndSendsAll()
+    {
+        // Transient observation failure => today's behavior, unchanged.
+        var sent = new List<string>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: _ => { },
+            foregroundElevation: _ => ForegroundElevation.Unknown);
+        var text = new string('a', 16); // 2 chunks of 8
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        string.Concat(sent).ShouldBe(text);
+    }
+
+    [Fact]
+    public void Guarded_ElevationNotElevated_SendsAll()
+    {
+        var sent = new List<string>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: _ => { },
+            foregroundElevation: _ => ForegroundElevation.NotElevated);
+        var text = new string('a', 16);
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        string.Concat(sent).ShouldBe(text);
+    }
+
+    [Fact]
+    public void Guarded_DefaultElevationProbe_OffWindows_FailsOpen()
+    {
+        // Construct WITHOUT the elevation seam: the production default
+        // (ElevationProbe.Probe) must fail open off-Windows so every
+        // existing Linux test and non-Windows path is unaffected.
+        var sent = new List<string>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: _ => { });
+        var text = new string('a', 8);
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 

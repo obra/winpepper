@@ -117,4 +117,57 @@ public class SessionViewModelPendingTests
         vm.HasPendingPaste.ShouldBeTrue();
         vm.Stage.ShouldBe(SessionStage.PendingPaste);
     }
+
+    [Fact]
+    public void EnterPendingPaste_ElevatedReason_ShowsAdminCopy_AndStaysClickable()
+    {
+        // Elevated-target park (paste-path-hardening): same PendingPaste
+        // stage (pill stays clickable, PillAnimationMap untouched), same
+        // full-text slot semantics -- only the copy differs so the user
+        // knows WHY nothing was typed and what to do.
+        var (vm, _) = NewVm();
+        vm.EnterPendingPaste("blocked text", T(1, "a"), PendingPasteReason.ElevatedTarget);
+
+        vm.HasPendingPaste.ShouldBeTrue();
+        vm.PendingPasteText.ShouldBe("blocked text");
+        vm.Stage.ShouldBe(SessionStage.PendingPaste);
+        vm.StatusText.ShouldBe("Admin window - switch & click");
+    }
+
+    [Fact]
+    public void EnterPendingPaste_DefaultReason_KeepsClickToPasteCopy()
+    {
+        var (vm, _) = NewVm();
+        vm.EnterPendingPaste("deferred text", T(1, "a"));
+
+        vm.StatusText.ShouldBe("Click to paste");
+    }
+
+    [Fact]
+    public void ShowPendingPasteStatus_TogglesCopy_WhilePending()
+    {
+        // Pill-click retry path: clicking the pill while an admin window is
+        // focused flips the copy to the admin message; a later kept-slot
+        // outcome that is NOT elevated flips it back.
+        var (vm, _) = NewVm();
+        vm.EnterPendingPaste("retry me", T(1, "a"));
+
+        vm.ShowPendingPasteStatus(PendingPasteReason.ElevatedTarget);
+        vm.StatusText.ShouldBe("Admin window - switch & click");
+        vm.Stage.ShouldBe(SessionStage.PendingPaste); // still clickable
+        vm.HasPendingPaste.ShouldBeTrue();            // slot untouched
+
+        vm.ShowPendingPasteStatus(PendingPasteReason.Interrupted);
+        vm.StatusText.ShouldBe("Click to paste");
+    }
+
+    [Fact]
+    public void ShowPendingPasteStatus_NoOp_WhenNothingPending()
+    {
+        var (vm, _) = NewVm();
+        vm.ShowPendingPasteStatus(PendingPasteReason.ElevatedTarget);
+
+        vm.StatusText.ShouldNotBe("Admin window - switch & click");
+        vm.HasPendingPaste.ShouldBeFalse();
+    }
 }

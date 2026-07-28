@@ -144,16 +144,39 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     /// <summary>The deferred text held in the pending slot (memory only, never persisted).</summary>
     public string PendingPasteText => _pending.PendingText;
 
+    private const string PendingPasteStatus = "Click to paste";
+    private const string PendingPasteElevatedStatus = "Admin window - switch & click";
+
+    private static string PendingStatusFor(PendingPasteReason reason)
+        => reason == PendingPasteReason.ElevatedTarget ? PendingPasteElevatedStatus : PendingPasteStatus;
+
     /// <summary>
     /// Enter the pending-paste state: hold the final text in memory (never
     /// persisted) and show the pill's PENDING visual. Because Stage becomes
     /// PendingPaste (not Idle), the pill's Idle auto-hide does not fire.
+    /// The reason selects the pill copy: an elevated-target park explains
+    /// WHY nothing was typed (UIPI) and what to do next; everything else
+    /// keeps the classic "Click to paste".
     /// </summary>
-    public void EnterPendingPaste(string text, InjectionTarget target) => _ui.Post(() =>
+    public void EnterPendingPaste(string text, InjectionTarget target,
+        PendingPasteReason reason = PendingPasteReason.Interrupted) => _ui.Post(() =>
     {
         _pending.SetPending(text, target);
         Stage = SessionStage.PendingPaste;
-        StatusText = "Click to paste";
+        StatusText = PendingStatusFor(reason);
+    });
+
+    /// <summary>
+    /// Update the pill copy for a paste attempt that KEPT the slot (the
+    /// pill-click retry path): an elevated block shows the admin-window
+    /// copy; any other kept-slot outcome restores the default. No-op when
+    /// nothing is pending. Stage stays PendingPaste so the pill remains
+    /// clickable -- the slot itself is untouched.
+    /// </summary>
+    public void ShowPendingPasteStatus(PendingPasteReason reason) => _ui.Post(() =>
+    {
+        if (!_pending.HasPending) return;
+        StatusText = PendingStatusFor(reason);
     });
 
     /// <summary>

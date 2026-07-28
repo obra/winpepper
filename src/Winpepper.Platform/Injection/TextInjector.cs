@@ -35,37 +35,66 @@ public sealed class TextInjector
     internal const int ChunkCodeUnits = 8;
 
     /// <summary>
-    /// Pause between guarded send chunks. Load-bearing (validation ledger, A1):
-    /// SendInput is queue-insertion (~µs per call), so an UNPACED loop finishes
-    /// in single-digit milliseconds and the mid-paste guard could never observe
-    /// a human focus change. 5 ms per 8-unit chunk = 1600 code units/s nominal
-    /// -- the same design point as the original 32/20 ms tuning -- and the
-    /// guard now runs 4x more often, shrinking the worst-case bleed into a
-    /// newly focused window from ~32 to ~8 units. The 5 ms pace is real only
-    /// through PacingWaiter (the production sleep default): Thread.Sleep(5)
-    /// measurably quantizes to ~15.5 ms (bleed-hardening ledger, V1), which
-    /// would throttle the feed to ~513 units/s.
+    /// Target feed rate for the guarded send, in UTF-16 code units per
+    /// second. Chosen to match the observed render rate of slow-rendering
+    /// target apps (~600 chars/s): when feed &lt;= render, the
+    /// queued-but-undelivered BACKLOG cannot grow, so a mid-paste window
+    /// switch can leak at most the true in-flight chunk
+    /// (&lt;= <see cref="ChunkCodeUnits"/>) into the newly focused window.
+    /// The previous 1600 units/s design point fed slow apps ~2.5x faster
+    /// than they rendered; the growing backlog followed focus on a human
+    /// click-switch and sprayed dozens of characters (paste-path-hardening,
+    /// 2026-07-27 -- a deliberate, owner-approved supersession of the
+    /// bleed-hardening plan's ">= 1600 nominal" feed-rate floor; chunk-size
+    /// reduction attacked the wrong term). UX cost, quantified: a 458-char
+    /// paste takes ~0.8 s of send time instead of ~0.3 s; in slow-rendering
+    /// apps the perceived duration is unchanged (the app remains the
+    /// bottleneck).
     /// </summary>
-    internal const int InterChunkPauseMs = 5;
+    internal const int TargetFeedUnitsPerSecond = 600;
+
+    /// <summary>
+    /// Pause between guarded send chunks, derived from
+    /// <see cref="TargetFeedUnitsPerSecond"/> by CEILING division:
+    /// ceil(8 * 1000 / 600) = 14 ms, i.e. ~571 code units/s nominal --
+    /// rounded UP so the nominal feed can never EXCEED the target
+    /// (truncating division gives 13 ms = ~615 units/s, above the claimed
+    /// render rate, and the backlog would grow again; stage-2 ledger A1).
+    /// Load-bearing (validation ledger, A1):
+    /// SendInput is queue-insertion (~us per call), so an UNPACED loop
+    /// finishes in single-digit milliseconds and the mid-paste guard could
+    /// never observe a human focus change. The pace is real only through
+    /// PacingWaiter (the production sleep default): Thread.Sleep quantizes
+    /// to the legacy ~15.6 ms timer resolution (bleed-hardening ledger, V1),
+    /// which would slow the feed to ~513 units/s -- tolerable at this design
+    /// point, but the high-resolution timer keeps the pace deliberate rather
+    /// than accidental (its health is pinned by the 5 ms probe in
+    /// InterChunkPacingWindowsTests).
+    /// </summary>
+    internal const int InterChunkPauseMs =
+        (ChunkCodeUnits * 1000 + TargetFeedUnitsPerSecond - 1) / TargetFeedUnitsPerSecond; // ceiling: feed <= target
 
     private readonly ILogger<TextInjector> _log;
     private readonly Func<int, bool> _isKeyDown;
     private readonly Func<long> _foregroundHwnd;
     private readonly Func<string, bool> _sendChunk;
     private readonly Action<int> _sleep;
+    private readonly Func<long, ForegroundElevation> _foregroundElevation;
 
     public TextInjector(
         ILogger<TextInjector> log,
         Func<int, bool>? isKeyDown = null,
         Func<long>? foregroundHwnd = null,
         Func<string, bool>? sendChunk = null,
-        Action<int>? sleep = null)
+        Action<int>? sleep = null,
+        Func<long, ForegroundElevation>? foregroundElevation = null)
     {
         _log = log;
         _isKeyDown = isKeyDown ?? DefaultKeyProbe;
         _foregroundHwnd = foregroundHwnd ?? DefaultForegroundProbe;
         _sendChunk = sendChunk ?? SendChunkViaSendInput;
         _sleep = sleep ?? PacingWaiter.Wait;
+        _foregroundElevation = foregroundElevation ?? ElevationProbe.Probe;
     }
 
     private static bool DefaultKeyProbe(int vk)
@@ -95,6 +124,11 @@ public sealed class TextInjector
     /// If any check trips, the remaining chunks are not sent and
     /// <see cref="InjectionRunOutcome.Interrupted"/> is returned so the
     /// caller can hold the WHOLE original text as a pending paste.
+    /// Before anything else -- even the preludes -- the foreground window's
+    /// process elevation is probed once: an elevated (UIPI-protected) target
+    /// returns <see cref="InjectionRunOutcome.BlockedElevated"/> with nothing
+    /// typed, because SendInput to such a window is silently dropped while
+    /// reporting success (MSDN); the caller parks the FULL text.
     /// The baseline is captured at method entry -- BEFORE the modifier
     /// release-wait (up to 1500 ms) and the mouse release-wait (up to
     /// 1500 ms) -- so a focus change during either wait is caught before the
@@ -115,6 +149,21 @@ public sealed class TextInjector
         if (string.IsNullOrEmpty(text)) return InjectionRunOutcome.Completed;
 
         var hwndAtSendStart = _foregroundHwnd();
+        // UIPI pre-check (paste-path-hardening): SendInput into an elevated
+        // window is silently dropped while reporting success, so a run
+        // against an elevated target would consume the text with nothing
+        // delivered. Park instead -- BEFORE any synthesis (even the
+        // modifier-neutralizing KEYUPs) and before the release-wait
+        // preludes. Fail-open: an unobservable foreground or elevation
+        // keeps today's behavior (ElevatedTargetDecider).
+        if (ElevatedTargetDecider.Decide(hwndAtSendStart, _foregroundElevation(hwndAtSendStart))
+            == ElevatedTargetDecision.Park)
+        {
+            _log.LogInformation(
+                "Foreground window is elevated (UIPI would silently drop SendInput); not typing -- holding the full text as pending ({Chars} chars)",
+                text.Length);
+            return InjectionRunOutcome.BlockedElevated;
+        }
         NeutralizeHeldModifiers();
         // Mouse prelude: never START typing while a button is physically
         // down (the pill click that requested this paste is the common

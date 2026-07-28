@@ -369,6 +369,13 @@ at the top of the file is reused as-is.
     [Fact]
     public void Guarded_DefaultForegroundProbe_OffWindows_ParksAtStart()
     {
+        // Off-Windows-only pin: on the Windows gate's interactive desktop the
+        // real DefaultForegroundProbe returns a live nonzero hwnd, so the run
+        // would proceed (Completed / BlockedElevated) and the assertion below
+        // would fail. Same guard pattern as
+        // ElevationProbeTests.Probe_OffWindows_ReturnsUnknown_FailOpen.
+        if (OperatingSystem.IsWindows()) return;
+
         // The production default probe returns 0 unconditionally off-Windows
         // (TextInjector.DefaultForegroundProbe). Under the new fail-safe
         // polarity an unseamed injector therefore PARKS off-Windows instead

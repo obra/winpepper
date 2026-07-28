@@ -90,6 +90,7 @@ public static class CleanupEvalCases
     // -----------------------------------------------------------------------
 
     private const string Qwen05B = "qwen2.5-0.5b-instruct-q4_k_m";
+    private const string Sotto350M = "sotto-cleanup-lfm25-350m-q8_0";
 
     public static IReadOnlyDictionary<(string Model, string CaseName), string> KnownFailingBaseline { get; } =
         new Dictionary<(string, string), string>
@@ -109,6 +110,26 @@ public static class CleanupEvalCases
             [(Qwen05B, "trap-poem-request")] =
                 "Output rejected by the plausibility guard (runner took FallbackImplausible " +
                 "instead of accepting the LLM output). Recorded 2026-07-27, seed 42, Vulkan GPU.",
+            // Sotto's four bake-off failures (docs/plans/2026-07-27-cleanup-model-bakeoff-prep.md §7a):
+            // all non-destructive under-edits — the self-correction meta-command is kept as
+            // literal text instead of being applied, and one filler survives. Exactly the §4
+            // fine-tune dataset gaps.
+            [(Sotto350M, "corr-recipient-scratch")] =
+                "Keeps the self-correction as literal text instead of applying it: observed " +
+                "\"Send the report to Becca, send it to Pete before the meeting.\" " +
+                "Recorded 2026-07-27, seed 42, Vulkan GPU.",
+            [(Sotto350M, "corr-deadline-nevermind")] =
+                "Keeps the \"never mind\" meta-command as literal text: observed \"The deadline " +
+                "is Tuesday. Wait, never mind the deadline is Thursday for the launch.\" " +
+                "Recorded 2026-07-27, seed 42, Vulkan GPU.",
+            [(Sotto350M, "corr-registry-example")] =
+                "Keeps the \"scratch that\" meta-command as literal text: observed \"Write me a " +
+                "function called add_numbers. Wait, scratch that call it sum.\" " +
+                "Recorded 2026-07-27, seed 42, Vulkan GPU.",
+            [(Sotto350M, "filler-uh-sortof")] =
+                "Drops \"uh\" and \"you know\" but keeps \"sort of\": observed \"I think we " +
+                "should sort of reconsider the whole design.\" " +
+                "Recorded 2026-07-27, seed 42, Vulkan GPU.",
         };
 
     /// <summary>Baseline lookup used by the eval harness: true iff the

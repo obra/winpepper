@@ -261,7 +261,15 @@ Recommended actions (product decisions, not taken here):
 
 1. Promote sotto-350m toward default cleanup model. It is currently
    `ManualInstallOnly` (no public GGUF) — publishing/hosting a GGUF or
-   shipping the conversion is the blocker.
+   shipping the conversion is the blocker. UPDATE 2026-07-27: the conversion
+   is now scripted and reproducible — `scripts/convert-sotto-gguf.sh` goes
+   from the MIT HF source to a byte-identical GGUF (sha256 verified against
+   the registry) using a pinned llama.cpp commit, and prints install
+   instructions. Verified end-to-end and installed on this machine
+   (`%LOCALAPPDATA%\winpepper\models\cleanup\sotto-cleanup-lfm25-350m-q8_0\`);
+   select it via Settings after an app restart. Remaining for a true default:
+   host the GGUF at a public URL (HF or GitHub release — account/product
+   decision) and fill `ModelFile.Url` / drop `ManualInstallOnly`.
 2. Keep qwen as the installed-by-default fallback until (1) resolves.
 3. §4 gap-fill fine-tune (meta-commands + imperative resistance) on top of
    sotto remains the highest-leverage quality step; its 4 eval failures are

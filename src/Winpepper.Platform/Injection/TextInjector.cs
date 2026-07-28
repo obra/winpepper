@@ -35,18 +35,44 @@ public sealed class TextInjector
     internal const int ChunkCodeUnits = 8;
 
     /// <summary>
-    /// Pause between guarded send chunks. Load-bearing (validation ledger, A1):
-    /// SendInput is queue-insertion (~µs per call), so an UNPACED loop finishes
-    /// in single-digit milliseconds and the mid-paste guard could never observe
-    /// a human focus change. 5 ms per 8-unit chunk = 1600 code units/s nominal
-    /// -- the same design point as the original 32/20 ms tuning -- and the
-    /// guard now runs 4x more often, shrinking the worst-case bleed into a
-    /// newly focused window from ~32 to ~8 units. The 5 ms pace is real only
-    /// through PacingWaiter (the production sleep default): Thread.Sleep(5)
-    /// measurably quantizes to ~15.5 ms (bleed-hardening ledger, V1), which
-    /// would throttle the feed to ~513 units/s.
+    /// Target feed rate for the guarded send, in UTF-16 code units per
+    /// second. Chosen to match the observed render rate of slow-rendering
+    /// target apps (~600 chars/s): when feed &lt;= render, the
+    /// queued-but-undelivered BACKLOG cannot grow, so a mid-paste window
+    /// switch can leak at most the true in-flight chunk
+    /// (&lt;= <see cref="ChunkCodeUnits"/>) into the newly focused window.
+    /// The previous 1600 units/s design point fed slow apps ~2.5x faster
+    /// than they rendered; the growing backlog followed focus on a human
+    /// click-switch and sprayed dozens of characters (paste-path-hardening,
+    /// 2026-07-27 -- a deliberate, owner-approved supersession of the
+    /// bleed-hardening plan's ">= 1600 nominal" feed-rate floor; chunk-size
+    /// reduction attacked the wrong term). UX cost, quantified: a 458-char
+    /// paste takes ~0.8 s of send time instead of ~0.3 s; in slow-rendering
+    /// apps the perceived duration is unchanged (the app remains the
+    /// bottleneck).
     /// </summary>
-    internal const int InterChunkPauseMs = 5;
+    internal const int TargetFeedUnitsPerSecond = 600;
+
+    /// <summary>
+    /// Pause between guarded send chunks, derived from
+    /// <see cref="TargetFeedUnitsPerSecond"/> by CEILING division:
+    /// ceil(8 * 1000 / 600) = 14 ms, i.e. ~571 code units/s nominal --
+    /// rounded UP so the nominal feed can never EXCEED the target
+    /// (truncating division gives 13 ms = ~615 units/s, above the claimed
+    /// render rate, and the backlog would grow again; stage-2 ledger A1).
+    /// Load-bearing (validation ledger, A1):
+    /// SendInput is queue-insertion (~us per call), so an UNPACED loop
+    /// finishes in single-digit milliseconds and the mid-paste guard could
+    /// never observe a human focus change. The pace is real only through
+    /// PacingWaiter (the production sleep default): Thread.Sleep quantizes
+    /// to the legacy ~15.6 ms timer resolution (bleed-hardening ledger, V1),
+    /// which would slow the feed to ~513 units/s -- tolerable at this design
+    /// point, but the high-resolution timer keeps the pace deliberate rather
+    /// than accidental (its health is pinned by the 5 ms probe in
+    /// InterChunkPacingWindowsTests).
+    /// </summary>
+    internal const int InterChunkPauseMs =
+        (ChunkCodeUnits * 1000 + TargetFeedUnitsPerSecond - 1) / TargetFeedUnitsPerSecond; // ceiling: feed <= target
 
     private readonly ILogger<TextInjector> _log;
     private readonly Func<int, bool> _isKeyDown;

@@ -129,7 +129,7 @@ public class TextInjectorGuardedTests
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 
-        sleeps.ShouldBe(new[] { 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5 }); // 11 x TextInjector.InterChunkPauseMs
+        sleeps.ShouldBe(new[] { 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14 }); // 11 x TextInjector.InterChunkPauseMs (render-rate pace)
     }
 
     [Fact]
@@ -144,14 +144,22 @@ public class TextInjectorGuardedTests
     }
 
     [Fact]
-    public void DesignPoint_FeedRateFloor_And_BleedBound()
+    public void DesignPoint_FeedRateCeiling_And_BleedBound()
     {
-        // Spec constraint: the effective feed rate must never drop below the
-        // original 1600 code units/s design point, and the worst-case bleed
-        // into a newly focused window (<= 1 in-flight chunk, prior ledger
-        // AD-1, hardened by this task) must not regress past 8 code units.
-        (TextInjector.ChunkCodeUnits * 1000 / TextInjector.InterChunkPauseMs)
-            .ShouldBeGreaterThanOrEqualTo(1600);
+        // Spec constraint (paste-path-hardening, 2026-07-27): the nominal
+        // feed rate must stay AT OR BELOW TargetFeedUnitsPerSecond so the
+        // queued-but-undelivered backlog cannot grow against slow-rendering
+        // apps (~600 chars/s claimed render rate) -- a mid-paste window
+        // switch then leaks at most the true in-flight chunk. The pause is
+        // CEILING-derived for exactly this reason: truncating division gave
+        // 13 ms = ~615 units/s, ABOVE the target (stage-2 ledger A1). This
+        // DELIBERATELY SUPERSEDES the bleed-hardening plan's ">= 1600"
+        // floor (owner-approved). The feed must not collapse either, and
+        // the worst-case bleed bound (<= 1 in-flight chunk, prior ledger
+        // AD-1) must not regress past 8 code units.
+        var nominalFeed = TextInjector.ChunkCodeUnits * 1000 / TextInjector.InterChunkPauseMs; // 571 at 8/14ms
+        nominalFeed.ShouldBeLessThanOrEqualTo(TextInjector.TargetFeedUnitsPerSecond); // never exceed the render-rate target
+        nominalFeed.ShouldBeGreaterThanOrEqualTo(500); // sanity floor: still responsive in fast apps
         TextInjector.ChunkCodeUnits.ShouldBeLessThanOrEqualTo(8);
     }
 
@@ -204,8 +212,8 @@ public class TextInjectorGuardedTests
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 
         string.Concat(sent).ShouldBe(text);
-        // Three 15 ms release-wait polls, then the single 5 ms inter-chunk pause.
-        sleeps.ShouldBe(new[] { 15, 15, 15, 5 });
+        // Three 15 ms release-wait polls, then the single 14 ms inter-chunk pause.
+        sleeps.ShouldBe(new[] { 15, 15, 15, 14 });
     }
 
     [Fact]

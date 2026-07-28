@@ -136,6 +136,17 @@ Consequences accepted and documented:
   held** (existing `if (_pending.HasPending) return;` guard in the VM's error
   presentation — unchanged): the clickable park affordance outranks a
   6-second error flash. Pre-existing behavior, now merely longer-lived.
+- **Merged pastes take proportionally longer, accepted** (load-bearing
+  ledger A16, 2026-07-28): paste duration scales linearly at ~1.75 ms/char
+  (`ChunkCodeUnits=8`, `TargetFeedUnitsPerSecond=600` ⇒ 14 ms inter-chunk
+  pause), so a typical two-dictation merge ≈ 1.6 s. A mid-paste interrupt of
+  a merged text re-parks the FULL concatenation and a retry retypes the
+  already-delivered prefix — the same pre-existing full-text-park behavior
+  as single pastes, only linearly larger; the failure mode is duplicated
+  visible text (recoverable), never loss. A segment-queue/delivered-offset
+  model was considered and rejected: it redesigns the slot and pill
+  semantics and violates the owner-approved full-text park constraint. The
+  meter + log field data allow this call to be revisited.
 
 ## File structure
 
@@ -1045,9 +1056,12 @@ production caller — the `EnterPendingPaste` body (~line 164) changes from
 ```
 
 (The rest of `EnterPendingPaste` — `Stage = SessionStage.PendingPaste;
-StatusText = PendingStatusFor(reason);` — is unchanged. Behavior for a fresh
-slot is identical; the append path only becomes reachable in Task 6 when the
-Recording-arm discard is removed.)
+StatusText = PendingStatusFor(reason);` — is unchanged, and so is the
+`_ui.Post(...)` wrapper the whole body runs inside: the slot's thread safety
+relies on every mutation being UI-marshaled, so change ONLY the `SetPending`
+line and leave the wrapper intact. Behavior for a fresh slot is identical;
+the append path only becomes reachable in Task 6 when the Recording-arm
+discard is removed.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1253,10 +1267,12 @@ patterns EXACTLY (fully-qualified type names, mirrored hold/toggle arms,
 comment style).
 
 **Files:**
-- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` — hold-arm start
-  (~line 445), toggle-arm start (~line 850), hold-arm outcome chain
-  (~lines 920–962), toggle-arm outcome chain (~lines 1136–1176),
-  `TryPastePending` (~lines 807–854)
+- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` — `TryPastePending`
+  (~lines 382–437), hold-arm start (~lines 445–448), hold-arm outcome chain
+  (~lines 736–766), toggle-arm start (~lines 850–853), toggle-arm outcome
+  chain (~lines 1134–1164). (Line refs audited against HEAD 2026-07-28:
+  the three `TryInjectGuarded` calls sit at ~397, ~736, ~1134 and each
+  chain's `injected` local is `outcome == ...Completed` on the next line.)
 
 **Interfaces:**
 - Consumes: `InjectionRunOutcome.NoForeground` (Task 2);
@@ -1314,12 +1330,12 @@ for normal park flows):
 
 - [ ] **Step 3: Mirror the arm in the toggle-arm outcome chain**
 
-Same insertion point in the toggle arm's chain (~lines 1136–1176), using that
+Same insertion point in the toggle arm's chain (~lines 1134–1164), using that
 arm's locals: `outcome2` and `final2` (everything else identical).
 
 - [ ] **Step 4: Add the `NoForeground` arm to `TryPastePending`**
 
-In `TryPastePending` (~lines 807–854), insert a new `else if` between the
+In `TryPastePending` (~lines 382–437), insert a new `else if` between the
 existing `Interrupted` log arm and the final
 `else _log.LogWarning("Pending paste injection failed");`:
 
@@ -1405,7 +1421,10 @@ These exercise the PipelineHost wiring that has no automated coverage
    `Foreground hwnd read 0 mid-paste (occurrence #N)` lines. Expect: none in
    calm use (matches the probe: zeros never occur at rest). If one appears,
    confirm the paste PARKED (pill shows `Click to paste`) and one click
-   recovered the full text.
+   recovered the full text. Known-legitimate exception: a park coinciding
+   with a USER-initiated window activation (e.g. opening settings from the
+   tray exactly as a dictation completes) is correct fail-safe behavior —
+   focus genuinely moved — not a bug (ledger N3).
 4. **Elevated park still works (regression):** focus an elevated terminal,
    dictate. Expect: nothing typed, pill shows
    `Admin window - switch & click` (renders fully, no ellipsis), click into

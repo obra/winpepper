@@ -15,9 +15,10 @@ namespace Winpepper.Platform.Tests.Injection;
 /// the timer path is broken: STOP and report, do not widen the threshold or
 /// swap in a spin-wait without explicit approval. The 5 ms probe is kept
 /// SEPARATE from the production pause on purpose: at 14 ms the high-res
-/// timer (~13.2 ms) and the Sleep fallback (~15.6 ms) are nearly
-/// indistinguishable on a noisy host, so a production-pace measurement has
-/// no discriminating power for timer health.
+/// timer (~14.2 ms; a waitable timer never signals before its due time,
+/// and the 5 ms probe measured +0.2-0.4 ms overshoot) and the Sleep
+/// fallback (~15.6 ms) are nearly indistinguishable on a noisy host, so a
+/// production-pace measurement has no discriminating power for timer health.
 /// (2) a production-pace check that proves the NEW render-rate floor: the
 /// inter-chunk wait really is at least InterChunkPauseMs, so the feed rate
 /// stays at or below ~571 code units/s and the bleed backlog cannot build

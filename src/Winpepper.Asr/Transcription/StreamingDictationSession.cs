@@ -13,9 +13,16 @@ namespace Winpepper.Asr.Transcription;
 /// it is ready. FinishAsync completes the pump and returns the final transcript,
 /// or null when no transcriber materialized (caller uses the batch-adapter path).
 /// The pump drain is bounded by a drain deadline (default 10 s): a wedged push
-/// (half-dead socket) HANGS rather than throws, so on timeout FinishAsync
-/// abandons + disposes the session and returns null (A10 — the whole post-stop
-/// wait stays bounded; the caller's batch path takes over).
+/// HANGS rather than throws (half-dead socket send, or a stuck synchronous
+/// native P/Invoke), so on timeout FinishAsync abandons the session and
+/// returns null promptly — the caller's batch path takes over. The abandoned
+/// session's dispose runs in the BACKGROUND: disposing a socket session aborts
+/// the socket (which unwedges its pump), but disposing a native session cannot
+/// interrupt an in-flight P/Invoke — it only prevents further use and frees
+/// native state once the call returns — so no caller-facing path ever awaits it.
+/// Invariant: callers never invoke FinishAsync/DisposeAsync concurrently
+/// (PipelineHost enforces this via grab-and-null ownership transfer), which is
+/// what the remaining plain <c>_session</c> reads rely on.
 /// </summary>
 public sealed class StreamingDictationSession : IAsyncDisposable
 {
@@ -26,6 +33,21 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     private readonly TimeSpan _drainDeadline;
     private IStreamingTranscriptionSession? _session;
     private Exception? _pumpError;
+
+    /// <summary>Drain bound applied when ZERO pushes completed by stop time.
+    /// In that state streaming has no latency win to preserve: the engine
+    /// would have to process ALL queued audio during the drain anyway, and the
+    /// caller's late batch path on fullAudio produces an equivalent transcript
+    /// (the session itself logs "Streamed latency win lost" when it falls
+    /// back) — so waiting the full deadline buys the user nothing. Applies
+    /// ONLY once the session actually started: a session still starting at
+    /// stop time (cloud connect is designed-bounded at 10 s; a cold factory
+    /// load takes seconds) keeps the full deadline — abandoning it early would
+    /// trade a healthy dictation for a local batch one.</summary>
+    private static readonly TimeSpan ZeroPushDrainDeadline = TimeSpan.FromSeconds(1.5);
+
+    private volatile bool _sessionStarted;   // written by the pump, read by FinishAsync
+    private volatile bool _anyPushCompleted; // written by the pump, read by FinishAsync
 
     private StreamingDictationSession(
         Func<CancellationToken, Task<IStreamingTranscriber?>> transcriberFactory,
@@ -46,9 +68,30 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                     await foreach (var _ in _frames.Reader.ReadAllAsync(CancellationToken.None)) { }
                     return;
                 }
-                _session = await transcriber.StartSessionAsync(ct);
+                var session = await transcriber.StartSessionAsync(ct);
+                _session = session;
+                _sessionStarted = true; // keys FinishAsync's drain-deadline choice (with _anyPushCompleted)
+                // Push via the LOCAL reference, never the nullable field: an
+                // abandon (silence-drop / cancel / drain timeout) nulls
+                // _session concurrently with this loop, and completing the
+                // writer does not stop ReadAllAsync from yielding frames that
+                // are already queued. Pushing into a disposed session is a
+                // benign no-op by session contract.
                 await foreach (var frame in _frames.Reader.ReadAllAsync(CancellationToken.None))
-                    await _session.PushAsync(frame, ct);
+                {
+                    await session.PushAsync(frame, ct);
+                    _anyPushCompleted = true; // keys FinishAsync's drain-deadline choice
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                // Ordinary teardown, not a pump failure: PipelineHost
+                // cancels the run CTS BEFORE disposing the streaming
+                // session, and a session may check ct before its own
+                // disposed guard (nemotron does) — so a canceled-ct push
+                // can surface mid-drain. The `when` guard keeps OCEs with
+                // an UNcancelled ct (e.g. a dispose-aborted cloud send)
+                // classified exactly as before.
             }
             catch (Exception ex)
             {
@@ -93,56 +136,103 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     public async Task<TranscriptionResult?> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
     {
         _frames.Writer.TryComplete();
+        // Short-circuit ONLY a session that actually started and still
+        // completed zero pushes; a session still starting (cloud connect,
+        // cold factory load) keeps the full deadline.
+        var deadline = _anyPushCompleted || !_sessionStarted
+            ? _drainDeadline
+            : TimeSpan.FromTicks(Math.Min(_drainDeadline.Ticks, ZeroPushDrainDeadline.Ticks));
         try
         {
-            await _pump.WaitAsync(_drainDeadline, ct); // TimeoutException on a wedged drain
+            await _pump.WaitAsync(deadline, ct); // TimeoutException on a wedged drain
         }
         catch (TimeoutException)
         {
-            // A wedged push (half-dead socket) HANGS rather than throws, so no
-            // exception-based fallback inside the session/wrapper can fire and
-            // the cloud deadline (scheduled inside the wrapper's FinishAsync)
-            // never starts. Bound the whole post-stop wait HERE: abandon the
-            // session — disposing it aborts the socket, which is what unblocks
-            // the pump — and return null so the caller's late path transcribes
-            // fullAudio (bounded, batch).
-            DrainTimedOut = true; // late path must NOT ensure (orphaned-pump risk)
+            // A wedged push HANGS rather than throws (half-dead socket send,
+            // or a stuck synchronous native P/Invoke), so no exception-based
+            // fallback inside the session/wrapper can fire. Bound the whole
+            // post-stop wait HERE: abandon the session and return null so the
+            // caller's late path transcribes fullAudio (bounded, batch). The
+            // session dispose runs in the BACKGROUND: awaiting it inline can
+            // block for as long as the wedged native call takes (observed
+            // ~16 s in the wild — dispose cannot interrupt a P/Invoke, it just
+            // queues behind the session's native gate). Callers that see
+            // DrainTimedOut coordinate shared-native disposal via
+            // PumpCompletion, exactly as before.
+            DrainTimedOut = true;
             _log.LogWarning(
                 "streaming drain exceeded {DrainDeadline}; abandoning streaming session, batch path takes over",
-                _drainDeadline);
-            await DisposeAsync();
+                deadline);
+            _ = ScheduleAbandonedSessionDispose();
             return null;
         }
         // Captured on the pump task; rethrow via ExceptionDispatchInfo so the
         // original stack trace survives this cross-thread rethrow.
         if (_pumpError is not null) ExceptionDispatchInfo.Capture(_pumpError).Throw();
-        if (_session is null) return null;
-        var result = await _session.FinishAsync(fullAudio, ct);
-        await _session.DisposeAsync();
-        _session = null;
-        return result;
+        var session = _session;
+        if (session is null) return null;
+        try
+        {
+            return await session.FinishAsync(fullAudio, ct);
+        }
+        finally
+        {
+            // Ordering: finish first, then dispose (FallbackStreamingTranscriber's
+            // push-after-dispose guard documents why). The finally keeps the
+            // session from leaking when FinishAsync throws — that exception
+            // deliberately propagates to the pipeline (batch parity).
+            await DisposeSessionAsync();
+        }
     }
 
-    /// <summary>Abandon the dictation (silence-drop / cancel / drain timeout): stop
-    /// the pump and dispose the session without transcribing. Never throws. Disposes
-    /// the session BEFORE awaiting the pump — a wedged push never completes on its
-    /// own; aborting the session is what unblocks it — then re-disposes after the
-    /// pump exits, covering the pump-assigned-the-session-late race.</summary>
+    /// <summary>Dispose the abandoned session OFF every caller-facing await
+    /// path. The immediate attempt aborts a socket-style session — which is
+    /// what unwedges a pump stuck in a socket send. A native session's dispose
+    /// cannot interrupt an in-flight P/Invoke: it only queues behind the
+    /// session's native gate until the call returns, which is exactly why no
+    /// caller may await it. After the pump exits, dispose again: that is the
+    /// only point with a happens-before edge on the pump's late `_session`
+    /// assignment (the pump may still have been inside StartSessionAsync when
+    /// we abandoned).</summary>
+    private Task ScheduleAbandonedSessionDispose()
+        => Task.Run(async () =>
+        {
+            await DisposeSessionAsync().ConfigureAwait(false);
+            try { await _pump.ConfigureAwait(false); } catch { /* pump error already logged */ }
+            await DisposeSessionAsync().ConfigureAwait(false);
+        });
+
+    /// <summary>Abandon the dictation (silence-drop / cancel / drain timeout):
+    /// stop the pump and dispose the session without transcribing. Never
+    /// throws, and never blocks unboundedly: the session dispose runs in the
+    /// background (for a socket session dispose aborts the socket and unwedges
+    /// its pump; for a native session dispose cannot interrupt the in-flight
+    /// P/Invoke and would otherwise block here behind the native gate), and
+    /// the pump wait is bounded. Callers coordinate shared-native disposal via
+    /// <see cref="PumpCompletion"/>.</summary>
     public async ValueTask DisposeAsync()
     {
         _frames.Writer.TryComplete();
-        await DisposeSessionAsync();
-        // Bounded: never let a pathologically hung pump (e.g. a hanging factory)
-        // block the serial hotkey loop; orphaning the pump task is the lesser evil.
+        // FinishAsync already proved the pump is wedged past the drain
+        // deadline AND scheduled the background dispose chain — scheduling a
+        // second chain or waiting on the pump again here only duplicates work
+        // and delays the caller's late batch path.
+        if (DrainTimedOut) return;
+        var abandonDispose = ScheduleAbandonedSessionDispose();
+        // Bounded: never let a pathologically hung pump (hanging factory, or
+        // a wedged native call) block the serial hotkey loop; orphaning the
+        // pump task is the lesser evil.
         try { await _pump.WaitAsync(TimeSpan.FromSeconds(5)); } catch { /* abandoned */ }
-        await DisposeSessionAsync();
+        // Let the common (healthy) case observe a disposed session
+        // synchronously; a chain blocked behind a wedged native call finishes
+        // in the background.
+        try { await abandonDispose.WaitAsync(TimeSpan.FromSeconds(1)); } catch { /* finishes in background */ }
     }
 
     private async ValueTask DisposeSessionAsync()
     {
-        var session = _session;
+        var session = Interlocked.Exchange(ref _session, null);
         if (session is null) return;
-        _session = null;
         try { await session.DisposeAsync(); } catch { /* abandoned */ }
     }
 }

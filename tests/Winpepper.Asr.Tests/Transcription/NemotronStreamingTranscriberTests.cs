@@ -176,6 +176,71 @@ public class NemotronStreamingTranscriberTests
     // Dispose-is-abort contract: the pipeline disposes sessions while pushes
     // may still arrive (cancel / silence-drop / drain-timeout / teardown).
     [Fact]
+    public async Task Native_call_slower_than_threshold_logs_a_duration_warning()
+    {
+        var engine = new FakeTranscribeCppEngine { FeedDelay = TimeSpan.FromMilliseconds(50) };
+        var log = new CapturingLogger();
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
+            log, nativeCallWarnAfter: TimeSpan.FromMilliseconds(1));
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // exactly one native feed
+
+        Assert.Contains(log.Warnings,
+            w => w.Contains("nemotron native stream feed took") && w.Contains("ms"));
+    }
+
+    [Fact]
+    public async Task Fast_native_calls_log_no_duration_warning()
+    {
+        var engine = new FakeTranscribeCppEngine();
+        var log = new CapturingLogger();
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en", log);
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken);
+        var result = await s.FinishAsync(Samples(2560), TestContext.Current.CancellationToken);
+
+        Assert.Equal("hello world final", result.Text);
+        Assert.DoesNotContain(log.Warnings, w => w.Contains("nemotron native"));
+    }
+
+    [Fact]
+    public async Task Wedged_native_call_logs_a_still_running_warning_before_it_returns()
+    {
+        // A permanent wedge (or one the user kills the process over) would
+        // leave ZERO log evidence from a completion-time-only bracket — the
+        // in-flight watchdog is what makes that state diagnosable. The fake
+        // feed blocks on a gate until the watchdog warning is OBSERVED, so
+        // the test is condition-synchronized: no timing margin to lose under
+        // scheduler load (only the generous give-up bound below).
+        using var gate = new ManualResetEventSlim(false);
+        var engine = new FakeTranscribeCppEngine { FeedGate = gate };
+        var log = new CapturingLogger();
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
+            log, nativeCallWarnAfter: TimeSpan.FromMilliseconds(50));
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        var push = Task.Run(() => s.PushAsync(Samples(2560),
+            TestContext.Current.CancellationToken).AsTask()); // exactly one native feed, wedged on the gate
+
+        var giveUp = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!log.Warnings.Any(w => w.Contains("nemotron native stream feed still running after"))
+               && DateTime.UtcNow < giveUp)
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        gate.Set(); // unwedge the native call
+
+        await push;
+        Assert.Contains(log.Warnings,
+            w => w.Contains("nemotron native stream feed still running after"));
+        Assert.Contains(log.Warnings,
+            w => w.Contains("nemotron native stream feed took"));
+    }
+
+    [Fact]
     public async Task Push_after_dispose_is_a_harmless_no_op()
     {
         var engine = new FakeTranscribeCppEngine();

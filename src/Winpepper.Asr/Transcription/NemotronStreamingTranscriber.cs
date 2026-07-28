@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Winpepper.Asr.TranscribeCpp;
 
@@ -23,6 +24,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
     private readonly ILogger? _log;
     private readonly int _attContextRight;
     private readonly string? _language;
+    private readonly TimeSpan _nativeCallWarnAfter;
 
     public NemotronStreamingTranscriber(
         Func<ITranscribeCppEngine> engineProvider,
@@ -30,7 +32,8 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         string modelName,
         ILogger? log = null,
         int attContextRight = 13,
-        string? language = null)
+        string? language = null,
+        TimeSpan? nativeCallWarnAfter = null)
     {
         _engineProvider = engineProvider;
         _batchFallback = batchFallback;
@@ -38,13 +41,18 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         _log = log;
         _attContextRight = attContextRight;
         _language = language;
+        // 3 s: an order of magnitude above a healthy call (feeds are ~tens of
+        // ms, finalize ~100-300 ms) yet well below the drain deadline, so a
+        // wedge is visible in the log before it becomes a user-facing stall.
+        _nativeCallWarnAfter = nativeCallWarnAfter ?? TimeSpan.FromSeconds(3);
     }
 
     public string ModelName { get; }
 
     public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
         => Task.FromResult<IStreamingTranscriptionSession>(
-            new Session(_engineProvider, _batchFallback, ModelName, _attContextRight, _language, _log));
+            new Session(_engineProvider, _batchFallback, ModelName, _attContextRight, _language, _log,
+                _nativeCallWarnAfter));
 
     private sealed class Session : IStreamingTranscriptionSession
     {
@@ -54,6 +62,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private readonly int _attContextRight;
         private readonly string? _language;
         private readonly ILogger? _log;
+        private readonly TimeSpan _nativeCallWarnAfter;
 
         private readonly float[] _buffer = new float[FeedChunkSamples];
         // Serializes ALL native stream access. The pipeline disposes sessions
@@ -69,7 +78,8 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private bool _disposed;
 
         public Session(Func<ITranscribeCppEngine> engineProvider, ITranscriber batchFallback,
-            string modelName, int attContextRight, string? language, ILogger? log)
+            string modelName, int attContextRight, string? language, ILogger? log,
+            TimeSpan nativeCallWarnAfter)
         {
             _engineProvider = engineProvider;
             _batchFallback = batchFallback;
@@ -77,6 +87,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             _attContextRight = attContextRight;
             _language = language;
             _log = log;
+            _nativeCallWarnAfter = nativeCallWarnAfter;
         }
 
         public ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
@@ -98,7 +109,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
                         offset += take;
                         if (_buffered == FeedChunkSamples)
                         {
-                            _stream!.Feed(_buffer, FeedChunkSamples);
+                            TimedNativeCall("stream feed", () => _stream!.Feed(_buffer, FeedChunkSamples));
                             _streamed = true;
                             _buffered = 0;
                         }
@@ -141,11 +152,11 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
                         EnsureStream();
                         if (_buffered > 0)
                         {
-                            _stream!.Feed(_buffer, _buffered);   // flush the tail
+                            TimedNativeCall("stream feed", () => _stream!.Feed(_buffer, _buffered)); // flush the tail
                             _streamed = true;
                             _buffered = 0;
                         }
-                        var (text, truncated) = _stream!.Finalize();
+                        var (text, truncated) = TimedNativeCall("stream finalize", () => _stream!.Finalize());
                         if (truncated)
                             fallbackReason = "stream reports was_truncated";
                         else if (string.IsNullOrWhiteSpace(text))
@@ -184,7 +195,44 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
 
         private void EnsureStream()
         {
-            _stream ??= _engineProvider().BeginStream(_attContextRight, _language);
+            _stream ??= TimedNativeCall("stream begin",
+                () => _engineProvider().BeginStream(_attContextRight, _language));
+        }
+
+        /// <summary>Native streaming calls are synchronous P/Invokes that
+        /// cannot be cancelled or interrupted; when one wedges, the streaming
+        /// pump stalls until it returns and the coordinator's drain deadline
+        /// fires (observed: a call stuck >=15 s in the wild). Log twice: an
+        /// IN-FLIGHT warning when the threshold crosses while the call is
+        /// still stuck (a permanent wedge — or one the user kills the process
+        /// over — would otherwise leave zero log evidence, and it also holds
+        /// the compute gate, silently batch-degrading every later local
+        /// dictation), and the duration on completion, so future wedges are
+        /// diagnosable from the log alone.</summary>
+        private T TimedNativeCall<T>(string op, Func<T> call)
+        {
+            var nativeSw = Stopwatch.StartNew();
+            using var watchdogCts = new CancellationTokenSource();
+            _ = WarnWhenStillRunningAsync(op, watchdogCts.Token);
+            try { return call(); }
+            finally
+            {
+                watchdogCts.Cancel();
+                nativeSw.Stop();
+                if (nativeSw.Elapsed >= _nativeCallWarnAfter)
+                    _log?.LogWarning(
+                        "nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns",
+                        op, (int)nativeSw.ElapsedMilliseconds);
+            }
+        }
+
+        private async Task WarnWhenStillRunningAsync(string op, CancellationToken ct)
+        {
+            try { await Task.Delay(_nativeCallWarnAfter, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; } // the call completed in time
+            _log?.LogWarning(
+                "nemotron native {Op} still running after {ThresholdMs} ms; the streaming pump is stalled until it returns",
+                op, (int)_nativeCallWarnAfter.TotalMilliseconds);
         }
 
         private void MarkCorrupt(string where, Exception e)

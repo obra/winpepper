@@ -70,6 +70,7 @@ public sealed class FallbackStreamingTranscriber : IStreamingTranscriber
         private readonly FallbackStreamingTranscriber _owner;
         private readonly IStreamingTranscriptionSession? _inner;
         private Exception? _failure;
+        private volatile bool _disposed;
 
         internal Session(FallbackStreamingTranscriber owner, IStreamingTranscriptionSession? inner, Exception? startError)
         {
@@ -80,7 +81,17 @@ public sealed class FallbackStreamingTranscriber : IStreamingTranscriber
 
         public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
         {
-            if (_failure is not null || _inner is null) return;
+            // Push-after-dispose is a benign no-op (parity with the nemotron
+            // session): the coordinator's pump may legitimately drain queued
+            // frames after the pipeline abandoned the dictation. Without this
+            // guard the push lands on the DISPOSED inner socket session, whose
+            // ObjectDisposedException would poison _failure and log a spurious
+            // WRN. Today that poisoning is inert — every coordinator path
+            // finishes BEFORE disposing, so it never reaches FinishAsync's
+            // fallback path — but it is a latent fallback-conversion trap
+            // (local-batch result plus the user-facing "cloud unavailable"
+            // toast) if the finish/dispose ordering ever changes.
+            if (_disposed || _failure is not null || _inner is null) return;
             try
             {
                 await _inner.PushAsync(mono16k, ct);
@@ -132,6 +143,7 @@ public sealed class FallbackStreamingTranscriber : IStreamingTranscriber
 
         public async ValueTask DisposeAsync()
         {
+            _disposed = true; // set BEFORE disposing the inner: pushes racing past this point must not reach it
             if (_inner is not null) await _inner.DisposeAsync();
         }
     }

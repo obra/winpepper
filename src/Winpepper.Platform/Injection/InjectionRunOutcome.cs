@@ -18,4 +18,14 @@ public enum InjectionRunOutcome
 
     /// <summary>SendInput refused a chunk; equivalent to the old TryInject == false.</summary>
     SendFailed,
+
+    /// <summary>
+    /// The foreground window at send start belongs to an elevated
+    /// (higher-integrity) process: Windows UIPI would silently drop every
+    /// SendInput keystroke while reporting success, so NOTHING was typed --
+    /// not even the modifier-neutralizing KEYUPs. The caller must park the
+    /// FULL text as a pending paste and surface the elevated-target pill
+    /// status. Not an error (no ErrorBus) -- the pill is the surface.
+    /// </summary>
+    BlockedElevated,
 }

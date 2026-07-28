@@ -79,19 +79,22 @@ public sealed class TextInjector
     private readonly Func<long> _foregroundHwnd;
     private readonly Func<string, bool> _sendChunk;
     private readonly Action<int> _sleep;
+    private readonly Func<long, ForegroundElevation> _foregroundElevation;
 
     public TextInjector(
         ILogger<TextInjector> log,
         Func<int, bool>? isKeyDown = null,
         Func<long>? foregroundHwnd = null,
         Func<string, bool>? sendChunk = null,
-        Action<int>? sleep = null)
+        Action<int>? sleep = null,
+        Func<long, ForegroundElevation>? foregroundElevation = null)
     {
         _log = log;
         _isKeyDown = isKeyDown ?? DefaultKeyProbe;
         _foregroundHwnd = foregroundHwnd ?? DefaultForegroundProbe;
         _sendChunk = sendChunk ?? SendChunkViaSendInput;
         _sleep = sleep ?? PacingWaiter.Wait;
+        _foregroundElevation = foregroundElevation ?? ElevationProbe.Probe;
     }
 
     private static bool DefaultKeyProbe(int vk)
@@ -121,6 +124,11 @@ public sealed class TextInjector
     /// If any check trips, the remaining chunks are not sent and
     /// <see cref="InjectionRunOutcome.Interrupted"/> is returned so the
     /// caller can hold the WHOLE original text as a pending paste.
+    /// Before anything else -- even the preludes -- the foreground window's
+    /// process elevation is probed once: an elevated (UIPI-protected) target
+    /// returns <see cref="InjectionRunOutcome.BlockedElevated"/> with nothing
+    /// typed, because SendInput to such a window is silently dropped while
+    /// reporting success (MSDN); the caller parks the FULL text.
     /// The baseline is captured at method entry -- BEFORE the modifier
     /// release-wait (up to 1500 ms) and the mouse release-wait (up to
     /// 1500 ms) -- so a focus change during either wait is caught before the
@@ -141,6 +149,21 @@ public sealed class TextInjector
         if (string.IsNullOrEmpty(text)) return InjectionRunOutcome.Completed;
 
         var hwndAtSendStart = _foregroundHwnd();
+        // UIPI pre-check (paste-path-hardening): SendInput into an elevated
+        // window is silently dropped while reporting success, so a run
+        // against an elevated target would consume the text with nothing
+        // delivered. Park instead -- BEFORE any synthesis (even the
+        // modifier-neutralizing KEYUPs) and before the release-wait
+        // preludes. Fail-open: an unobservable foreground or elevation
+        // keeps today's behavior (ElevatedTargetDecider).
+        if (ElevatedTargetDecider.Decide(hwndAtSendStart, _foregroundElevation(hwndAtSendStart))
+            == ElevatedTargetDecision.Park)
+        {
+            _log.LogInformation(
+                "Foreground window is elevated (UIPI would silently drop SendInput); not typing -- holding the full text as pending ({Chars} chars)",
+                text.Length);
+            return InjectionRunOutcome.BlockedElevated;
+        }
         NeutralizeHeldModifiers();
         // Mouse prelude: never START typing while a button is physically
         // down (the pill click that requested this paste is the common

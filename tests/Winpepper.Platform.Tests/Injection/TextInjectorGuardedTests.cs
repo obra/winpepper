@@ -294,4 +294,86 @@ public class TextInjectorGuardedTests
 
         string.Concat(sent).ShouldBe(text);
     }
+
+    [Fact]
+    public void Guarded_ElevatedForeground_BlocksBeforeAnyKeystrokeOrWait()
+    {
+        // UIPI pre-check (paste-path-hardening): SendInput into an elevated
+        // window is silently dropped while reporting success, so the run
+        // must not start at all. The block must land BEFORE the modifier
+        // and mouse release-wait preludes (no sleeps) and before any send.
+        // isKeyDown reports everything held to prove no prelude ran.
+        var sent = new List<string>();
+        var sleeps = new List<int>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => true,
+            foregroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: sleeps.Add,
+            foregroundElevation: _ => ForegroundElevation.Elevated);
+
+        injector.TryInjectGuarded("text for an admin window")
+            .ShouldBe(InjectionRunOutcome.BlockedElevated);
+
+        sent.ShouldBeEmpty();
+        sleeps.ShouldBeEmpty(); // blocked before the release-wait preludes
+    }
+
+    [Fact]
+    public void Guarded_ElevationUnknown_FailsOpen_AndSendsAll()
+    {
+        // Transient observation failure => today's behavior, unchanged.
+        var sent = new List<string>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: _ => { },
+            foregroundElevation: _ => ForegroundElevation.Unknown);
+        var text = new string('a', 16); // 2 chunks of 8
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        string.Concat(sent).ShouldBe(text);
+    }
+
+    [Fact]
+    public void Guarded_ElevationNotElevated_SendsAll()
+    {
+        var sent = new List<string>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: _ => { },
+            foregroundElevation: _ => ForegroundElevation.NotElevated);
+        var text = new string('a', 16);
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        string.Concat(sent).ShouldBe(text);
+    }
+
+    [Fact]
+    public void Guarded_DefaultElevationProbe_OffWindows_FailsOpen()
+    {
+        // Construct WITHOUT the elevation seam: the production default
+        // (ElevationProbe.Probe) must fail open off-Windows so every
+        // existing Linux test and non-Windows path is unaffected.
+        var sent = new List<string>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: _ => { });
+        var text = new string('a', 8);
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        string.Concat(sent).ShouldBe(text);
+    }
 }

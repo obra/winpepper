@@ -19,6 +19,11 @@ public sealed class FakeTranscribeCppEngine : ITranscribeCppEngine
     public bool ThrowOnFinalize;
     public TimeSpan FeedDelay; // simulates a slow native transcribe_stream_feed
 
+    /// <summary>When set, Feed blocks until the gate is released — a deterministic
+    /// wedge for watchdog tests (condition-synchronized, no timing margins). The
+    /// wait is bounded so a failing test cannot hang the runner.</summary>
+    public ManualResetEventSlim? FeedGate;
+
     public ITranscribeCppStream BeginStream(int attContextRight, string? language = null)
     {
         BeginStreamCalls++;
@@ -47,6 +52,7 @@ public sealed class FakeTranscribeCppEngine : ITranscribeCppEngine
 
         public string? Feed(float[] samples, int count)
         {
+            _e.FeedGate?.Wait(TimeSpan.FromSeconds(30));
             if (_e.FeedDelay > TimeSpan.Zero) Thread.Sleep(_e.FeedDelay);
             if (_e.ThrowOnFeed) throw new TranscribeCppException("fake feed failure");
             FeedCounts.Add(count);

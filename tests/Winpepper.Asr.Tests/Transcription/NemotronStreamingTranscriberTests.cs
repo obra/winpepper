@@ -212,17 +212,28 @@ public class NemotronStreamingTranscriberTests
     {
         // A permanent wedge (or one the user kills the process over) would
         // leave ZERO log evidence from a completion-time-only bracket — the
-        // in-flight watchdog is what makes that state diagnosable. 400 ms vs
-        // a 50 ms threshold gives the watchdog ample margin to fire.
-        var engine = new FakeTranscribeCppEngine { FeedDelay = TimeSpan.FromMilliseconds(400) };
+        // in-flight watchdog is what makes that state diagnosable. The fake
+        // feed blocks on a gate until the watchdog warning is OBSERVED, so
+        // the test is condition-synchronized: no timing margin to lose under
+        // scheduler load (only the generous give-up bound below).
+        using var gate = new ManualResetEventSlim(false);
+        var engine = new FakeTranscribeCppEngine { FeedGate = gate };
         var log = new CapturingLogger();
         var t = new NemotronStreamingTranscriber(
             () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
             log, nativeCallWarnAfter: TimeSpan.FromMilliseconds(50));
         await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
 
-        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // exactly one native feed
+        var push = Task.Run(() => s.PushAsync(Samples(2560),
+            TestContext.Current.CancellationToken).AsTask()); // exactly one native feed, wedged on the gate
 
+        var giveUp = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!log.Warnings.Any(w => w.Contains("nemotron native stream feed still running after"))
+               && DateTime.UtcNow < giveUp)
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        gate.Set(); // unwedge the native call
+
+        await push;
         Assert.Contains(log.Warnings,
             w => w.Contains("nemotron native stream feed still running after"));
         Assert.Contains(log.Warnings,

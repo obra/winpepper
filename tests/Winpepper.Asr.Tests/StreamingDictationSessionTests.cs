@@ -95,6 +95,26 @@ public class StreamingDictationSessionTests
         transcriber.Session.FinishAudio.Length.ShouldBe(0); // FinishAsync never ran
     }
 
+    [Fact]
+    public async Task FinishThatThrows_StillDisposesTheSession()
+    {
+        // The session FinishAsync exception deliberately propagates to the
+        // pipeline (batch parity) — but the inner session must not leak.
+        var transcriber = new FakeStreamingTranscriber("cloud")
+        {
+            OnFinish = (_, _) => throw new InvalidOperationException("finish boom"),
+        };
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken);
+        session.OnFrame(new float[] { 1f });
+
+        await Should.ThrowAsync<InvalidOperationException>(
+            () => session.FinishAsync(new float[1], TestContext.Current.CancellationToken));
+
+        transcriber.LastSession!.Disposed.ShouldBeTrue();
+    }
+
     // Models the abandon race behind Bug A: dispose lands while the pump is
     // mid-push and MORE frames are already queued (completing the writer does
     // not stop ReadAllAsync from yielding them). DisposeAsync releases the

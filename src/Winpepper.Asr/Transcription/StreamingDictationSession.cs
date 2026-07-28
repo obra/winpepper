@@ -171,9 +171,18 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         if (_pumpError is not null) ExceptionDispatchInfo.Capture(_pumpError).Throw();
         var session = _session;
         if (session is null) return null;
-        var result = await session.FinishAsync(fullAudio, ct);
-        await DisposeSessionAsync();
-        return result;
+        try
+        {
+            return await session.FinishAsync(fullAudio, ct);
+        }
+        finally
+        {
+            // Ordering: finish first, then dispose (FallbackStreamingTranscriber's
+            // push-after-dispose guard documents why). The finally keeps the
+            // session from leaking when FinishAsync throws — that exception
+            // deliberately propagates to the pipeline (batch parity).
+            await DisposeSessionAsync();
+        }
     }
 
     /// <summary>Dispose the abandoned session OFF every caller-facing await
@@ -204,11 +213,12 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _frames.Writer.TryComplete();
-        var abandonDispose = ScheduleAbandonedSessionDispose();
         // FinishAsync already proved the pump is wedged past the drain
-        // deadline — waiting on it again here only delays the caller's late
-        // batch path. Everything defers to the background dispose chain.
+        // deadline AND scheduled the background dispose chain — scheduling a
+        // second chain or waiting on the pump again here only duplicates work
+        // and delays the caller's late batch path.
         if (DrainTimedOut) return;
+        var abandonDispose = ScheduleAbandonedSessionDispose();
         // Bounded: never let a pathologically hung pump (hanging factory, or
         // a wedged native call) block the serial hotkey loop; orphaning the
         // pump task is the lesser evil.

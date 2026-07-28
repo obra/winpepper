@@ -124,9 +124,72 @@ LFM2.5-350M for exactly this task.
 3. Per model: (a) 18-case prompt eval (chatbot traps / self-corrections /
    fillers / guards), (b) latency bench on the same 118-statement corpus,
    (c) implausible-fallback rate on real dictations, (d) memory footprint.
-4. Chat-template caution: candidates are not ChatML — `LlamaCleanupBackend`
-   builds the Qwen ChatML template by hand and its anti-prompts are
-   ChatML-specific; per-model template support is required before any
-   non-Qwen candidate produces meaningful results.
+4. ~~Chat-template caution~~ DONE (293724f): per-model prompt formats
+   (`chatml` / `granite` / `raw-io`) via `CleanupPromptFormatter`, declared on
+   `ModelDescriptor.PromptFormat` and threaded through every construction site.
 5. Compare off-the-shelf winners vs a sotto-seeded fine-tune of a 350M–1.2B
    base; decide on quality-per-latency, license, and footprint.
+
+## 6. Candidate integration + first-contact results (2026-07-27)
+
+Landed: per-model prompt formats + registry entries (`293724f`), rejection
+diagnosis fixes + bench raw-output/`--verbose`/`--gpu-layers` (`619e05c`).
+Registry now holds 4 cleanup models (eval slots exactly full); qwen stays
+default. Test models staged at `C:\Users\dan\winpepper-models-test` (bench
+`--models-root`, eval `WINPEPPER_MODELS_ROOT`).
+
+**Sotto GGUF conversion** (no public GGUF exists): converted from
+`juanquivilla/sotto-cleanup-lfm25-350m` (MIT) via llama.cpp
+`convert_hf_to_gguf.py --outtype q8_0`. Two tokenizer_config.json edits were
+required (transformers-v5 artifacts): `tokenizer_class` →
+`PreTrainedTokenizerFast`, and drop `extra_special_tokens: []`. Output:
+379,215,808 bytes, sha256 `67113c65…5d962d` (in registry, manual-install-only).
+
+### Results — 118-statement bench + 18-case eval, same host as §2 baseline
+
+| Model | p50 / p95 / mean (Llm ms) | Implausible | Eval (18 cases) |
+|---|---|---|---|
+| qwen2.5-0.5b (baseline) | 334 / 572 / 368 | 24 of 354 | 14/18 — fails 3 chatbot traps (ANSWERS content) + 1 self-corr applied BACKWARD |
+| **sotto-350m (raw-io)** | **289 / 475 / 307** | **0** | **14/18 — ALL 8 chatbot traps pass**; fails 3 self-corr (meta-command not applied, text kept) + keeps "sort of" |
+| lfm2.5-1.2b (chatml) | 304 / 438 / 327 (48 accepted) | 252 → fix landed, re-run pending | pending |
+| granite-4.0-1b | — | 300 of 300 | model-side: Vulkan garbage |
+
+Key judgments:
+
+- **Sotto's failures are non-destructive under-edits** (keeps the correction
+  words as literal text); qwen's failures are catastrophic (answers the
+  dictation, deletes the wrong clause). Same 14/18 count, very different risk.
+  Sotto is also ~10% faster, 23% smaller (379 vs 491 MB), and had ZERO
+  implausible-guard rejections on 100 real dictations.
+- **LFM2.5 84% rejection was OUR bug**: it echoes the one-shot example in
+  `BasePrompts.Default` verbatim (reproduced with the vendor template on CPU —
+  not a template or Vulkan issue). Fixed via `ModelDescriptor.OmitPromptExample`
+  → `BasePrompts.DefaultNoExample`. Verification re-run pending.
+- **Granite-4.0-1b Q4_K_M is broken on the Vulkan backend**: degenerate token
+  salad ("$118$150$once…") on GPU, clean output for the same GGUF+prompt on
+  CPU llama.cpp — matches IBM's published numerical-range warning. Options:
+  Q8_0 variant (~1.7 GB), `--gpu-layers 0`, or drop from the Vulkan bake-off.
+- **Parallel eval fixture crash fixed**: the 4 slot classes now share one
+  `DisableParallelization` collection (concurrent Vulkan model loads crashed
+  the process natively).
+
+### Pending (blocked 2026-07-27 by dead WSL→Windows interop; resume after
+`wsl --shutdown` / fresh terminal)
+
+```
+./scripts/windows-gate.sh   # gate for 619e05c before any push
+./scripts/run-cleanup-bench-windows.sh --model lfm2.5-1.2b-instruct-q4_k_m --models-root /mnt/c/Users/dan/winpepper-models-test
+./scripts/run-cleanup-bench-windows.sh --model granite-4.0-1b-q4_k_m --models-root /mnt/c/Users/dan/winpepper-models-test --gpu-layers 0 --passes 1
+# eval per model (serialized slots), e.g.:
+#   WINPEPPER_MODELS_ROOT=C:\Users\dan\winpepper-models-test dotnet exec Winpepper.Cleanup.Tests.dll -class Winpepper.Cleanup.Tests.CleanupPromptEvalModelSlot1
+```
+
+### Recommendation as of today
+
+Sotto-350m is already the best candidate measured: strictly better failure
+profile than the current model at lower latency and footprint. Its remaining
+gap (explicit "scratch that / never mind" meta-commands) is exactly the
+gap-fill fine-tune identified in §4 — a targeted fine-tuning run on top of the
+MIT sotto dataset with added meta-command + imperative-resistance pairs is the
+highest-leverage next step. Cleanup of `/home/dan/models-work` (~6 GB of
+conversion artifacts) can happen once the bake-off no longer needs re-conversion.

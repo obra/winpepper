@@ -291,20 +291,23 @@ with:
         sleeps.ShouldBe(new[] { 15, 15, 15, 14 });
 ```
 
-- [ ] **Step 2: Run the class to verify the three tests fail**
+- [ ] **Step 2: Build to verify the retuned tests cannot compile against the OLD constants**
 
 ```bash
 export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet
 export PATH="$DOTNET_ROOT:$PATH"
 cd /home/dan/code/winpepper/.worktrees/paste-path-hardening
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
-dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform.Tests.dll \
-  -notrait "Platform=Windows" -class Winpepper.Platform.Tests.Injection.TextInjectorGuardedTests
 ```
 
-Expected: FAIL — `Guarded_Paces_Between_Chunks_Only` (expects 14s, gets 5s),
-`DesignPoint_FeedRateCeiling_And_BleedBound` (1600 > 600 target),
-`Guarded_PillClick_...ThenSendsAll` (expects trailing 14, gets 5).
+Expected: BUILD FAILURE — CS0117: `TextInjector` does not contain a definition
+for `TargetFeedUnitsPerSecond` (Step 1's replacement test references it, but
+the constant does not exist until Step 3). Do NOT run the test DLL at this
+step: the build failed, so any binaries on disk are stale leftovers from a
+previous build and a run against them would report a misleading PASS. The
+behavioral red assertions (14 ms vs 5 ms pause, feed <= 600 target, trailing
+14 ms) are proven by these same tests going green in Step 5 only after
+Step 3's retune — with the OLD constants they cannot even compile.
 
 - [ ] **Step 3: Retune the production constants and XML docs**
 
@@ -392,7 +395,14 @@ In `src/Winpepper.Platform/Injection/PacingWaiter.cs`, replace the class-level
 
 - [ ] **Step 5: Run the class to verify the Linux tests pass**
 
-Same commands as Step 2. Expected: PASS (`Errors: 0, Failed: 0` for the class run).
+Same build command as Step 2 (which must now SUCCEED), then run the class:
+
+```bash
+dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform.Tests.dll \
+  -notrait "Platform=Windows" -class Winpepper.Platform.Tests.Injection.TextInjectorGuardedTests
+```
+
+Expected: PASS (`Errors: 0, Failed: 0` for the class run).
 
 - [ ] **Step 6: Rewrite the Windows pacing sentinel to prove the NEW floor**
 

@@ -433,7 +433,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             switch (to)
             {
                 case SessionState.Recording:
-                    _pending.Discard(); // Rule 5: a new dictation discards any pending paste.
+                    // A held park deliberately SURVIVES a new dictation
+                    // (council 2026-07-28: preserve/append or fail loud --
+                    // never silently drop; supersedes Rule 5 of the
+                    // 2026-07-21 pending-paste plan, owner-approved). If this
+                    // dictation also parks, EnterPendingPaste appends.
                     _stopwatch.Restart();
                     Stage = SessionStage.Recording;
                     StatusText = "Recording...";
@@ -456,9 +460,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     break;
                 case SessionState.Idle:
                     _stopwatch.Stop();
-                    // If a pending paste is held, keep the PENDING pill visible
-                    // instead of returning to Idle (which would auto-hide it).
-                    if (_pending.HasPending) break;
+                    // A held park survives dictations: returning to engine
+                    // Idle with a held slot must RESTORE the PENDING pill
+                    // (stage + reason-correct copy) -- not leave the last
+                    // in-flight copy ("Inserting...") on screen and not
+                    // auto-hide the pill.
+                    if (_pending.HasPending)
+                    {
+                        Stage = SessionStage.PendingPaste;
+                        StatusText = PendingStatusFor(_pending.Reason);
+                        break;
+                    }
                     Stage = SessionStage.Idle;
                     StatusText = "Ready";
                     break;

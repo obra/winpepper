@@ -5,18 +5,18 @@
 > quality review after each task. Steps use checkbox (`- [ ]`) syntax
 > for tracking.
 
-**Goal:** Changing the cleanup LLM model in Settings (or History Lab) takes effect on the next dictation without an app restart, with the ~1–1.7 s GGUF load pre-warmed in the background and the model hash-verified before it is ever swapped in.
+**Goal:** Changing the cleanup LLM model in Settings (or History Lab) takes effect on the next dictation without an app restart, with the ~1–1.7 s GGUF load AND the ~0.27–0.49 s first-generation warm-up pre-warmed in the background and the model hash-verified before it is ever swapped in.
 
-**Architecture:** Mirror the existing ASR live-swap pattern (docs/plans/2026-07-23-live-asr-model-swap.md): a volatile in-memory selection slot for "effective immediately" transport, a pure `Plan/CommitLoad` swap decider, and a per-dictation seam inside PipelineHost's serialized run loop. Cleanup differs from ASR in three ways this plan addresses head-on: (1) the backend load is pre-warmed asynchronously on promote so no dictation pays it, (2) readiness is descriptor-level SHA-256 verification (a new `ModelFilesVerifier` + `ModelsServices.VerifyCleanupModelReady`, deliberately NOT routed through `ModelProvisioningCoordinator` whose global state feeds the ASR startup gate), and (3) each model carries `PromptFormat` + `OmitPromptExample`, so a swap constructs a fresh `LlamaCleanupBackend` AND a fresh `CleanupRunner`. A new `CleanupBackendHolder` (in `Winpepper.Cleanup`, cross-platform, delegate-injected so it is fully Linux-testable) owns the live backend+runner pair, the pre-warm task, and all disposal.
+**Architecture:** Mirror the existing ASR live-swap pattern (docs/plans/2026-07-23-live-asr-model-swap.md): a volatile in-memory selection slot for "effective immediately" transport, a pure `Plan/CommitLoad` swap decider, and a per-dictation seam inside PipelineHost's serialized run loop. Cleanup differs from ASR in three ways this plan addresses head-on: (1) the backend load PLUS a first-generation warm-up (`WarmAsync`, via the holder's `warmup` delegate) are pre-warmed asynchronously on promote so no dictation pays either, (2) readiness is descriptor-level SHA-256 verification (a new `ModelFilesVerifier` + `ModelsServices.VerifyCleanupModelReady`, deliberately NOT routed through `ModelProvisioningCoordinator` whose global state feeds the ASR startup gate), and (3) each model carries `PromptFormat` + `OmitPromptExample`, so a swap constructs a fresh `LlamaCleanupBackend` AND a fresh `CleanupRunner`. A new `CleanupBackendHolder` (in `Winpepper.Cleanup`, cross-platform, delegate-injected so it is fully Linux-testable) owns the live backend+runner pair, the pre-warm task, and all disposal.
 
 **Tech Stack:** C# / .NET 9, LLamaSharp (Windows TFM only), xUnit v3 + Shouldly for tests, hand-written fakes (no mocking library).
 
 ## Global Constraints
 
 - Branch: `feat/cleanup-model-live-swap` in worktree `/home/dan/code/winpepper/.worktrees/cleanup-model-live-swap`. All paths below are relative to the worktree root. Do NOT touch the keyboard hook or `packaging/`.
-- **Design decision 1 (already made with the user — do not re-litigate): PRE-WARM ON PROMOTE.** When the user promotes a cleanup model, load the new backend asynchronously in the background so the ~1–1.7 s LlamaWeights load is NOT paid by the next dictation. The swap itself must still only take effect at the dictation boundary (the serialized seam), never mid-generation.
+- **Design decision 1 (already made with the user — do not re-litigate): PRE-WARM ON PROMOTE.** When the user promotes a cleanup model, load the new backend asynchronously in the background so the ~1–1.7 s LlamaWeights load is NOT paid by the next dictation. The swap itself must still only take effect at the dictation boundary (the serialized seam), never mid-generation. **Validation finding (load-bearing ledger A5, falsified):** the ~1–1.7 s figure is LOAD-ONLY — the bake-off bench measured an ADDITIONAL 266–488 ms "Warm (once)" cost on the first generation (Vulkan shader pipeline + weight paging), roughly doubling first-dictation cleanup latency. Pre-warm therefore means load + `WarmAsync`: the holder's `warmup` delegate (Task 5) runs inside the background load task, and a pre-warm is "ready" only after both complete. Concurrent-load safety and dual-residency headroom were verified (ledger A3/A4: llama.cpp Vulkan device access is mutex-guarded at the pinned revision; OOM on the LOAD path surfaces as a catchable managed exception; ~6x memory headroom on the target machine).
 - **Design decision 2 (already made with the user — do not re-litigate): HASH-VERIFIED READINESS.** Before swapping, verify the model files against registry sha256 (analog of `ModelsServices.VerifyAsrModelReady`) — file-exists alone is not sufficient. A model that fails verification must not be swapped in; keep the current backend and log the reason.
-- **SERIALIZED-CALLER INVARIANT (the disposal safety mechanism — must be documented in code):** only PipelineHost's run loop calls `CleanupRunner.RunAsync`, and the loop awaits it inline (one hotkey event is fully processed before the next is dequeued — `PipelineHost.RunAsync`, `await foreach` + inline `await HandleHotkey`). Therefore at the per-dictation seam no generation is in flight on the old backend, and a pre-warmed backend discarded before ever being handed out has no callers at all. `LlamaCleanupBackend.Dispose()` is NOT gated against concurrent `GenerateAsync` — this invariant is why disposal at the seam is safe without an orphan guard. `AppShell.Dispose` must dispose PipelineHost BEFORE the holder.
+- **SERIALIZED-CALLER INVARIANT (the disposal safety mechanism — must be documented in code):** only PipelineHost's run loop calls `CleanupRunner.RunAsync`, and the loop awaits it inline (one hotkey event is fully processed before the next is dequeued — `PipelineHost.RunAsync`, `await foreach` + inline `await HandleHotkey`). Therefore at the per-dictation seam no generation is in flight on the old backend, and a pre-warmed backend discarded before ever being handed out has no callers at all. `LlamaCleanupBackend.Dispose()` is NOT gated against concurrent `GenerateAsync` — this invariant is why disposal at the seam is safe without an orphan guard. **Validation (ledger A1, verified):** the invariant holds on ALL `RunAsync` exit paths (normal, timeout, cancel, exception) — an `await` surfaces only after the awaited Task is terminal (its `finally`, incl. `_gate.Release()`, already ran), and LLamaSharp **0.27.0**'s `StatelessExecutor.InferAsync` is a plain async iterator whose native work runs via awaited `DecodeAsync` (no detached work possible). This proof is version-pinned: re-verify on any LLamaSharp upgrade. **Shutdown leg (ledger A2, FALSIFIED and corrected):** `PipelineHost.Dispose` only does a bounded best-effort join (`_runTask?.Wait(2 s)`, PipelineHost.cs:1304-1305, result previously discarded), so "dispose PipelineHost before the holder" alone does NOT guarantee quiescence. Task 8 therefore records the join outcome as `PipelineHost.RunLoopJoined`, and `AppShell.Dispose` disposes the holder ONLY when the join succeeded — on a timed-out join the holder is deliberately leaked (`Application.Current.Exit()` follows immediately; a leak is safe, a use-after-free is not).
 - **Both dictation code paths must be modified.** PipelineHost has two near-duplicate cleanup blocks (HOLD path ~`:641-712` with archive `:810-832`; TOGGLE path ~`:1039-1110` with archive `:1216`), differing only by a `2` suffix on locals. Every seam change lands in BOTH. This is the single largest correctness hazard of the change.
 - **Prompt-format correctness on swap:** `PromptFormat` is consumed only by `LlamaCleanupBackend` (constructor) and `OmitPromptExample` only by `CleanupRunner` (constructor); both are `readonly`. A swap therefore constructs a fresh backend AND a fresh runner from the NEW model's registry descriptor values.
 - `Winpepper.Cleanup` references `Winpepper.Core` + `Winpepper.Corrections` but NOT `Winpepper.Models` (verified in `src/Winpepper.Cleanup/Winpepper.Cleanup.csproj`). The holder therefore takes a local `CleanupModelTarget` record; AppShell maps `Winpepper.Models.CleanupModelResolution` into it. Do not add a Cleanup→Models project reference.
@@ -44,11 +44,11 @@ None. Every spec requirement maps to a task below (see the coverage map).
 | Spec requirement | Observable production outcome | Covered by |
 |---|---|---|
 | Promote publishes in-memory + persists (both promote sites) | Changing the cleanup model in Settings or History Lab takes effect on the next dictation, no restart | Task 1 (slot), Task 9 (callbacks), Task 8 (seam), Task 11 smoke 4 |
-| Pre-warm on promote — load not paid by the next dictation | The GGUF load runs on a background thread at promote time; the dictation path never loads synchronously | Task 4 (holder pre-warm), Task 9 (`RequestPrewarm` in callbacks), Task 11 smoke 5 |
+| Pre-warm on promote — load not paid by the next dictation | The GGUF load + first-generation warm-up run on a background thread at promote time; the dictation path never loads synchronously | Task 4 (holder pre-warm), Task 5 (warm-up delegate), Task 9 (`RequestPrewarm` in callbacks), Task 11 smoke 5 |
 | Swap only at the dictation boundary, never mid-generation | The live pair mutates only inside `EnsureCurrent()`, called once per dictation from the serialized run loop before `RunAsync` | Task 4 (tests 1–3), Task 8 (seam placement in BOTH paths), Task 6 (documented invariant) |
 | Hash-verified readiness before swap; failed verification keeps current model + logs | A corrupt/missing model is never swapped in; dictations keep the working model | Task 3 (verifier), Task 5 (holder tests), Task 7 (`VerifyCleanupModelReady`), Task 11 smoke 6 |
 | Fallback when desired model missing | Dictations continue with raw transcript (runner null) or the previous model; self-heals when the model appears | Task 5, Task 8, Task 11 smoke 6 |
-| Disposal of replaced and never-used pre-warmed backends | No native-weights leak; no use-after-free | Task 4 (swap dispose), Task 5 (stale-pre-warm + holder Dispose), Task 6 (idempotent `Dispose`) |
+| Disposal of replaced and never-used pre-warmed backends | No native-weights leak; no use-after-free | Task 4 (swap dispose), Task 5 (stale-pre-warm + holder Dispose), Task 6 (idempotent `Dispose`), Task 8 Step 5(c) (join-conditional shutdown dispose) |
 | Prompt-format correctness on swap (`PromptFormat` + `OmitPromptExample` from the NEW descriptor) | A swapped-in granite/raw-io model cleans correctly (fresh backend AND fresh runner) | Task 4 (test 6), Task 8 (fresh construction via factories), Task 11 smoke 7 |
 | History attribution reflects the actually-used model | History records stamp the swap state's loaded (resolved) name, not the boot-time raw settings string | Task 4 (test 5), Task 8 (both archive sites), Task 11 smoke 4 |
 | Both near-duplicate dictation paths get the seam | Hold-dictation and toggle-dictation both swap | Task 8 |
@@ -1195,7 +1195,7 @@ EOF
 
 ### Task 5: CleanupBackendHolder — verification, failure, staleness, and disposal paths
 
-Adds, test-first: hash-verification gating (failed verification keeps the current model and never constructs a backend), missing-GgufPath handling, `FellBackToDefault` warning, disposal of a pre-warmed backend that is replaced/discarded before ever being used, self-heal (a dictation whose desired model differs from the loaded one kicks a background load if none is in flight), retry after a failed load, and pending disposal in `Dispose()`.
+Adds, test-first: hash-verification gating (failed verification keeps the current model and never constructs a backend), missing-GgufPath handling, `FellBackToDefault` warning, disposal of a pre-warmed backend that is replaced/discarded before ever being used, self-heal (a dictation whose desired model differs from the loaded one kicks a background load if none is in flight), retry after a failed load, the pre-warm **warm-up delegate** (ledger A5: the ~1–1.7 s figure is load-only; the first generation pays an additional 266–488 ms, so pre-warm must also run a warm-up before it counts as ready), and pending disposal in `Dispose()` with a **bounded join** of an in-flight load (ledger A10: process exit must not kill a thread mid-native-GGUF-load).
 
 **Files:**
 - Modify: `src/Winpepper.Cleanup/CleanupBackendHolder.cs` (created in Task 4)
@@ -1203,7 +1203,7 @@ Adds, test-first: hash-verification gating (failed verification keeps the curren
 
 **Interfaces:**
 - Consumes: everything from Task 4 (same harness; same public API — no signature changes).
-- Produces: behavioral guarantees only; the public API is unchanged. Task 8 relies on: `EnsureCurrent()` self-heals (so PipelineHost needs no extra pre-warm calls), and `Dispose()` frees both live and pending backends.
+- Produces: behavioral guarantees plus ONE backward-compatible API addition — the constructor gains an optional trailing parameter `Func<ILlamaCleanupBackend, CancellationToken, Task>? warmup = null` (Task 8 wires it to `LlamaCleanupBackend.WarmAsync`; Task 4's tests keep compiling unchanged). Task 8 relies on: `EnsureCurrent()` self-heals (so PipelineHost needs no extra pre-warm calls), and `Dispose()` frees both live and pending backends.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1318,6 +1318,38 @@ Append these facts inside `CleanupBackendHolderTests` (same file, after the Task
     }
 
     [Fact]
+    public void Prewarm_RunsWarmupOnTheNewBackend_BeforeItIsAdoptable()
+    {
+        DisposableFakeBackend? warmed = null;
+        DisposableFakeBackend? made = null;
+        var holder = new CleanupBackendHolder(
+            desiredModelName: () => "model-a",
+            resolve: raw => new CleanupModelTarget(
+                GgufPath: "/tmp/model-a.gguf", ResolvedName: "model-a",
+                FellBackToDefault: false, PromptFormat: "chatml"),
+            verifyReady: _ => true,
+            backendFactory: _ => made = new DisposableFakeBackend(),
+            runnerFactory: (backend, omit) =>
+                new CleanupRunner(backend, NullLogger<CleanupRunner>.Instance, omit),
+            log: new CollectingLogger<CleanupBackendHolder>(),
+            warmup: (backend, _) =>
+            {
+                warmed = (DisposableFakeBackend)backend;
+                return Task.CompletedTask;
+            });
+
+        holder.RequestPrewarm();
+        SpinWait.SpinUntil(() => holder.EnsureCurrent().Runner is not null, Timeout)
+            .ShouldBeTrue();
+
+        // The warm-up ran inside the pre-warm load task, on the new backend,
+        // before the seam could adopt it: a pre-warm is "ready" only after
+        // load + warm-up complete (ledger A5).
+        warmed.ShouldNotBeNull();
+        warmed.ShouldBeSameAs(made);
+    }
+
+    [Fact]
     public void UnknownModelName_FallingBackToDefault_LogsWarning()
     {
         var h = new HarnessWithFallback { Desired = "bogus-name" };
@@ -1377,11 +1409,11 @@ Also make two small harness edits in the same file:
 /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Cleanup.Tests/bin/Release/net9.0/Winpepper.Cleanup.Tests.dll -notrait "Platform=Windows"
 ```
 
-Expected: summary shows `Failed: N` with N ≥ 5 (the self-heal, verification, missing-gguf, staleness, pending-dispose, and fallback-warning facts fail; the failed-load-retry fact may time out — timeouts count as failures). Task 4's 6 facts stay green.
+Expected: **build error** on the `warmup:` named argument (e.g. `CS1739: The best overload ... does not have a parameter named 'warmup'` — the ctor parameter does not exist yet; a build error counts as red). If you temporarily comment out only the new warm-up fact to see the behavioral reds, the summary shows `Failed: N` with N ≥ 5 (the self-heal, verification, missing-gguf, staleness, pending-dispose, and fallback-warning facts fail; the failed-load-retry fact may time out — timeouts count as failures) and Task 4's 6 facts stay green; restore the fact before Step 3.
 
 - [ ] **Step 3: Implement the missing behaviors**
 
-In `src/Winpepper.Cleanup/CleanupBackendHolder.cs`, make these four edits:
+In `src/Winpepper.Cleanup/CleanupBackendHolder.cs`, make these five edits:
 
 **(a)** In `EnsureCurrent`, replace the `KeepCurrent`/`CannotStart` branch body (`break;`) with self-heal + stale discard:
 
@@ -1493,12 +1525,47 @@ and in `Dispose()`:
     {
         lock (_gate)
         {
+            // Bounded join of an in-flight pre-warm BEFORE discarding: at app
+            // exit, ExitProcess terminating a thread mid-native-GGUF-load risks
+            // a loader/driver-lock deadlock during DLL_PROCESS_DETACH (ledger
+            // A10). A pending load at quit is rare; worst case this waits one
+            // load + warm-up. Wait() throwing (faulted/canceled) means the
+            // task is terminal — exactly what we need — so it is swallowed.
+            try { _pending?.Load.Wait(TimeSpan.FromSeconds(5)); } catch { }
             DiscardPendingLocked();
             DisposeBackend(_backend);
             _backend = null;
             _runner = null;
         }
     }
+```
+
+**(e)** Add the warm-up delegate. Append an optional trailing constructor parameter (after `log`) plus a matching `readonly` field, assigned in the constructor body:
+
+```csharp
+        Func<ILlamaCleanupBackend, CancellationToken, Task>? warmup = null
+```
+
+```csharp
+    private readonly Func<ILlamaCleanupBackend, CancellationToken, Task>? _warmup; // = warmup
+```
+
+Then in `LoadCore`, inside the inner `try`, AFTER `var runner = _runnerFactory(backend, target.OmitPromptExample);` and BEFORE `return new PrewarmResult(backend, runner);`, insert:
+
+```csharp
+                // Pre-warm is load + WARM-UP: the ~1–1.7 s LoadFromFile figure
+                // is load-only; the first generation pays an additional
+                // ~0.27–0.49 s (Vulkan shader pipeline + weight paging — ledger
+                // A5). Run it here, on the background load task, so a pre-warm
+                // is "ready" only when the first real dictation will be fast.
+                // A throw is treated as a failed load (backend disposed,
+                // retried later); the production delegate
+                // (LlamaCleanupBackend.WarmAsync) swallows its own exceptions
+                // as non-fatal. Keeping the warm-up inside the load task
+                // preserves the disposal discipline: a pending backend is only
+                // ever disposed after its load+warm task completes (never with
+                // a warm-up in flight — ledger A1b).
+                _warmup?.Invoke(backend, CancellationToken.None).GetAwaiter().GetResult();
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
@@ -1508,7 +1575,7 @@ and in `Dispose()`:
 /home/dan/code/winpepper/.dotnet/dotnet exec tests/Winpepper.Cleanup.Tests/bin/Release/net9.0/Winpepper.Cleanup.Tests.dll -notrait "Platform=Windows"
 ```
 
-Expected: summary ends `Errors: 0, Failed: 0`; all 13 holder facts green.
+Expected: summary ends `Errors: 0, Failed: 0`; all 14 holder facts green.
 
 - [ ] **Step 5: Full Linux suite, then commit**
 
@@ -1521,13 +1588,15 @@ Expected: `LINUX SUITE: GREEN`.
 ```bash
 git add src/Winpepper.Cleanup/CleanupBackendHolder.cs tests/Winpepper.Cleanup.Tests/CleanupBackendHolderTests.cs
 git commit -m "$(cat <<'EOF'
-feat(cleanup): holder failure paths — hash gate, staleness disposal, self-heal
+feat(cleanup): holder failure paths — hash gate, staleness disposal, self-heal, warm-up
 
 Failed SHA-256 verification or a missing gguf keeps the current model (loudly
 logged) and never constructs a backend; a pre-warmed backend replaced before
 first use is disposed; the seam self-heals by kicking a background load when
-desired != loaded with none in flight; failed loads retry; Dispose frees both
-live and pending backends.
+desired != loaded with none in flight; failed loads retry; the optional warmup
+delegate runs inside the load task so a pre-warm is ready only after load +
+first-generation warm-up (ledger A5); Dispose bounded-joins an in-flight
+pre-warm (ledger A10) and frees both live and pending backends.
 
 🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
 
@@ -1737,7 +1806,13 @@ In `src/Winpepper.App/Hosting/AppShell.cs`:
                 backend,
                 factory.CreateLogger<Winpepper.Cleanup.CleanupRunner>(),
                 omitPromptExample: omit),
-            log: factory.CreateLogger<Winpepper.Cleanup.CleanupBackendHolder>());
+            log: factory.CreateLogger<Winpepper.Cleanup.CleanupBackendHolder>(),
+            // Pre-warm = load + first-generation warm-up (ledger A5): WarmAsync
+            // pages in weights + Vulkan shader pipeline and swallows its own
+            // failures as non-fatal. Cast is safe by construction: the
+            // backendFactory above always constructs LlamaCleanupBackend.
+            warmup: (backend, ct) =>
+                ((Winpepper.Cleanup.LlamaCleanupBackend)backend).WarmAsync(ct));
         cleanupHolder.RequestPrewarm(); // replaces the old synchronous boot load
 ```
 
@@ -1822,6 +1897,37 @@ Then replace:
 
 After this step, `grep -n "_cleanup\b\|_cleanupModelName" src/Winpepper.App/Hosting/PipelineHost.cs` must return no matches (only `_cleanupHolder` remains).
 
+- [ ] **Step 4b: PipelineHost — record the run-loop join outcome (ledger A2)**
+
+The existing `Dispose()` join is bounded and best-effort — the `Wait` result is discarded, so a caller cannot know whether the loop actually quiesced. In `Dispose()` (~`:1304-1305`), replace:
+
+```csharp
+            try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+```
+
+with:
+
+```csharp
+            // Record whether the run loop actually quiesced: AppShell disposes
+            // the cleanup holder ONLY on a successful join (the wait is
+            // bounded/best-effort, so "PipelineHost disposed first" alone does
+            // not guarantee no generation is in flight — ledger A2). Wait()
+            // throwing means _runTask is terminal (faulted/canceled), which IS
+            // a completed join.
+            try { RunLoopJoined = _runTask?.Wait(TimeSpan.FromSeconds(2)) ?? true; }
+            catch { RunLoopJoined = true; }
+```
+
+and add, next to the other public members:
+
+```csharp
+    /// <summary>True once Dispose has joined the run loop (or it was never
+    /// started / already terminal). When FALSE the loop was orphaned, possibly
+    /// mid-dictation: the cleanup holder must NOT be disposed (leak instead —
+    /// the process is exiting).</summary>
+    public bool RunLoopJoined { get; private set; } = true;
+```
+
 - [ ] **Step 5: AppShell — PipelineHost call site, shell surface, dispose ordering**
 
 (a) In the `new PipelineHost(...)` call (`:312-330`): replace the argument `cleanupModelName` (in `historyServices.Archiver, cleanupModelName,` at `:320`) with `cleanupHolder`, and in the line `cleanup, correctionStore, windowContext,` (`:327`) delete the leading `cleanup, ` so it reads `correctionStore, windowContext,` (the positional args still line up with `corrections`/`windowContext` after the deleted ctor param).
@@ -1852,10 +1958,13 @@ After this step, `grep -n "_cleanup\b\|_cleanupModelName" src/Winpepper.App/Host
 (c) In `AppShell.Dispose()` (~`:598-608`), add — AFTER the line that disposes the Pipeline and before the remaining disposals:
 
 ```csharp
-        // After Pipeline: the run loop is stopped, so no dictation holds a
-        // cleanup lease and disposing the live backend cannot race a
-        // generation (serialized-caller invariant).
-        CleanupBackend.Dispose();
+        // After Pipeline, and ONLY if its run loop actually joined: then no
+        // dictation holds a cleanup lease and disposing the live backend
+        // cannot race a generation (serialized-caller invariant). On a
+        // timed-out join (loop orphaned, possibly mid-generation — ledger A2)
+        // deliberately LEAK the holder: Application.Current.Exit() follows
+        // immediately, and a leak is safe where a use-after-free is not.
+        if (Pipeline.RunLoopJoined) CleanupBackend.Dispose();
 ```
 
 - [ ] **Step 6: Full Linux suite (nothing shared broke), then commit**
@@ -1876,8 +1985,12 @@ CleanupBackendHolder: AppShell seeds the CleanupModelSelectionSlot, builds the
 holder (resolve/verify/backend/runner delegates) and kicks a boot pre-warm;
 PipelineHost calls EnsureCurrent() once per dictation at the cleanup seam in
 BOTH dictation paths and stamps history from the lease's loaded (resolved)
-name — attribution now names the model that actually ran. AppShell.Dispose
-frees the holder after the pipeline (serialized-caller invariant).
+name — attribution now names the model that actually ran. PipelineHost now
+records its bounded run-loop join outcome (RunLoopJoined) and AppShell.Dispose
+frees the holder after the pipeline ONLY when the join succeeded — an orphaned
+loop leaks the holder instead of racing it (serialized-caller invariant,
+ledger A2). The holder pre-warm runs WarmAsync so a swap is ready only after
+load + first-generation warm-up (ledger A5).
 
 🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
 
@@ -1983,7 +2096,7 @@ cd /home/dan/code/winpepper/.worktrees/cleanup-model-live-swap
 ./scripts/linux-tests.sh
 ```
 
-Expected: every project prints `Errors: 0` / `Failed: 0`; final lines show `linux-tests grand total: N tests` with N ≥ baseline (~1387) + 26 new facts (4 slot + 9 decider + 4 verifier + 13 holder — grand total ≈ 1417; record the actual number), then `LINUX SUITE: GREEN`.
+Expected: every project prints `Errors: 0` / `Failed: 0`; final lines show `linux-tests grand total: N tests` with N ≥ baseline (~1387) + 27 new facts (4 slot + 9 decider + 4 verifier + 14 holder — grand total ≈ 1418; record the actual number), then `LINUX SUITE: GREEN`.
 
 - [ ] **Step 2: If red, fix forward before proceeding**
 
@@ -2011,13 +2124,18 @@ Expected: `GATE: GREEN` (all 12 project/TFM runs). Known flakes: UNC MSB4025 "re
 
 - [ ] **Step 3: Smoke — promote while idle swaps without restart**
 
-Launch the app on Windows. Dictate once (baseline, current model). Open Models tab → promote the OTHER cleanup model. Wait ~5 s (pre-warm), dictate again. Open History detail for the new entry.
-Expected: the new dictation is cleaned; the history record's cleanup model name is the NEW model's canonical name; no restart happened. Logs contain `Cleanup model loaded (swap #...)`.
+Launch the app on Windows. Dictate once (baseline, current model). Open Models tab → promote the OTHER cleanup model. Wait ~5 s (pre-warm = load + warm-up), dictate again. Open History detail for the new entry.
+Expected: the new dictation is cleaned; the history record's cleanup model name is the NEW model's canonical name; no restart happened. Logs contain `Cleanup model loaded (swap #...)`. The post-swap dictation's cleanup latency is comparable to steady state — the first-generation warm-up ran during pre-warm, not on the dictation (ledger A5).
 
 - [ ] **Step 4: Smoke — promote then immediately dictate (pre-warm race)**
 
 Promote back to the first model and dictate IMMEDIATELY (within ~1 s, before the load can finish).
 Expected: the dictation completes normally using the PREVIOUS model (history attributes the previous model — attribution is truthful); the NEXT dictation uses the newly promoted model. No hang, no mid-dictation swap.
+
+- [ ] **Step 4b: Smoke — promote DURING an active dictation (concurrent pre-warm)**
+
+Start a long dictation (hold and keep talking ~15 s); while it is still capturing/generating, promote the other cleanup model from the Models tab so the background hash + GGUF load + warm-up overlaps live ASR/cleanup work on the same GPU.
+Expected: the in-flight dictation completes normally — no audio stutter, hang, or corrupted cleanup output — and the NEXT dictation uses the new model. This is the empirical check for the structurally-verified concurrent-load safety and the accepted pre-warm-contention decision (ledger A3/A11). If this step shows degradation, the pre-identified fallback is idle-gating `RequestPrewarm` — file it as follow-up work; do not silently accept.
 
 - [ ] **Step 5: Smoke — promote a not-ready model keeps the current one**
 
@@ -2043,11 +2161,11 @@ Append a short verification note (gate totals + smoke pass/fail per step) to the
 ## Self-Review
 
 **1. Spec coverage.** Walked the spec top to bottom against the tasks:
-- Pre-warm on promote (decision 1): Task 4 (`RequestPrewarm` + never-sync-load `EnsureCurrent`), Task 9 (callbacks), boot pre-warm in Task 8. ✓
+- Pre-warm on promote (decision 1): Task 4 (`RequestPrewarm` + never-sync-load `EnsureCurrent`), Task 5 (warm-up delegate — pre-warm is load + first-generation warm-up, ledger A5), Task 9 (callbacks), boot pre-warm in Task 8. ✓
 - Swap only at dictation boundary: `EnsureCurrent` is the sole mutation point (Task 4 tests 1–2), called from the serialized loop in both paths (Task 8 Steps 3–4). ✓
 - Hash-verified readiness (decision 2), analog of `VerifyAsrModelReady`: Tasks 3, 5(c), 7; failed verification keeps current + logs (Task 5 test + smoke 6). ✓
 - New types (slot, decider, holder): Tasks 1, 2, 4–5, mirroring `AsrModelSelectionSlot`/`AsrModelSwapState`. ✓
-- Disposal safety without an orphan guard, documented invariant, never-used pre-warm disposal: Tasks 4 (swap dispose), 5 (stale/pending/Dispose), 6 (idempotent `Dispose` + contract doc). ✓
+- Disposal safety without an orphan guard, documented invariant, never-used pre-warm disposal: Tasks 4 (swap dispose), 5 (stale/pending/Dispose with bounded pre-warm join), 6 (idempotent `Dispose` + contract doc), 8 Step 4b/5(c) (join-conditional shutdown dispose — ledger A2). ✓
 - AppShell seed/construct/pass, PipelineHost both paths + attribution from loaded name, both promote sites: Tasks 8, 9 — with the explicit "grep for `_cleanup`/`_cleanupModelName` must be empty" check ensuring no third usage is missed. ✓
 - Prompt-format correctness (fresh runner alongside fresh backend): holder constructs both per swap (Task 4 test 6), production factories in Task 8 Step 1(b), smoke 7. ✓
 - Tests mirror ASR analog coverage, Linux-runnable pure logic, Windows-traited LLamaSharp parts: Tasks 1–5 are untraited net9.0-leg tests; no new real-LLamaSharp test is added (the existing `[Trait("Platform","Windows")]` integration tests plus the smoke checklist cover the Windows-only pieces). ✓
@@ -2057,4 +2175,6 @@ Append a short verification note (gate totals + smoke pass/fail per step) to the
 
 **2. Placeholder scan.** No TBD/TODO/"handle edge cases"/"similar to Task N" placeholders; every code step carries complete code; every run step has an exact command and expected output. Task 8 uses `file:line` anchors with content descriptions (the ASR plan's established convention for Windows-only tasks where TDD is impossible) plus verbatim replacement code.
 
-**3. Type consistency.** Cross-checked signatures used across tasks: `CleanupModelSelectionSlot.Publish(string?)/Read()` (T1 = T8 seed = T9 callbacks); `CleanupModelSwapState.Plan(string, bool)/CommitLoad(string)/LoadedModelName/Generation` (T2 = T4 holder usage); `ModelFilesVerifier.VerifyAsync(ModelDescriptor, string, CancellationToken)` (T3 = T7 call); `CleanupModelTarget(string? GgufPath, string ResolvedName, bool FellBackToDefault, string PromptFormat, bool OmitPromptExample)` (T4 record = T8 mapping = T5 harness); holder ctor delegate order `desiredModelName, resolve, verifyReady, backendFactory, runnerFactory, log` (T4 ctor = T4/T5 test harnesses = T8 construction); `CleanupBackendLease(CleanupRunner? Runner, string? LoadedModelName)` (T4 = T8 `cleanupLease.Runner` / `cleanupLease.LoadedModelName ?? ""`); `VerifyCleanupModelReady(string) -> bool` (T7 = T8 delegate); shell properties `CleanupModelSelection`/`CleanupBackend` (T8 = T9). `CleanupRunner(ILlamaCleanupBackend, ILogger<CleanupRunner>, bool omitPromptExample)` and `LlamaCleanupBackend(string, ILogger<LlamaCleanupBackend>, ..., string promptFormat)` match the existing production signatures. Consistent.
+**3. Type consistency.** Cross-checked signatures used across tasks: `CleanupModelSelectionSlot.Publish(string?)/Read()` (T1 = T8 seed = T9 callbacks); `CleanupModelSwapState.Plan(string, bool)/CommitLoad(string)/LoadedModelName/Generation` (T2 = T4 holder usage); `ModelFilesVerifier.VerifyAsync(ModelDescriptor, string, CancellationToken)` (T3 = T7 call); `CleanupModelTarget(string? GgufPath, string ResolvedName, bool FellBackToDefault, string PromptFormat, bool OmitPromptExample)` (T4 record = T8 mapping = T5 harness); holder ctor delegate order `desiredModelName, resolve, verifyReady, backendFactory, runnerFactory, log` with the optional trailing `warmup` added in T5 Step 3(e) (T4 ctor = T4/T5 test harnesses; T5 warm-up fact and T8 construction pass `warmup:` by name); `PipelineHost.RunLoopJoined` (T8 Step 4b = T8 Step 5(c) consumer); `CleanupBackendLease(CleanupRunner? Runner, string? LoadedModelName)` (T4 = T8 `cleanupLease.Runner` / `cleanupLease.LoadedModelName ?? ""`); `VerifyCleanupModelReady(string) -> bool` (T7 = T8 delegate); shell properties `CleanupModelSelection`/`CleanupBackend` (T8 = T9). `CleanupRunner(ILlamaCleanupBackend, ILogger<CleanupRunner>, bool omitPromptExample)` and `LlamaCleanupBackend(string, ILogger<LlamaCleanupBackend>, ..., string promptFormat)` match the existing production signatures. Consistent.
+
+**4. Load-bearing validation amendments (2026-07-28).** The plan's assumptions were surfaced and validated (ledger: `.worktrees/.the-usual-logs/cleanup-model-live-swap/load-bearing-ledger.md`; 7 verified, 2 falsified, 2 accepted). Amendments applied: (a) ledger **A2 falsified** — `PipelineHost.Dispose`'s run-loop join is bounded/best-effort, so Task 8 gained Step 4b (`RunLoopJoined`) and Step 5(c) became join-conditional; (b) ledger **A5 falsified** — the ~1–1.7 s figure is load-only and the first generation pays an extra 266–488 ms, so the holder gained an optional `warmup` delegate (Task 5 Step 3(e) + new test, wired to `WarmAsync` in Task 8 Step 1(b)); (c) ledger **A10 accepted** — holder `Dispose` bounded-joins an in-flight pre-warm; (d) ledger **A11 accepted** — pre-warm-on-promote kept, with the new Task 11 Step 4b promote-mid-dictation smoke as the empirical check (fallback if it degrades: idle-gate `RequestPrewarm`). Verified with no plan change needed: serialized-caller invariant on all exit paths (A1, pinned to LLamaSharp 0.27.0), concurrent Vulkan load safety + dual-residency headroom (A3/A4), installed-file hashes match the registry incl. sotto (A6), verification-cache soundness (A7), promote callbacks are the only post-boot writers + raw seed is safe (A8), resolved-name attribution breaks no consumer (A9).

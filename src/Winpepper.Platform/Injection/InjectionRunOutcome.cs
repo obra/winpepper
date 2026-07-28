@@ -28,4 +28,19 @@ public enum InjectionRunOutcome
     /// status. Not an error (no ErrorBus) -- the pill is the surface.
     /// </summary>
     BlockedElevated,
+
+    /// <summary>
+    /// GetForegroundWindow() returned 0 at send start: the foreground was
+    /// unobservable at exactly the moment we were about to type. NOTHING was
+    /// typed -- not even the modifier-neutralizing KEYUPs. FAIL-SAFE, the
+    /// deliberate opposite of the probe/elevation fail-open bias
+    /// (ForegroundElevation.Unknown => inject): probe evidence
+    /// (pending-paste-council-hardening, 2026-07-28) shows hwnd==0 occurs
+    /// ONLY during focus transitions -- exactly the dangerous moment -- and a
+    /// park is a visible one-click detour while a blind inject can be
+    /// invisible, unrecoverable loss. The caller must park the FULL text as
+    /// a pending paste with the default "Click to paste" copy. Not an error
+    /// (no ErrorBus) -- the pill is the surface.
+    /// </summary>
+    NoForeground,
 }

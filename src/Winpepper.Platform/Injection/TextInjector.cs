@@ -81,6 +81,12 @@ public sealed class TextInjector
     private readonly Action<int> _sleep;
     private readonly Func<long, ForegroundElevation> _foregroundElevation;
 
+    /// <summary>
+    /// hwnd==0 occurrence counts (at-start vs mid-stream), for field
+    /// re-evaluation of the park-on-0 polarity. Internal for tests.
+    /// </summary>
+    internal HwndZeroMeter Meter { get; } = new();
+
     public TextInjector(
         ILogger<TextInjector> log,
         Func<int, bool>? isKeyDown = null,
@@ -101,7 +107,13 @@ public sealed class TextInjector
         => OperatingSystem.IsWindows()
            && (Winpepper.Platform.Hotkeys.KeyboardHookNative.GetAsyncKeyState(vk) & 0x8000) != 0;
 
-    /// <summary>Foreground HWND as Int64; 0 when unknown (non-Windows, or the call fails).</summary>
+    /// <summary>
+    /// Foreground HWND as Int64; 0 when unknown (non-Windows, or the call
+    /// fails). NOTE: since the park-on-0 polarity (2026-07-28) an unseamed
+    /// TryInjectGuarded returns NoForeground (parks) whenever this yields 0
+    /// -- including unconditionally off-Windows. Fail-safe by design;
+    /// production injection is Windows-only.
+    /// </summary>
     private static long DefaultForegroundProbe()
     {
         if (!OperatingSystem.IsWindows()) return 0;
@@ -149,6 +161,18 @@ public sealed class TextInjector
         if (string.IsNullOrEmpty(text)) return InjectionRunOutcome.Completed;
 
         var hwndAtSendStart = _foregroundHwnd();
+        // No observable foreground at send start (council majority polarity,
+        // probe-gated 2026-07-28): park the FULL text instead of typing into
+        // an unknown window. Fail-SAFE -- deliberately opposite to the
+        // probe/elevation fail-open below, see InjectionRunOutcome.NoForeground.
+        if (hwndAtSendStart == 0)
+        {
+            var atStartZeroCount = Meter.RecordAtStart();
+            _log.LogWarning(
+                "Foreground hwnd is 0 at injection start (occurrence #{Count}); not typing -- parking the full text ({Chars} chars)",
+                atStartZeroCount, text.Length);
+            return InjectionRunOutcome.NoForeground;
+        }
         // UIPI pre-check (paste-path-hardening): SendInput into an elevated
         // window is silently dropped while reporting success, so a run
         // against an elevated target would consume the text with nothing

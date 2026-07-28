@@ -161,7 +161,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public void EnterPendingPaste(string text, InjectionTarget target,
         PendingPasteReason reason = PendingPasteReason.Interrupted) => _ui.Post(() =>
     {
-        _pending.SetPending(text, target);
+        _pending.HoldOrAppend(text, target, reason);
         Stage = SessionStage.PendingPaste;
         StatusText = PendingStatusFor(reason);
     });

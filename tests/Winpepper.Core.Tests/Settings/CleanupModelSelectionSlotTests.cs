@@ -1,0 +1,49 @@
+using Shouldly;
+using Winpepper.Core.Settings;
+using Xunit;
+
+namespace Winpepper.Core.Tests.Settings;
+
+public class CleanupModelSelectionSlotTests
+{
+    [Fact]
+    public void Read_BeforeAnyPublish_ReturnsNull()
+    {
+        var slot = new CleanupModelSelectionSlot();
+
+        slot.Read().ShouldBeNull();
+    }
+
+    [Fact]
+    public void Read_AfterPublish_ReturnsPublishedName()
+    {
+        var slot = new CleanupModelSelectionSlot();
+
+        slot.Publish("qwen2.5-0.5b-instruct-q4_k_m");
+
+        slot.Read().ShouldBe("qwen2.5-0.5b-instruct-q4_k_m");
+    }
+
+    [Fact]
+    public void Publish_LatestWriteWins()
+    {
+        var slot = new CleanupModelSelectionSlot();
+
+        slot.Publish("model-a");
+        slot.Publish("model-b");
+
+        slot.Read().ShouldBe("model-b");
+    }
+
+    [Fact]
+    public void Publish_FromAnotherThread_IsVisibleToReader()
+    {
+        var slot = new CleanupModelSelectionSlot();
+
+        var publisher = new Thread(() => slot.Publish("model-a"));
+        publisher.Start();
+        publisher.Join();
+
+        slot.Read().ShouldBe("model-a");
+    }
+}

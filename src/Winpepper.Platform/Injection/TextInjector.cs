@@ -152,9 +152,12 @@ public sealed class TextInjector
     /// starts, and a button still held past the timeout ABORTS the run
     /// (Interrupted; the pending slot keeps the full text) because there is
     /// no safe mouse neutralization -- a synthesized button-up would
-    /// fabricate a click. Fail-open: if the foreground window cannot be
-    /// determined (probe returns 0) the HWND guard is disabled, and a
-    /// key/button probe that cannot observe reports "up" and never halts.
+    /// fabricate a click. Foreground polarity is fail-SAFE (park-on-0,
+    /// 2026-07-28): a 0 foreground read parks the FULL text at start
+    /// (<see cref="InjectionRunOutcome.NoForeground"/>) and halts mid-stream
+    /// (<see cref="InjectionRunOutcome.Interrupted"/>); the meter counts
+    /// both. Key/button probes remain fail-open: a probe that cannot observe
+    /// reports "up" and never halts.
     /// </summary>
     public InjectionRunOutcome TryInjectGuarded(string text)
     {
@@ -208,7 +211,14 @@ public sealed class TextInjector
             _sendChunk,
             physicalInputDown: () => ModifierGuard.AnyDown(_isKeyDown)
                                      || MouseButtonGuard.AnyDown(_isKeyDown),
-            pauseBetweenChunks: () => _sleep(InterChunkPauseMs));
+            pauseBetweenChunks: () => _sleep(InterChunkPauseMs),
+            onZeroForeground: () =>
+            {
+                var midStreamZeroCount = Meter.RecordMidStream();
+                _log.LogWarning(
+                    "Foreground hwnd read 0 mid-paste (occurrence #{Count}); halting -- the full text will be parked",
+                    midStreamZeroCount);
+            });
         if (outcome == InjectionRunOutcome.Interrupted)
             _log.LogInformation("Injection interrupted: foreground window, physical modifier, or mouse button state changed mid-paste");
         return outcome;

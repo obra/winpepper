@@ -122,6 +122,23 @@ public class TextInjectorGuardedTests
     }
 
     [Fact]
+    public void Guarded_ProbeGoesToZero_MidSend_Interrupts_AndCountsMidStream()
+    {
+        var sent = new List<string>();
+        var probes = 0;
+        var injector = NewInjector(
+            () => ++probes == 1 ? 42L : 0L,   // start check sees 42; per-chunk sees 0
+            c => { sent.Add(c); return true; });
+        var text = new string('a', 24);       // 3 chunks of 8
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Interrupted);
+
+        string.Concat(sent).Length.ShouldBeLessThan(text.Length);
+        injector.Meter.MidStreamCount.ShouldBe(1);
+        injector.Meter.AtStartCount.ShouldBe(0);
+    }
+
+    [Fact]
     public void Guarded_DefaultForegroundProbe_OffWindows_ParksAtStart()
     {
         // Off-Windows-only pin: on the Windows gate's interactive desktop the

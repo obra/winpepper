@@ -13,7 +13,9 @@ namespace Winpepper.Platform.Injection;
 /// mouse button gone down (the leading edge of a halt gesture -- Alt is down
 /// before Alt+Tab changes the foreground; a mouse button is down before a
 /// click flips it), then asks <see cref="MidPasteDecider"/> whether the
-/// window we started typing into is still foreground. On either halt it stops
+/// window we started typing into is still positively foreground (a 0 read
+/// halts fail-safe and is reported via <c>onZeroForeground</c> for field
+/// counting). On either halt it stops
 /// immediately and reports <see cref="InjectionRunOutcome.Interrupted"/> so
 /// the caller can hold the WHOLE original text as a pending paste. All Win32
 /// access is behind the delegates, so this loop is fully unit-testable on
@@ -27,7 +29,8 @@ public static class GuardedInjectionRun
         Func<long> currentForegroundHwnd,
         Func<string, bool> sendChunk,
         Func<bool>? physicalInputDown = null,
-        Action? pauseBetweenChunks = null)
+        Action? pauseBetweenChunks = null,
+        Action? onZeroForeground = null)
     {
         ArgumentNullException.ThrowIfNull(chunks);
         ArgumentNullException.ThrowIfNull(currentForegroundHwnd);
@@ -41,7 +44,12 @@ public static class GuardedInjectionRun
             // is the (microsecond-scale) send itself, not the pause.
             if (physicalInputDown?.Invoke() == true)
                 return InjectionRunOutcome.Interrupted;
-            if (MidPasteDecider.Decide(hwndAtSendStart, currentForegroundHwnd())
+            var hwndNow = currentForegroundHwnd();
+            // Observation hook BEFORE the decision: a 0 read is exactly what
+            // the park-on-0 polarity wants field data on (it also halts just
+            // below, so this fires at most once per run).
+            if (hwndNow == 0) onZeroForeground?.Invoke();
+            if (MidPasteDecider.Decide(hwndAtSendStart, hwndNow)
                 == MidPasteDecision.Halt)
             {
                 return InjectionRunOutcome.Interrupted;

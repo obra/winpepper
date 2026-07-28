@@ -80,10 +80,11 @@ public class GuardedInjectionRunTests
     }
 
     [Fact]
-    public void FailOpen_UnknownBaseline_SendsEverything()
+    public void ZeroBaseline_Halts_NothingSent()
     {
-        // hwndAtSendStart == 0 => guard disabled; behaves exactly like the
-        // old unguarded send even though the probe reports a different hwnd.
+        // DELIBERATE PIN REVISION (2026-07-28): baseline 0 used to disable
+        // the guard (fail-open); it now halts before the first chunk
+        // (fail-safe) so nothing is typed into an unverifiable foreground.
         var sent = new List<string>();
         var outcome = GuardedInjectionRun.Execute(
             chunks: new[] { "aa", "bb" },
@@ -91,8 +92,42 @@ public class GuardedInjectionRunTests
             currentForegroundHwnd: () => 99,
             sendChunk: c => { sent.Add(c); return true; });
 
-        outcome.ShouldBe(InjectionRunOutcome.Completed);
-        sent.Count.ShouldBe(2);
+        outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        sent.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void ProbeGoesToZero_MidRun_Halts_AfterPrefixOnly()
+    {
+        // Live baseline, per-chunk probe returns 0 from chunk 2 on: the run
+        // must stop with only a strict prefix sent (the caller parks the
+        // FULL text). Closes the coverage gap where hwnd-going-to-0 mid-run
+        // was pinned only at the decider unit level.
+        var sent = new List<string>();
+        var probes = 0;
+        var outcome = GuardedInjectionRun.Execute(
+            chunks: new[] { "aa", "bb", "cc" },
+            hwndAtSendStart: 42,
+            currentForegroundHwnd: () => ++probes == 1 ? 42L : 0L,
+            sendChunk: c => { sent.Add(c); return true; });
+
+        outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        sent.ShouldBe(new[] { "aa" });
+    }
+
+    [Fact]
+    public void ProbeGoesToZero_MidRun_InvokesZeroObserver_ExactlyOnce()
+    {
+        var zeroObservations = 0;
+        var probes = 0;
+        GuardedInjectionRun.Execute(
+            chunks: new[] { "aa", "bb", "cc" },
+            hwndAtSendStart: 42,
+            currentForegroundHwnd: () => ++probes == 1 ? 42L : 0L,
+            sendChunk: c => true,
+            onZeroForeground: () => zeroObservations++);
+
+        zeroObservations.ShouldBe(1); // the observing check halts the run
     }
 
     [Fact]

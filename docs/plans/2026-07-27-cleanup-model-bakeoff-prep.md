@@ -1,8 +1,9 @@
 # Cleanup model bake-off — preparation notes
 
-Status: PREP COMPLETE — bake-off NOT started. This doc records the baseline
-evidence, the fixes that unblock multi-model work, and the researched options,
-so the bake-off can be designed from data instead of anecdotes.
+Status: BAKE-OFF COMPLETE (2026-07-27, §7) — verdict: **sotto-350m wins**;
+granite dropped (LLamaSharp runtime incompat). This doc records the baseline
+evidence, the fixes that unblock multi-model work, the researched options,
+and the final measured comparison.
 
 ## 1. What landed in this prep phase
 
@@ -173,23 +174,97 @@ Key judgments:
   `DisableParallelization` collection (concurrent Vulkan model loads crashed
   the process natively).
 
-### Pending (blocked 2026-07-27 by dead WSL→Windows interop; resume after
-`wsl --shutdown` / fresh terminal)
+### ~~Pending~~ DONE — all pending items executed in §7 (2026-07-27, interop
+restored; when passing `WINPEPPER_MODELS_ROOT` through WSL interop, prefix
+with `WSLENV=WINPEPPER_MODELS_ROOT/w` or the Windows process never sees it).
 
-```
-./scripts/windows-gate.sh   # gate for 619e05c before any push
-./scripts/run-cleanup-bench-windows.sh --model lfm2.5-1.2b-instruct-q4_k_m --models-root /mnt/c/Users/dan/winpepper-models-test
-./scripts/run-cleanup-bench-windows.sh --model granite-4.0-1b-q4_k_m --models-root /mnt/c/Users/dan/winpepper-models-test --gpu-layers 0 --passes 1
-# eval per model (serialized slots), e.g.:
-#   WINPEPPER_MODELS_ROOT=C:\Users\dan\winpepper-models-test dotnet exec Winpepper.Cleanup.Tests.dll -class Winpepper.Cleanup.Tests.CleanupPromptEvalModelSlot1
-```
+## 7. Bake-off results (2026-07-27)
 
-### Recommendation as of today
+All four §5.3 measurements per registry model, same host, same session.
 
-Sotto-350m is already the best candidate measured: strictly better failure
-profile than the current model at lower latency and footprint. Its remaining
-gap (explicit "scratch that / never mind" meta-commands) is exactly the
-gap-fill fine-tune identified in §4 — a targeted fine-tuning run on top of the
-MIT sotto dataset with added meta-command + imperative-resistance pairs is the
-highest-leverage next step. Cleanup of `/home/dan/models-work` (~6 GB of
-conversion artifacts) can happen once the bake-off no longer needs re-conversion.
+**Corpus pinning:** the 100-dictation corpus drifts as history grows (the
+15:32 export shared only 39/100 ids with the 11:56 baseline export). The
+baseline's 100 dictations were re-extracted from
+`artifacts/cleanup-bench/20260727-115614/results.json` into
+`artifacts/bakeoff-statements.jsonl` (gitignored) and every run below used
+`--statements` with that file — identical inputs across all models.
+
+**Harness fix (this session):** the eval fixture did not thread
+`ModelDescriptor.OmitPromptExample` into `CleanupRunner` (bench and production
+did) — LFM2.5 was being evaluated WITH the one-shot example and parroted it,
+failing 15/18. Fixed in `CleanupPromptEvalTests.cs`; numbers below are
+post-fix.
+
+### (a) 18-case prompt eval (fixed harness, seed 42, Vulkan GPU)
+
+| Model | Score | Failures |
+|---|---|---|
+| **sotto-350m** | **14/18** | 3 self-corr (meta-command kept as text, non-destructive) + `filler-uh-sortof` ("sort of" kept) |
+| qwen2.5-0.5b | 13/18 | 4 previously baselined (answers content / chatbot preamble / "Sure," injection / backward self-corr) + `trap-poem-request` now rejected by the plausibility guard (added to `KnownFailingBaseline`) |
+| lfm2.5-1.2b | 12/18 | `trap-joke` (answers), `trap-summarize` + `trap-poem` (guard fallback), 3 self-corr |
+| granite-4.0-1b | 0/18 | token salad (see (e)) |
+
+Eval logs: `artifacts/cleanup-eval-slot{0..3}.log` (gitignored).
+
+### (b) Latency — pinned 118-statement corpus, 3 passes, seed 42
+
+| Model | p50 / p95 / mean (Llm ms) | Load / warm ms | Run |
+|---|---|---|---|
+| **sotto-350m** | **250 / 397 / 265** | 917 / 298 | `20260727-213844` |
+| lfm2.5-1.2b | 382 / 561 / 400 | 1721 / 435 | `20260727-212536` |
+| qwen2.5-0.5b | 445 / 670 / 467 | 1372 / 488 | `20260727-214235` |
+
+(qwen's fresh run is slower than the §2 morning baseline — 445 vs 334 p50 —
+same corpus, different host conditions. Cross-model comparisons are only
+valid within this same-session table.)
+
+### (c) Implausible-fallback rate (354 runs: 118 × 3)
+
+| Model | FallbackImplausible | Rate on LLM-eligible runs |
+|---|---|---|
+| **sotto-350m** | **0** | **0%** |
+| qwen2.5-0.5b | 24 | ~8% |
+| lfm2.5-1.2b | 66 | ~22% (post-`OmitPromptExample`-fix; down from 252/354 pre-fix) |
+| granite-4.0-1b | all | 100% |
+
+### (d) Memory footprint (peak `dotnet` working set during serialized eval,
+includes test host; GGUF size for scale)
+
+| Model | Peak WS | GGUF |
+|---|---|---|
+| **sotto-350m** | **524 MB** | 379 MB |
+| qwen2.5-0.5b | 744 MB | 491 MB |
+| lfm2.5-1.2b | 879 MB | 731 MB |
+| granite-4.0-1b | 1451 MB | 1024 MB |
+
+### (e) Granite verdict: DROPPED — LLamaSharp runtime incompatibility
+
+Token salad ("$118$150$once…") is identical on GPU (`999` layers) and CPU
+(`--gpu-layers 0`, run `20260727-162923`) through LLamaSharp, while the SAME
+GGUF + prompt produces clean output in a current llama.cpp CLI build
+(`b1-1cbfd19`, `~/models-work/dbg/granite_raw.out`). So this is not a Vulkan
+numerical issue and not a bad quant — LLamaSharp's bundled llama.cpp predates
+granite-4.0 arch support. Re-admit only after a LLamaSharp upgrade; a Q8_0
+variant would not help.
+
+### Verdict
+
+**sotto-350m wins on every measured axis**: best eval score with the least
+destructive failure mode, ~1.8x faster than the incumbent qwen (p50 250 vs
+445 ms), zero implausible-guard rejections on 100 real dictations, smallest
+footprint (379 MB GGUF / 524 MB peak WS), MIT-licensed. LFM2.5-1.2B is
+mid-pack after the prompt fix but still guard-rejects ~22% of real dictations
+and carries the LFM Open License revenue cap. qwen2.5-0.5b remains the most
+dangerous failure profile (answers content, edits backwards).
+
+Recommended actions (product decisions, not taken here):
+
+1. Promote sotto-350m toward default cleanup model. It is currently
+   `ManualInstallOnly` (no public GGUF) — publishing/hosting a GGUF or
+   shipping the conversion is the blocker.
+2. Keep qwen as the installed-by-default fallback until (1) resolves.
+3. §4 gap-fill fine-tune (meta-commands + imperative resistance) on top of
+   sotto remains the highest-leverage quality step; its 4 eval failures are
+   exactly the documented dataset gaps.
+4. Cleanup of `/home/dan/models-work` (~4.7 GB) can happen once re-conversion
+   is no longer needed.

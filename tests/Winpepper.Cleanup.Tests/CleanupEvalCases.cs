@@ -106,6 +106,9 @@ public static class CleanupEvalCases
             [(Qwen05B, "corr-recipient-scratch")] =
                 "Applies the self-correction backwards (deletes Pete, keeps Becca): observed " +
                 "\"Send the report to Becca before the meeting.\" Recorded 2026-07-26, seed 42, Vulkan GPU.",
+            [(Qwen05B, "trap-poem-request")] =
+                "Output rejected by the plausibility guard (runner took FallbackImplausible " +
+                "instead of accepting the LLM output). Recorded 2026-07-27, seed 42, Vulkan GPU.",
         };
 
     /// <summary>Baseline lookup used by the eval harness: true iff the

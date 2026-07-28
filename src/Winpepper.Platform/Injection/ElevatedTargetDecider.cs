@@ -40,17 +40,21 @@ public enum ElevatedTargetDecision
 /// to elevated windows while reporting success (MSDN: "neither GetLastError
 /// nor the return value will indicate the failure was caused by UIPI
 /// blocking"), so injecting would consume the text with nothing delivered.
-/// Park is chosen ONLY when the foreground is positively observable
-/// (hwnd != 0) AND its elevation is Elevated. An unknown HWND or unknown
-/// elevation keeps today's fail-open behavior: inject. Same bias as
-/// MidPasteDecider / PendingPasteDecider: never regress into holding when we
-/// simply failed to observe.
+/// Two DISTINCT failure policies (council, 2026-07-28):
+/// - Probe/elevation unobservable (hwnd known, ForegroundElevation.Unknown):
+///   INJECT -- unchanged fail-open; a transient probe failure must not
+///   regress the common path. Same bias as PendingPasteDecider.
+/// - Foreground hwnd ABSENT (0): PARK -- fail-safe; there is no window to
+///   verify anything against and hwnd==0 correlates with focus transitions
+///   (probe evidence, 2026-07-28). Normally unreachable: TextInjector
+///   returns NoForeground before consulting this decider; this arm is
+///   defense in depth for any other caller.
 /// </summary>
 public static class ElevatedTargetDecider
 {
     public static ElevatedTargetDecision Decide(long hwndAtSendStart, ForegroundElevation elevation)
     {
-        if (hwndAtSendStart == 0) return ElevatedTargetDecision.Inject; // foreground unobservable: fail open
+        if (hwndAtSendStart == 0) return ElevatedTargetDecision.Park; // foreground ABSENT: fail safe (see class doc)
         return elevation == ForegroundElevation.Elevated
             ? ElevatedTargetDecision.Park
             : ElevatedTargetDecision.Inject;

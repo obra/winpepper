@@ -34,12 +34,16 @@ public sealed class ElevatedTargetDeciderTests
     }
 
     [Fact]
-    public void UnknownHwnd_Injects_FailOpen_EvenIfProbeClaimsElevated()
+    public void ZeroHwnd_Parks_FailSafe_RegardlessOfProbeResult()
     {
-        // No observable foreground at all (probe returned 0): the HWND guard
-        // is disabled today and this check must not regress that. A probe
-        // result for hwnd 0 is meaningless; fail open takes precedence.
+        // DELIBERATE PIN REVISION (council 5-1, probe-gated 2026-07-28,
+        // supersedes the paste-path-hardening fail-open pin): an absent
+        // foreground hwnd now PARKS instead of blind-injecting. Normally
+        // unreachable -- TextInjector returns NoForeground before consulting
+        // this decider -- kept as defense in depth. Contrast the UNCHANGED
+        // fail-open next door: a KNOWN hwnd with an unobservable elevation
+        // probe still injects (KnownHwnd_UnknownElevation_Injects_FailOpen).
         ElevatedTargetDecider.Decide(hwndAtSendStart: 0, ForegroundElevation.Elevated)
-            .ShouldBe(ElevatedTargetDecision.Inject);
+            .ShouldBe(ElevatedTargetDecision.Park);
     }
 }

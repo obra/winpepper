@@ -49,7 +49,7 @@ public sealed class PipelineHost : IDisposable
     private Winpepper.Asr.Transcription.StreamingDictationSession? _streamingSession;
     private Action<ReadOnlyMemory<float>>? _streamFrameHandler;
 
-    private readonly Winpepper.Cleanup.CleanupRunner? _cleanup;        // PLAN2-TYPE
+    private readonly Winpepper.Cleanup.CleanupBackendHolder _cleanupHolder;
     // NOTE: no CleanupOptions field. Options are built PER DICTATION from the
     // settings provider (CleanupOptionsFactory.FromSettings) so Cleanup-tab
     // changes — including the Enabled toggle — take effect immediately.
@@ -58,7 +58,6 @@ public sealed class PipelineHost : IDisposable
     private Task<Winpepper.Platform.WindowContext.WindowContextResult>? _ctxPrefetchTask;    // PLAN2-TYPE
 
     private readonly Winpepper.History.HistoryArchiver _archiver;
-    private readonly string _cleanupModelName;
     private System.Diagnostics.Stopwatch? _recordStopwatch;
 
     private readonly Winpepper.Core.Errors.ErrorBus _errorBus;
@@ -85,12 +84,11 @@ public sealed class PipelineHost : IDisposable
         Func<string?, string> resolveAsrModelName,
         Func<string, bool> isAsrModelReady,
         Winpepper.History.HistoryArchiver archiver,
-        string cleanupModelName,
+        Winpepper.Cleanup.CleanupBackendHolder cleanupHolder,
         Winpepper.Platform.Injection.ClipboardFallback clipboardFallback,
         Winpepper.Core.Notifications.IToastService toasts,
         Func<AppSettings> settingsProvider,
         Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> transcriberFactory,
-        Winpepper.Cleanup.CleanupRunner? cleanup = null,                       // PLAN2-TYPE
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
         Winpepper.Core.Learning.PostPasteWatcher? postPaste = null,
@@ -117,8 +115,7 @@ public sealed class PipelineHost : IDisposable
         _resolveAsrModelName = resolveAsrModelName;
         _isAsrModelReady = isAsrModelReady;
         _archiver = archiver;
-        _cleanupModelName = cleanupModelName;
-        _cleanup = cleanup;
+        _cleanupHolder = cleanupHolder;
         _corrections = corrections;
         _windowContext = windowContext;
         _clipboardFallback = clipboardFallback;
@@ -133,6 +130,12 @@ public sealed class PipelineHost : IDisposable
 
     /// <summary>True once the ASR model is loaded and the hotkey pipeline is running.</summary>
     public bool IsRunning { get; private set; }
+
+    /// <summary>True once Dispose has joined the run loop (or it was never
+    /// started / already terminal). When FALSE the loop was orphaned, possibly
+    /// mid-dictation: the cleanup holder must NOT be disposed (leak instead —
+    /// the process is exiting).</summary>
+    public bool RunLoopJoined { get; private set; } = true;
 
     public void UpdateHotkeys(string hold, string toggle)
         => _hotkeyLifecycle.Run(() =>
@@ -656,17 +659,24 @@ public sealed class PipelineHost : IDisposable
                 // AppSettings, so building options HERE (not at boot) makes the
                 // Enabled toggle and every other cleanup setting take effect on
                 // this very dictation.
+                // Per-dictation cleanup-model seam (mirror of TryEnsureAsrModel):
+                // adopt a completed pre-warm and swap HERE — never mid-generation.
+                // The serialized run loop (await foreach + inline await
+                // HandleHotkey) guarantees the previous dictation's RunAsync has
+                // completed, so disposing the replaced backend is safe.
+                var cleanupLease = _cleanupHolder.EnsureCurrent();
+                var cleanupRunner = cleanupLease.Runner;
                 var cleanupOptions = Winpepper.Cleanup.CleanupOptionsFactory.FromSettings(settingsNow);
                 var skipLlm = Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName);
                 // Single policy home (CleanupRunner.Preflight) decides whether the
                 // LLM will actually run. The engine enters CleaningUp exactly for
                 // those dictations — so the pill's "Cleaning up..." phase is
                 // truthful and "Inserting..." remains reachable afterwards.
-                var llmWillRun = !string.IsNullOrWhiteSpace(final) && _cleanup is not null
+                var llmWillRun = !string.IsNullOrWhiteSpace(final) && cleanupRunner is not null
                     && Winpepper.Cleanup.CleanupRunner.Preflight(final, cleanupOptions, skipLlm);
                 _engine.Apply(llmWillRun ? SessionEvent.CleanupStarted : SessionEvent.TranscriptReady);
 
-                if (!string.IsNullOrWhiteSpace(final) && _cleanup is not null)
+                if (!string.IsNullOrWhiteSpace(final) && cleanupRunner is not null)
                 {
                     // Plan 2's CleanupRunner.RunAsync expects a Task<string?>? for the
                     // window context. Adapt our Task<WindowContextResult> by projecting
@@ -687,7 +697,7 @@ public sealed class PipelineHost : IDisposable
                     cleanupSw.Start();
                     try
                     {
-                        var result = await _cleanup.RunAsync(
+                        var result = await cleanupRunner.RunAsync(
                             rawTranscript: final,
                             corrections: correctionsData,
                             windowContextTask: ctxTextTask,
@@ -702,7 +712,7 @@ public sealed class PipelineHost : IDisposable
                         {
                             Winpepper.Cleanup.CleanupPath.BypassProvider => "none (cloud, corrections-only)",
                             Winpepper.Cleanup.CleanupPath.BypassDisabled => "none (disabled, corrections-only)",
-                            _ => _cleanupModelName,
+                            _ => cleanupLease.LoadedModelName ?? "",
                         };
                         windowContextUsed = ctxTextTask is not null
                                             && result.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
@@ -1069,17 +1079,21 @@ public sealed class PipelineHost : IDisposable
                     // AppSettings, so building options HERE (not at boot) makes the
                     // Enabled toggle and every other cleanup setting take effect on
                     // this very dictation.
+                    // Per-dictation cleanup-model seam — second (toggle) path;
+                    // keep byte-parallel with the hold path above.
+                    var cleanupLease2 = _cleanupHolder.EnsureCurrent();
+                    var cleanupRunner2 = cleanupLease2.Runner;
                     var cleanupOptions2 = Winpepper.Cleanup.CleanupOptionsFactory.FromSettings(settingsNow2);
                     var skipLlm2 = Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName2);
                     // Single policy home (CleanupRunner.Preflight) decides whether the
                     // LLM will actually run. The engine enters CleaningUp exactly for
                     // those dictations — so the pill's "Cleaning up..." phase is
                     // truthful and "Inserting..." remains reachable afterwards.
-                    var llmWillRun2 = !string.IsNullOrWhiteSpace(final2) && _cleanup is not null
+                    var llmWillRun2 = !string.IsNullOrWhiteSpace(final2) && cleanupRunner2 is not null
                         && Winpepper.Cleanup.CleanupRunner.Preflight(final2, cleanupOptions2, skipLlm2);
                     _engine.Apply(llmWillRun2 ? SessionEvent.CleanupStarted : SessionEvent.TranscriptReady);
 
-                    if (!string.IsNullOrWhiteSpace(final2) && _cleanup is not null)
+                    if (!string.IsNullOrWhiteSpace(final2) && cleanupRunner2 is not null)
                     {
                         // Plan 2's CleanupRunner.RunAsync expects a Task<string?>? for the
                         // window context. Adapt our Task<WindowContextResult> by projecting
@@ -1100,7 +1114,7 @@ public sealed class PipelineHost : IDisposable
                         cleanupSw2.Start();
                         try
                         {
-                            var result2 = await _cleanup.RunAsync(
+                            var result2 = await cleanupRunner2.RunAsync(
                                 rawTranscript: final2,
                                 corrections: correctionsData2,
                                 windowContextTask: ctxTextTask2,
@@ -1115,7 +1129,7 @@ public sealed class PipelineHost : IDisposable
                             {
                                 Winpepper.Cleanup.CleanupPath.BypassProvider => "none (cloud, corrections-only)",
                                 Winpepper.Cleanup.CleanupPath.BypassDisabled => "none (disabled, corrections-only)",
-                                _ => _cleanupModelName,
+                                _ => cleanupLease2.LoadedModelName ?? "",
                             };
                             windowContextUsed2 = ctxTextTask2 is not null
                                                 && result2.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
@@ -1338,7 +1352,14 @@ public sealed class PipelineHost : IDisposable
         {
             _hotkeyReadiness.Disable();
             _runCts?.Cancel();
-            try { _runTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
+            // Record whether the run loop actually quiesced: AppShell disposes
+            // the cleanup holder ONLY on a successful join (the wait is
+            // bounded/best-effort, so "PipelineHost disposed first" alone does
+            // not guarantee no generation is in flight — ledger A2). Wait()
+            // throwing means _runTask is terminal (faulted/canceled), which IS
+            // a completed join.
+            try { RunLoopJoined = _runTask?.Wait(TimeSpan.FromSeconds(2)) ?? true; }
+            catch { RunLoopJoined = true; }
             _hook.Dispose();
             // An in-flight streaming session (app shut down mid-dictation) holds a
             // live pump + inner socket; dispose it here or it leaks at teardown.

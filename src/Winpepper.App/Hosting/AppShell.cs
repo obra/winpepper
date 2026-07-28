@@ -51,6 +51,9 @@ public sealed class AppShell : IDisposable
     /// </summary>
     public Winpepper.Core.Settings.AsrModelSelectionSlot AsrModelSelection { get; }
 
+    public Winpepper.Core.Settings.CleanupModelSelectionSlot CleanupModelSelection { get; }
+    public Winpepper.Cleanup.CleanupBackendHolder CleanupBackend { get; }
+
     /// <summary>
     /// Background first-run installer for the Nemotron streaming model +
     /// native runtime. Kicked off (non-blocking) from <see cref="StartAsync"/>;
@@ -166,7 +169,6 @@ public sealed class AppShell : IDisposable
         // PLAN2-TYPE — Plan 2 owns these types; constructing them here so Plan 3's
         // pipeline can invoke real cleanup + window context. Each one is optional —
         // if the model or registry isn't present yet, we fall back to raw transcript.
-        Winpepper.Cleanup.CleanupRunner? cleanup = null;
         Winpepper.Corrections.CorrectionStore? correctionStore = null;
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null;
 
@@ -180,45 +182,43 @@ public sealed class AppShell : IDisposable
                 "CorrectionStore unavailable; cleanup will run with empty corrections.");
         }
 
-        try
-        {
-            // Plan 2's LlamaCleanupBackend (line 2141) is constructed with the path to
-            // the .gguf file (not the directory). Cleanup models install to
-            // <Root>/models/cleanup/<key>/<file>.gguf; the registry plus the user's
-            // CleanupModelName setting decide which one to load (unknown names fall
-            // back to the registry default, mirroring the ASR repair above), so the
-            // model loaded here always matches the name PipelineHost stamps on
-            // history records.
-            var cleanupResolution = Winpepper.Models.CleanupModelPathResolver.Resolve(
-                modelsServices.Registry, modelsServices.ModelsRoot, settings.CleanupModelName);
-            if (cleanupResolution.FellBackToDefault)
+        // Live cleanup-model swap (mirror of the ASR slot + seam): the holder
+        // owns backend+runner construction, hash-verified readiness, pre-warm,
+        // and disposal; PipelineHost consumes it once per dictation at the
+        // cleanup seam. Boot no longer blocks on the GGUF load —
+        // RequestPrewarm loads in the background and a dictation that wins the
+        // race falls back to the raw transcript once, then self-heals.
+        var cleanupSelection = new Winpepper.Core.Settings.CleanupModelSelectionSlot();
+        cleanupSelection.Publish(settings.CleanupModelName); // seed with the persisted boot value
+        var cleanupHolder = new Winpepper.Cleanup.CleanupBackendHolder(
+            desiredModelName: () => cleanupSelection.Read(),
+            resolve: raw =>
             {
-                factory.CreateLogger("Winpepper.App").LogWarning(
-                    "Unknown cleanup model {ConfiguredModel}; using default {DefaultModel}",
-                    settings.CleanupModelName, cleanupResolution.ResolvedName);
-            }
-            if (cleanupResolution.GgufPath is { } modelFile && File.Exists(modelFile))
-            {
-                var backend = new Winpepper.Cleanup.LlamaCleanupBackend(modelFile,
-                    factory.CreateLogger<Winpepper.Cleanup.LlamaCleanupBackend>(),
-                    promptFormat: cleanupResolution.PromptFormat);
-                cleanup = new Winpepper.Cleanup.CleanupRunner(backend,
-                    factory.CreateLogger<Winpepper.Cleanup.CleanupRunner>(),
-                    omitPromptExample: cleanupResolution.OmitPromptExample);
-            }
-            else
-            {
-                factory.CreateLogger("Winpepper.App").LogWarning(
-                    "Cleanup model {ModelName} not installed (expected {ExpectedPath}); falling back to raw transcripts.",
-                    cleanupResolution.ResolvedName,
-                    cleanupResolution.GgufPath ?? "<descriptor declares no .gguf file>");
-            }
-        }
-        catch (Exception ex)
-        {
-            factory.CreateLogger("Winpepper.App").LogWarning(ex,
-                "Cleanup runner unavailable; falling back to raw transcripts.");
-        }
+                // CleanupModelResolution -> CleanupModelTarget: field-for-field
+                // copy (Winpepper.Cleanup does not reference Winpepper.Models).
+                var r = Winpepper.Models.CleanupModelPathResolver.Resolve(
+                    modelsServices.Registry, modelsServices.ModelsRoot, raw);
+                return new Winpepper.Cleanup.CleanupModelTarget(
+                    r.GgufPath, r.ResolvedName, r.FellBackToDefault,
+                    r.PromptFormat, r.OmitPromptExample);
+            },
+            verifyReady: name => modelsServices.VerifyCleanupModelReady(name),
+            backendFactory: target => new Winpepper.Cleanup.LlamaCleanupBackend(
+                target.GgufPath!,
+                factory.CreateLogger<Winpepper.Cleanup.LlamaCleanupBackend>(),
+                promptFormat: target.PromptFormat),
+            runnerFactory: (backend, omit) => new Winpepper.Cleanup.CleanupRunner(
+                backend,
+                factory.CreateLogger<Winpepper.Cleanup.CleanupRunner>(),
+                omitPromptExample: omit),
+            log: factory.CreateLogger<Winpepper.Cleanup.CleanupBackendHolder>(),
+            // Pre-warm = load + first-generation warm-up (ledger A5): WarmAsync
+            // pages in weights + Vulkan shader pipeline and swallows its own
+            // failures as non-fatal. Cast is safe by construction: the
+            // backendFactory above always constructs LlamaCleanupBackend.
+            warmup: (backend, ct) =>
+                ((Winpepper.Cleanup.LlamaCleanupBackend)backend).WarmAsync(ct));
+        cleanupHolder.RequestPrewarm(); // replaces the old synchronous boot load
 
         try
         {
@@ -243,7 +243,6 @@ public sealed class AppShell : IDisposable
         // changes are live.
 
         var historyServices = new Winpepper.App.Services.HistoryServices(AppPaths.HistoryRoot);
-        var cleanupModelName = settings.CleanupModelName;
 
         var cancel = HotkeyChord.Parse("Esc");
         var hotkeyLog = factory.CreateLogger("Winpepper.App.Hotkeys");
@@ -317,14 +316,14 @@ public sealed class AppShell : IDisposable
                                          raw => modelsServices.Registry.ResolveOrDefault(
                                              raw, Winpepper.Models.ModelKind.Asr).Name,
                                          name => modelsServices.VerifyAsrModelReady(name),
-                                         historyServices.Archiver, cleanupModelName,
+                                         historyServices.Archiver, cleanupHolder,
                                          clipboardFallback, toasts,
                                          () => store.Load(),
                                          (local, loadedModelName, s, onFallback) => AppShell.BuildStreamingTranscriber(
                                              local, loadedModelName, s, onFallback, () => nemotronHolder.TryGet(),
                                              aaiClient, aaiKeyStore, aaiOptions,
                                              correctionStore, errorBus, factory),
-                                         cleanup, correctionStore, windowContext,
+                                         correctionStore, windowContext,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
                                          postPasteLearningEnabled: settings.PostPasteLearningEnabled,
                                          prewarmMicEnabled: settings.PrewarmMicEnabled);
@@ -339,6 +338,7 @@ public sealed class AppShell : IDisposable
                             toasts, clipboardFallback, crashHandler,
                             logTail, uiThread, diagHost,
                             aaiKeyStore, aaiClient, aaiOptions, asrSelection,
+                            cleanupSelection, cleanupHolder,
                             streamingAutoInstaller);
     }
 
@@ -361,6 +361,8 @@ public sealed class AppShell : IDisposable
                      Winpepper.Asr.Transcription.AssemblyAiClient assemblyAiClient,
                      Winpepper.Asr.Transcription.AssemblyAiOptions assemblyAiOptions,
                      Winpepper.Core.Settings.AsrModelSelectionSlot asrSelection,
+                     Winpepper.Core.Settings.CleanupModelSelectionSlot cleanupSelection,
+                     Winpepper.Cleanup.CleanupBackendHolder cleanupHolder,
                      Winpepper.Models.StreamingAutoInstaller streamingAutoInstaller)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
@@ -378,6 +380,8 @@ public sealed class AppShell : IDisposable
         AssemblyAiClient = assemblyAiClient;
         AssemblyAiOptions = assemblyAiOptions;
         AsrModelSelection = asrSelection;
+        CleanupModelSelection = cleanupSelection;
+        CleanupBackend = cleanupHolder;
         StreamingAutoInstaller = streamingAutoInstaller;
 
         Pill = new StatusPillWindow(sessionVm);
@@ -598,6 +602,13 @@ public sealed class AppShell : IDisposable
     public void Dispose()
     {
         Pipeline.Dispose();
+        // After Pipeline, and ONLY if its run loop actually joined: then no
+        // dictation holds a cleanup lease and disposing the live backend
+        // cannot race a generation (serialized-caller invariant). On a
+        // timed-out join (loop orphaned, possibly mid-generation — ledger A2)
+        // deliberately LEAK the holder: Application.Current.Exit() follows
+        // immediately, and a leak is safe where a use-after-free is not.
+        if (Pipeline.RunLoopJoined) CleanupBackend.Dispose();
         Tray.Dispose();
         Pill.Close();
         SettingsWriter.Dispose();

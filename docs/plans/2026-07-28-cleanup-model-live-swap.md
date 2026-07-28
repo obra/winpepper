@@ -2140,7 +2140,7 @@ Expected: the in-flight dictation completes normally — no audio stutter, hang,
 - [ ] **Step 5: Smoke — promote a not-ready model keeps the current one**
 
 Rename one installed model's `.gguf` file aside (e.g. append `.bak` in `%LOCALAPPDATA%\winpepper\models\cleanup\<name>\`), promote that model, dictate twice.
-Expected: dictations keep being cleaned by the CURRENT model; the log shows the verification warning (`failed verification` or `declares no .gguf`); nothing crashes. Restore the file, dictate again: the swap self-heals (new model used). Restore everything afterwards.
+Expected: dictations keep being cleaned by the CURRENT model; the log shows the verification warning (`failed verification` or `declares no .gguf`); nothing crashes. Then restore the file and dictate once — this dictation still uses the CURRENT model; it merely kicks the background retry at the seam (re-verify = full SHA-256 of the restored file, then load + warm-up). Wait ~5 s, dictate again: the swap self-heals — this second post-restore dictation uses the NEW model (same kick-then-adopt cadence as Step 3). Restore everything afterwards.
 
 - [ ] **Step 6: Smoke — prompt-format correctness after swap**
 

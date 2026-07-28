@@ -46,6 +46,7 @@ public sealed class CleanupBackendHolder : IDisposable
     private readonly Func<CleanupModelTarget, ILlamaCleanupBackend> _backendFactory;
     private readonly Func<ILlamaCleanupBackend, bool, CleanupRunner> _runnerFactory;
     private readonly ILogger<CleanupBackendHolder> _log;
+    private readonly Func<ILlamaCleanupBackend, CancellationToken, Task>? _warmup;
 
     private readonly object _gate = new();
     private readonly CleanupModelSwapState _swap = new();
@@ -59,7 +60,8 @@ public sealed class CleanupBackendHolder : IDisposable
         Func<string, bool> verifyReady,
         Func<CleanupModelTarget, ILlamaCleanupBackend> backendFactory,
         Func<ILlamaCleanupBackend, bool, CleanupRunner> runnerFactory,
-        ILogger<CleanupBackendHolder> log)
+        ILogger<CleanupBackendHolder> log,
+        Func<ILlamaCleanupBackend, CancellationToken, Task>? warmup = null)
     {
         _desiredModelName = desiredModelName;
         _resolve = resolve;
@@ -67,6 +69,7 @@ public sealed class CleanupBackendHolder : IDisposable
         _backendFactory = backendFactory;
         _runnerFactory = runnerFactory;
         _log = log;
+        _warmup = warmup;
     }
 
     /// <summary>Resolved name of the currently live model; null until first adoption.</summary>
@@ -124,6 +127,18 @@ public sealed class CleanupBackendHolder : IDisposable
                 case CleanupSwapAction.KeepCurrent:
                 case CleanupSwapAction.CannotStart:
                 default:
+                    if (!string.Equals(target.ResolvedName, _swap.LoadedModelName, StringComparison.Ordinal))
+                    {
+                        // Desired differs from loaded and no completed pre-warm
+                        // exists: kick (or retry) a background load so a later
+                        // dictation can swap. No-op while one is in flight.
+                        StartPrewarmLocked(target);
+                    }
+                    else
+                    {
+                        // Desired == loaded: any pending pre-warm is stale.
+                        DiscardPendingLocked();
+                    }
                     break;
             }
 
@@ -134,12 +149,28 @@ public sealed class CleanupBackendHolder : IDisposable
     private void StartPrewarmLocked(CleanupModelTarget target)
     {
         if (string.Equals(target.ResolvedName, _swap.LoadedModelName, StringComparison.Ordinal))
-            return; // the desired model is already live
+        {
+            DiscardPendingLocked(); // desired model already live; drop any stale pre-warm
+            return;
+        }
 
         if (_pending is not null
             && string.Equals(_pending.Target.ResolvedName, target.ResolvedName, StringComparison.Ordinal))
         {
-            return; // already loading (or loaded and waiting for the seam)
+            if (!_pending.Load.IsCompleted)
+                return; // load in flight
+            if (_pending.Load is { IsCompletedSuccessfully: true, Result: not null })
+                return; // warm and waiting for the seam
+            _pending = null; // completed but failed -> retry below
+        }
+
+        DiscardPendingLocked(); // a pre-warm for a different model is stale
+
+        if (target.FellBackToDefault)
+        {
+            _log.LogWarning(
+                "Unknown cleanup model requested; using default {DefaultModel}",
+                target.ResolvedName);
         }
 
         var captured = target;
@@ -150,10 +181,43 @@ public sealed class CleanupBackendHolder : IDisposable
     {
         try
         {
+            if (target.GgufPath is null)
+            {
+                _log.LogWarning(
+                    "Cleanup model {ModelName} declares no .gguf file; keeping the current model.",
+                    target.ResolvedName);
+                return null;
+            }
+
+            // Hash-verified readiness (per-file size + SHA-256) — a merely
+            // present-but-stale/corrupt file must never be swapped in. Runs on
+            // this background thread, never on the UI thread or the dictation
+            // seam, so a cold multi-second hash is safe here.
+            if (!_verifyReady(target.ResolvedName))
+            {
+                _log.LogWarning(
+                    "Cleanup model {ModelName} failed verification (missing/size/SHA-256 mismatch); keeping the current model.",
+                    target.ResolvedName);
+                return null;
+            }
+
             var backend = _backendFactory(target);
             try
             {
                 var runner = _runnerFactory(backend, target.OmitPromptExample);
+                // Pre-warm is load + WARM-UP: the ~1–1.7 s LoadFromFile figure
+                // is load-only; the first generation pays an additional
+                // ~0.27–0.49 s (Vulkan shader pipeline + weight paging — ledger
+                // A5). Run it here, on the background load task, so a pre-warm
+                // is "ready" only when the first real dictation will be fast.
+                // A throw is treated as a failed load (backend disposed,
+                // retried later); the production delegate
+                // (LlamaCleanupBackend.WarmAsync) swallows its own exceptions
+                // as non-fatal. Keeping the warm-up inside the load task
+                // preserves the disposal discipline: a pending backend is only
+                // ever disposed after its load+warm task completes (never with
+                // a warm-up in flight — ledger A1b).
+                _warmup?.Invoke(backend, CancellationToken.None).GetAwaiter().GetResult();
                 return new PrewarmResult(backend, runner);
             }
             catch
@@ -183,6 +247,25 @@ public sealed class CleanupBackendHolder : IDisposable
         }
     }
 
+    private void DiscardPendingLocked()
+    {
+        var pending = _pending;
+        if (pending is null) return;
+        _pending = null;
+        // The pre-warmed backend was never handed out, so no generation can be
+        // in flight on it — dispose as soon as its load completes (it may
+        // still be running right now).
+        pending.Load.ContinueWith(
+            t =>
+            {
+                if (t is { IsCompletedSuccessfully: true, Result: not null })
+                    DisposeBackend(t.Result.Backend);
+            },
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
+    }
+
     /// <summary>
     /// Dispose the live backend. Caller contract: PipelineHost must already be
     /// disposed (run loop stopped) so no dictation holds a lease.
@@ -191,6 +274,14 @@ public sealed class CleanupBackendHolder : IDisposable
     {
         lock (_gate)
         {
+            // Bounded join of an in-flight pre-warm BEFORE discarding: at app
+            // exit, ExitProcess terminating a thread mid-native-GGUF-load risks
+            // a loader/driver-lock deadlock during DLL_PROCESS_DETACH (ledger
+            // A10). A pending load at quit is rare; worst case this waits one
+            // load + warm-up. Wait() throwing (faulted/canceled) means the
+            // task is terminal — exactly what we need — so it is swallowed.
+            try { _pending?.Load.Wait(TimeSpan.FromSeconds(5)); } catch { }
+            DiscardPendingLocked();
             DisposeBackend(_backend);
             _backend = null;
             _runner = null;

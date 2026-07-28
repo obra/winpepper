@@ -48,12 +48,14 @@ Win32 P/Invoke via `[LibraryImport]`, xUnit v3 (in-process runner via
 - **Deliberate constraint supersession (owner-approved in this task's spec):**
   the bleed-hardening plan's global constraint "feed rate floor ≥1600 nominal
   code units/s" and its HALT CONDITION 1 sentinel framing are superseded. The
-  new design point is `TargetFeedUnitsPerSecond = 600` (~615 units/s nominal
-  at 8-unit chunks / 13 ms pace). The spec explicitly instructs: "the existing
+  new design point is `TargetFeedUnitsPerSecond = 600` (~571 units/s nominal
+  at 8-unit chunks / 14 ms pace — the pause is CEILING-derived from the 600
+  target so the nominal feed never EXCEEDS it; stage-2 load-bearing ledger
+  A1). The spec explicitly instructs: "the existing
   Windows pacing sentinel test must be retuned to prove the NEW floor, not
   the old one."
 - **UX cost, quantified honestly:** a 458-char paste goes from ~0.3 s to
-  ~0.75 s of send time (458 / 615 ≈ 0.75 s). In slow-rendering apps perceived
+  ~0.8 s of send time (458 / 571 ≈ 0.80 s). In slow-rendering apps perceived
   duration is unchanged (the app remains the bottleneck). The pill-click
   UI-thread stall grows proportionally (predecessor ledger AD-3 accepted
   this; the follow-up if jank appears is background dispatch, NOT removing
@@ -95,12 +97,68 @@ All three ran (medium-IL `powershell.exe` from WSL, user `DANDESKTOP\dan`,
   denial exit, winlogon). The check runs once per injection start.
 
 Pacing math (change 2) is sound: backlog grows at (feed − render); at
-~615 units/s feed vs ~600 units/s render, growth is ~zero, collapsing
-worst-case bleed toward the true in-flight chunk (≤ 8 code units). The 13 ms
-pace is achievable — the existing `PacingWaiter` high-resolution timer
-measured 5.22–5.37 ms on a 5 ms request (bleed-hardening ledger B1), and
-13 ms is coarser, not finer. **No unresolved coverage gaps; no halt-worthy
-findings.**
+~571 units/s feed vs the ~600 units/s claimed render rate, growth is ≤ zero,
+collapsing worst-case bleed toward the true in-flight chunk (≤ 8 code
+units). The 14 ms pace is achievable — the existing `PacingWaiter`
+high-resolution timer measured 5.22–5.37 ms on a 5 ms request
+(bleed-hardening ledger B1), and 14 ms is coarser, not finer. **No
+unresolved coverage gaps; no halt-worthy findings.**
+
+## Load-Bearing Validation — STAGE 2 (workflow validation pass, 2026-07-27)
+
+A second validation wave ran after planning; full ledger at
+`.worktrees/.the-usual-logs/paste-path-hardening/load-bearing-ledger.md`
+(8 verified, 1 falsified→fixed, 2 accepted). Findings already folded into
+this plan:
+
+- **A11 verified (docs, verbatim):** MS Learn `SendInput` reference: "This
+  function fails when it is blocked by UIPI. Note that neither GetLastError
+  nor the return value will indicate the failure was caused by UIPI
+  blocking." The pre-check architecture (Tasks 2–4) is necessary, not
+  optional.
+- **A4/A3/A6 verified (HWND-first host probe, `hwnd-probe.ps1`):**
+  `GetWindowThreadProcessId` succeeded on **877/877** windows including
+  SYSTEM (dwm) and elevated-process windows — the fail-open branch never
+  fired; the park/paste split was exactly right (135 park windows, all
+  genuinely elevated/SYSTEM; 742 paste windows, zero ordinary apps
+  false-parked); elevated consoles report `elevated=True` whether the HWND
+  resolves to the client or the host. Accepted residuals (ledger W1–W3,
+  D1): ApplicationFrameHost-owned UWP windows probe as AFH (medium-IL,
+  fail-open — input flows via AFH); UIAccess processes are a rare blind
+  spot; Win11 sudo-inline consoles probe medium and genuinely accept input
+  (correct inject).
+- **A2 verified (mechanism):** official docs confirm the system input queue
+  routes each event to the focus window at DEQUEUE time — a
+  queued-undelivered backlog CAN follow a focus change. Whether a given
+  backlog redirects, drops, or lands in the old window varies; pacing
+  shrinks the backlog to ~zero, which fixes the incident under **every**
+  observed fate, and the per-chunk halt + full-text park prevents loss.
+- **A1 accepted (ledger decision):** the ~600 chars/s render figure traces
+  to a user eyeball estimate, unmeasured, and 8×1000/600 truncates to a
+  13 ms pause = ~615 u/s nominal — ABOVE the claimed render rate, so the
+  "backlog cannot grow" invariant would be arithmetically false. Decision:
+  derive the pause by **ceiling division** (= 14 ms, ~571 u/s ≤ 600),
+  making the invariant hold against the claimed rate. A live render-rate
+  measurement needs owner approval (protocol preserved in
+  `reports/validator-A1.md` §6).
+- **A8 falsified → fixed:** the pill is a fixed 300-DIP window
+  (`StatusPillLayout.cs:11`) whose text budget is ~209 DIP ≈ ~32 chars at
+  FontSize 13 with `CharacterEllipsis`; the original 57-char admin copy
+  lost its actionable half to elision. Copy shortened to
+  `Admin window - switch & click` (29 chars) throughout Tasks 5–7.
+- **A9 verified, guard is load-bearing:** `ci.yml`'s windows job filters
+  tests by NAME only, so the new `Platform=Windows`-trait sentinels DO run
+  on `windows-latest`, which executes **elevated** (UAC disabled). The
+  `Assert.SkipWhen(Environment.IsPrivilegedProcess, ...)` guards in
+  `ElevationProbeWindowsTests` are therefore required for CI green — never
+  remove them.
+- **A7/A5 verified:** no code path clobbers `StatusText` while a pending
+  slot is held (setter private; all 15 writers audited — but the safety
+  rests on the `HasPending` guards, and `NotifyPasteAttempted` is the one
+  VM method not marshalled via `_ui.Post`: keep Task 6's exact call
+  order); winpepper ships `asInvoker`, per-user MSI, HKCU autostart — it
+  runs non-elevated (UAC-disabled admin machines degrade to a conservative
+  park, never loss).
 
 ## Scope Check
 
@@ -158,7 +216,7 @@ Design notes locked in here:
 
 ---
 
-### Task 1: Render-rate pacing retune (5 ms → 13 ms, ~600 units/s feed)
+### Task 1: Render-rate pacing retune (5 ms → 14 ms, ≤600 units/s feed)
 
 **Files:**
 - Modify: `src/Winpepper.Platform/Injection/TextInjector.cs:29-49` (constants + XML docs)
@@ -170,8 +228,11 @@ Design notes locked in here:
 - Consumes: existing `TextInjector.ChunkCodeUnits` (= 8, unchanged),
   `PacingWaiter.Wait(int ms)` (unchanged).
 - Produces: `internal const int TextInjector.TargetFeedUnitsPerSecond = 600`
-  and `internal const int TextInjector.InterChunkPauseMs` now COMPUTED as
-  `ChunkCodeUnits * 1000 / TargetFeedUnitsPerSecond` (= 13). Later tasks and
+  and `internal const int TextInjector.InterChunkPauseMs` now COMPUTED by
+  CEILING division as
+  `(ChunkCodeUnits * 1000 + TargetFeedUnitsPerSecond - 1) / TargetFeedUnitsPerSecond`
+  (= 14 — truncating division would give 13 ms = ~615 units/s, ABOVE the
+  600 target; ledger A1). Later tasks and
   tests reference `TextInjector.InterChunkPauseMs` symbolically.
 
 - [ ] **Step 1: Retune the three Linux test pins (write the failing tests)**
@@ -187,7 +248,7 @@ In `tests/Winpepper.Platform.Tests/Injection/TextInjectorGuardedTests.cs`:
 with:
 
 ```csharp
-        sleeps.ShouldBe(new[] { 13, 13, 13, 13, 13, 13, 13, 13, 13, 13, 13 }); // 11 x TextInjector.InterChunkPauseMs (render-rate pace)
+        sleeps.ShouldBe(new[] { 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14 }); // 11 x TextInjector.InterChunkPauseMs (render-rate pace)
 ```
 
 (2) Replace the whole `DesignPoint_FeedRateFloor_And_BleedBound` method
@@ -198,17 +259,18 @@ with:
     public void DesignPoint_FeedRateCeiling_And_BleedBound()
     {
         // Spec constraint (paste-path-hardening, 2026-07-27): the nominal
-        // feed rate must stay AT OR BELOW ~TargetFeedUnitsPerSecond (plus
-        // integer-division slack) so the queued-but-undelivered backlog
-        // cannot grow against slow-rendering apps (~600 chars/s observed
-        // render rate) -- a mid-paste window switch then leaks at most the
-        // true in-flight chunk. This DELIBERATELY SUPERSEDES the
-        // bleed-hardening plan's ">= 1600" floor (owner-approved). The feed
-        // must not collapse either, and the worst-case bleed bound
-        // (<= 1 in-flight chunk, prior ledger AD-1) must not regress past
-        // 8 code units.
-        var nominalFeed = TextInjector.ChunkCodeUnits * 1000 / TextInjector.InterChunkPauseMs; // 615 at 8/13ms
-        nominalFeed.ShouldBeLessThanOrEqualTo(660);    // ceiling: TargetFeedUnitsPerSecond + 10% slack
+        // feed rate must stay AT OR BELOW TargetFeedUnitsPerSecond so the
+        // queued-but-undelivered backlog cannot grow against slow-rendering
+        // apps (~600 chars/s claimed render rate) -- a mid-paste window
+        // switch then leaks at most the true in-flight chunk. The pause is
+        // CEILING-derived for exactly this reason: truncating division gave
+        // 13 ms = ~615 units/s, ABOVE the target (stage-2 ledger A1). This
+        // DELIBERATELY SUPERSEDES the bleed-hardening plan's ">= 1600"
+        // floor (owner-approved). The feed must not collapse either, and
+        // the worst-case bleed bound (<= 1 in-flight chunk, prior ledger
+        // AD-1) must not regress past 8 code units.
+        var nominalFeed = TextInjector.ChunkCodeUnits * 1000 / TextInjector.InterChunkPauseMs; // 571 at 8/14ms
+        nominalFeed.ShouldBeLessThanOrEqualTo(TextInjector.TargetFeedUnitsPerSecond); // never exceed the render-rate target
         nominalFeed.ShouldBeGreaterThanOrEqualTo(500); // sanity floor: still responsive in fast apps
         TextInjector.ChunkCodeUnits.ShouldBeLessThanOrEqualTo(8);
     }
@@ -225,8 +287,8 @@ with:
 with:
 
 ```csharp
-        // Three 15 ms release-wait polls, then the single 13 ms inter-chunk pause.
-        sleeps.ShouldBe(new[] { 15, 15, 15, 13 });
+        // Three 15 ms release-wait polls, then the single 14 ms inter-chunk pause.
+        sleeps.ShouldBe(new[] { 15, 15, 15, 14 });
 ```
 
 - [ ] **Step 2: Run the class to verify the three tests fail**
@@ -240,9 +302,9 @@ dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform
   -notrait "Platform=Windows" -class Winpepper.Platform.Tests.Injection.TextInjectorGuardedTests
 ```
 
-Expected: FAIL — `Guarded_Paces_Between_Chunks_Only` (expects 13s, gets 5s),
-`DesignPoint_FeedRateCeiling_And_BleedBound` (1600 > 660 ceiling),
-`Guarded_PillClick_...ThenSendsAll` (expects trailing 13, gets 5).
+Expected: FAIL — `Guarded_Paces_Between_Chunks_Only` (expects 14s, gets 5s),
+`DesignPoint_FeedRateCeiling_And_BleedBound` (1600 > 600 target),
+`Guarded_PillClick_...ThenSendsAll` (expects trailing 14, gets 5).
 
 - [ ] **Step 3: Retune the production constants and XML docs**
 
@@ -272,7 +334,7 @@ doc+const) with:
     /// 2026-07-27 -- a deliberate, owner-approved supersession of the
     /// bleed-hardening plan's ">= 1600 nominal" feed-rate floor; chunk-size
     /// reduction attacked the wrong term). UX cost, quantified: a 458-char
-    /// paste takes ~0.75 s of send time instead of ~0.3 s; in slow-rendering
+    /// paste takes ~0.8 s of send time instead of ~0.3 s; in slow-rendering
     /// apps the perceived duration is unchanged (the app remains the
     /// bottleneck).
     /// </summary>
@@ -280,8 +342,12 @@ doc+const) with:
 
     /// <summary>
     /// Pause between guarded send chunks, derived from
-    /// <see cref="TargetFeedUnitsPerSecond"/>: 8 * 1000 / 600 = 13 ms,
-    /// i.e. ~615 code units/s nominal. Load-bearing (validation ledger, A1):
+    /// <see cref="TargetFeedUnitsPerSecond"/> by CEILING division:
+    /// ceil(8 * 1000 / 600) = 14 ms, i.e. ~571 code units/s nominal --
+    /// rounded UP so the nominal feed can never EXCEED the target
+    /// (truncating division gives 13 ms = ~615 units/s, above the claimed
+    /// render rate, and the backlog would grow again; stage-2 ledger A1).
+    /// Load-bearing (validation ledger, A1):
     /// SendInput is queue-insertion (~us per call), so an UNPACED loop
     /// finishes in single-digit milliseconds and the mid-paste guard could
     /// never observe a human focus change. The pace is real only through
@@ -292,7 +358,8 @@ doc+const) with:
     /// than accidental (its health is pinned by the 5 ms probe in
     /// InterChunkPacingWindowsTests).
     /// </summary>
-    internal const int InterChunkPauseMs = ChunkCodeUnits * 1000 / TargetFeedUnitsPerSecond;
+    internal const int InterChunkPauseMs =
+        (ChunkCodeUnits * 1000 + TargetFeedUnitsPerSecond - 1) / TargetFeedUnitsPerSecond; // ceiling: feed <= target
 ```
 
 - [ ] **Step 4: Retune the PacingWaiter doc comment**
@@ -313,9 +380,9 @@ In `src/Winpepper.Platform/Injection/PacingWaiter.cs`, replace the class-level
 /// per 5 ms wait WITHOUT raising the process timer resolution (no
 /// timeBeginPeriod; ledger B1/B3) -- so it is not exposed to the Win11
 /// occluded-window resolution revocation a raised-resolution Sleep would
-/// risk. At the current 13 ms production pause
+/// risk. At the current 14 ms production pause
 /// (TextInjector.InterChunkPauseMs, render-rate pacing) the Thread.Sleep
-/// fail-safe (~15.6 ms) overshoots by only ~20%, but the high-res timer
+/// fail-safe (~15.6 ms) overshoots by only ~11%, but the high-res timer
 /// keeps the pace deliberate, and the fixed 5 ms probe in
 /// InterChunkPacingWindowsTests still proves the fast path engages on the
 /// gate host. Fail-safe: if the timer cannot be created or set, falls back
@@ -349,13 +416,13 @@ namespace Winpepper.Platform.Tests.Injection;
 /// (ledger V1), so 10 ms cleanly separates the paths; a failure here means
 /// the timer path is broken: STOP and report, do not widen the threshold or
 /// swap in a spin-wait without explicit approval. The 5 ms probe is kept
-/// SEPARATE from the production pause on purpose: at 13 ms the high-res
+/// SEPARATE from the production pause on purpose: at 14 ms the high-res
 /// timer (~13.2 ms) and the Sleep fallback (~15.6 ms) are nearly
 /// indistinguishable on a noisy host, so a production-pace measurement has
 /// no discriminating power for timer health.
 /// (2) a production-pace check that proves the NEW render-rate floor: the
 /// inter-chunk wait really is at least InterChunkPauseMs, so the feed rate
-/// stays at or below ~615 code units/s and the bleed backlog cannot build
+/// stays at or below ~571 code units/s and the bleed backlog cannot build
 /// against slow-rendering (~600 chars/s) target apps.
 /// </summary>
 [Trait("Platform", "Windows")]
@@ -396,7 +463,7 @@ public sealed class InterChunkPacingWindowsTests
 
         var avgMs = sw.Elapsed.TotalMilliseconds / iterations;
         // THE new floor (paste-path-hardening): the pace must really be at
-        // least ~13 ms so the feed stays at or below ~615 code units/s and
+        // least ~14 ms so the feed stays at or below ~571 code units/s and
         // backlog cannot grow against slow-rendering apps. Half-millisecond
         // grace for timer coalescing on a noisy host.
         avgMs.ShouldBeGreaterThanOrEqualTo(TextInjector.InterChunkPauseMs - 0.5);
@@ -431,8 +498,9 @@ git commit -m "feat(injection): retune inter-chunk pacing to the ~600 units/s re
 
 Feed at 1600 units/s outran slow apps' ~600 chars/s render rate; the queued
 backlog followed focus on a mid-paste click-switch and sprayed dozens of
-chars. TargetFeedUnitsPerSecond=600 (13 ms pace, 8-unit chunks) makes backlog
-growth ~zero, collapsing worst-case bleed toward the in-flight chunk.
+chars. TargetFeedUnitsPerSecond=600 (14 ms ceiling-derived pace, 8-unit
+chunks; nominal 571 <= 600) makes backlog growth <= zero, collapsing
+worst-case bleed toward the in-flight chunk.
 Deliberate, owner-approved supersession of the bleed-hardening >=1600 floor;
 Windows sentinel retuned to prove the NEW floor (5 ms probe keeps timer-health
 discrimination)."
@@ -904,8 +972,15 @@ public sealed class ElevationProbeWindowsTests
 }
 ```
 
-These run only on the Windows gate (Task 7). Verify they at least COMPILE for
-the windows TFM now:
+These run on the Windows gate (Task 7) AND on GitHub CI: `ci.yml`'s windows
+job filters tests by NAME only (`FullyQualifiedName!~...`), so
+`Platform=Windows`-trait tests are NOT excluded there — and GitHub-hosted
+Windows runners execute **elevated** (administrators, UAC disabled). The two
+`Assert.SkipWhen(Environment.IsPrivilegedProcess, ...)` guards above are
+therefore LOAD-BEARING for CI green, not just gate-host hygiene (stage-2
+ledger A9): without them both elevation sentinels flip red post-merge. Do
+not remove or "simplify away" those guards. Verify the file at least
+COMPILES for the windows TFM now:
 
 ```bash
 dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Release -p:EnableWindowsTargeting=true
@@ -1192,7 +1267,7 @@ foreground/elevation."
   - `public void SessionViewModel.ShowPendingPasteStatus(PendingPasteReason reason)`
     — updates only the pill copy while a slot is held; no-op when nothing pending.
   - Status copy strings: `"Click to paste"` (unchanged default) and
-    `"Admin window - click a normal window, then click the pill"` (elevated).
+    `"Admin window - switch & click"` (elevated).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1215,7 +1290,7 @@ using if not present):
         vm.HasPendingPaste.ShouldBeTrue();
         vm.PendingPasteText.ShouldBe("blocked text");
         vm.Stage.ShouldBe(SessionStage.PendingPaste);
-        vm.StatusText.ShouldBe("Admin window - click a normal window, then click the pill");
+        vm.StatusText.ShouldBe("Admin window - switch & click");
     }
 
     [Fact]
@@ -1237,7 +1312,7 @@ using if not present):
         vm.EnterPendingPaste("retry me", T(1, "a"));
 
         vm.ShowPendingPasteStatus(PendingPasteReason.ElevatedTarget);
-        vm.StatusText.ShouldBe("Admin window - click a normal window, then click the pill");
+        vm.StatusText.ShouldBe("Admin window - switch & click");
         vm.Stage.ShouldBe(SessionStage.PendingPaste); // still clickable
         vm.HasPendingPaste.ShouldBeTrue();            // slot untouched
 
@@ -1251,7 +1326,7 @@ using if not present):
         var (vm, _) = NewVm();
         vm.ShowPendingPasteStatus(PendingPasteReason.ElevatedTarget);
 
-        vm.StatusText.ShouldNotBe("Admin window - click a normal window, then click the pill");
+        vm.StatusText.ShouldNotBe("Admin window - switch & click");
         vm.HasPendingPaste.ShouldBeFalse();
     }
 ```
@@ -1305,7 +1380,7 @@ fully qualified — match the file's existing style):
 
 ```csharp
     private const string PendingPasteStatus = "Click to paste";
-    private const string PendingPasteElevatedStatus = "Admin window - click a normal window, then click the pill";
+    private const string PendingPasteElevatedStatus = "Admin window - switch & click";
 
     private static string PendingStatusFor(PendingPasteReason reason)
         => reason == PendingPasteReason.ElevatedTarget ? PendingPasteElevatedStatus : PendingPasteStatus;
@@ -1570,8 +1645,8 @@ Use a generous timeout (~60 min; the gate itself budgets 40 min build +
 20 min per run). Expected: `GATE: GREEN` and exit 0. This proves, on the real
 host: the App builds with the new `PipelineHost` branches; the retuned
 pacing sentinels (`InterChunkPacingWindowsTests`) pass — the 5 ms probe shows
-the high-res timer engages AND the 13 ms production pace really waits ≥
-12.5 ms avg; and the elevation-probe sentinels (`ElevationProbeWindowsTests`)
+the high-res timer engages AND the 14 ms production pace really waits ≥
+13.5 ms avg; and the elevation-probe sentinels (`ElevationProbeWindowsTests`)
 pass — own process `NotElevated`, winlogon denial maps to `Elevated`, cost
 < 5 ms/call.
 
@@ -1602,12 +1677,12 @@ the two incidents that motivated this work:
    (e.g. switch windows mid-paste), focus an ELEVATED terminal, click the
    pill. Expect: nothing typed, log line
    `Pending paste blocked: foreground window is elevated; slot kept with full text`,
-   pill shows `Admin window - click a normal window, then click the pill`,
+   pill shows `Admin window - switch & click`,
    and the pill remains clickable. Then focus a normal window (e.g. Notepad),
-   click the pill: the FULL text pastes and the pill hides. Verify the longer
-   admin copy renders acceptably in the pill (it is rendered verbatim; if it
-   overflows, shortening the copy string in `SessionViewModel` +
-   `SessionViewModelPendingTests` is a 2-line follow-up).
+   click the pill: the FULL text pastes and the pill hides. The copy was
+   pre-sized to the pill's measured text budget (~32 chars at FontSize 13 in
+   the fixed 300-DIP pill; stage-2 ledger A8 falsified the original 57-char
+   copy at ~57% elision) — confirm it renders fully, no ellipsis.
 2. **Elevated hold/toggle arm:** focus an elevated terminal, dictate via the
    hotkey. Expect: no characters land, pill shows the admin copy, full text
    parks; click a normal window then the pill — full text lands.
@@ -1616,7 +1691,7 @@ the two incidents that motivated this work:
    new window receives at most ~8 stray characters (one in-flight chunk),
    not dozens; the pill parks the full text. Perceived total duration in the
    slow app should be unchanged versus before (the app was already the
-   bottleneck); in a fast app (Notepad) the 458-char paste now takes ~0.75 s
+   bottleneck); in a fast app (Notepad) the 458-char paste now takes ~0.8 s
    instead of ~0.3 s — expected, accepted cost.
 4. Reminder from the predecessor plan: smoke items exercising the MOUSE halt
    must use non-elevated targets (`GetAsyncKeyState` is blanked for elevated

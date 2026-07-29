@@ -102,6 +102,38 @@ public sealed class HotkeyHook : IDisposable
         var modifiersBeforeEvent = _modifiers;
         var bindings = Volatile.Read(ref _bindings);
 
+        // Injected fast-path (standard WH_KEYBOARD_LL practice, 2026-07-28):
+        // synthetic events (LLKHF_INJECTED / LLKHF_LOWER_IL_INJECTED --
+        // SendInput from ANY process, including our own TextInjector and
+        // NeutralizeHeldModifiers) never participate in chord matching or
+        // key-state tracking; they pass straight through. This (a) removes
+        // the hook's per-event tax (~0.2 ms/event measured on the production
+        // host) from every injected keystroke system-wide, and (b) fixes a
+        // latent wedge: our own neutralization KEYUP for a physically-held
+        // Win key used to clear _modifiers and end a Win-containing hold
+        // chord spuriously. The chord recorder still receives injected
+        // transitions (it filters them itself via RawKeyTransition.IsInjected),
+        // so recording-mode behavior is contract-identical. _captureKeysDown
+        // intentionally no longer tracks injected downs -- such entries were
+        // self-healed anyway (GetAsyncKeyState reads them as up).
+        if (isInjected)
+        {
+            var rawCaptureForInjected = Volatile.Read(ref _rawCapture);
+            if (rawCaptureForInjected is not null)
+            {
+                try
+                {
+                    rawCaptureForInjected.Sink(
+                        new RawKeyTransition(vk, scanCode, down, IsInjected: true, IsRepeat: false));
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Raw hotkey capture callback failed");
+                }
+            }
+            return false; // never swallow synthetic input
+        }
+
         // Low-level hook callbacks observe async key state before the current
         // transition is applied. A false Space state therefore proves any
         // previously owned press ended, while a repeat/up still reads down.
@@ -140,13 +172,10 @@ public sealed class HotkeyHook : IDisposable
             }
 
             _observedCancelKeys.Remove(vk);
-            if (!isInjected)
-            {
-                if (down && _passedThroughKeys.ContainsKey(vk))
-                    _passedThroughKeys[vk] = now;
-                else if (!down)
-                    _passedThroughKeys.Remove(vk);
-            }
+            if (down && _passedThroughKeys.ContainsKey(vk))
+                _passedThroughKeys[vk] = now;
+            else if (!down)
+                _passedThroughKeys.Remove(vk);
             var swallowWhileCaptured = !down && _swallowedKeys.Remove(vk);
             if (!down && _holding && HoldEndedOnKeyUp(bindings.Hold, vk))
             {
@@ -171,12 +200,12 @@ public sealed class HotkeyHook : IDisposable
             if (down)
             {
                 _captureKeysDown[vk] = now;
-                if (!isInjected && _passedThroughKeys.ContainsKey(vk))
+                if (_passedThroughKeys.ContainsKey(vk))
                     _passedThroughKeys[vk] = now;
                 return false;
             }
             _captureKeysDown.Remove(vk);
-            if (!isInjected) _passedThroughKeys.Remove(vk);
+            _passedThroughKeys.Remove(vk);
             _observedCancelKeys.Remove(vk);
 
             // Finish any chord that was already active when capture began, but
@@ -197,7 +226,6 @@ public sealed class HotkeyHook : IDisposable
         // and this is a fresh press.
         if (_passedThroughKeys.TryGetValue(vk, out var passedSince))
         {
-            if (isInjected) return false;
             if (down && IsKeyEntryLive(vk, passedSince, now))
             {
                 _passedThroughKeys[vk] = now;
@@ -235,7 +263,7 @@ public sealed class HotkeyHook : IDisposable
                 _holding = false;
                 evt = new HotkeyEvent(HotkeyEventKind.HoldUp, DateTimeOffset.UtcNow);
             }
-            if (down && !isInjected) _passedThroughKeys[vk] = now;
+            if (down) _passedThroughKeys[vk] = now;
             return swallowOwnedUp;
         }
 

@@ -1757,3 +1757,39 @@ whoever pushes next.
    Tasks 5 and 6; `TargetFeedUnitsPerSecond`/`InterChunkPauseMs` names match
    between Task 1 production code and both test files. Status copy string is
    byte-identical in Task 5 impl, Task 5 tests, and Task 7 smoke item.
+
+---
+
+## Post-ship evidence: render-rate measurement (2026-07-28, council fast-follow #2)
+
+The `TargetFeedUnitsPerSecond = 600` design point was set from a user
+eyeball estimate (~300 chars visibly unfolding in ~0.5 s in their daily
+app). The council flagged this as unmeasured. Measured on the real host
+(Winpepper 0.7.0.90 running, its keyboard hook active), by injecting 600
+chars unpaced into sacrificial windows and polling WM_GETTEXTLENGTH at
+5 ms until complete:
+
+| Target | Measured consumption |
+|---|---|
+| WinForms TextBox (fast path) | ~633 chars/s |
+| WinForms RichTextBox | ~1,163 chars/s |
+| WinForms TextBox + 1 ms/keystroke handler | ~63 chars/s (synthetic; Start-Sleep quantum inflates 1 ms to ~15.6 ms — not representative of real apps) |
+| Win11 Notepad | unmeasurable (RichEditD2DPT does not answer WM_GETTEXT-family reads; text landed but could not be polled) |
+
+Conclusions:
+1. **Constant kept at 600.** No measurable REAL target consumed slower
+   than the 571 units/s nominal feed; the two real controls measured at
+   633 and 1,163 chars/s, and the user's real-app estimate (~600) sits
+   right at the design point. Backlog growth is zero-or-negative against
+   everything measured.
+2. Pathologically slow targets (the synthetic 63 chars/s case) exist in
+   principle; for those the mid-paste guards (focus/modifier/mouse/hwnd-0
+   halt) and the HwndZeroMeter field data are the mitigation, not pacing.
+3. **Unconfirmed observation worth a future look:** a single unpaced
+   600-char SendInput batch took ~0.5-1.0 s to RETURN with Winpepper's
+   low-level keyboard hook running (queue-insertion is normally ~us).
+   If the hook adds ~0.5 ms per injected event, Winpepper's own paced
+   sends are effectively slower than nominal (extra safety margin against
+   bleed, slight extra latency). Not acted on; measure before believing.
+
+Probe scripts: /tmp/render-probe/{target,probe}.ps1 (WSL side, session-local).

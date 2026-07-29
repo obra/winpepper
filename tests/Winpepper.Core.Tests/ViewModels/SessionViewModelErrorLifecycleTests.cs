@@ -192,6 +192,39 @@ public class SessionViewModelErrorLifecycleTests
     }
 
     [Fact]
+    public void NotifyError_While_Pending_Still_Takes_The_Pill_Then_Restores_The_Pending_Pill()
+    {
+        // Since parks survive dictations (council 2026-07-28), NotifyError's
+        // old HasPending guard silently dropped the failure of any dictation
+        // started over a held park: pill flipped Recording -> straight back to
+        // "Click to paste" with no error and no toast (Unknown never toasts).
+        // Mirrors the real call site: PipelineHost applies SessionEvent.Failed
+        // FIRST (engine back at Idle, pending pill restored), THEN NotifyError.
+        //
+        // DISCRIMINATING: this is the only test that catches a fix which
+        // presents the error but strands the pill - ReleasePillIfUnchanged's
+        // old HasPending early-return would leave Stage=Error forever (the
+        // 2026-07-24 squatting-pill class); the restore below proves the
+        // resync's pending-aware idle arm hands the pill back to the park.
+        var (vm, engine, _, delays) = NewVm();
+        vm.EnterPendingPaste("saved text", new Winpepper.Core.Pending.InjectionTarget { WindowHandle = 1, ElementId = "a" });
+        StartDictation(engine);
+        engine.Apply(SessionEvent.Failed); // engine -> Idle; pending pill restored
+
+        vm.NotifyError("pipeline blew up");
+
+        vm.Stage.ShouldBe(SessionStage.Error);          // presented, not swallowed
+        vm.StatusText.ShouldBe("Error: pipeline blew up");
+
+        delays.FireAll();
+
+        vm.Stage.ShouldBe(SessionStage.PendingPaste);   // park gets its pill back
+        vm.StatusText.ShouldBe("Click to paste");
+        vm.HasPendingPaste.ShouldBeTrue();
+        vm.PendingPasteText.ShouldBe("saved text");     // the park itself is untouched
+    }
+
+    [Fact]
     public void ConditionError_Still_Surfaces_While_Idle()
     {
         var (vm, _, bus, _) = NewVm();

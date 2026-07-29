@@ -133,9 +133,15 @@ Consequences accepted and documented:
 - **A park can now only be cleared by pasting it** (or app exit; cancel
   already preserved it). No silent-drop path remains, which is the point.
 - **Transient EVENT errors are recorded but not pill-flashed while a park is
-  held** (existing `if (_pending.HasPending) return;` guard in the VM's error
-  presentation — unchanged): the clickable park affordance outranks a
-  6-second error flash. Pre-existing behavior, now merely longer-lived.
+  held AT IDLE** (the VM's `HasPending` presentation guards, now scoped): the
+  clickable park affordance outranks a 6-second error flash while the user is
+  in the pill-click retry loop. CORRECTION (fresh-eyes delta review,
+  2026-07-28): the original claim here — "pre-existing behavior, now merely
+  longer-lived" — was wrong. Retention made the unconditional guards NEWLY
+  reachable mid-dictation, silently dropping the failure of any dictation
+  started over a held park. Fixed: `OnBusReport`'s guard is idle-scoped,
+  `NotifyError`'s guard is removed, and the error self-clear resync restores
+  the PENDING pill (reason-correct copy) instead of stranding `Stage=Error`.
 - **Merged pastes take proportionally longer, accepted** (load-bearing
   ledger A16, 2026-07-28): paste duration scales linearly at ~1.75 ms/char
   (`ChunkCodeUnits=8`, `TargetFeedUnitsPerSecond=600` ⇒ 14 ms inter-chunk

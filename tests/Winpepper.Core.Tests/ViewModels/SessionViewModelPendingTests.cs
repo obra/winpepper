@@ -150,6 +150,29 @@ public class SessionViewModelPendingTests
     }
 
     [Fact]
+    public void ErrorReport_MidDictation_WhilePending_StillTakesThePill()
+    {
+        // Since parks survive dictations (council 2026-07-28), the HasPending
+        // guard in OnBusReport became reachable MID-DICTATION -- and, written
+        // unconditionally, it silently dropped the failure of any dictation
+        // started over a held park (no pill error; Unknown never toasts).
+        // The guard is now scoped to idle: in flight, the error must present.
+        // Contrast ErrorReport_WhilePending_KeepsPendingClickable (engine
+        // Idle), which pins the guard's surviving click-to-paste rationale.
+        var (vm, engine) = NewVm();
+        var bus = new ErrorBus();
+        vm.AttachErrorBus(bus);
+        vm.EnterPendingPaste("saved text", T(1, "a"));
+        engine.Apply(SessionEvent.StartRequested); // Recording: in flight
+
+        bus.Report(ErrorStage.Unknown, new InvalidOperationException("pipeline blew up"), Guid.NewGuid());
+
+        vm.Stage.ShouldBe(SessionStage.Error);      // presented, not swallowed
+        vm.HasPendingPaste.ShouldBeTrue();          // the park itself is untouched
+        vm.PendingPasteText.ShouldBe("saved text");
+    }
+
+    [Fact]
     public void NotifyPasteAttempted_Success_ClearsPendingAndReturnsIdle()
     {
         var (vm, _) = NewVm();

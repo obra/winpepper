@@ -43,6 +43,8 @@ public sealed partial class ModelsPage : Page
             promoteCleanup: name =>
             {
                 var shell = App.Shell!;
+                shell.CleanupModelSelection.Publish(name); // effective immediately (next dictation)
+                shell.CleanupBackend.RequestPrewarm();     // background load so the next dictation doesn't pay it
                 _ = shell.SettingsWriter.QueueAndFlushAsync(s2 => s2 with { CleanupModelName = name }); // durability
             },
             // The progress bridge requires an observable enqueue result: if

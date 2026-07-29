@@ -21,6 +21,7 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
     private readonly uint? _samplingSeed;
     private readonly string _promptFormat;
+    private bool _disposed;
 
     /// <param name="samplingSeed">Optional fixed sampling seed. Null (production)
     /// keeps LLamaSharp's default random seed; the prompt eval suite pins it for
@@ -128,8 +129,20 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
         }
     }
 
+    /// <summary>
+    /// Disposal contract: NOT gated against a concurrent
+    /// <see cref="GenerateAsync"/> — the caller must guarantee quiescence.
+    /// In production the only owner is <see cref="CleanupBackendHolder"/>,
+    /// which disposes (a) a replaced live backend at the serialized
+    /// per-dictation seam (PipelineHost's run loop awaits RunAsync inline, so
+    /// no generation is in flight there) and (b) pre-warmed backends that were
+    /// never handed out (no callers by construction). Idempotent: safe to call
+    /// twice.
+    /// </summary>
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
         _weights.Dispose();
         _gate.Dispose();
     }

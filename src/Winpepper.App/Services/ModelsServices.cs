@@ -97,6 +97,32 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
         return ready;
     }
 
+    private string? _verifiedCleanupModelName; // last canonical cleanup name that passed descriptor-level verification
+
+    /// <summary>
+    /// Cleanup analog of <see cref="VerifyAsrModelReady"/>: descriptor-level
+    /// verified readiness (per-file size + SHA-256) for the CANONICAL cleanup
+    /// model name. The positive result is cached per selection change; a
+    /// negative result is never cached (missing files short-circuit cheaply,
+    /// and the next attempt should pick up a completed download). Deliberately
+    /// does NOT route through ModelProvisioningCoordinator.VerifyReadyAsync:
+    /// that would churn the coordinator's single global state, which feeds the
+    /// ASR startup gate, onboarding, and the Models page. Called only from the
+    /// cleanup pre-warm background thread — never from the UI thread or the
+    /// dictation seam — so a cold multi-second SHA-256 here is safe.
+    /// </summary>
+    public bool VerifyCleanupModelReady(string canonicalName)
+    {
+        if (string.Equals(_verifiedCleanupModelName, canonicalName, StringComparison.Ordinal))
+            return true;
+
+        var descriptor = Registry.ResolveOrDefault(canonicalName, ModelKind.Cleanup);
+        var ready = ModelFilesVerifier.VerifyAsync(descriptor, ModelsRoot, CancellationToken.None)
+                                      .GetAwaiter().GetResult();
+        if (ready) _verifiedCleanupModelName = canonicalName;
+        return ready;
+    }
+
     private void OnCoordinatorStateChanged(object? sender, ModelProvisioningState state)
     {
         _state = MapState(state);

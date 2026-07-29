@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
@@ -46,7 +47,7 @@ public sealed record StreamingFinishStats(
 /// </summary>
 public sealed class StreamingDictationSession : IAsyncDisposable
 {
-    private readonly Channel<float[]> _frames = Channel.CreateUnbounded<float[]>(
+    private readonly Channel<PooledFrame> _frames = Channel.CreateUnbounded<PooledFrame>(
         new UnboundedChannelOptions { SingleReader = true });
     private readonly Task _pump;
     private readonly ILogger _log;
@@ -77,6 +78,18 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     private volatile bool _sessionStarted;   // written by the pump, read by FinishAsync
     private volatile bool _anyPushCompleted; // written by the pump, read by FinishAsync
 
+    /// <summary>A rented buffer + its real length (ArrayPool rounds up).
+    /// Ownership: OnFrame rents; whichever dequeue site consumes it returns it.
+    /// Frames never dequeued (channel dropped with the object) are simply
+    /// collected — ArrayPool does not require returns for correctness.</summary>
+    private readonly struct PooledFrame
+    {
+        public PooledFrame(float[] buffer, int length) { Buffer = buffer; Length = length; }
+        public float[] Buffer { get; }
+        public int Length { get; }
+        public ReadOnlyMemory<float> Memory => Buffer.AsMemory(0, Length);
+    }
+
     private StreamingDictationSession(
         Func<CancellationToken, Task<IStreamingTranscriber?>> transcriberFactory,
         ILogger log,
@@ -97,6 +110,7 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                     {
                         Interlocked.Decrement(ref _queuedFrames);
                         Interlocked.Add(ref _queuedSamples, -dropped.Length);
+                        ArrayPool<float>.Shared.Return(dropped.Buffer);
                     }
                     return;
                 }
@@ -113,7 +127,17 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                 {
                     Interlocked.Decrement(ref _queuedFrames);
                     Interlocked.Add(ref _queuedSamples, -frame.Length);
-                    await session.PushAsync(frame, ct);
+                    try
+                    {
+                        await session.PushAsync(frame.Memory, ct);
+                    }
+                    finally
+                    {
+                        // Safe: every PushAsync implementation consumes the
+                        // samples before its ValueTask completes (contract on
+                        // IStreamingTranscriptionSession.PushAsync).
+                        ArrayPool<float>.Shared.Return(frame.Buffer);
+                    }
                     _anyPushCompleted = true; // keys FinishAsync's drain-deadline choice
                 }
             }
@@ -135,6 +159,7 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                 {
                     Interlocked.Decrement(ref _queuedFrames);
                     Interlocked.Add(ref _queuedSamples, -leftover.Length);
+                    ArrayPool<float>.Shared.Return(leftover.Buffer);
                 }
             }
         }, CancellationToken.None);
@@ -147,15 +172,23 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         TimeSpan? drainDeadline = null)
         => new(transcriberFactory, log, ct, drainDeadline);
 
-    /// <summary>Called from the recorder's FramesAvailable event. Copies the frame
-    /// (the recorder may reuse its buffer) and never blocks the capture thread.</summary>
+    /// <summary>Called from the recorder's FramesAvailable event. Copies the
+    /// frame into a POOLED buffer (defensive copy kept — the recorder contract
+    /// allows buffer reuse — but without the per-frame float[] churn that
+    /// feeds GC-pause suspicion: ~20 x 800-float allocations/s previously).
+    /// Never blocks the capture thread.</summary>
     public void OnFrame(ReadOnlyMemory<float> frame)
     {
-        var copy = frame.ToArray();
-        if (_frames.Writer.TryWrite(copy)) // TryWrite is false after completion — silent drop
+        var buffer = ArrayPool<float>.Shared.Rent(frame.Length);
+        frame.Span.CopyTo(buffer);
+        if (_frames.Writer.TryWrite(new PooledFrame(buffer, frame.Length)))
         {
             Interlocked.Increment(ref _queuedFrames);
-            Interlocked.Add(ref _queuedSamples, copy.Length);
+            Interlocked.Add(ref _queuedSamples, frame.Length);
+        }
+        else
+        {
+            ArrayPool<float>.Shared.Return(buffer); // TryWrite false after completion — silent drop
         }
     }
 

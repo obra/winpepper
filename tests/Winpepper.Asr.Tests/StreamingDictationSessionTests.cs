@@ -69,6 +69,25 @@ public class StreamingDictationSessionTests
     }
 
     [Fact]
+    public async Task OnFrame_PooledCopy_PreservesExactLengthAndContent()
+    {
+        var transcriber = new RecordingStreamingTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken);
+        var frame = new float[800];
+        for (var i = 0; i < frame.Length; i++) frame[i] = i;
+        session.OnFrame(frame);
+        session.OnFrame(new float[] { 1f, 2f, 3f }); // pool rounds the rented array up
+
+        await session.FinishAsync(new float[1], TestContext.Current.CancellationToken);
+
+        transcriber.Session.Pushed[0].Length.ShouldBe(800); // NOT the pool bucket size
+        transcriber.Session.Pushed[0][799].ShouldBe(799f);
+        transcriber.Session.Pushed[1].ShouldBe(new[] { 1f, 2f, 3f });
+    }
+
+    [Fact]
     public async Task NullFactory_FinishReturnsNull()
     {
         var session = StreamingDictationSession.Start(

@@ -533,10 +533,10 @@ public sealed class PipelineHost : IDisposable
                 };
                 timing.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
 
-                var drainSw = System.Diagnostics.Stopwatch.StartNew();
+                var micStopSw = System.Diagnostics.Stopwatch.StartNew();
                 var samples = _warmRecorder!.StopSession();
-                drainSw.Stop();
-                timing.DrainMs = (int)drainSw.ElapsedMilliseconds;
+                micStopSw.Stop();
+                timing.MicStopMs = (int)micStopSw.ElapsedMilliseconds;
                 WarnIfSessionSilent(samples, _currentSessionId);
                 _sounds.PlayStop();
 
@@ -1027,10 +1027,10 @@ public sealed class PipelineHost : IDisposable
                     };
                     timing2.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
 
-                    var drainSw2 = System.Diagnostics.Stopwatch.StartNew();
+                    var micStopSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var samples2 = _warmRecorder!.StopSession();
-                    drainSw2.Stop();
-                    timing2.DrainMs = (int)drainSw2.ElapsedMilliseconds;
+                    micStopSw2.Stop();
+                    timing2.MicStopMs = (int)micStopSw2.ElapsedMilliseconds;
                     WarnIfSessionSilent(samples2, _currentSessionId);
                     _sounds.PlayStop();
 

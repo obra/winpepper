@@ -13,7 +13,7 @@ public class DictationTimingSummaryTests
         Kind = "hold",
         Outcome = "completed",
         RecordMs = 3512,
-        DrainMs = 42,
+        MicStopMs = 42,
         TrimMs = 8,
         TrimRemovedMs = 1200,
         AsrMs = 812,
@@ -38,7 +38,7 @@ public class DictationTimingSummaryTests
 
         line.ShouldBe(
             "session=11111111-2222-3333-4444-555555555555 kind=hold outcome=completed"
-            + " rec=3512ms drain=42ms trim=8ms trim_removed=1200ms"
+            + " rec=3512ms mic_stop=42ms trim=8ms trim_removed=1200ms"
             + " asr=812ms asr_mode=streaming asr_model=nemotron-streaming-en"
             + " corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b"
             + " inject=850ms inject_chars=458 inject_chunks=58/58 inject_pace=798ms"
@@ -55,7 +55,7 @@ public class DictationTimingSummaryTests
             Kind = "toggle",
             Outcome = "silent",
             RecordMs = 8950,
-            DrainMs = 30,
+            MicStopMs = 30,
             TrimMs = 12,
             TotalMs = 60,
         };
@@ -88,7 +88,7 @@ public class DictationTimingSummaryTests
     public void Overruns_AtBudget_IsEmpty()
     {
         var s = Full();
-        s.DrainMs = DictationTimingSummary.DrainBudgetMs;      // 500, not over
+        s.MicStopMs = DictationTimingSummary.MicStopBudgetMs;   // 500, not over
         s.TrimMs = DictationTimingSummary.TrimBudgetMs;        // 200
         s.AsrMs = DictationTimingSummary.AsrStreamingBudgetMs; // 2000 (Full() is streaming)
         s.CorrectionsMs = DictationTimingSummary.CorrectionsBudgetMs;

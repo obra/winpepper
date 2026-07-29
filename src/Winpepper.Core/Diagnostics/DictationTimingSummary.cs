@@ -24,7 +24,7 @@ public sealed class DictationTimingSummary
     // are PROVISIONAL -- re-derive from the first weeks of `dictation
     // timing` lines. The cleanup live-swap merged AFTER the cleanup
     // measurement window, so recheck that distribution in week one too.
-    public const int DrainBudgetMs = 500;         // provisional: buffer copy + tee teardown
+    public const int MicStopBudgetMs = 500;       // provisional: mic buffer copy + tee teardown (WarmRecorder.StopSession)
     public const int TrimBudgetMs = 200;          // provisional: pure math over <=60 s of floats
     public const int AsrStreamingBudgetMs = 2000; // measured: streaming p90 <= 464 ms on measured days
                                                   // (day variance is real: 07-26 p90 = 1640 ms, still under)
@@ -43,7 +43,7 @@ public sealed class DictationTimingSummary
     public string Outcome { get; set; } = "completed";  // completed|pending|silent|failed|empty
 
     public int? RecordMs { get; set; }
-    public int? DrainMs { get; set; }
+    public int? MicStopMs { get; set; }
     public int? TrimMs { get; set; }
     public int? TrimRemovedMs { get; set; }
     public int? AsrMs { get; set; }
@@ -67,7 +67,7 @@ public sealed class DictationTimingSummary
         sb.Append(" kind=").Append(Kind);
         sb.Append(" outcome=").Append(Outcome);
         AppendCoreMs(sb, "rec", RecordMs);
-        AppendCoreMs(sb, "drain", DrainMs);
+        AppendCoreMs(sb, "mic_stop", MicStopMs);
         AppendCoreMs(sb, "trim", TrimMs);
         AppendOptMs(sb, "trim_removed", TrimRemovedMs);
         AppendCoreMs(sb, "asr", AsrMs);
@@ -89,7 +89,7 @@ public sealed class DictationTimingSummary
     public IReadOnlyList<StageOverrun> Overruns()
     {
         var list = new List<StageOverrun>(2);
-        Check(list, "drain", DrainMs, DrainBudgetMs);
+        Check(list, "mic_stop", MicStopMs, MicStopBudgetMs);
         Check(list, "trim", TrimMs, TrimBudgetMs);
         // Per-mode asr budget (the WRN's budget figure also reveals the
         // mode). ONLY an explicit "streaming" gets the tight budget; batch,

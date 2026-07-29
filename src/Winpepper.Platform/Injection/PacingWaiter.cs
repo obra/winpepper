@@ -11,12 +11,16 @@ namespace Winpepper.Platform.Injection;
 /// per 5 ms wait WITHOUT raising the process timer resolution (no
 /// timeBeginPeriod; ledger B1/B3) -- so it is not exposed to the Win11
 /// occluded-window resolution revocation a raised-resolution Sleep would
-/// risk. At the current 14 ms production pause
-/// (TextInjector.InterChunkPauseMs, render-rate pacing) the Thread.Sleep
-/// fail-safe (~15.6 ms) overshoots by only ~11%, but the high-res timer
-/// keeps the pace deliberate, and the fixed 5 ms probe in
+/// risk. Under deadline pacing (DeadlinePacer, 2026-07-28) production waits
+/// are the REMAINDER of the per-chunk period (typically ~0-9 ms on the
+/// measured host, where the send itself costs ~14-18 ms/chunk); the
+/// high-res timer keeps the pace deliberate (its documented error mode is
+/// expiration DELAY), and the fixed 5 ms probe in
 /// InterChunkPacingWindowsTests still proves the fast path engages on the
-/// gate host. Fail-safe: if the timer cannot be created or set, falls back
+/// gate host -- which matters because the Thread.Sleep fail-safe is NOT
+/// never-early for sub-resolution waits (documented "may sleep less" below
+/// the ~15.6 ms clock tick; stage-2 ledger A1) and must never be the
+/// production regime. Fail-safe: if the timer cannot be created or set, falls back
 /// to Thread.Sleep -- pacing gets coarser (feed slower) but nothing breaks.
 /// </summary>
 internal static class PacingWaiter

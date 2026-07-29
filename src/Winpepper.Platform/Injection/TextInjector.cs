@@ -35,41 +35,61 @@ public sealed class TextInjector
     internal const int ChunkCodeUnits = 8;
 
     /// <summary>
-    /// Target feed rate for the guarded send, in UTF-16 code units per
+    /// CEILING on the guarded send's feed rate, in UTF-16 code units per
     /// second. Chosen to match the observed render rate of slow-rendering
     /// target apps (~600 chars/s): when feed &lt;= render, the
     /// queued-but-undelivered BACKLOG cannot grow, so a mid-paste window
     /// switch can leak at most the true in-flight chunk
-    /// (&lt;= <see cref="ChunkCodeUnits"/>) into the newly focused window.
-    /// The previous 1600 units/s design point fed slow apps ~2.5x faster
-    /// than they rendered; the growing backlog followed focus on a human
-    /// click-switch and sprayed dozens of characters (paste-path-hardening,
-    /// 2026-07-27 -- a deliberate, owner-approved supersession of the
-    /// bleed-hardening plan's ">= 1600 nominal" feed-rate floor; chunk-size
-    /// reduction attacked the wrong term). UX cost, quantified: a 458-char
-    /// paste takes ~0.8 s of send time instead of ~0.3 s; in slow-rendering
-    /// apps the perceived duration is unchanged (the app remains the
-    /// bottleneck).
+    /// (&lt;= <see cref="ChunkCodeUnits"/>). The previous 1600 units/s
+    /// design point fed slow apps ~2.5x faster than they rendered; the
+    /// growing backlog followed focus on a human click-switch and sprayed
+    /// dozens of characters (paste-path-hardening, 2026-07-27 -- a
+    /// deliberate, owner-approved supersession of the bleed-hardening
+    /// plan's "&gt;= 1600 nominal" feed-rate floor).
+    /// Semantics under deadline pacing (2026-07-28): this remains a
+    /// bleed-safety CEILING the feed may approach but never exceed. The
+    /// pacer subtracts the MEASURED send time from each pause (see
+    /// <see cref="DeadlinePacer"/>), so the actual feed sits near the 571
+    /// units/s nominal instead of the ~250-285 units/s the old full-pause
+    /// design delivered on this host, where the SendInput call itself costs
+    /// ~1 ms/event (measured 2026-07-28; a 458-char paste took ~1.6 s
+    /// against the ~0.8 s design point).
     /// </summary>
     internal const int TargetFeedUnitsPerSecond = 600;
 
     /// <summary>
-    /// Pause between guarded send chunks, derived from
-    /// <see cref="TargetFeedUnitsPerSecond"/> by CEILING division:
-    /// ceil(8 * 1000 / 600) = 14 ms, i.e. ~571 code units/s nominal --
-    /// rounded UP so the nominal feed can never EXCEED the target
-    /// (truncating division gives 13 ms = ~615 units/s, above the claimed
-    /// render rate, and the backlog would grow again; stage-2 ledger A1).
-    /// Load-bearing (validation ledger, A1):
-    /// SendInput is queue-insertion (~us per call), so an UNPACED loop
-    /// finishes in single-digit milliseconds and the mid-paste guard could
-    /// never observe a human focus change. The pace is real only through
-    /// PacingWaiter (the production sleep default): Thread.Sleep quantizes
-    /// to the legacy ~15.6 ms timer resolution (bleed-hardening ledger, V1),
-    /// which would slow the feed to ~513 units/s -- tolerable at this design
-    /// point, but the high-resolution timer keeps the pace deliberate rather
-    /// than accidental (its health is pinned by the 5 ms probe in
-    /// InterChunkPacingWindowsTests).
+    /// Minimum per-chunk PERIOD (send + sleep) for the guarded send,
+    /// derived from <see cref="TargetFeedUnitsPerSecond"/> by CEILING
+    /// division: ceil(8 * 1000 / 600) = 14 ms, i.e. ~571 code units/s
+    /// nominal -- rounded UP so the nominal feed can never EXCEED the
+    /// target (truncating division gives 13 ms = ~615 units/s, above the
+    /// claimed render rate, and the backlog would grow again; stage-2
+    /// ledger A1). Load-bearing measurement (2026-07-28, live probes on the
+    /// production host): SendInput with KEYEVENTF_UNICODE events is NOT
+    /// queue-insertion cheap here -- it costs ~0.85-1.13 ms PER EVENT
+    /// (linear in events, so ~14-18 ms per 16-event chunk; other low-level
+    /// hooks in the environment dominate; Winpepper's own hook adds only
+    /// ~0.2 ms/event). An old production log once recorded ~13 us/event, so
+    /// the original "queue-insertion (~us per call)" ledger assumption (A1)
+    /// is stale for this machine -- which is why pacing is DEADLINE-based:
+    /// each chunk sleeps only max(0, ceil(period - measured elapsed)) via
+    /// <see cref="DeadlinePacer"/>, where period is scaled per chunk
+    /// (<see cref="PeriodMsForChunk"/>: 14 ms for 8-unit chunks, 16 ms for
+    /// the 9-unit surrogate-straddle chunks the chunker emits rather than
+    /// split a pair -- a fixed 14 ms would let those feed ~643 units/s;
+    /// stage-2 ledger A7). The ceiling rounding means the period cannot
+    /// undershoot its floor, and a send that alone exceeds the period
+    /// sleeps zero -- SendInput itself then throttles the feed below the
+    /// ceiling. The pace stays real through PacingWaiter (the production
+    /// sleep default): Win32 frames waitable-timer inaccuracy as expiration
+    /// DELAYS, and the periods carry 0.67-1 ms of margin over what the 600
+    /// ceiling strictly needs, absorbing sub-ms jitter (stage-2 ledger A1).
+    /// The Thread.Sleep fail-safe is NOT never-early (documented to
+    /// possibly sleep LESS than requested below the ~15.6 ms clock
+    /// resolution); a broken timer path is caught by the gate's 5 ms probe
+    /// -- STOP and report, never a production regime.
+    /// The per-chunk PERIOD floor is pinned on the gate host by
+    /// InterChunkPacingWindowsTests.
     /// </summary>
     internal const int InterChunkPauseMs =
         (ChunkCodeUnits * 1000 + TargetFeedUnitsPerSecond - 1) / TargetFeedUnitsPerSecond; // ceiling: feed <= target
@@ -80,6 +100,7 @@ public sealed class TextInjector
     private readonly Func<string, bool> _sendChunk;
     private readonly Action<int> _sleep;
     private readonly Func<long, ForegroundElevation> _foregroundElevation;
+    private readonly Func<double> _monotonicMs;
 
     /// <summary>
     /// hwnd==0 occurrence counts (at-start vs mid-stream), for field
@@ -93,7 +114,8 @@ public sealed class TextInjector
         Func<long>? foregroundHwnd = null,
         Func<string, bool>? sendChunk = null,
         Action<int>? sleep = null,
-        Func<long, ForegroundElevation>? foregroundElevation = null)
+        Func<long, ForegroundElevation>? foregroundElevation = null,
+        Func<double>? monotonicMs = null)
     {
         _log = log;
         _isKeyDown = isKeyDown ?? DefaultKeyProbe;
@@ -101,6 +123,7 @@ public sealed class TextInjector
         _sendChunk = sendChunk ?? SendChunkViaSendInput;
         _sleep = sleep ?? PacingWaiter.Wait;
         _foregroundElevation = foregroundElevation ?? ElevationProbe.Probe;
+        _monotonicMs = monotonicMs ?? DefaultMonotonicMs;
     }
 
     private static bool DefaultKeyProbe(int vk)
@@ -121,12 +144,30 @@ public sealed class TextInjector
         catch { return 0; }
     }
 
+    /// <summary>Monotonic milliseconds (Stopwatch-based; immune to wall-clock changes).</summary>
+    private static double DefaultMonotonicMs()
+        => System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0
+           / System.Diagnostics.Stopwatch.Frequency;
+
+    /// <summary>
+    /// Per-chunk minimum period: <see cref="InterChunkPauseMs"/> scaled by
+    /// the chunk's actual code-unit count. InjectionChunker extends a chunk
+    /// to <see cref="ChunkCodeUnits"/>+1 = 9 units rather than split a
+    /// surrogate pair; a fixed 14 ms period would let sustained 9-unit
+    /// chunks feed ~643 units/s &gt; 600 (stage-2 ledger A7).
+    /// ceil(8 * 14 / 8) = 14 (unchanged); ceil(9 * 14 / 8) = 16 (~562
+    /// units/s, 1 ms margin over the 15 ms the 600 ceiling strictly needs).
+    /// </summary>
+    internal static int PeriodMsForChunk(string chunk)
+        => (int)Math.Ceiling(chunk.Length * (double)InterChunkPauseMs / ChunkCodeUnits);
+
     /// <summary>
     /// Interruptible paste: types the text in chunks of
-    /// <see cref="ChunkCodeUnits"/> UTF-16 code units, pausing
-    /// <see cref="InterChunkPauseMs"/> between chunks (pacing is what makes
-    /// the guard able to observe a human halt gesture at all -- an unpaced
-    /// loop is queue-insertion-fast and finishes in milliseconds) and
+    /// <see cref="ChunkCodeUnits"/> UTF-16 code units, enforcing a per-chunk
+    /// PERIOD of at least <see cref="InterChunkPauseMs"/> -- the send's own
+    /// measured duration counts toward the period and only the remainder is
+    /// slept (<see cref="DeadlinePacer"/>); the paced period is what lets
+    /// the guard observe a human halt gesture at a bounded cadence -- and
     /// checking before every chunk that (a) no physical modifier has gone
     /// down (the leading edge of Alt+Tab -- injected Unicode is delivered
     /// with the current physical modifier state applied), (b) no physical
@@ -203,6 +244,12 @@ public sealed class TextInjector
             return InjectionRunOutcome.Interrupted;
         }
         var chunks = InjectionChunker.Split(text, ChunkCodeUnits);
+        // Deadline pacing: period accounting starts NOW, so the first
+        // chunk's guard probes + send count toward the first period.
+        var pacer = new DeadlinePacer(InterChunkPauseMs, _sleep, _monotonicMs);
+        // Pause k follows chunks[k]; its period scales with THAT chunk's
+        // unit count (9-unit straddle chunks get 16 ms -- stage-2 ledger A7).
+        var pausedChunks = 0;
         var outcome = GuardedInjectionRun.Execute(
             chunks,
             hwndAtSendStart,
@@ -210,7 +257,7 @@ public sealed class TextInjector
             _sendChunk,
             physicalInputDown: () => ModifierGuard.AnyDown(_isKeyDown)
                                      || MouseButtonGuard.AnyDown(_isKeyDown),
-            pauseBetweenChunks: () => _sleep(InterChunkPauseMs),
+            pauseBetweenChunks: () => pacer.PauseForNextChunk(PeriodMsForChunk(chunks[pausedChunks++])),
             onZeroForeground: () =>
             {
                 var midStreamZeroCount = Meter.RecordMidStream();

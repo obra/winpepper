@@ -181,8 +181,7 @@ public sealed class TextInjector
         // against an elevated target would consume the text with nothing
         // delivered. Park instead -- BEFORE any synthesis (even the
         // modifier-neutralizing KEYUPs) and before the release-wait
-        // preludes. Fail-open: an unobservable foreground or elevation
-        // keeps today's behavior (ElevatedTargetDecider).
+        // preludes. Fail-open for an unobservable ELEVATION only (Unknown => inject); an absent foreground already parked above.
         if (ElevatedTargetDecider.Decide(hwndAtSendStart, _foregroundElevation(hwndAtSendStart))
             == ElevatedTargetDecision.Park)
         {

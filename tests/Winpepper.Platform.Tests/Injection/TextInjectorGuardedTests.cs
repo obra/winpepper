@@ -526,4 +526,65 @@ public class TextInjectorGuardedTests
 
         sleeps.ShouldBe(new[] { 16, 16 }); // TextInjector.PeriodMsForChunk(9-unit chunk) remainders
     }
+
+    [Fact]
+    public void GuardedDetailed_CompletedRun_ReportsChunksAndPacing()
+    {
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: _ => true,
+            sleep: _ => { });
+        var text = new string('a', 96); // 12 chunks of 8
+
+        var report = injector.TryInjectGuardedDetailed(text);
+
+        report.Outcome.ShouldBe(InjectionRunOutcome.Completed);
+        report.ChunksTotal.ShouldBe(12);
+        report.ChunksSent.ShouldBe(12);
+        // 11 inter-chunk pauses of 8 code units each at the 14 ms deadline
+        // period (nominal -- the DeadlinePacer nets out send time at run time).
+        report.PacingWaitMs.ShouldBe(11 * TextInjector.InterChunkPauseMs);
+    }
+
+    [Fact]
+    public void GuardedDetailed_InterruptedMidRun_ReportsPartialChunks()
+    {
+        var foreground = 42L;
+        var sent = new List<string>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => foreground,
+            sendChunk: c => { sent.Add(c); if (sent.Count == 3) foreground = 99; return true; },
+            sleep: _ => { });
+        var text = new string('a', 96); // 12 chunks of 8
+
+        var report = injector.TryInjectGuardedDetailed(text);
+
+        report.Outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        report.ChunksTotal.ShouldBe(12);
+        report.ChunksSent.ShouldBe(3);
+        // Paused before chunks 2, 3, and 4; the guard halted before send #4.
+        report.PacingWaitMs.ShouldBe(3 * TextInjector.InterChunkPauseMs);
+    }
+
+    [Fact]
+    public void GuardedDetailed_NoForeground_ReportsZeroChunks()
+    {
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 0,
+            sendChunk: _ => true,
+            sleep: _ => { });
+
+        var report = injector.TryInjectGuardedDetailed(new string('a', 16));
+
+        report.Outcome.ShouldBe(InjectionRunOutcome.NoForeground);
+        report.ChunksTotal.ShouldBe(0);
+        report.ChunksSent.ShouldBe(0);
+        report.PacingWaitMs.ShouldBe(0);
+    }
 }

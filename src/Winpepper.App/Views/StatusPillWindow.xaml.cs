@@ -21,6 +21,8 @@ public sealed partial class StatusPillWindow : Window
     private readonly DispatcherTimer _tickTimer;
     private IntPtr _hwnd;
     private bool _visible;
+    private int _keepAliveTick;
+    private Windows.Graphics.RectInt32 _lastPositionedWorkArea;
     private double _pulsePhase;
     private PillAnimationMode _animMode = PillAnimationMode.None;
 
@@ -86,10 +88,21 @@ public sealed partial class StatusPillWindow : Window
             ElapsedText.Text = $"{_vm.ElapsedMs / 1000} s";
 
             // Cheap: keep us pinned to the top even if another topmost window
-            // was created after our last show. Only while visible.
-            if (_visible) ExtendedWindowStyle.AssertTopmost(_hwnd);
+            // was created after our last show. Only while visible. This tick
+            // now also runs during PendingPaste/Error (PillTimerPolicy), so
+            // the pill survives other topmost windows appearing while it
+            // waits -- the 2026-07-28 buried-pill fix.
+            if (_visible)
+            {
+                ExtendedWindowStyle.AssertTopmost(_hwnd);
+                MaybeFollowForegroundMonitor();
+            }
 
-            ApplyAnimationFrame();
+            // Pulse/meter rendering only where the policy says so; for
+            // PendingPaste/Error the None-mode frame writes constants anyway,
+            // but gating here makes "no pulse while pending" explicit.
+            if (_previewActive || PillTimerPolicy.ForStage(_vm.Stage).AnimationRunning)
+                ApplyAnimationFrame();
         };
 
         _vm.PropertyChanged += OnVmChanged;
@@ -144,9 +157,14 @@ public sealed partial class StatusPillWindow : Window
         StatusText.Text = _vm.StatusText;
         _animMode = PillAnimationMap.ForStage(_vm.Stage);
 
+        // Timer policy: the keep-alive tick runs whenever the pill is on
+        // screen (incl. PendingPaste and Error); the pulse itself is gated
+        // per-tick by PillTimerPolicy.AnimationRunning.
+        if (PillTimerPolicy.ForStage(_vm.Stage).KeepAliveRunning) _tickTimer.Start();
+        else _tickTimer.Stop();
+
         if (_vm.Stage == SessionStage.PendingPaste)
         {
-            _tickTimer.Stop();               // no thinking pulse while waiting
             _visible = true;
             ResetPillVisual();               // steady dot, full opacity, scale 1
             Dot.Fill = new SolidColorBrush(Microsoft.UI.Colors.DodgerBlue);
@@ -161,7 +179,6 @@ public sealed partial class StatusPillWindow : Window
         if (_vm.Stage == SessionStage.Idle)
         {
             ExtendedWindowStyle.SetClickThrough(_hwnd, clickThrough: true);
-            _tickTimer.Stop();
             _visible = false;
             ResetPillVisual();
             _hideTimer.Stop(); _hideTimer.Start();
@@ -169,7 +186,6 @@ public sealed partial class StatusPillWindow : Window
         else if (_vm.Stage == SessionStage.Error)
         {
             ExtendedWindowStyle.SetClickThrough(_hwnd, clickThrough: true);
-            _tickTimer.Stop();
             _visible = true;
             ResetPillVisual(); // steady dot; Error keeps its Goldenrod colour below
             Dot.Fill = new SolidColorBrush(Microsoft.UI.Colors.Goldenrod);
@@ -197,7 +213,6 @@ public sealed partial class StatusPillWindow : Window
             appWindow.Show(activateWindow: false);
             _visible = true;
             ExtendedWindowStyle.AssertTopmost(_hwnd);
-            _tickTimer.Start();
             _hideTimer.Stop();
         }
     }
@@ -322,6 +337,31 @@ public sealed partial class StatusPillWindow : Window
         }
     }
 
+    /// <summary>
+    /// Re-anchors the pill when the FOREGROUND window moved to a different
+    /// monitor while the pill is on screen (PendingPaste persists across
+    /// window switches, so it must follow the user's active display). Runs
+    /// on the 100 ms keep-alive tick but throttled to ~1 s, and calls
+    /// PositionBottomCenter (2x Move + resize -- not cheap) ONLY when the
+    /// target work area actually changed, so the clickable pill is never
+    /// repositioned under a user's pointer on the same monitor.
+    /// </summary>
+    private void MaybeFollowForegroundMonitor()
+    {
+        if (++_keepAliveTick % 10 != 0) return; // 100 ms tick -> ~1 s cadence
+        var fgHwnd = Native.ForegroundWindow.GetForegroundWindow();
+        if (fgHwnd == IntPtr.Zero) return;
+        var work = DisplayArea.GetFromWindowId(
+            Win32Interop.GetWindowIdFromWindow(fgHwnd), DisplayAreaFallback.Nearest).WorkArea;
+        if (work.X == _lastPositionedWorkArea.X && work.Y == _lastPositionedWorkArea.Y
+            && work.Width == _lastPositionedWorkArea.Width && work.Height == _lastPositionedWorkArea.Height)
+        {
+            return;
+        }
+        var appWindow = AppWindow.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(_hwnd));
+        PositionBottomCenter(appWindow);
+    }
+
     private void PositionBottomCenter(AppWindow appWindow)
     {
         var fgHwnd = Native.ForegroundWindow.GetForegroundWindow();
@@ -329,6 +369,7 @@ public sealed partial class StatusPillWindow : Window
             ? DisplayArea.GetFromWindowId(Win32Interop.GetWindowIdFromWindow(fgHwnd), DisplayAreaFallback.Nearest)
             : DisplayArea.Primary;
         var work = display.WorkArea;
+        _lastPositionedWorkArea = work;
 
         // Enter the target display before sizing. Otherwise a pill sized with the target
         // DPI while still on another monitor can be scaled a second time by WM_DPICHANGED.

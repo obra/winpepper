@@ -105,7 +105,8 @@ public sealed class AppShell : IDisposable
 
         var uiThread = new DispatcherQueueUiThread(DispatcherQueue.GetForCurrentThread());
         var engine = new SessionEngine();
-        var sessionVm = new SessionViewModel(engine, uiThread);
+        var sessionVm = new SessionViewModel(engine, uiThread,
+            log: factory.CreateLogger<SessionViewModel>());
         var errorBus = new Winpepper.Core.Errors.ErrorBus();
         sessionVm.AttachErrorBus(errorBus);
 

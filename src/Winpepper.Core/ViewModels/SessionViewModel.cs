@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using Winpepper.Core.Errors;
 using Winpepper.Core.Pending;
 using Winpepper.Core.Sessions;
@@ -12,6 +13,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private readonly IUiThread _ui;
     private readonly IDelayScheduler _delays;
     private readonly SessionEngine _engine;
+    private readonly ILogger? _log;
     private readonly Stopwatch _stopwatch = new();
     private SessionStage _stage = SessionStage.Idle;
     private string _statusText = "Ready";
@@ -60,11 +62,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public SessionViewModel(SessionEngine engine, IUiThread ui, IDelayScheduler? delays = null)
+    public SessionViewModel(SessionEngine engine, IUiThread ui, IDelayScheduler? delays = null, ILogger? log = null)
     {
         _engine = engine;
         _ui = ui;
         _delays = delays ?? new SystemDelayScheduler();
+        _log = log;
         _engine.StateChanged += OnEngineStateChanged;
     }
 
@@ -74,6 +77,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set
         {
             if (_stage == value) return;
+            var previous = _stage;
             _stage = value;
             _presentationGeneration++;
             if (value != SessionStage.Recording)
@@ -81,6 +85,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 _levelMeter.Reset();
                 InputLevel = 0;
             }
+            // Observability (UI latency markers): the closest log proxy for
+            // pill visible/hidden. Runs on the UI thread; actual hide adds
+            // the fixed 600 ms StatusPillWindow._hideTimer delay downstream.
+            // INF because minimumLevel is hard-coded to Information.
+            _log?.LogInformation("pill stage {From} -> {To}", previous, value);
             Raise(nameof(Stage));
             Raise(nameof(StatusText));
         }

@@ -395,9 +395,17 @@ public sealed class PipelineHost : IDisposable
     {
         if (!_vm.HasPendingPaste) return false;
         var text = Winpepper.Core.InjectionText.ForPaste(_vm.PendingPasteText);
-        var outcome = string.IsNullOrWhiteSpace(text)
-            ? Winpepper.Platform.Injection.InjectionRunOutcome.SendFailed
-            : _injector.TryInjectGuarded(text);
+        Winpepper.Platform.Injection.InjectionRunReport report = default;
+        Winpepper.Platform.Injection.InjectionRunOutcome outcome;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            outcome = Winpepper.Platform.Injection.InjectionRunOutcome.SendFailed; // never ran
+        }
+        else
+        {
+            report = _injector.TryInjectGuardedDetailed(text);
+            outcome = report.Outcome;
+        }
         var injected = outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
         if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.SendFailed)
         {
@@ -408,7 +416,9 @@ public sealed class PipelineHost : IDisposable
                 _currentSessionId);
         }
         if (injected)
-            _log.LogInformation("Pending paste injected");
+            _log.LogInformation(
+                "Pending paste injected ({Chars} chars, {ChunksSent}/{ChunksTotal} chunks, nominal pacing {PacingMs} ms)",
+                text.Length, report.ChunksSent, report.ChunksTotal, report.PacingWaitMs);
         else if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.BlockedElevated)
             // The clicked-into window is elevated: UIPI would have silently
             // dropped every keystroke while reporting success (the exact
@@ -458,7 +468,8 @@ public sealed class PipelineHost : IDisposable
                         _vm.PendingPasteText.Length);
                 _engine.Apply(SessionEvent.StartRequested);
                 _currentSessionId = Guid.NewGuid();
-                _log.LogInformation("Session started (hold) {SessionId}", _currentSessionId);
+                _log.LogInformation("Session started (hold) {SessionId} (hotkey observed {LagMs} ms before handling)",
+                    _currentSessionId, (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds);
                 _sounds.PlayStart();
                 // Start the streaming dictation session BEFORE StartSession —
                 // StartSession raises the 500 ms pre-roll synchronously through
@@ -514,11 +525,26 @@ public sealed class PipelineHost : IDisposable
                 _engine.Apply(SessionEvent.StopRequested);
                 _recordStopwatch?.Stop();
 
+                var releaseAt = evt.Timestamp;
+                var timing = new Winpepper.Core.Diagnostics.DictationTimingSummary
+                {
+                    SessionId = _currentSessionId,
+                    Kind = "hold",
+                };
+                timing.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
+
+                var drainSw = System.Diagnostics.Stopwatch.StartNew();
                 var samples = _warmRecorder!.StopSession();
+                drainSw.Stop();
+                timing.DrainMs = (int)drainSw.ElapsedMilliseconds;
                 WarnIfSessionSilent(samples, _currentSessionId);
                 _sounds.PlayStop();
 
-                var trimmed = TrimForTranscription(samples, _currentSessionId);
+                var trimSw = System.Diagnostics.Stopwatch.StartNew();
+                var trimmed = TrimForTranscription(samples, _currentSessionId, out var trimRemovedMs);
+                trimSw.Stop();
+                timing.TrimMs = (int)trimSw.ElapsedMilliseconds;
+                if (trimRemovedMs > 0) timing.TrimRemovedMs = trimRemovedMs;
                 if (trimmed is null)
                 {
                     // Live-mic silence: skip transcription + injection (the ASR-saving
@@ -558,6 +584,9 @@ public sealed class PipelineHost : IDisposable
                         NoteStreamingReleased(droppedStreaming);
                     }
                     _recordStopwatch = null;
+                    timing.Outcome = "silent";
+                    timing.TotalMs = TotalSince(releaseAt);
+                    EmitTimingSummary(timing);
                     break;
                 }
 
@@ -640,6 +669,11 @@ public sealed class PipelineHost : IDisposable
                                 Guid.Empty);
                         }
                         _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
+                        timing.Outcome = "failed";
+                        timing.AsrMs = (int)transcribeSw.ElapsedMilliseconds;
+                        timing.AsrMode = "batch";
+                        timing.TotalMs = TotalSince(releaseAt);
+                        EmitTimingSummary(timing);
                         return;
                     }
                     var transcriber = _buildTranscriber(asrNow, _asrSwap.LoadedModelName!, settingsNow, fallbackNotice);
@@ -651,6 +685,16 @@ public sealed class PipelineHost : IDisposable
 
                 string final = transcription.Text;
                 var producedModelName = transcription.ProviderModelName;
+                timing.AsrMs = (int)transcribeSw.ElapsedMilliseconds;
+                // Mode from the model that ACTUALLY produced the result (not from
+                // which code arm returned): nemotron const => true local streaming;
+                // the assemblyai/ prefix => cloud (shares the batch budget); else
+                // local batch (incl. every fallback path).
+                timing.AsrMode =
+                    string.Equals(producedModelName, Winpepper.Asr.TranscribeCpp.NemotronStreamingModel.Name, StringComparison.OrdinalIgnoreCase) ? "streaming"
+                    : Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName) ? "cloud"
+                    : "batch";
+                timing.AsrModel = producedModelName;
                 var cleanupSw = new System.Diagnostics.Stopwatch();
                 var cleanupUsedModel = "";
                 var windowContextUsed = false;
@@ -692,7 +736,12 @@ public sealed class PipelineHost : IDisposable
                             TaskScheduler.Default);
                     }
 
+                    var correctionsSw = System.Diagnostics.Stopwatch.StartNew();
                     var correctionsData = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
+                    correctionsSw.Stop();
+                    // PipelineHost-side corrections LOAD only; corrections
+                    // APPLICATION happens inside CleanupRunner.RunAsync.
+                    timing.CorrectionsMs = (int)correctionsSw.ElapsedMilliseconds;
 
                     cleanupSw.Start();
                     try
@@ -705,6 +754,8 @@ public sealed class PipelineHost : IDisposable
                             ct: ct,
                             skipLlm: skipLlm);
                         cleanupSw.Stop();
+                        timing.CleanupMs = (int)cleanupSw.ElapsedMilliseconds;
+                        timing.CleanupPath = result.Path.ToString();
                         _log.LogInformation("Cleanup path={Path}, {ElapsedMs}ms",
                             result.Path, (int)result.Elapsed.TotalMilliseconds);
                         final = result.CleanedText;
@@ -714,12 +765,15 @@ public sealed class PipelineHost : IDisposable
                             Winpepper.Cleanup.CleanupPath.BypassDisabled => "none (disabled, corrections-only)",
                             _ => cleanupLease.LoadedModelName ?? "",
                         };
+                        timing.CleanupModel = string.IsNullOrWhiteSpace(cleanupUsedModel) ? null : cleanupUsedModel;
                         windowContextUsed = ctxTextTask is not null
                                             && result.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
                     }
                     catch (Exception ex)
                     {
                         cleanupSw.Stop();
+                        timing.CleanupMs = (int)cleanupSw.ElapsedMilliseconds;
+                        timing.CleanupPath = "exception";
                         _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
                         _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Cleanup, ex, _currentSessionId);
                     }
@@ -729,6 +783,10 @@ public sealed class PipelineHost : IDisposable
                     if (llmWillRun) _engine.Apply(SessionEvent.CleanupCompleted);
                 }
 
+                // injectSw is WALL time: it includes CaptureTarget() and up to
+                // 2 x 1500 ms release-wait preludes inside TryInjectGuardedDetailed
+                // -- inject_pace (nominal) vs inject (wall) separates pacing from
+                // prelude stalls.
                 var injectSw = System.Diagnostics.Stopwatch.StartNew();
                 var injected = false;
                 if (!string.IsNullOrWhiteSpace(final))
@@ -751,7 +809,14 @@ public sealed class PipelineHost : IDisposable
                     else
                     {
                         var toType = Winpepper.Core.InjectionText.ForPaste(final);
-                        var outcome = _injector.TryInjectGuarded(toType);
+                        var injReport = _injector.TryInjectGuardedDetailed(toType);
+                        var outcome = injReport.Outcome;
+                        if (injReport.ChunksTotal > 0)
+                        {
+                            timing.InjectChunksSent = injReport.ChunksSent;
+                            timing.InjectChunksTotal = injReport.ChunksTotal;
+                            timing.InjectPacingMs = injReport.PacingWaitMs;
+                        }
                         injected = outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
                         if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
                         {
@@ -812,6 +877,18 @@ public sealed class PipelineHost : IDisposable
                     }
                 }
                 injectSw.Stop();
+                timing.InjectMs = (int)injectSw.ElapsedMilliseconds;
+                if (!string.IsNullOrWhiteSpace(final)) timing.InjectChars = final.Length;
+                // Outcome derivation: "pending" covers every park reason
+                // (HoldPending, Interrupted, BlockedElevated, NoForeground,
+                // SendFailed -- all end in EnterPendingPaste). "empty" is the
+                // honest bucket for the empty-final-text dictation where the
+                // whole injection block was skipped: no injection ran and no
+                // pending paste exists, so neither "completed" nor "pending"
+                // would be true.
+                timing.Outcome = injected
+                    ? "completed"
+                    : (string.IsNullOrWhiteSpace(final) ? "empty" : "pending");
                 if (Winpepper.Core.Learning.PostPasteGate.ShouldWatch(
                         _postPasteLearningEnabled, injected,
                         _postPaste is not null, _focusedCapturer is not null,
@@ -837,6 +914,11 @@ public sealed class PipelineHost : IDisposable
                     }
                 }
                 _engine.Apply(SessionEvent.InjectionCompleted);
+
+                // Emit BEFORE Archive: an Archive throw (escapes to the RunAsync
+                // catch) can never skip the timing line.
+                timing.TotalMs = TotalSince(releaseAt);
+                EmitTimingSummary(timing);
 
                 var totalMs = (int)((_recordStopwatch?.ElapsedMilliseconds ?? 0)
                                      + transcribeSw.ElapsedMilliseconds
@@ -867,6 +949,7 @@ public sealed class PipelineHost : IDisposable
                 break;
             case HotkeyEventKind.Cancel:
                 _engine.Apply(SessionEvent.CancelRequested);
+                _log.LogInformation("Session cancelled {SessionId}", _currentSessionId);
                 _ = _warmRecorder?.StopSession();
                 if (_streamingSession is not null)
                 {
@@ -885,7 +968,8 @@ public sealed class PipelineHost : IDisposable
                             _vm.PendingPasteText.Length);
                     _engine.Apply(SessionEvent.StartRequested);
                     _currentSessionId = Guid.NewGuid();
-                    _log.LogInformation("Session started (toggle) {SessionId}", _currentSessionId);
+                    _log.LogInformation("Session started (toggle) {SessionId} (hotkey observed {LagMs} ms before handling)",
+                        _currentSessionId, (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds);
                     _sounds.PlayStart();
                     // (same comment as the HoldDown arm: create BEFORE StartSession
                     // so the synchronously-raised pre-roll is not dropped)
@@ -935,11 +1019,26 @@ public sealed class PipelineHost : IDisposable
                     _engine.Apply(SessionEvent.StopRequested);
                     _recordStopwatch?.Stop();
 
+                    var releaseAt2 = evt.Timestamp;
+                    var timing2 = new Winpepper.Core.Diagnostics.DictationTimingSummary
+                    {
+                        SessionId = _currentSessionId,
+                        Kind = "toggle",
+                    };
+                    timing2.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
+
+                    var drainSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var samples2 = _warmRecorder!.StopSession();
+                    drainSw2.Stop();
+                    timing2.DrainMs = (int)drainSw2.ElapsedMilliseconds;
                     WarnIfSessionSilent(samples2, _currentSessionId);
                     _sounds.PlayStop();
 
-                    var trimmed2 = TrimForTranscription(samples2, _currentSessionId);
+                    var trimSw2 = System.Diagnostics.Stopwatch.StartNew();
+                    var trimmed2 = TrimForTranscription(samples2, _currentSessionId, out var trimRemovedMs2);
+                    trimSw2.Stop();
+                    timing2.TrimMs = (int)trimSw2.ElapsedMilliseconds;
+                    if (trimRemovedMs2 > 0) timing2.TrimRemovedMs = trimRemovedMs2;
                     if (trimmed2 is null)
                     {
                         // Live-mic silence: skip transcription + injection but STILL
@@ -978,6 +1077,9 @@ public sealed class PipelineHost : IDisposable
                             NoteStreamingReleased(droppedStreaming2);
                         }
                         _recordStopwatch = null;
+                        timing2.Outcome = "silent";
+                        timing2.TotalMs = TotalSince(releaseAt2);
+                        EmitTimingSummary(timing2);
                         break;
                     }
 
@@ -1060,6 +1162,11 @@ public sealed class PipelineHost : IDisposable
                                     Guid.Empty);
                             }
                             _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
+                            timing2.Outcome = "failed";
+                            timing2.AsrMs = (int)transcribeSw2.ElapsedMilliseconds;
+                            timing2.AsrMode = "batch";
+                            timing2.TotalMs = TotalSince(releaseAt2);
+                            EmitTimingSummary(timing2);
                             return;
                         }
                         var transcriber2 = _buildTranscriber(asrNow2, _asrSwap.LoadedModelName!, settingsNow2, fallbackNotice2);
@@ -1071,6 +1178,16 @@ public sealed class PipelineHost : IDisposable
 
                     string final2 = transcription2.Text;
                     var producedModelName2 = transcription2.ProviderModelName;
+                    timing2.AsrMs = (int)transcribeSw2.ElapsedMilliseconds;
+                    // Mode from the model that ACTUALLY produced the result (not from
+                    // which code arm returned): nemotron const => true local streaming;
+                    // the assemblyai/ prefix => cloud (shares the batch budget); else
+                    // local batch (incl. every fallback path).
+                    timing2.AsrMode =
+                        string.Equals(producedModelName2, Winpepper.Asr.TranscribeCpp.NemotronStreamingModel.Name, StringComparison.OrdinalIgnoreCase) ? "streaming"
+                        : Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName2) ? "cloud"
+                        : "batch";
+                    timing2.AsrModel = producedModelName2;
                     var cleanupSw2 = new System.Diagnostics.Stopwatch();
                     var cleanupUsedModel2 = "";
                     var windowContextUsed2 = false;
@@ -1109,7 +1226,12 @@ public sealed class PipelineHost : IDisposable
                                 TaskScheduler.Default);
                         }
 
+                        var correctionsSw2 = System.Diagnostics.Stopwatch.StartNew();
                         var correctionsData2 = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
+                        correctionsSw2.Stop();
+                        // PipelineHost-side corrections LOAD only; corrections
+                        // APPLICATION happens inside CleanupRunner.RunAsync.
+                        timing2.CorrectionsMs = (int)correctionsSw2.ElapsedMilliseconds;
 
                         cleanupSw2.Start();
                         try
@@ -1122,6 +1244,8 @@ public sealed class PipelineHost : IDisposable
                                 ct: ct,
                                 skipLlm: skipLlm2);
                             cleanupSw2.Stop();
+                            timing2.CleanupMs = (int)cleanupSw2.ElapsedMilliseconds;
+                            timing2.CleanupPath = result2.Path.ToString();
                             _log.LogInformation("Cleanup path={Path}, {ElapsedMs}ms",
                                 result2.Path, (int)result2.Elapsed.TotalMilliseconds);
                             final2 = result2.CleanedText;
@@ -1131,12 +1255,15 @@ public sealed class PipelineHost : IDisposable
                                 Winpepper.Cleanup.CleanupPath.BypassDisabled => "none (disabled, corrections-only)",
                                 _ => cleanupLease2.LoadedModelName ?? "",
                             };
+                            timing2.CleanupModel = string.IsNullOrWhiteSpace(cleanupUsedModel2) ? null : cleanupUsedModel2;
                             windowContextUsed2 = ctxTextTask2 is not null
                                                 && result2.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
                         }
                         catch (Exception ex)
                         {
                             cleanupSw2.Stop();
+                            timing2.CleanupMs = (int)cleanupSw2.ElapsedMilliseconds;
+                            timing2.CleanupPath = "exception";
                             _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
                             _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Cleanup, ex, _currentSessionId);
                         }
@@ -1146,6 +1273,10 @@ public sealed class PipelineHost : IDisposable
                         if (llmWillRun2) _engine.Apply(SessionEvent.CleanupCompleted);
                     }
 
+                    // injectSw2 is WALL time: it includes CaptureTarget() and up to
+                    // 2 x 1500 ms release-wait preludes inside TryInjectGuardedDetailed
+                    // -- inject_pace (nominal) vs inject (wall) separates pacing from
+                    // prelude stalls.
                     var injectSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var injected2 = false;
                     if (!string.IsNullOrWhiteSpace(final2))
@@ -1168,7 +1299,14 @@ public sealed class PipelineHost : IDisposable
                         else
                         {
                             var toType2 = Winpepper.Core.InjectionText.ForPaste(final2);
-                            var outcome2 = _injector.TryInjectGuarded(toType2);
+                            var injReport2 = _injector.TryInjectGuardedDetailed(toType2);
+                            var outcome2 = injReport2.Outcome;
+                            if (injReport2.ChunksTotal > 0)
+                            {
+                                timing2.InjectChunksSent = injReport2.ChunksSent;
+                                timing2.InjectChunksTotal = injReport2.ChunksTotal;
+                                timing2.InjectPacingMs = injReport2.PacingWaitMs;
+                            }
                             injected2 = outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
                             if (outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
                             {
@@ -1227,6 +1365,18 @@ public sealed class PipelineHost : IDisposable
                         }
                     }
                     injectSw2.Stop();
+                    timing2.InjectMs = (int)injectSw2.ElapsedMilliseconds;
+                    if (!string.IsNullOrWhiteSpace(final2)) timing2.InjectChars = final2.Length;
+                    // Outcome derivation: "pending" covers every park reason
+                    // (HoldPending, Interrupted, BlockedElevated, NoForeground,
+                    // SendFailed -- all end in EnterPendingPaste). "empty" is the
+                    // honest bucket for the empty-final-text dictation where the
+                    // whole injection block was skipped: no injection ran and no
+                    // pending paste exists, so neither "completed" nor "pending"
+                    // would be true.
+                    timing2.Outcome = injected2
+                        ? "completed"
+                        : (string.IsNullOrWhiteSpace(final2) ? "empty" : "pending");
                     if (Winpepper.Core.Learning.PostPasteGate.ShouldWatch(
                             _postPasteLearningEnabled, injected2,
                             _postPaste is not null, _focusedCapturer is not null,
@@ -1252,6 +1402,11 @@ public sealed class PipelineHost : IDisposable
                         }
                     }
                     _engine.Apply(SessionEvent.InjectionCompleted);
+
+                    // Emit BEFORE Archive: an Archive throw (escapes to the RunAsync
+                    // catch) can never skip the timing line.
+                    timing2.TotalMs = TotalSince(releaseAt2);
+                    EmitTimingSummary(timing2);
 
                     var totalMs2 = (int)((_recordStopwatch?.ElapsedMilliseconds ?? 0)
                                          + transcribeSw2.ElapsedMilliseconds
@@ -1301,13 +1456,19 @@ public sealed class PipelineHost : IDisposable
     /// (actionable); the quiet drop below adds no toast (consumer policy: a
     /// live-mic-nobody-spoke drop is not actionable).
     /// </summary>
-    private float[]? TrimForTranscription(float[] samples, Guid sessionId)
+    private float[]? TrimForTranscription(float[] samples, Guid sessionId, out int removedMs)
     {
         var result = Winpepper.Audio.SilenceTrimmer.Trim(samples);
+        removedMs = result.RemovedMs;
         if (result.IsSilent)
         {
             var ms = (int)((long)samples.Length * 1000 / 16000);
-            _log.LogInformation("dropped silent recording, {Ms} ms", ms);
+            // voiced/clear/max-RMS make the provisional gate constants
+            // recalibratable from logs and a dropped short utterance
+            // diagnosable after the fact. Content-free: numbers only.
+            _log.LogInformation(
+                "dropped silent recording, {Ms} ms (voiced {VoicedMs} ms, clear {ClearVoicedMs} ms, max frame rms {MaxFrameRms:0.0000})",
+                ms, result.VoicedMs, result.ClearVoicedMs, result.MaxFrameRms);
             return null;
         }
 
@@ -1317,6 +1478,27 @@ public sealed class PipelineHost : IDisposable
                 result.RemovedMs, result.RunsTrimmed);
 
         return result.Trimmed;
+    }
+
+    private static int TotalSince(DateTimeOffset releaseAt)
+        => (int)(DateTimeOffset.UtcNow - releaseAt).TotalMilliseconds;
+
+    /// <summary>
+    /// Emits the one-line per-dictation timing summary (INF, grep:
+    /// "dictation timing") and a [WRN] per stage-budget overrun (grep:
+    /// "slow dictation stage"). Complements -- never replaces -- the
+    /// existing one-off timing logs (trimmed silence, injection
+    /// interrupted, retained parks, ...).
+    /// </summary>
+    private void EmitTimingSummary(Winpepper.Core.Diagnostics.DictationTimingSummary timing)
+    {
+        _log.LogInformation("dictation timing {Summary}", timing.FormatLine());
+        foreach (var o in timing.Overruns())
+        {
+            _log.LogWarning(
+                "slow dictation stage {Stage}: {ActualMs} ms (budget {BudgetMs} ms), session {SessionId}",
+                o.Stage, o.ActualMs, o.BudgetMs, timing.SessionId);
+        }
     }
 
     /// <summary>

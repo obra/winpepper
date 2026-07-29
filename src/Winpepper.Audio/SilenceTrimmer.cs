@@ -18,6 +18,30 @@ public readonly struct TrimResult
     /// detector: this is a voice-presence check over frame-RMS percentiles.
     /// </summary>
     public required bool IsSilent { get; init; }
+
+    /// <summary>
+    /// Milliseconds of voiced (above-adaptive-threshold) audio detected.
+    /// 0 when the P90 gate fired (the adaptive threshold is derived from a
+    /// speech level that does not exist there) and for sub-frame buffers.
+    /// Observability only -- lets the drop log say WHY.
+    /// </summary>
+    public required int VoicedMs { get; init; }
+
+    /// <summary>
+    /// Milliseconds of frames at or above ClearSpeechRmsFloor (0.02).
+    /// Absolute, so it is reported on BOTH silent paths (0 only for
+    /// sub-frame buffers). Together with MaxFrameRms this makes the gate
+    /// constants recalibratable from production logs (they were measured
+    /// from one 100-recording archive, 2026-07-28, and are provisional).
+    /// </summary>
+    public required int ClearVoicedMs { get; init; }
+
+    /// <summary>
+    /// Loudest 20 ms frame RMS observed (0 for sub-frame buffers).
+    /// Observability only -- a dropped short utterance is diagnosable from
+    /// the log by how close it came to the 0.02 clear tier.
+    /// </summary>
+    public required double MaxFrameRms { get; init; }
 }
 
 /// <summary>
@@ -54,6 +78,43 @@ public static class SilenceTrimmer
     /// <summary>Below this 90th-percentile RMS the recording has no speech.</summary>
     private const double SilentSpeechLevel = 0.004;
 
+    /// <summary>
+    /// Minimum total duration of voiced (above-adaptive-threshold) audio a
+    /// recording must contain to count as speech. The P90 gate above is
+    /// PROPORTIONAL (needs >10% of frames loud), so a brief non-speech
+    /// transient (cough, mic bump, keyboard clatter) in a SHORT recording
+    /// can unlock the whole buffer -- confirmed near-miss 2026-07-28
+    /// (~450 ms transient at -36..-45 dBFS in an 8.95 s silent recording).
+    /// This is an absolute backstop. 600 ms exceeds the confirmed transient
+    /// class; real speech shorter than this passes via the clear-speech
+    /// tier below. Drops remain non-destructive (original audio archived).
+    /// </summary>
+    private const int MinVoicedDurationMs = 600;
+
+    /// <summary>
+    /// Frames at or above this RMS (~-34 dBFS) are "clearly speech-loud".
+    /// MEASURED (2026-07-28, 100-recording archive): every archived
+    /// non-speech file has at most ONE 20 ms frame at or above 0.02, while
+    /// loud short utterances reach it -- but 17% of real dictations never
+    /// do, so this tier is a loud-short-utterance escape hatch, NOT a
+    /// speech test. Known residual: quiet short utterances (max frame RMS
+    /// 0.013-0.017, e.g. the two archived "Thank you."s) sit inside the
+    /// transient level band and are dropped -- see
+    /// Trim_QuietShortUtterance_IsDropped_KnownResidual.
+    /// </summary>
+    private const double ClearSpeechRmsFloor = 0.02;
+
+    /// <summary>
+    /// Clear-speech-loud audio needed to bypass the duration floor. 100 ms
+    /// = 5 frames: the measured worst non-speech file shows 1 frame at or
+    /// above 0.02 (5x margin), while the archived loud short utterance
+    /// "Great." has EXACTLY 100 ms of clear audio and 9/93 real dictations
+    /// sit in the [100, 200) ms clear band -- do not raise this without new
+    /// archive measurements (provisional constants; the drop log's
+    /// voiced/clear/max-RMS fields exist for recalibration).
+    /// </summary>
+    private const int MinClearVoicedDurationMs = 100;
+
     public static TrimResult Trim(ReadOnlySpan<float> samples)
     {
         var n = samples.Length;
@@ -68,6 +129,9 @@ public static class SilenceTrimmer
                 RemovedMs = 0,
                 RunsTrimmed = 0,
                 IsSilent = false,
+                VoicedMs = 0,
+                ClearVoicedMs = 0,
+                MaxFrameRms = 0,
             };
         }
 
@@ -81,12 +145,24 @@ public static class SilenceTrimmer
 
         if (speechLevel < SilentSpeechLevel)
         {
+            // P90-silent: the adaptive threshold is undefined (it is derived
+            // from a speech level that does not exist), so VoicedMs reports
+            // 0. Clear/max fields are absolute and still meaningful -- they
+            // keep long-recording transient near-misses diagnosable from the
+            // drop log (the gate constants below are recalibrated from
+            // these fields).
+            var clearMsAtP90 = 0;
+            for (var f = 0; f < frameCount; f++)
+                if (rms[f] >= ClearSpeechRmsFloor) clearMsAtP90 += FrameMs;
             return new TrimResult
             {
                 Trimmed = Array.Empty<float>(),
                 RemovedMs = 0,
                 RunsTrimmed = 0,
                 IsSilent = true,
+                VoicedMs = 0,
+                ClearVoicedMs = clearMsAtP90,
+                MaxFrameRms = sorted[^1],
             };
         }
 
@@ -103,6 +179,38 @@ public static class SilenceTrimmer
         var isSilence = new bool[frameCount];
         for (var f = 0; f < frameCount; f++)
             isSilence[f] = rms[f] < threshold;
+
+        // Minimum-voiced-duration gate (2026-07-28 transient-rejection fix;
+        // AND semantics -- the owner-fixed P90 parameters above are not
+        // re-derived, and this gate can only make the verdict MORE silent).
+        // Voiced frames are never trimmed (only isSilence frames are), so
+        // "voiced in the kept post-trim audio" == "voiced in the input" and
+        // we can count directly off isSilence[]/rms[] without re-analyzing
+        // the output buffer.
+        var voicedMs = 0;
+        var clearVoicedMs = 0;
+        var maxFrameRms = 0.0;
+        for (var f = 0; f < frameCount; f++)
+        {
+            if (rms[f] > maxFrameRms) maxFrameRms = rms[f];
+            if (isSilence[f]) continue;
+            voicedMs += FrameMs;
+            if (rms[f] >= ClearSpeechRmsFloor) clearVoicedMs += FrameMs;
+        }
+
+        if (voicedMs < MinVoicedDurationMs && clearVoicedMs < MinClearVoicedDurationMs)
+        {
+            return new TrimResult
+            {
+                Trimmed = Array.Empty<float>(),
+                RemovedMs = 0,
+                RunsTrimmed = 0,
+                IsSilent = true,
+                VoicedMs = voicedMs,
+                ClearVoicedMs = clearVoicedMs,
+                MaxFrameRms = maxFrameRms,
+            };
+        }
 
         // Walk contiguous silence runs; build the ordered list of whole-frame
         // segments to KEEP. Interior runs keep 600 ms per speech edge; edge runs
@@ -166,6 +274,9 @@ public static class SilenceTrimmer
             RemovedMs = removedFrames * FrameMs,
             RunsTrimmed = runsTrimmed,
             IsSilent = false,
+            VoicedMs = voicedMs,
+            ClearVoicedMs = clearVoicedMs,
+            MaxFrameRms = maxFrameRms,
         };
     }
 

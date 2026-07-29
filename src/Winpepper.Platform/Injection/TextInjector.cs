@@ -200,9 +200,9 @@ public sealed class TextInjector
     /// both. Key/button probes remain fail-open: a probe that cannot observe
     /// reports "up" and never halts.
     /// </summary>
-    public InjectionRunOutcome TryInjectGuarded(string text)
+    public InjectionRunReport TryInjectGuardedDetailed(string text)
     {
-        if (string.IsNullOrEmpty(text)) return InjectionRunOutcome.Completed;
+        if (string.IsNullOrEmpty(text)) return new InjectionRunReport(InjectionRunOutcome.Completed, 0, 0, 0);
 
         var hwndAtSendStart = _foregroundHwnd();
         // No observable foreground at send start (council majority polarity,
@@ -215,7 +215,7 @@ public sealed class TextInjector
             _log.LogWarning(
                 "Foreground hwnd is 0 at injection start (occurrence #{Count}); not typing -- parking the full text ({Chars} chars)",
                 atStartZeroCount, text.Length);
-            return InjectionRunOutcome.NoForeground;
+            return new InjectionRunReport(InjectionRunOutcome.NoForeground, 0, 0, 0);
         }
         // UIPI pre-check (paste-path-hardening): SendInput into an elevated
         // window is silently dropped while reporting success, so a run
@@ -229,7 +229,7 @@ public sealed class TextInjector
             _log.LogInformation(
                 "Foreground window is elevated (UIPI would silently drop SendInput); not typing -- holding the full text as pending ({Chars} chars)",
                 text.Length);
-            return InjectionRunOutcome.BlockedElevated;
+            return new InjectionRunReport(InjectionRunOutcome.BlockedElevated, 0, 0, 0);
         }
         NeutralizeHeldModifiers();
         // Mouse prelude: never START typing while a button is physically
@@ -241,7 +241,7 @@ public sealed class TextInjector
             _log.LogInformation(
                 "Mouse button still held {Timeout}ms after injection was requested; not typing -- text stays pending",
                 MouseWaitTimeoutMs);
-            return InjectionRunOutcome.Interrupted;
+            return new InjectionRunReport(InjectionRunOutcome.Interrupted, 0, 0, 0);
         }
         var chunks = InjectionChunker.Split(text, ChunkCodeUnits);
         // Deadline pacing: period accounting starts NOW, so the first
@@ -250,14 +250,21 @@ public sealed class TextInjector
         // Pause k follows chunks[k]; its period scales with THAT chunk's
         // unit count (9-unit straddle chunks get 16 ms -- stage-2 ledger A7).
         var pausedChunks = 0;
-        var outcome = GuardedInjectionRun.Execute(
+        var nominalPacingMs = 0;
+        var run = GuardedInjectionRun.Execute(
             chunks,
             hwndAtSendStart,
             _foregroundHwnd,
             _sendChunk,
             physicalInputDown: () => ModifierGuard.AnyDown(_isKeyDown)
                                      || MouseButtonGuard.AnyDown(_isKeyDown),
-            pauseBetweenChunks: () => pacer.PauseForNextChunk(PeriodMsForChunk(chunks[pausedChunks++])),
+            pauseBetweenChunks: () =>
+            {
+                var periodMs = PeriodMsForChunk(chunks[pausedChunks++]);
+                nominalPacingMs += periodMs;
+                // DeadlinePacer path unchanged -- observe only, never alter.
+                pacer.PauseForNextChunk(periodMs);
+            },
             onZeroForeground: () =>
             {
                 var midStreamZeroCount = Meter.RecordMidStream();
@@ -265,10 +272,12 @@ public sealed class TextInjector
                     "Foreground hwnd read 0 mid-paste (occurrence #{Count}); halting -- the full text will be parked",
                     midStreamZeroCount);
             });
-        if (outcome == InjectionRunOutcome.Interrupted)
+        if (run.Outcome == InjectionRunOutcome.Interrupted)
             _log.LogInformation("Injection interrupted: foreground window, physical modifier, or mouse button state changed mid-paste");
-        return outcome;
+        return new InjectionRunReport(run.Outcome, chunks.Count, run.ChunksSent, nominalPacingMs);
     }
+
+    public InjectionRunOutcome TryInjectGuarded(string text) => TryInjectGuardedDetailed(text).Outcome;
 
     public bool TryInject(string text)
         => TryInjectGuarded(text) == InjectionRunOutcome.Completed;

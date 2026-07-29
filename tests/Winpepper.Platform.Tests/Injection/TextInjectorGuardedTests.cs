@@ -189,18 +189,25 @@ public class TextInjectorGuardedTests
     [Fact]
     public void Guarded_Paces_Between_Chunks_Only()
     {
+        // SEMANTIC CHANGE (deadline pacing, 2026-07-28): the values recorded
+        // through the sleep seam are now the requested REMAINDERS of each
+        // 14 ms period, not fixed requested pauses. With a frozen monotonic
+        // clock the measured elapsed is 0, so every remainder is the full
+        // InterChunkPauseMs -- which keeps this the canonical
+        // "pauses run between chunks only" pin.
         var sleeps = new List<int>();
         var injector = new TextInjector(
             NullLogger<TextInjector>.Instance,
             isKeyDown: _ => false,
             foregroundHwnd: () => 42,
             sendChunk: _ => true,
-            sleep: sleeps.Add);
+            sleep: sleeps.Add,
+            monotonicMs: () => 0.0);
         var text = new string('a', 96); // 12 chunks => exactly 11 inter-chunk pauses
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 
-        sleeps.ShouldBe(new[] { 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14 }); // 11 x TextInjector.InterChunkPauseMs (render-rate pace)
+        sleeps.ShouldBe(new[] { 14, 14, 14, 14, 14, 14, 14, 14, 14, 14, 14 }); // 11 x TextInjector.InterChunkPauseMs remainders (frozen clock => elapsed 0)
     }
 
     [Fact]
@@ -277,13 +284,14 @@ public class TextInjectorGuardedTests
             isKeyDown: vk => vk == 0x01 && buttonDown,
             foregroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; },
-            sleep: ms => { sleeps.Add(ms); if (sleeps.Count >= 3) buttonDown = false; });
+            sleep: ms => { sleeps.Add(ms); if (sleeps.Count >= 3) buttonDown = false; },
+            monotonicMs: () => 0.0);
         var text = new string('a', 16); // 2 chunks of 8
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 
         string.Concat(sent).ShouldBe(text);
-        // Three 15 ms release-wait polls, then the single 14 ms inter-chunk pause.
+        // Three 15 ms release-wait polls, then the single inter-chunk REMAINDER (frozen clock => full 14 ms).
         sleeps.ShouldBe(new[] { 15, 15, 15, 14 });
     }
 
@@ -446,5 +454,76 @@ public class TextInjectorGuardedTests
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
 
         string.Concat(sent).ShouldBe(text);
+    }
+
+    [Fact]
+    public void Guarded_DeadlinePacing_SleepsOnlyTheRemainderOfThePeriod()
+    {
+        // Deadline pacing (2026-07-28): the pause accounts for the send
+        // call's own measured duration. A 5 ms send inside a 14 ms period
+        // leaves a 9 ms remainder.
+        var sleeps = new List<int>();
+        var now = 0.0;
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: _ => { now += 5.0; return true; }, // each send "costs" 5 ms
+            sleep: ms => { sleeps.Add(ms); now += ms; },
+            monotonicMs: () => now);
+        var text = new string('a', 24); // 3 chunks => 2 inter-chunk pauses
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        sleeps.ShouldBe(new[] { 9, 9 }); // 14 - 5 measured send ms, per period
+    }
+
+    [Fact]
+    public void Guarded_SendSlowerThanPeriod_SleepsZeroTimes_GuardCadenceUnchanged()
+    {
+        // When SendInput alone takes >= the 14 ms period, the injector must
+        // not add ANY sleep (the send itself throttles the feed at or below
+        // the safe rate) -- and the halt-predicate cadence must not change:
+        // still exactly one foreground check per chunk plus the baseline.
+        var sleeps = new List<int>();
+        var now = 0.0;
+        var hwndReads = 0;
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => { hwndReads++; return 42; },
+            sendChunk: _ => { now += 20.0; return true; }, // send alone exceeds the period
+            sleep: ms => { sleeps.Add(ms); now += ms; },
+            monotonicMs: () => now);
+        var text = new string('a', 24); // 3 chunks
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        sleeps.ShouldBeEmpty();
+        hwndReads.ShouldBe(4); // 1 baseline at entry + 1 mid-paste check per chunk
+    }
+
+    [Fact]
+    public void Guarded_NineUnitStraddleChunks_GetTheScaledPeriodRemainder()
+    {
+        // InjectionChunker extends a chunk to 9 units rather than split a
+        // surrogate pair. A fixed 14 ms period would let sustained 9-unit
+        // chunks feed ~643 units/s > 600, so the period scales per chunk:
+        // ceil(9 * 14 / 8) = 16 ms (stage-2 ledger A7). Frozen clock =>
+        // the full scaled period is requested through the sleep seam.
+        var sleeps = new List<int>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: _ => true,
+            sleep: sleeps.Add,
+            monotonicMs: () => 0.0);
+        var block = "a\U0001F600\U0001F600\U0001F600\U0001F600"; // 9 units: 1 BMP char + 4 surrogate pairs
+        var text = block + block + block; // 3 straddle chunks of 9 units => 2 inter-chunk pauses
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        sleeps.ShouldBe(new[] { 16, 16 }); // TextInjector.PeriodMsForChunk(9-unit chunk) remainders
     }
 }

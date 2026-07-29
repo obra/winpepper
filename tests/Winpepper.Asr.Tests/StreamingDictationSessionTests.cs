@@ -582,4 +582,101 @@ public class StreamingDictationSessionTests
         await session.PumpCompletion.WaitAsync(
             TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
+
+    [Fact]
+    public async Task FinishAsync_ReportsBacklogAndSpans_InFinishStats()
+    {
+        var transcriber = new RecordingStreamingTranscriber();
+        var gate = new TaskCompletionSource<IStreamingTranscriber?>();
+        var session = StreamingDictationSession.Start(
+            _ => gate.Task, NullLogger.Instance, TestContext.Current.CancellationToken);
+        session.OnFrame(new float[800]);
+        session.OnFrame(new float[800]);
+        session.OnFrame(new float[800]);
+
+        // FinishAsync runs synchronously up to its first await, capturing the
+        // backlog BEFORE the transcriber (and thus the pump's pushes) exists.
+        var finish = session.FinishAsync(new float[9], TestContext.Current.CancellationToken);
+        gate.SetResult(transcriber);
+
+        (await finish).ShouldNotBeNull();
+        var stats = session.FinishStats.ShouldNotBeNull();
+        stats.BacklogFrames.ShouldBe(3);
+        stats.BacklogMs.ShouldBe(150); // 2400 samples / 16 per ms
+        stats.AsrWaitMs.ShouldBeGreaterThanOrEqualTo(0);
+        stats.AsrNativeMs.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task FinishAsync_DrainTimeout_StillReportsWaitAndBacklog()
+    {
+        var transcriber = new PermanentlyWedgedTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromMilliseconds(200));
+        session.OnFrame(new float[800]); // the pump wedges on this push
+        session.OnFrame(new float[800]); // stays queued behind the wedge
+
+        var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        var stats = session.FinishStats.ShouldNotBeNull();
+        stats.AsrWaitMs.ShouldBeGreaterThanOrEqualTo(150); // paid the ~200 ms deadline
+        stats.AsrNativeMs.ShouldBeNull();                  // inner finish never ran
+        stats.NativeCallStats.ShouldBeNull();              // never probed on abandon (gate may be wedged)
+        // Frame 1 may or may not have been dequeued by the pump before
+        // FinishAsync captured the backlog — both are legitimate.
+        stats.BacklogFrames.ShouldBeInRange(1, 2);
+
+        transcriber.Session.Unwedge();
+        await session.PumpCompletion.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task FinishAsync_SurfacesNativeCallStats_WhenSessionExposesThem()
+    {
+        var transcriber = new StatsExposingTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken);
+        session.OnFrame(new float[800]);
+
+        (await session.FinishAsync(new float[800], TestContext.Current.CancellationToken)).ShouldNotBeNull();
+
+        session.FinishStats.ShouldNotBeNull()
+            .NativeCallStats.ShouldBe(new NativeCallStats(7, 900, 400, 2));
+    }
+
+    [Fact]
+    public async Task FinishAsync_NullFactory_StillSetsFinishStats()
+    {
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(null),
+            NullLogger.Instance, TestContext.Current.CancellationToken);
+        session.OnFrame(new float[800]);
+
+        var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        var stats = session.FinishStats.ShouldNotBeNull();
+        stats.AsrNativeMs.ShouldBeNull(); // no session ever materialized
+    }
+
+    private sealed class StatsExposingTranscriber : IStreamingTranscriber
+    {
+        public string ModelName => "stats";
+        public StatsSession Session { get; } = new();
+        public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
+            => Task.FromResult<IStreamingTranscriptionSession>(Session);
+
+        public sealed class StatsSession : IStreamingTranscriptionSession, INativeCallStatsSource
+        {
+            public NativeCallStats NativeCallStats { get; } = new(7, 900, 400, 2);
+            public ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct) => ValueTask.CompletedTask;
+            public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
+                => Task.FromResult(new TranscriptionResult("OK", "stats"));
+            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        }
+    }
 }

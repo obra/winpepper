@@ -39,7 +39,7 @@ These are spec-acknowledged limits. Each is pinned by a test or recorded in a co
 2. **Silence gate measured residual (a):** 2 of 93 archived real dictations (quiet short "Thank you." utterances, max frame RMS 0.013–0.017) are now dropped — their level band overlaps the transient class; no energy-only constant can rescue them. Non-destructive (audio is always archived; recoverable within the last 50 dictations). Pinned by `Trim_QuietShortUtterance_IsDropped_KnownResidual`.
 3. **Silence gate measured residual (b):** a sustained quiet transient ≥ 600 ms (e.g. a 900 ms door rumble) still passes — an energy detector cannot distinguish it from quiet speech. Pinned by `Trim_SustainedQuietTransient_IsKept_KnownResidual`.
 4. **Pre-existing P90 sparse-speech residual:** a real brief speech burst in a long mostly-silent recording is dropped by the P90 gate (the false-positive direction the 2026-07-24 plan accepted and promised — but never wrote — a characterization test for). Pinned by `Trim_SparseSpeechBurst_LongRecording_IsSilent_KnownResidual`.
-5. **Five of the eight stage budgets are PROVISIONAL** (no log evidence exists for them yet — closing that gap is this feature's point). Cleanup and the two ASR budgets are measured from the 2026-07-24→28 production-log distributions. The budget consts carry a recalibration note.
+5. **Five of the eight stage budgets are PROVISIONAL** (no log evidence exists for them yet — closing that gap is this feature's point). Cleanup and the two ASR budgets are measured from production-log distributions (cleanup window 2026-07-17→28; re-verified against the raw logs 2026-07-28: Llm n=455, p50=505 ms, p90=816 ms, one overrun). The cleanup live-swap merged at base `f6d043b` AFTER the measurement window — recheck the cleanup distribution from the first week of `dictation timing` lines. The budget consts carry a recalibration note.
 6. **UI latency markers are log proxies:** "pill visible" is measured at the `SessionViewModel.Stage` setter (UI thread), not at pixels-on-screen; "pill hidden" adds the fixed 600 ms `_hideTimer` delay. Documented in the log-line comments.
 
 ## File Structure
@@ -60,7 +60,7 @@ These are spec-acknowledged limits. Each is pinned by a test or recorded in a co
 | `tests/Winpepper.Platform.Tests/Injection/TextInjectorGuardedTests.cs` (modify) | 5 | 3 report tests |
 | `tests/Winpepper.Platform.Tests/Injection/GuardedInjectionRunTests.cs` (modify) | 5 | Mechanical `.Outcome` migration at ~9 assertion sites |
 | `src/Winpepper.Core/Diagnostics/DictationTimingSummary.cs` (create) | 6 | Per-dictation timing accumulator, formatter, budget classifier |
-| `tests/Winpepper.Core.Tests/Diagnostics/DictationTimingSummaryTests.cs` (create) | 6 | 8 format/budget tests |
+| `tests/Winpepper.Core.Tests/Diagnostics/DictationTimingSummaryTests.cs` (create) | 6 | 9 format/budget tests |
 | `src/Winpepper.Core/ViewModels/SessionViewModel.cs` (modify) | 7 | Optional `ILogger`; `pill stage {From} -> {To}` on stage change |
 | `tests/Winpepper.Core.Tests/ViewModels/SessionViewModelLoggingTests.cs` (create) | 7 | Stage-transition logging tests |
 | `src/Winpepper.App/Hosting/AppShell.cs` (modify) | 7 | Pass a logger into `SessionViewModel` |
@@ -81,7 +81,7 @@ Task dependency graph: `1 → 8`, `3 → 4`, `5 → 8`, `6 → 8`; Tasks 2 and 7
 - Consumes: existing `SilenceTrimmer.Trim(ReadOnlySpan<float>) -> TrimResult` and its per-frame classification (`threshold = min(max(3*noiseFloor, 0.002), 0.15*speechLevel)`; a frame is voiced iff `rms[f] >= threshold`).
 - Produces: `TrimResult` gains three `required` init props — `int VoicedMs`, `int ClearVoicedMs`, `double MaxFrameRms`. Task 8 reads all three in the drop log line. `Trim`'s signature and all existing behavior for kept recordings are unchanged. The only production constructor of `TrimResult` is `SilenceTrimmer` itself (3 sites in this file); the bench harness `scripts/asr-latency-bench/Program.cs:464` only *reads* results and keeps compiling.
 
-**Background (verified root cause):** `IsSilent` today is `P90(20 ms-frame RMS) < 0.004` — purely proportional, so any transient occupying > 10 % of frames (cough, mic bump, keyboard clatter) unlocks the entire recording. Confirmed near-miss: an 8.95 s silent recording with a ~450 ms transient at −36..−45 dBFS, dropped only because the transient was just under 10 % of frames. The fix adds an absolute gate as an ADDITIONAL condition (AND semantics; do not re-derive the P90 parameters), counted off the existing per-frame classification: require ≥ 600 ms of voiced frames, with a clear-speech escape hatch (≥ 100 ms of frames at ≥ 0.02 RMS). Constants were MEASURED against all 100 archived recordings in a prior validation cycle. Note on "evaluated on the KEPT (post-trim) audio": under the trim walk every voiced frame is always kept (only `isSilence` frames are ever dropped), so counting voiced frames off the input classification IS the count on the kept audio — the implementation comment states this equivalence.
+**Background (verified root cause):** `IsSilent` today is `P90(20 ms-frame RMS) < 0.004` — purely proportional, so any transient occupying > 10 % of frames (cough, mic bump, keyboard clatter) unlocks the entire recording. Confirmed near-miss (validated against the archived WAV and `winpepper-20260728.log`): an 8.95 s silent recording with a ~450 ms transient at −36..−45 dBFS, dropped only because the transient occupied ~6.3 % of frames (28/447 ≥ 0.004) — under the > 10 % the proportional gate needs; the same transient in a capture under ~4.5 s flips the verdict. The fix adds an absolute gate as an ADDITIONAL condition (AND semantics; do not re-derive the P90 parameters), counted off the existing per-frame classification: require ≥ 600 ms of voiced frames, with a clear-speech escape hatch (≥ 100 ms of frames at ≥ 0.02 RMS). Constants were MEASURED against all 100 archived recordings in a prior validation cycle. Note on "evaluated on the KEPT (post-trim) audio": under the trim walk every voiced frame is always kept (only `isSilence` frames are ever dropped), so counting voiced frames off the input classification IS the count on the kept audio — the implementation comment states this equivalence.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -507,13 +507,16 @@ Add to `tests/Winpepper.Asr.Tests/ParakeetStreamingSessionTests.cs` (the existin
         await session.PushAsync(above, TestContext.Current.CancellationToken);
 
         // Unlatched: mel frames reach the extractor -> at least one chunk
-        // encode. (Exact count depends on the interior skipper; assert the
-        // latch opened, not the chunking arithmetic.)
+        // encode. Post-latch 0.0021-level frames classify as SPEECH in the
+        // InteriorSilenceSkipper (its per-frame floor is the same 0.002, and
+        // the >=floor branch bypasses quiet-recording suppression entirely),
+        // so audio flows to the encoder. Assert the latch opened, not the
+        // chunking arithmetic.
         backend.EncodeMelFrameCounts.Count.ShouldBeGreaterThanOrEqualTo(1);
     }
 ```
 
-Note: match the existing file's `using` set and any session-construction details of `NewSession` (its optional `fallback` parameter can be left defaulted). If `LeadingSilence_JustAboveFloor_Unlatches` fails with 0 encodes, the interior skipper is eating the low-DC audio after the latch — raise the fill value until it clears the skipper's per-frame floor with margin (e.g. `0.003f`) while keeping `JustBelowFloor` at `0.0019f`; the latch boundary being pinned is the LEADING gate, and the below-floor test carries that pin.
+Note: match the existing file's `using` set and any session-construction details of `NewSession` (its optional `fallback` parameter can be left defaulted). Validation (2026-07-28) traced the private `Rms` (whole-buffer sqrt(Σs²/N), so a DC fill's RMS equals its amplitude to within float noise) and the skipper's `Classify` — frames at ≥ 0.002 take the speech branch, never quiet-suppression — so both tests are expected to pass as written. Safety valve kept: if `LeadingSilence_JustAboveFloor_Unlatches` nonetheless fails with 0 encodes, raise the fill value until it clears the skipper's per-frame floor with margin (e.g. `0.003f`) while keeping `JustBelowFloor` at `0.0019f`; the latch boundary being pinned is the LEADING gate, and the below-floor test carries that pin.
 
 - [ ] **Step 2: Run the suite**
 
@@ -774,6 +777,8 @@ In `OnVmChanged`, immediately after `_animMode = PillAnimationMap.ForStage(_vm.S
 
 Then DELETE the four per-branch timer calls this replaces: `_tickTimer.Stop();` in the `PendingPaste` arm (with its `// no thinking pulse while waiting` comment), `_tickTimer.Stop();` in the `Idle` arm, `_tickTimer.Stop();` in the `Error` arm, and `_tickTimer.Start();` in the final else arm. Everything else in each arm (colors, `_visible`, `ResetPillVisual`, `PositionBottomCenter`, `Show`, `AssertTopmost`, `SetClickThrough`, `_hideTimer` handling) stays exactly as-is — this is deliberately the Error branch getting the same treatment as PendingPaste.
 
+Validated behavior note (2026-07-28, `SessionViewModel.Tick()` fully inspected): the tick body is `if (_stopwatch.IsRunning) ElapsedMs = _stopwatch.ElapsedMilliseconds;` and the stopwatch only starts on engine→Recording and stops on engine→Idle. So during PendingPaste the tick is a pure no-op (stopwatch stopped — no counter artifacts, indefinitely safe), and during an IN-FLIGHT error hold (engine still Recording) `ElapsedText` will now visibly count up through the 6–10 s hold — a truthful, accepted behavior delta vs today's frozen text; do not add a second timer or guard for it.
+
 - [ ] **Step 4: Add the monitor-follow**
 
 Add this method next to `PositionBottomCenter`:
@@ -837,6 +842,9 @@ and higher-band (ZBID/UIAccess) occluders.
 On-device smoke (post-merge): enter PendingPaste, raise another topmost
 window (e.g. Task Manager always-on-top) -> pill returns to front within
 ~100 ms; move focus to another monitor -> pill re-anchors within ~1 s.
+If the pill ever seems missing, check ALL monitors before concluding
+z-order burial -- wrong-monitor placement is a distinct rival cause
+(addressed by the monitor-follow, discriminated by this step).
 
 🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
 
@@ -1048,12 +1056,12 @@ EOF
 **Interfaces:**
 - Consumes: nothing (pure; `System.Text` only).
 - Produces (Task 8 consumes):
-  - `public sealed class DictationTimingSummary` in `Winpepper.Core.Diagnostics` with `required Guid SessionId`, `required string Kind` init props; settable `string Outcome` (default `"completed"`; values `completed|pending|silent|failed|empty`); `int?` props `RecordMs, DrainMs, TrimMs, TrimRemovedMs, AsrMs, CorrectionsMs, CleanupMs, InjectMs, InjectChars, InjectChunksSent, InjectChunksTotal, InjectPacingMs, TotalMs`; `string?` props `AsrMode, AsrModel, CleanupPath, CleanupModel`.
+  - `public sealed class DictationTimingSummary` in `Winpepper.Core.Diagnostics` with `required Guid SessionId`, `required string Kind` init props; settable `string Outcome` (default `"completed"`; values `completed|pending|silent|failed|empty`); `int?` props `RecordMs, DrainMs, TrimMs, TrimRemovedMs, AsrMs, CorrectionsMs, CleanupMs, InjectMs, InjectChars, InjectChunksSent, InjectChunksTotal, InjectPacingMs, TotalMs`; `string?` props `AsrMode` (values `streaming|batch|cloud`), `AsrModel, CleanupPath, CleanupModel`.
   - `public string FormatLine()` — one deterministic key=value line; null CORE stages (`rec drain trim asr corrections cleanup inject total`) render `skip`; optional fields are omitted entirely when null; string values containing a space are double-quoted.
   - `public IReadOnlyList<StageOverrun> Overruns()` with `public readonly record struct StageOverrun(string Stage, int ActualMs, int BudgetMs)`.
-  - Public budget consts: `DrainBudgetMs=500, TrimBudgetMs=200, AsrStreamingBudgetMs=2000, AsrBatchBudgetMs=8000, CorrectionsBudgetMs=150, CleanupBudgetMs=2000, InjectBudgetMs=1500, TotalBudgetMs=5000`. `Overruns()` checks `AsrMs` against the batch budget when `AsrMode == "batch"`, else the streaming budget. Recording has no budget.
+  - Public budget consts: `DrainBudgetMs=500, TrimBudgetMs=200, AsrStreamingBudgetMs=2000, AsrBatchBudgetMs=8000, CorrectionsBudgetMs=150, CleanupBudgetMs=2000, InjectBudgetMs=1500, TotalBudgetMs=5000`. `Overruns()` checks `AsrMs` against the streaming budget ONLY when `AsrMode == "streaming"`; `batch`, `cloud`, and unknown/null modes all use the (generous) batch budget — a misclassified mode must fail toward silence, not WRN spam. Recording has no budget.
 
-**Budget rationale (grounded in the 2026-07-24→28 production-log distributions from the prior validation cycle):** recording has no budget (user-controlled duration). Cleanup 2000 ms — MEASURED as a true anomaly signal: Llm-path n=453, p50=505 ms, p90=808 ms, exactly one overrun (4256 ms, plausibly a cold post-swap load — precisely what a WRN should catch). ASR is per-mode because one budget was measured to be routine noise: streaming-era gaps sit at p50 ≈ 140–180 ms / p90 ≤ 464 ms (2000 ms catches genuine anomalies), while healthy batch-era dictations ran p50 3.2–3.6 s / p90 6.0–7.0 s and cloud (AssemblyAI) p50 2247 ms — a flat 2000 ms budget would have flagged 84–86 % of batch dictations. `AsrBatchBudgetMs=8000` sits above the measured batch p90, so batch WRNs mean genuinely slow, and the differing budget value printed in the WRN also reveals the mode at a glance. The remaining five budgets are PROVISIONAL (no log evidence exists for them yet — that is exactly the gap this feature closes): Drain 500 ms — `StopSession` is a buffer copy plus streaming tee teardown, normally near-instant. Trim 200 ms — pure math over ≤ 60 s of 16 kHz floats. Corrections 150 ms — a local file load. Inject 1500 ms — a 458-char paste is ~0.8 s of nominal pacing at the current 14 ms/8-unit deadline pace (57 pauses × 14 ms ≈ 798 ms, and the DeadlinePacer nets out send time so wall ≈ nominal); 1500 ms leaves headroom, while a full release-wait prelude timeout (1500 ms) overruns — deserving a warning. Total 5000 ms — beyond that the dictation "felt slow" by definition. Recalibration note: re-derive the provisional five from the first weeks of `dictation timing` lines; they are consts precisely so a retune is a one-line diff.
+**Budget rationale (grounded in production-log distributions from the prior validation cycle, RE-VERIFIED against the raw logs 2026-07-28):** recording has no budget (user-controlled duration). Cleanup 2000 ms — MEASURED as a true anomaly signal over 2026-07-17→28: Llm-path n=453, p50=505 ms, p90=808 ms, exactly one overrun (4256 ms, plausibly a cold post-swap load — precisely what a WRN should catch); note the cleanup live-swap merged at base `f6d043b` AFTER this window, so re-check the distribution from week-one `dictation timing` lines. ASR is per-mode because one budget was measured to be routine noise: streaming-era gaps sit at p50 ≈ 140–180 ms / p90 ≤ 464 ms on the measured days (day-to-day variance is real — 07-26 p90 hit 1640 ms, still under budget; 2000 ms catches genuine anomalies), while healthy batch-era dictations ran p50 3.2–3.6 s / p90 6.0–7.0 s and cloud (AssemblyAI, n=30) p50 2247 ms — a flat 2000 ms budget would have flagged 84–86 % of batch dictations. `AsrBatchBudgetMs=8000` sits above the measured batch p90, so batch WRNs mean genuinely slow, and the differing budget value printed in the WRN also reveals the mode at a glance. `cloud` is a distinct MODE (truthful logging) but shares the batch budget — its 2247 ms p50 must never hit the 2000 ms streaming budget (see Task 8 Step 5 for why the mode comes from the produced model name, not from which code arm returned). The remaining five budgets are PROVISIONAL (no log evidence exists for them yet — that is exactly the gap this feature closes): Drain 500 ms — `StopSession` is a buffer copy plus streaming tee teardown, normally near-instant. Trim 200 ms — pure math over ≤ 60 s of 16 kHz floats. Corrections 150 ms — a local file load. Inject 1500 ms — a 458-char paste is ~0.8 s of nominal pacing at the current 14 ms/8-unit deadline pace (57 pauses × 14 ms ≈ 798 ms, and the DeadlinePacer nets out send time so wall ≈ nominal); 1500 ms leaves headroom, while a full release-wait prelude timeout (1500 ms) overruns — deserving a warning. Total 5000 ms — beyond that the dictation "felt slow" by definition. Recalibration note: re-derive the provisional five from the first weeks of `dictation timing` lines; they are consts precisely so a retune is a one-line diff.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1080,7 +1088,7 @@ public class DictationTimingSummaryTests
         TrimRemovedMs = 1200,
         AsrMs = 812,
         AsrMode = "streaming",
-        AsrModel = "parakeet-tdt-0.6b",
+        AsrModel = "nemotron-streaming-en",
         CorrectionsMs = 2,
         CleanupMs = 640,
         CleanupPath = "Llm",
@@ -1101,7 +1109,7 @@ public class DictationTimingSummaryTests
         line.ShouldBe(
             "session=11111111-2222-3333-4444-555555555555 kind=hold outcome=completed"
             + " rec=3512ms drain=42ms trim=8ms trim_removed=1200ms"
-            + " asr=812ms asr_mode=streaming asr_model=parakeet-tdt-0.6b"
+            + " asr=812ms asr_mode=streaming asr_model=nemotron-streaming-en"
             + " corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b"
             + " inject=850ms inject_chars=458 inject_chunks=58/58 inject_pace=798ms"
             + " total=2354ms");
@@ -1199,6 +1207,29 @@ public class DictationTimingSummaryTests
     }
 
     [Fact]
+    public void Overruns_CloudAsr_UsesBatchBudget()
+    {
+        // "cloud" is a distinct mode for truthful logging but shares the
+        // batch budget: measured cloud (AssemblyAI) p50 is ~2247 ms, which
+        // must NOT trip the 2000 ms streaming budget. Only an explicit
+        // "streaming" mode gets the tight budget -- unknown modes fail
+        // toward silence.
+        var s = Full();
+        s.AsrMode = "cloud";
+        s.AsrMs = 2247; // routine healthy cloud -- must NOT warn
+
+        s.Overruns().ShouldBeEmpty();
+
+        s.AsrMs = DictationTimingSummary.AsrBatchBudgetMs + 1;
+
+        s.Overruns().ShouldBe(new[]
+        {
+            new StageOverrun("asr", DictationTimingSummary.AsrBatchBudgetMs + 1,
+                DictationTimingSummary.AsrBatchBudgetMs),
+        });
+    }
+
+    [Fact]
     public void Overruns_SkippedStages_ProduceNoWarnings()
     {
         var s = new DictationTimingSummary
@@ -1252,15 +1283,20 @@ public readonly record struct StageOverrun(string Stage, int ActualMs, int Budge
 public sealed class DictationTimingSummary
 {
     // Stage budgets (ms). Recording has none: its duration is the user's.
-    // cleanup and the two asr budgets are log-derived (2026-07-24..28
-    // production distributions); the rest are PROVISIONAL -- re-derive from
-    // the first weeks of `dictation timing` lines.
+    // cleanup and the two asr budgets are log-derived (production
+    // distributions, re-verified against the raw logs 2026-07-28); the rest
+    // are PROVISIONAL -- re-derive from the first weeks of `dictation
+    // timing` lines. The cleanup live-swap merged AFTER the cleanup
+    // measurement window, so recheck that distribution in week one too.
     public const int DrainBudgetMs = 500;         // provisional: buffer copy + tee teardown
     public const int TrimBudgetMs = 200;          // provisional: pure math over <=60 s of floats
-    public const int AsrStreamingBudgetMs = 2000; // measured: streaming p90 <= 464 ms; 2 s = true anomaly
-    public const int AsrBatchBudgetMs = 8000;     // measured: healthy batch p50 3.2-3.6 s, p90 6-7 s
+    public const int AsrStreamingBudgetMs = 2000; // measured: streaming p90 <= 464 ms on measured days
+                                                  // (day variance is real: 07-26 p90 = 1640 ms, still under)
+    public const int AsrBatchBudgetMs = 8000;     // measured: healthy batch p50 3.2-3.6 s, p90 6-7 s;
+                                                  // cloud (n=30, p50 2247 ms) shares this budget
     public const int CorrectionsBudgetMs = 150;   // provisional: local file load
     public const int CleanupBudgetMs = 2000;      // measured: Llm path n=453 p50=505 p90=808, 1 overrun
+                                                  // (window 2026-07-17..28)
     public const int InjectBudgetMs = 1500;       // provisional: ~0.8 s nominal send for 458 chars at
                                                   // the 14 ms/8-unit deadline pace; a full 1500 ms
                                                   // release-wait prelude overruns -- deserving a WRN
@@ -1275,7 +1311,7 @@ public sealed class DictationTimingSummary
     public int? TrimMs { get; set; }
     public int? TrimRemovedMs { get; set; }
     public int? AsrMs { get; set; }
-    public string? AsrMode { get; set; }                // "streaming" | "batch"
+    public string? AsrMode { get; set; }                // "streaming" | "batch" | "cloud"
     public string? AsrModel { get; set; }
     public int? CorrectionsMs { get; set; }
     public int? CleanupMs { get; set; }
@@ -1319,8 +1355,11 @@ public sealed class DictationTimingSummary
         var list = new List<StageOverrun>(2);
         Check(list, "drain", DrainMs, DrainBudgetMs);
         Check(list, "trim", TrimMs, TrimBudgetMs);
-        // Per-mode asr budget (the WRN's budget figure also reveals the mode).
-        Check(list, "asr", AsrMs, AsrMode == "batch" ? AsrBatchBudgetMs : AsrStreamingBudgetMs);
+        // Per-mode asr budget (the WRN's budget figure also reveals the
+        // mode). ONLY an explicit "streaming" gets the tight budget; batch,
+        // cloud (measured p50 2247 ms), and unknown/null modes all use the
+        // generous batch budget so a misclassification fails toward silence.
+        Check(list, "asr", AsrMs, AsrMode == "streaming" ? AsrStreamingBudgetMs : AsrBatchBudgetMs);
         Check(list, "corrections", CorrectionsMs, CorrectionsBudgetMs);
         Check(list, "cleanup", CleanupMs, CleanupBudgetMs);
         Check(list, "inject", InjectMs, InjectBudgetMs);
@@ -1376,8 +1415,10 @@ feat(core): DictationTimingSummary -- per-dictation stage line + budget overruns
 Pure, Linux-tested accumulator/formatter: one parseable key=value line
 per dictation (skipped stages marked, string values with spaces quoted)
 plus Overruns() classification against fixed stage budgets for [WRN]
-lines. Cleanup and per-mode ASR budgets are measured from the
-2026-07-24..28 production logs; the other five are labeled provisional
+lines. Cleanup and per-mode ASR budgets are measured from production
+logs (re-verified against the raw 2026-07 logs); asr_mode is three-way
+(streaming|batch|cloud) with only explicit "streaming" getting the
+tight 2000 ms budget; the other five budgets are labeled provisional
 with a recalibration note. PipelineHost wiring lands separately.
 
 🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
@@ -1560,7 +1601,7 @@ EOF
 
 **Zero-cost discipline:** Stopwatch reads along the existing flow only — no new threads, no timers, no hot-path allocations beyond the one summary object/line per dictation. Do NOT touch `HotkeyHook.cs` (the injected-event fast path at :105–135 stays byte-identical). Existing one-off timing logs (trimmed silence, injection interrupted, retained parks, cleanup path line, model-load lines) all STAY — the summary complements them.
 
-**CRITICAL structural fact:** `HandleHotkey` (`PipelineHost.cs:449`) writes the dictation flow TWICE, byte-parallel — the `HoldUp` arm (≈512–867) and the `Toggle`-stop arm (≈933–1282, every local suffixed `2`). Steps 2–9 below show the HOLD arm; Step 10 duplicates every change into the toggle arm with `2`-suffixed names (`timing2`, `releaseAt2`, `drainSw2`, `trimSw2`, `streamingProduced2`, `correctionsSw2`, `injReport2`). On the toggle side, `evt.Timestamp` of the stop-toggle event is the stop-press instant — the correct `releaseAt2`. Line anchors below are from base `f6d043b` — earlier tasks do not touch this file, but VERIFY each anchor against the current file as you edit.
+**CRITICAL structural fact:** `HandleHotkey` (`PipelineHost.cs:449`) writes the dictation flow TWICE, byte-parallel — the `HoldUp` arm (≈512–867) and the `Toggle`-stop arm (≈933–1282, every local suffixed `2`). Steps 2–9 below show the HOLD arm; Step 10 duplicates every change into the toggle arm with `2`-suffixed names (`timing2`, `releaseAt2`, `drainSw2`, `trimSw2`, `correctionsSw2`, `injReport2`). On the toggle side, `evt.Timestamp` of the stop-toggle event is the stop-press instant — the correct `releaseAt2`. Line anchors below are from base `f6d043b` — earlier tasks do not touch this file, but VERIFY each anchor against the current file as you edit.
 
 - [ ] **Step 1: Add the two private helpers**
 
@@ -1671,11 +1712,7 @@ In the `HoldUp` arm, after `_engine.Apply(SessionEvent.StopRequested);` / `_reco
 
 - [ ] **Step 5: ASR stamps + the ASR-failed terminal**
 
-(a) Just BEFORE the batch/late-path block `if (maybeTranscription is null)` (`:604`), capture which path produced the result:
-
-```csharp
-                var streamingProduced = maybeTranscription is not null;
-```
+(a) Do NOT derive the ASR mode from which code arm returned. `maybeTranscription is not null` was validated (2026-07-28) to be a wrong signal: with `StreamingEnabled=true` (the default), the local `BatchStreamingAdapter`, the cloud websocket, the cloud REST zero-push batch, and the cloud→local fallback ALL return non-null through the streaming arm — under an arm-based derivation, routine cloud (p50 ≈ 2247 ms) and local batch (p50 3.2–3.6 s) dictations would spam the 2000 ms streaming-budget WRN, poisoning exactly the signal this feature creates. Instead, the mode comes from `producedModelName` in (c) below — every internal fallback rewrites `ProviderModelName` to the engine that ACTUALLY produced the text, so the name is outcome-truthful (verified across all five paths).
 
 (b) Inside the ASR-unavailable early-exit (`:625–644`), immediately BEFORE the `return;` at `:643` (after the existing `_log.LogWarning("Local ASR unavailable ...")`):
 
@@ -1693,9 +1730,18 @@ In the `HoldUp` arm, after `_engine.Apply(SessionEvent.StopRequested);` / `_reco
 
 ```csharp
                 timing.AsrMs = (int)transcribeSw.ElapsedMilliseconds;
-                timing.AsrMode = streamingProduced ? "streaming" : "batch";
+                // Mode from the model that ACTUALLY produced the result (see
+                // Step 5a): nemotron const => true local streaming; the
+                // assemblyai/ prefix => cloud (shares the batch budget); else
+                // local batch (incl. every fallback path).
+                timing.AsrMode =
+                    string.Equals(producedModelName, Winpepper.Asr.TranscribeCpp.NemotronStreamingModel.Name, StringComparison.OrdinalIgnoreCase) ? "streaming"
+                    : CloudProvider.IsCloud(producedModelName) ? "cloud"
+                    : "batch";
                 timing.AsrModel = producedModelName;
 ```
+
+(`NemotronStreamingModel.Name` is the existing `public const string` (`"nemotron-streaming-en"`, `NemotronStreamingModel.cs:8`); `CloudProvider.IsCloud` is the same call PipelineHost already makes at `:670`/`:1087` for `skipLlm` — reuse its exact form/qualification from those sites.)
 
 - [ ] **Step 6: Corrections + cleanup stamps**
 
@@ -1779,7 +1825,7 @@ Immediately after `_engine.Apply(SessionEvent.InjectionCompleted);` (`:839`) and
                 EmitTimingSummary(timing);
 ```
 
-(The `HistoryTimings` archive block stays exactly as-is — log and History intentionally share the same stopwatch values.)
+(The `HistoryTimings` archive block stays exactly as-is — log and History intentionally share the same stopwatch values. Placement matters: emission sits BEFORE the `_archiver.Archive` call so an Archive throw — which escapes to the RunAsync catch — can never skip the timing line; verified 2026-07-28 that these three emission points plus the RunAsync catch are the arms' only exits.)
 
 - [ ] **Step 9: Session cancelled line**
 
@@ -1793,7 +1839,7 @@ In the `Cancel` arm (`:868–878`), after `_engine.Apply(SessionEvent.CancelRequ
 
 - [ ] **Step 10: Duplicate Steps 3–8 into the Toggle-stop arm**
 
-The toggle-stop block (`:933–1282`) is byte-parallel. Apply every change from Steps 3–8 with: `Kind = "toggle"`, and locals `releaseAt2`, `timing2`, `drainSw2`, `trimSw2`, `trimRemovedMs2`, `streamingProduced2`, `correctionsSw2`, `injReport2`. Anchor mapping (hold → toggle): 514→935, 517→938, 521→942, drop-branch break 561→981, 604→1024, 643→1063, 650→1070, 695→1112, 707→1124, 711→1128, 722→1139, 754→1171, 814→1229, 839→1254. The second `TrimForTranscription` call site (`:942`) needs the same `out var trimRemovedMs2` update.
+The toggle-stop block (`:933–1282`) is byte-parallel. Apply every change from Steps 3–8 with: `Kind = "toggle"`, and locals `releaseAt2`, `timing2`, `drainSw2`, `trimSw2`, `trimRemovedMs2`, `correctionsSw2`, `injReport2` (the AsrMode derivation uses `producedModelName2`). Anchor mapping (hold → toggle): 514→935, 517→938, 521→942, drop-branch break 561→981, 604→1024, 643→1063, 650→1070, 695→1112, 707→1124, 711→1128, 722→1139, 754→1171, 814→1229, 839→1254. The second `TrimForTranscription` call site (`:942`) needs the same `out var trimRemovedMs2` update.
 
 - [ ] **Step 11: Enrich the pill-click retry success log**
 
@@ -1872,6 +1918,8 @@ Run from WSL, from the worktree root: `./scripts/windows-gate.sh` (~10 min; do N
 
 Expected: exit 0 and `GATE: GREEN`. Known transient failures — retry the gate, do not "fix" them: UNC MSB4025 "retry should be performed" build flakes, vsock interop flakes, and `Hook_Installs_And_DisposesCleanly` hanging on a headless host (needs an interactive desktop). Llama cleanup tests self-skip when the qwen GGUF is absent — `Skipped > 0` keeps the gate green and is expected.
 
+Baseline notes (validated 2026-07-28): the Linux suite was GREEN at base (1476 tests, 0 failed, 0 skipped — any future Linux `Skipped > 0` is itself a change to investigate) and the gate's hardcoded `powershell.exe` interop path executes; but host dotnet SDK health, `\\wsl.localhost` UNC build viability, and interactive-desktop availability were NOT pre-verified — if the first gate run fails in one of those categories, treat it as host-environmental, not as caused by this plan's changes. Also: the gate pre-cleans all `bin`/`obj`, so the next Linux run rebuilds from scratch (slow but expected).
+
 If the gate finds REAL compile errors (most likely in the Task 4 or Task 8 Windows-only wiring), fix them and commit each fix scoped to the task it repairs, e.g. `fix(app): <what the gate caught>` with the standard Amplifier trailer, then re-run the gate until GREEN.
 
 - [ ] **Step 3: Confirm branch state — and stop**
@@ -1898,5 +1946,6 @@ Expected: the 8 task commits (plus any gate-fix commits), clean tree. Do NOT pus
 1. **Spec coverage:** Fix 1 → Tasks 3+4 (timer policy + wiring, Error branch included, monitor-follow at ~1 s with change-guard); Fix 2 → Tasks 1+2 (AND-semantics gate, measured constants, both residual pins, the missing brief-transient test, recalibratable drop log fields via Task 8, streaming divergence documented not unified); Feature 3 → Tasks 5+6+7+8 (summary line incl. silent/pending/failed/empty outcomes, per-mode budgets with measured-vs-provisional rationale re-derived for the current 14 ms pacing, UI latency markers, hotkey lag, existing one-off logs preserved, zero-cost discipline, all pure logic Linux-tested).
 2. **No silent deferrals:** the two spec-acknowledged verification gaps (on-device pill efficacy; residual gate classes) are pinned by tests or recorded in commit messages per the spec's explicit "accept + record" instruction — not moved to future work. The deferred visual cue for retained parks is the spec's own explicit deferral. No stubs, mocks, or fake providers stand in for any production behavior: every new log line and gate runs in production code paths.
 3. **Placeholder scan:** every code step carries complete code; the only "adapt to the file" notes are pinned to verified existing helpers (`NewSession`, `Const`/`Concat`, usings) with concrete fallback instructions.
-4. **Type consistency check:** `TrimResult.VoicedMs/ClearVoicedMs/MaxFrameRms` (Task 1) = fields read in Task 8's drop log; `PillTimerPlan.KeepAliveRunning/AnimationRunning` (Task 3) = members used in Task 4; `InjectionRunReport(Outcome, ChunksTotal, ChunksSent, PacingWaitMs)` and `TryInjectGuardedDetailed` (Task 5) = exactly what Task 8 Steps 7/11 consume; `DictationTimingSummary` property names in Task 8 match Task 6's class; `SessionViewModel(..., ILogger? log = null)` (Task 7) matches the AppShell call. Verified consistent.
+4. **Type consistency check:** `TrimResult.VoicedMs/ClearVoicedMs/MaxFrameRms` (Task 1) = fields read in Task 8's drop log; `PillTimerPlan.KeepAliveRunning/AnimationRunning` (Task 3) = members used in Task 4; `InjectionRunReport(Outcome, ChunksTotal, ChunksSent, PacingWaitMs)` and `TryInjectGuardedDetailed` (Task 5) = exactly what Task 8 Steps 7/11 consume; `DictationTimingSummary` property names in Task 8 match Task 6's class, and the `AsrMode` values Task 8 stamps (`streaming|batch|cloud` from `producedModelName`) match Task 6's mode set and budget rule (streaming budget only for explicit `"streaming"`); `SessionViewModel(..., ILogger? log = null)` (Task 7) matches the AppShell call. Verified consistent.
+5. **Load-bearing validation pass (2026-07-28, post-writing):** 10 assumptions surfaced and dispatched to evidence: 9 verified (archive measurements, the near-miss WAV, Tick() safety, terminal coverage, baseline green, `TrimResult` construction sites, streaming latch boundary, budget distributions re-computed from raw production logs, and the model-name mode signal), 1 falsified (`maybeTranscription is not null` as the ASR-mode signal — fixed: mode now derives from `producedModelName`; Task 6 gained the `cloud` mode + `Overruns_CloudAsr_UsesBatchBudget`), 1 accepted residual (on-device pill-fix efficacy — tick keep-alive chosen over event-driven/higher-band alternatives; smoke checklist gained a wrong-monitor discrimination step). Ledger: `.worktrees/.the-usual-logs/pill-silence-observability/load-bearing-ledger.md`.
 

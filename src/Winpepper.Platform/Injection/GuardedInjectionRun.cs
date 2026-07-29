@@ -3,6 +3,9 @@ using System.Collections.Generic;
 
 namespace Winpepper.Platform.Injection;
 
+/// <summary>Outcome of one guarded run plus how many chunks actually landed.</summary>
+public readonly record struct GuardedRunResult(InjectionRunOutcome Outcome, int ChunksSent);
+
 /// <summary>
 /// Pure driver for an interruptible, chunked, PACED injection send. The pause
 /// runs BETWEEN chunks (never before the first): without pacing the whole
@@ -21,9 +24,6 @@ namespace Winpepper.Platform.Injection;
 /// access is behind the delegates, so this loop is fully unit-testable on
 /// Linux.
 /// </summary>
-/// <summary>Outcome of one guarded run plus how many chunks actually landed.</summary>
-public readonly record struct GuardedRunResult(InjectionRunOutcome Outcome, int ChunksSent);
-
 public static class GuardedInjectionRun
 {
     public static GuardedRunResult Execute(

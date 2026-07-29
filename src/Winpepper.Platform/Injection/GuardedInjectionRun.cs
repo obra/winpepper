@@ -21,9 +21,12 @@ namespace Winpepper.Platform.Injection;
 /// access is behind the delegates, so this loop is fully unit-testable on
 /// Linux.
 /// </summary>
+/// <summary>Outcome of one guarded run plus how many chunks actually landed.</summary>
+public readonly record struct GuardedRunResult(InjectionRunOutcome Outcome, int ChunksSent);
+
 public static class GuardedInjectionRun
 {
-    public static InjectionRunOutcome Execute(
+    public static GuardedRunResult Execute(
         IReadOnlyList<string> chunks,
         long hwndAtSendStart,
         Func<long> currentForegroundHwnd,
@@ -36,6 +39,7 @@ public static class GuardedInjectionRun
         ArgumentNullException.ThrowIfNull(currentForegroundHwnd);
         ArgumentNullException.ThrowIfNull(sendChunk);
 
+        var sent = 0;
         for (var i = 0; i < chunks.Count; i++)
         {
             if (i > 0) pauseBetweenChunks?.Invoke();
@@ -43,7 +47,7 @@ public static class GuardedInjectionRun
             // Checks sit immediately before the send, so the exposure window
             // is the (microsecond-scale) send itself, not the pause.
             if (physicalInputDown?.Invoke() == true)
-                return InjectionRunOutcome.Interrupted;
+                return new GuardedRunResult(InjectionRunOutcome.Interrupted, sent);
             var hwndNow = currentForegroundHwnd();
             // Observation hook BEFORE the decision: a 0 read is exactly what
             // the park-on-0 polarity wants field data on (it also halts just
@@ -52,11 +56,12 @@ public static class GuardedInjectionRun
             if (MidPasteDecider.Decide(hwndAtSendStart, hwndNow)
                 == MidPasteDecision.Halt)
             {
-                return InjectionRunOutcome.Interrupted;
+                return new GuardedRunResult(InjectionRunOutcome.Interrupted, sent);
             }
             if (!sendChunk(chunks[i]))
-                return InjectionRunOutcome.SendFailed;
+                return new GuardedRunResult(InjectionRunOutcome.SendFailed, sent);
+            sent++;
         }
-        return InjectionRunOutcome.Completed;
+        return new GuardedRunResult(InjectionRunOutcome.Completed, sent);
     }
 }

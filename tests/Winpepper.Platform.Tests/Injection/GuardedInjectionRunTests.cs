@@ -16,7 +16,7 @@ public class GuardedInjectionRunTests
             currentForegroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; });
 
-        outcome.ShouldBe(InjectionRunOutcome.Completed);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.Completed);
         sent.ShouldBe(new[] { "aa", "bb", "cc" });
     }
 
@@ -32,7 +32,7 @@ public class GuardedInjectionRunTests
             currentForegroundHwnd: () => 99,
             sendChunk: c => { sent.Add(c); return true; });
 
-        outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.Interrupted);
         sent.ShouldBeEmpty();
     }
 
@@ -49,7 +49,7 @@ public class GuardedInjectionRunTests
             currentForegroundHwnd: () => ++probes == 1 ? 42L : 99L,
             sendChunk: c => { sent.Add(c); return true; });
 
-        outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.Interrupted);
         sent.ShouldBe(new[] { "aa" });
     }
 
@@ -63,7 +63,7 @@ public class GuardedInjectionRunTests
             currentForegroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return sent.Count < 2; });
 
-        outcome.ShouldBe(InjectionRunOutcome.SendFailed);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.SendFailed);
         sent.ShouldBe(new[] { "aa", "bb" });
     }
 
@@ -76,7 +76,7 @@ public class GuardedInjectionRunTests
             currentForegroundHwnd: () => throw new InvalidOperationException("must not probe"),
             sendChunk: _ => throw new InvalidOperationException("must not send"));
 
-        outcome.ShouldBe(InjectionRunOutcome.Completed);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.Completed);
     }
 
     [Fact]
@@ -92,7 +92,7 @@ public class GuardedInjectionRunTests
             currentForegroundHwnd: () => 99,
             sendChunk: c => { sent.Add(c); return true; });
 
-        outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.Interrupted);
         sent.ShouldBeEmpty();
     }
 
@@ -111,7 +111,7 @@ public class GuardedInjectionRunTests
             currentForegroundHwnd: () => ++probes == 1 ? 42L : 0L,
             sendChunk: c => { sent.Add(c); return true; });
 
-        outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.Interrupted);
         sent.ShouldBe(new[] { "aa" });
     }
 
@@ -147,7 +147,7 @@ public class GuardedInjectionRunTests
             currentForegroundHwnd: () => ++probes <= 2 ? 42L : 99L,
             sendChunk: c => { sent.Add(c); return true; });
 
-        outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.Interrupted);
         var sentText = string.Concat(sent);
         sentText.Length.ShouldBeLessThan(text.Length);
         text.StartsWith(sentText, StringComparison.Ordinal).ShouldBeTrue();
@@ -167,7 +167,7 @@ public class GuardedInjectionRunTests
             sendChunk: c => { sent.Add(c); return true; },
             physicalInputDown: () => sent.Count >= 1); // "Alt goes down" after chunk 1
 
-        outcome.ShouldBe(InjectionRunOutcome.Interrupted);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.Interrupted);
         sent.ShouldBe(new[] { "aa" });
     }
 
@@ -182,7 +182,7 @@ public class GuardedInjectionRunTests
             sendChunk: c => { events.Add("send:" + c); return true; },
             pauseBetweenChunks: () => events.Add("pause"));
 
-        outcome.ShouldBe(InjectionRunOutcome.Completed);
+        outcome.Outcome.ShouldBe(InjectionRunOutcome.Completed);
         events.ShouldBe(new[] { "send:aa", "pause", "send:bb", "pause", "send:cc" });
     }
 }

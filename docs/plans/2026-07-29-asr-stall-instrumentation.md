@@ -23,7 +23,8 @@ existing `DrainTimedOut`/`PumpCompletion` precedent), because
 **Tech Stack:** .NET 9, xUnit v3 (in-process runner via `dotnet exec`, never
 `dotnet test`), Shouldly (except `NemotronStreamingTranscriberTests.cs`, which
 uses bare `Assert` — match each file's local style), `ArrayPool<float>`,
-`Interlocked`/`Volatile`, `Environment.TickCount64`, `GC.CollectionCount`.
+`Interlocked`/`Volatile`, `Environment.TickCount64`, `GC.CollectionCount`,
+`GC.GetTotalPauseDuration()` (verified available + monotonic on .NET 9).
 
 ## Global Constraints
 
@@ -95,11 +96,28 @@ fix cycle will use that data.
 - New OPTIONAL fields (omitted when null, so old-log grep patterns keep
   working): `asr_wait=`, `asr_native=`, `backlog=`, `backlog_ms=`,
   `native_calls=`, `native_total=`, `native_max=`, `native_over250=`,
-  `gc=g0/g1/g2`, `prewarm_active=true|false`. `asr=` remains the total for
-  continuity.
+  `gc=g0/g1/g2`, `gc_pause=` (ms delta of `GC.GetTotalPauseDuration()` —
+  measures actual GC pause TIME; counts alone can't convey magnitude),
+  `prewarm_active=true|false`. `asr=` remains the total for continuity.
 - New budget: `asr_wait` > 500 ms emits the existing
   `slow dictation stage` WRN — backlog buildup becomes grep-able without
-  waiting for a total-stage overrun.
+  waiting for a total-stage overrun. INTERPRETATION CAVEAT (validated):
+  `asr_wait=` spans `_pump.WaitAsync`, and the pump task includes session
+  STARTUP work (cold factory/model load, cloud connect) when the session was
+  still starting at stop — the deadline logic deliberately keeps the full
+  deadline for still-starting sessions. So a large `asr_wait` with SMALL
+  `backlog_ms` and a nearby engine/model-load INF is a cold start, not slow
+  feeds; genuine backlog buildup shows `backlog_ms` comparable to `rec=`.
+- RESIDUE DERIVATION (validated): on `asr_mode=streaming` lines,
+  `asr − asr_wait − asr_native` = coordinator overhead + the inner session's
+  native `stream dispose` (which runs after the `asr_native` stopwatch stops
+  and after the native-aggregate snapshot, so the line's `native_*` fields
+  deliberately do NOT include it). Every other residue component is
+  code-bounded ≤ ~1 s and typically ~0 (the settings re-read at the window
+  head is a per-call disk read with a 15–30 ms retry tail — a caveat, not
+  seconds), so a multi-second residue localizes to the native stream dispose —
+  which ALSO fires the existing ≥3000 ms `TimedNativeCall` WRN now that
+  Task 3 wraps it.
 - `backlog_ms` is computed from SAMPLES (queued samples / 16 per ms @ 16 kHz),
   not frames × nominal duration: real frames are ~50 ms (800 samples) but the
   session pre-roll frame is ~500 ms (8000 samples), so a sample count is the
@@ -249,7 +267,7 @@ EOF
 - Produces (Task 7 stamps these — exact names/types):
   `int? AsrWaitMs`, `int? AsrNativeMs`, `int? BacklogFrames`, `int? BacklogMs`,
   `int? NativeCalls`, `int? NativeTotalMs`, `int? NativeMaxMs`, `int? NativeOver250`,
-  `int? GcGen0`, `int? GcGen1`, `int? GcGen2`, `bool? PrewarmActive`,
+  `int? GcGen0`, `int? GcGen1`, `int? GcGen2`, `int? GcPauseMs`, `bool? PrewarmActive`,
   `public const int AsrWaitBudgetMs = 500`. All render only when set.
 
 - [ ] **Step 1: Write the failing tests**
@@ -275,13 +293,14 @@ and after `InjectPacingMs = 798,`:
         GcGen0 = 1,
         GcGen1 = 0,
         GcGen2 = 0,
+        GcPauseMs = 12,
         PrewarmActive = true,
 ```
 
 2. Update the exact-line expectation in `FormatLine_FullDictation_IsOneParseableKeyValueLine` to (single line, shown wrapped here — keep it one string or the existing concatenation style):
 
 ```
-session=11111111-2222-3333-4444-555555555555 kind=hold outcome=completed rec=3512ms mic_stop=42ms trim=8ms trim_removed=1200ms asr=812ms asr_mode=streaming asr_model=nemotron-streaming-en asr_wait=95ms asr_native=210ms backlog=2 backlog_ms=100ms native_calls=74 native_total=1900ms native_max=180ms native_over250=0 corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b inject=850ms inject_chars=458 inject_chunks=58/58 inject_pace=798ms gc=1/0/0 prewarm_active=true total=2354ms
+session=11111111-2222-3333-4444-555555555555 kind=hold outcome=completed rec=3512ms mic_stop=42ms trim=8ms trim_removed=1200ms asr=812ms asr_mode=streaming asr_model=nemotron-streaming-en asr_wait=95ms asr_native=210ms backlog=2 backlog_ms=100ms native_calls=74 native_total=1900ms native_max=180ms native_over250=0 corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b inject=850ms inject_chars=458 inject_chunks=58/58 inject_pace=798ms gc=1/0/0 gc_pause=12ms prewarm_active=true total=2354ms
 ```
 
 3. Add new facts (Shouldly, `Subject_Scenario_Expected` naming):
@@ -303,6 +322,7 @@ session=11111111-2222-3333-4444-555555555555 kind=hold outcome=completed rec=351
         line.ShouldNotContain("backlog");
         line.ShouldNotContain("native_");
         line.ShouldNotContain("gc=");
+        line.ShouldNotContain("gc_pause=");
         line.ShouldNotContain("prewarm_active=");
     }
 
@@ -354,9 +374,12 @@ Expected: FAIL — CS0117 (`AsrWaitMs` etc. not defined).
 1. Add the budget const to the budgets block (after `AsrBatchBudgetMs`):
 
 ```csharp
-    public const int AsrWaitBudgetMs = 500;       // asr_wait: pump backlog drain after stop. >500 ms means
+    public const int AsrWaitBudgetMs = 500;       // asr_wait: _pump.WaitAsync after stop. >500 ms means EITHER
                                                   // native feeds ran slower than real time during recording
-                                                  // (frames backed up in the unbounded channel).
+                                                  // (frames backed up in the unbounded channel; backlog_ms will
+                                                  // be large) OR the session was still starting at stop (cold
+                                                  // factory/model load, cloud connect; backlog_ms small, load
+                                                  // INFs nearby). The WRN is a flag to look, not a verdict.
 ```
 
 2. Add properties after `public string? AsrModel { get; set; }`:
@@ -378,6 +401,8 @@ and after `public int? InjectPacingMs { get; set; }`:
     public int? GcGen0 { get; set; }            // GC.CollectionCount deltas, recording start -> emit
     public int? GcGen1 { get; set; }
     public int? GcGen2 { get; set; }
+    public int? GcPauseMs { get; set; }         // GC.GetTotalPauseDuration() delta, recording start -> emit:
+                                                // actual GC pause TIME (counts can't convey magnitude)
     public bool? PrewarmActive { get; set; }    // cleanup pre-warm overlapped this dictation
 ```
 
@@ -399,6 +424,7 @@ and insert after `AppendOptMs(sb, "inject_pace", InjectPacingMs);` (before the `
 ```csharp
         if (GcGen0 is not null || GcGen1 is not null || GcGen2 is not null)
             sb.Append(" gc=").Append(GcGen0 ?? 0).Append('/').Append(GcGen1 ?? 0).Append('/').Append(GcGen2 ?? 0);
+        AppendOptMs(sb, "gc_pause", GcPauseMs);
         if (PrewarmActive is bool prewarm)
             sb.Append(" prewarm_active=").Append(prewarm ? "true" : "false");
 ```
@@ -437,8 +463,10 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 - Produces (Task 4 consumes): `public sealed record NativeCallStats(int Count, int TotalMs, int MaxMs, int CountOver250Ms)` and `public interface INativeCallStatsSource { NativeCallStats NativeCallStats { get; } }` in namespace `Winpepper.Asr.Transcription`; nemotron's `Session` implements `INativeCallStatsSource`.
 
 Log-volume discipline: NO new log lines in this task. The existing ≥3000 ms
-`TimedNativeCall` warnings are untouched (their tests keep passing). The
-aggregate is what distinguishes "one 2.9 s call" from "many 250 ms calls".
+`TimedNativeCall` warnings are untouched (their tests keep passing); wrapping
+the stream dispose (Step 3 item 5) merely extends that EXISTING warn mechanism
+to one more op — it emits nothing below the threshold. The aggregate is what
+distinguishes "one 2.9 s call" from "many 250 ms calls".
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -476,6 +504,22 @@ Append to `NemotronStreamingTranscriberTests.cs` (this file uses bare xUnit `Ass
         Assert.True(stats.CountOver250Ms >= 1);
         Assert.True(stats.MaxMs >= 250);
         Assert.True(stats.Count >= 2); // begin + feed at minimum
+    }
+
+    [Fact]
+    public async Task DisposeAsync_CountsStreamDisposeAsNativeCall()
+    {
+        var engine = new FakeTranscribeCppEngine();
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // stream begin + feed
+        var before = ((INativeCallStatsSource)s).NativeCallStats.Count;
+
+        await s.DisposeAsync();
+
+        var after = ((INativeCallStatsSource)s).NativeCallStats.Count;
+        Assert.Equal(before + 1, after); // "stream dispose" is a timed native call
     }
 ```
 
@@ -576,6 +620,29 @@ even when the native call throws, so corrupt paths still count):
                         op, (int)elapsedMs);
             }
 ```
+
+5. Wrap the native stream dispose in `Session.DisposeAsync` (validated gap:
+today `_stream?.Dispose()` is a raw P/Invoke into the same library that
+produced 4.5–14 s single calls in the wild, running INSIDE the `asr=` window
+but outside every timed span). Keep the existing body/semantics — take
+`_nativeGate` exactly as today, only route the `Dispose()` call through
+`TimedNativeCall`:
+
+```csharp
+            lock (_nativeGate)
+            {
+                if (_stream is { } stream) // capture a local: null-state analysis doesn't flow into lambdas (repo builds with WarningsAsErrors=nullable)
+                    TimedNativeCall("stream dispose", () => { stream.Dispose(); return true; });
+                // ... any existing null-out / state updates unchanged ...
+            }
+```
+
+(If `TimedNativeCall` has a void/`Action` overload, use it; otherwise the
+dummy-return `Func<T>` form above matches the existing call-site style. NOTE:
+this feeds the ≥3000 ms WRN and the per-session counters, but the timing
+LINE's `native_*` aggregates deliberately exclude it — Task 4 snapshots
+`NativeCallStats` before dispose runs. Attribution for a slow dispose comes
+from the WRN + the residue derivation in the Schema Change Note.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -743,7 +810,10 @@ Expected: FAIL — CS1061 (`FinishStats` not defined).
 /// PumpCompletion precedent: set by FinishAsync on EVERY path — including the
 /// drain-timeout abandon, where no TranscriptionResult exists and a
 /// result-attached metadata slot could never carry them. AsrWaitMs is the
-/// pump backlog-drain wait (_pump.WaitAsync); AsrNativeMs spans the inner
+/// pump wait (_pump.WaitAsync) — usually the backlog drain, but it also spans
+/// session STARTUP work (cold factory/model load, cloud connect) when the
+/// session was still starting at stop, so read it with backlog_ms.
+/// AsrNativeMs spans the inner
 /// session's FinishAsync — tail feed + finalize on the streaming happy path;
 /// includes batch-fallback time when the transcriber falls back internally
 /// (asr_mode=batch on the timing line reveals that case). Backlog is what was
@@ -1386,6 +1456,7 @@ Near the other private fields (e.g. beside `_recordStopwatch`):
     private int _gcGen0AtStart;
     private int _gcGen1AtStart;
     private int _gcGen2AtStart;
+    private System.TimeSpan _gcPauseAtStart;
 ```
 
 - [ ] **Step 2: Capture baselines at recording start (BOTH arms)**
@@ -1398,6 +1469,7 @@ Immediately after `_recordStopwatch = System.Diagnostics.Stopwatch.StartNew();`
                 _gcGen0AtStart = GC.CollectionCount(0);
                 _gcGen1AtStart = GC.CollectionCount(1);
                 _gcGen2AtStart = GC.CollectionCount(2);
+                _gcPauseAtStart = GC.GetTotalPauseDuration();
 ```
 
 - [ ] **Step 3: Add a stamping helper for FinishStats**
@@ -1460,6 +1532,10 @@ sites), so stamping here covers silent/failed/normal in both arms:
         timing.GcGen0 = GC.CollectionCount(0) - _gcGen0AtStart;
         timing.GcGen1 = GC.CollectionCount(1) - _gcGen1AtStart;
         timing.GcGen2 = GC.CollectionCount(2) - _gcGen2AtStart;
+        // GetTotalPauseDuration: cumulative process-wide GC pause time,
+        // monotonic by construction (verified on .NET 9; includes background
+        // GC's STW pauses, excludes its concurrent portion).
+        timing.GcPauseMs = (int)(GC.GetTotalPauseDuration() - _gcPauseAtStart).TotalMilliseconds;
         timing.PrewarmActive = _cleanupHolder.WasPrewarmActiveSince(_dictStartTicks);
         _log.LogInformation("dictation timing {Summary}", timing.FormatLine());
         foreach (var o in timing.Overruns())
@@ -1545,14 +1621,24 @@ Leave the branch local; the root session merges.
 A healthy streaming dictation:
 
 ```
-[INF] dictation timing session=... kind=hold outcome=completed rec=4200ms mic_stop=3ms trim=6ms asr=310ms asr_mode=streaming asr_model=nemotron-streaming-en asr_wait=120ms asr_native=185ms backlog=2 backlog_ms=100ms native_calls=27 native_total=800ms native_max=160ms native_over250=0 corrections=1ms cleanup=500ms ... gc=1/0/0 prewarm_active=false total=1400ms
+[INF] dictation timing session=... kind=hold outcome=completed rec=4200ms mic_stop=3ms trim=6ms asr=310ms asr_mode=streaming asr_model=nemotron-streaming-en asr_wait=120ms asr_native=185ms backlog=2 backlog_ms=100ms native_calls=27 native_total=800ms native_max=160ms native_over250=0 corrections=1ms cleanup=500ms ... gc=1/0/0 gc_pause=2ms prewarm_active=false total=1400ms
 ```
 
 The stall signature this instrumentation exists to catch (e.g. the 08:58
 `asr=3062ms` case) will now show WHERE the 3 s went — a large `asr_wait` +
-large `backlog_ms` + elevated `native_over250` means feeds ran slower than
-real time during recording; `prewarm_active=true` on exactly those lines
-confirms the 07-28 pre-warm-contention regression hypothesis; a nonzero
-`gc=` delta with high `native_max` points at GC pauses instead. Grep handles:
+large `backlog_ms` (comparable to `rec=`) + elevated `native_over250` means
+feeds ran slower than real time during recording; a large `asr_wait` with
+SMALL `backlog_ms` and a nearby engine/model-load INF is a cold start, not
+slow feeds (validated: the pump wait spans session startup). A large
+`gc_pause=` delta (the actual GC pause time — counts alone can't convey
+magnitude) with high `native_max` points at GC pauses;
+`prewarm_active=true` on exactly the stalled lines confirms the 07-28
+pre-warm-contention regression hypothesis. A multi-second RESIDUE
+(`asr − asr_wait − asr_native`) localizes to the native `stream dispose`
+(see the Schema Change Note; a ≥3 s dispose also fires the TimedNativeCall
+WRN). Two known unmarked residual suspects if a stalled line shows
+`prewarm_active=false gc_pause≈0`: a Models-page ASR verify (cold ~1.1 GB
+SHA-256 in Task.Run) and a History Lab rerun — both user-triggered and
+pre-dating 07-28. Grep handles:
 `dictation timing`, `slow dictation stage asr_wait`, `cleanup prewarm started`,
-`cleanup prewarm finished`.
+`cleanup prewarm finished`, `nemotron native stream dispose`.

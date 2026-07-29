@@ -11,9 +11,11 @@ while provably never exceeding the bleed-safety feed ceiling, and add a
 standard-practice injected-event fast-path to the low-level keyboard hook.
 
 **Architecture:** A new tiny `DeadlinePacer` class owns the
-`max(0, period - measured elapsed)` remainder math behind the existing
-`Action<int>` sleep seam plus a new injectable monotonic-clock seam on
-`TextInjector`. `GuardedInjectionRun`'s contract is untouched (the pause
+`max(0, period - measured elapsed)` remainder math — with the period scaled
+per chunk (`TextInjector.PeriodMsForChunk`: `ceil(units * 14 / 8)` ms, so a
+9-unit surrogate-straddle chunk gets 16 ms; stage-2 ledger A7) — behind the
+existing `Action<int>` sleep seam plus a new injectable monotonic-clock seam
+on `TextInjector`. `GuardedInjectionRun`'s contract is untouched (the pause
 stays a parameterless `Action`). Separately, `HotkeyHook.TryProcessKey`
 gains an early pass-through for `LLKHF_INJECTED` events that preserves the
 chord-recorder raw-capture contract.
@@ -35,8 +37,15 @@ chord-recorder raw-capture contract.
   the parallel cleanup stream — verify they match the known set; everything
   else must be green.
 - **Bleed-safety invariant (the property CHANGE 1 must provably keep):**
-  actual feed <= `TargetFeedUnitsPerSecond` (= 600 UTF-16 units/s). The
-  constant's CEILING semantics are unchanged; only dead time is removed.
+  actual feed <= `TargetFeedUnitsPerSecond` (= 600 UTF-16 units/s) for EVERY
+  chunk size `InjectionChunker.Split` can emit. The chunker extends a chunk
+  to 9 units rather than split a surrogate pair (pinned by
+  `InjectionChunkerTests`), and a fixed 14 ms period would let sustained
+  9-unit chunks feed ~643 units/s (stage-2 ledger A7) — so the per-chunk
+  period is `ceil(unitsSent * InterChunkPauseMs / ChunkCodeUnits)` ms:
+  8-unit chunks 14 ms (unchanged), 9-unit chunks 16 ms (~562 units/s, 1 ms
+  margin over the 15 ms the ceiling strictly needs). The constant's CEILING
+  semantics are unchanged; only dead time is removed.
 - **Guard cadence:** the per-chunk halt predicate (foreground / modifier /
   mouse / hwnd-0 checks) runs exactly as today — once per chunk period; the
   guard-check frequency must not drop below one check per
@@ -45,7 +54,9 @@ chord-recorder raw-capture contract.
   fail-open/park polarity (hwnd-0 parks, elevation parks,
   unobservable-probe injects); no clipboard use.
 - `TargetFeedUnitsPerSecond` stays `600`; `ChunkCodeUnits` stays `8`;
-  `InterChunkPauseMs` stays ceiling-derived `14`.
+  `InterChunkPauseMs` stays ceiling-derived `14` (it is the 8-unit chunk's
+  period; larger straddle chunks get the scaled period via
+  `PeriodMsForChunk`).
 - `ModifierGuard.WaitForRelease` and both release-wait preludes are NOT
   compensated — deadline pacing applies ONLY to the inter-chunk pause call
   site.
@@ -96,6 +107,11 @@ and continue with Task 5.
   queue-insertion ~µs/call. The machine's current input path is ~70x slower
   than that assumption. **The design must pace by MEASURED elapsed time,
   not assumptions.**
+- Render-rate record (commit 9671a84, measured on the real host with
+  Winpepper's hook active): WinForms TextBox ~633 chars/s, RichTextBox
+  ~1,163 chars/s; no measurable REAL target consumed slower than the 571
+  units/s nominal feed (stage-2 ledger A3). Sub-571 pathological targets are
+  explicitly owned by the mid-paste guards, not by pacing.
 
 Expected effect of CHANGE 1: actual feed rises from ~285/s to ~571/s
 nominal (~2x faster pastes) while never exceeding the 600 units/s ceiling.
@@ -162,8 +178,11 @@ verified by the same Windows gate. One plan.
   `internal sealed class DeadlinePacer` in namespace
   `Winpepper.Platform.Injection` with
   `public DeadlinePacer(int periodMs, Action<int> sleep, Func<double> monotonicMs)`
-  (period accounting starts at construction) and
-  `public void PauseForNextChunk()`.
+  (period accounting starts at construction; `periodMs` is the DEFAULT
+  period), `public void PauseForNextChunk()` (uses the default period), and
+  `public void PauseForNextChunk(int periodMs)` (per-call period override —
+  Task 2 passes the scaled per-chunk period for 9-unit straddle chunks;
+  stage-2 ledger A7).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -236,7 +255,9 @@ public class DeadlinePacerTests
     [InlineData(50.0)]
     public void BleedCeiling_Invariant_WorkPlusSleepNeverUndershootsThePeriod(double elapsedMs)
     {
-        // THE invariant CHANGE 1 must provably keep: per-chunk period
+        // THE invariant CHANGE 1 must provably keep (standard 8-unit
+        // chunks; the 9-unit straddle sibling test below covers the scaled
+        // period): per-chunk period
         // (send + sleep) >= InterChunkPauseMs, so nominal feed
         // <= ChunkCodeUnits/InterChunkPauseMs = ~571 units/s
         // <= TargetFeedUnitsPerSecond (600). Ceiling rounding is what makes
@@ -249,6 +270,42 @@ public class DeadlinePacerTests
         pacer.PauseForNextChunk();
 
         (elapsedMs + sleeps.Sum()).ShouldBeGreaterThanOrEqualTo(TextInjector.InterChunkPauseMs);
+    }
+
+    [Fact]
+    public void PauseForNextChunk_PerCallPeriod_OverridesTheDefault()
+    {
+        // A 9-unit surrogate-straddle chunk gets a scaled 16 ms period
+        // (stage-2 ledger A7); the pacer must honor the per-call value.
+        var sleeps = new List<int>();
+        var now = 0.0;
+        var pacer = new DeadlinePacer(14, sleeps.Add, () => now);
+
+        now = 5.0;
+        pacer.PauseForNextChunk(16);
+
+        sleeps.ShouldBe(new[] { 11 }); // 16 - 5
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(14.9)]
+    [InlineData(15.0)]
+    [InlineData(15.9)]
+    public void BleedCeiling_Invariant_HoldsForNineUnitStraddleChunkPeriods(double elapsedMs)
+    {
+        // A 9-unit chunk needs a period of at least 9 * 1000 / 600 = 15 ms
+        // to keep feed <= 600 units/s; the scaled period
+        // ceil(9 * InterChunkPauseMs / ChunkCodeUnits) = 16 ms provides it
+        // with 1 ms margin (stage-2 ledger A7).
+        var sleeps = new List<int>();
+        var now = 0.0;
+        var pacer = new DeadlinePacer(TextInjector.InterChunkPauseMs, sleeps.Add, () => now);
+
+        now = elapsedMs;
+        pacer.PauseForNextChunk(16);
+
+        (elapsedMs + sleeps.Sum()).ShouldBeGreaterThanOrEqualTo(15.0);
     }
 
     [Fact]
@@ -290,7 +347,19 @@ namespace Winpepper.Platform.Injection;
 /// covers the guard probes AND the send). The remainder is CEILING-rounded,
 /// so elapsed + sleep can never undershoot the period -- the bleed-safety
 /// ceiling (feed &lt;= TextInjector.TargetFeedUnitsPerSecond) is preserved
-/// provably. If the work alone takes &gt;= the period, no sleep is issued:
+/// by construction GIVEN the sleep primitive's error mode is delay:
+/// Win32 frames waitable-timer inaccuracy as expiration DELAYS (never-early
+/// is not contractual -- stage-2 ledger A1), and the design carries real
+/// margin (an 8-unit chunk's 14 ms period exceeds the 13.34 ms the 600
+/// ceiling strictly needs by 0.67 ms; a 9-unit chunk's scaled 16 ms exceeds
+/// its 15 ms need by 1 ms), absorbing sub-ms jitter. The gate's 5 ms probe
+/// pins the high-res timer path; the Thread.Sleep fail-safe is NOT
+/// never-early below the ~15.6 ms clock resolution (documented "may sleep
+/// less"), which is why a broken timer path is a STOP-and-report gate
+/// failure, never a production regime. Chunks larger than the standard
+/// 8 units (a surrogate-straddle chunk is 9) must pass their scaled period
+/// per call (TextInjector.PeriodMsForChunk; stage-2 ledger A7).
+/// If the work alone takes &gt;= the period, no sleep is issued:
 /// the feed is then throttled by SendInput itself, inherently at or below
 /// the safe rate. Guard cadence is unchanged: the halt predicate still runs
 /// once per chunk, i.e. at least once per periodMs-worth of feed.
@@ -319,12 +388,21 @@ internal sealed class DeadlinePacer
     /// <summary>
     /// Sleep the ceiling-rounded remainder of the current period (zero when
     /// the work since the last pause already consumed it), then start the
-    /// next period at the end of the sleep.
+    /// next period at the end of the sleep. Uses the constructor's default
+    /// period (the standard 8-unit chunk).
     /// </summary>
-    public void PauseForNextChunk()
+    public void PauseForNextChunk() => PauseForNextChunk(_periodMs);
+
+    /// <summary>
+    /// Same, with a per-call period: a chunk larger than the standard
+    /// 8 units (InjectionChunker emits 9-unit chunks rather than split a
+    /// surrogate pair) needs a proportionally longer period to stay under
+    /// the feed ceiling (stage-2 ledger A7).
+    /// </summary>
+    public void PauseForNextChunk(int periodMs)
     {
         var elapsedMs = _monotonicMs() - _periodStartMs;
-        var remainderMs = (int)Math.Ceiling(_periodMs - elapsedMs);
+        var remainderMs = (int)Math.Ceiling(periodMs - elapsedMs);
         if (remainderMs > 0) _sleep(remainderMs);
         _periodStartMs = _monotonicMs();
     }
@@ -356,9 +434,13 @@ git commit -m "feat(injection): add DeadlinePacer -- ceiling-remainder inter-chu
 Measured 2026-07-28 on the production host: SendInput costs ~0.85-1.13 ms
 per KEYEVENTF_UNICODE event (~14-18 ms per 16-event chunk), so the old
 full-pause design halved the real feed. DeadlinePacer sleeps only
-max(0, ceil(period - measured elapsed)); the ceiling rounding provably
-preserves the bleed-safety period floor (per-chunk period >= 14 ms =>
-feed <= 571 <= 600 units/s). Not yet wired into TextInjector.
+max(0, ceil(period - measured elapsed)); the ceiling rounding preserves the
+bleed-safety period floor by construction given the sleep primitive's error
+mode is delay (Win32 frames waitable-timer inaccuracy as expiration delays;
+stage-2 ledger A1), with 0.67-1 ms of per-period margin absorbing sub-ms
+jitter. A per-call period overload serves 9-unit surrogate-straddle chunks
+(ceil(9*14/8) = 16 ms keeps feed <= 600 units/s where a fixed 14 ms would
+allow ~643; stage-2 ledger A7). Not yet wired into TextInjector.
 
 Linux suite green."
 ```
@@ -383,6 +465,10 @@ Linux suite green."
   appended LAST so every existing call site stays valid:
   `Func<double>? monotonicMs = null` (monotonic milliseconds; production
   default is Stopwatch-based). Tasks 3's sentinel relies on this default.
+  Also produces `internal static int PeriodMsForChunk(string chunk)`
+  (= `ceil(chunk.Length * InterChunkPauseMs / (double)ChunkCodeUnits)`;
+  8-unit chunks -> 14 ms, 9-unit straddle chunks -> 16 ms; stage-2 ledger
+  A7), used by the pause call site and tests.
   The `Action<int> sleep` seam's inter-chunk values now mean **requested
   remainders**, not requested pauses (prelude poll values are unchanged).
 
@@ -428,7 +514,7 @@ with
 `// Three 15 ms release-wait polls, then the single inter-chunk REMAINDER (frozen clock => full 14 ms).`
 The assertion `sleeps.ShouldBe(new[] { 15, 15, 15, 14 });` stays as-is.
 
-(c) Append these two new tests to the class (before its closing brace):
+(c) Append these three new tests to the class (before its closing brace):
 
 ```csharp
     [Fact]
@@ -476,6 +562,30 @@ The assertion `sleeps.ShouldBe(new[] { 15, 15, 15, 14 });` stays as-is.
 
         sleeps.ShouldBeEmpty();
         hwndReads.ShouldBe(4); // 1 baseline at entry + 1 mid-paste check per chunk
+    }
+
+    [Fact]
+    public void Guarded_NineUnitStraddleChunks_GetTheScaledPeriodRemainder()
+    {
+        // InjectionChunker extends a chunk to 9 units rather than split a
+        // surrogate pair. A fixed 14 ms period would let sustained 9-unit
+        // chunks feed ~643 units/s > 600, so the period scales per chunk:
+        // ceil(9 * 14 / 8) = 16 ms (stage-2 ledger A7). Frozen clock =>
+        // the full scaled period is requested through the sleep seam.
+        var sleeps = new List<int>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            foregroundHwnd: () => 42,
+            sendChunk: _ => true,
+            sleep: sleeps.Add,
+            monotonicMs: () => 0.0);
+        var block = "a\U0001F600\U0001F600\U0001F600\U0001F600"; // 9 units: 1 BMP char + 4 surrogate pairs
+        var text = block + block + block; // 3 straddle chunks of 9 units => 2 inter-chunk pauses
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+
+        sleeps.ShouldBe(new[] { 16, 16 }); // TextInjector.PeriodMsForChunk(9-unit chunk) remainders
     }
 ```
 
@@ -531,6 +641,18 @@ add:
     private static double DefaultMonotonicMs()
         => System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0
            / System.Diagnostics.Stopwatch.Frequency;
+
+    /// <summary>
+    /// Per-chunk minimum period: <see cref="InterChunkPauseMs"/> scaled by
+    /// the chunk's actual code-unit count. InjectionChunker extends a chunk
+    /// to <see cref="ChunkCodeUnits"/>+1 = 9 units rather than split a
+    /// surrogate pair; a fixed 14 ms period would let sustained 9-unit
+    /// chunks feed ~643 units/s &gt; 600 (stage-2 ledger A7).
+    /// ceil(8 * 14 / 8) = 14 (unchanged); ceil(9 * 14 / 8) = 16 (~562
+    /// units/s, 1 ms margin over the 15 ms the 600 ceiling strictly needs).
+    /// </summary>
+    internal static int PeriodMsForChunk(string chunk)
+        => (int)Math.Ceiling(chunk.Length * (double)InterChunkPauseMs / ChunkCodeUnits);
 ```
 
 (d) In `TryInjectGuarded`, replace these two lines (205–213 region):
@@ -544,6 +666,9 @@ with
         // Deadline pacing: period accounting starts NOW, so the first
         // chunk's guard probes + send count toward the first period.
         var pacer = new DeadlinePacer(InterChunkPauseMs, _sleep, _monotonicMs);
+        // Pause k follows chunks[k]; its period scales with THAT chunk's
+        // unit count (9-unit straddle chunks get 16 ms -- stage-2 ledger A7).
+        var pausedChunks = 0;
 ```
 and
 ```csharp
@@ -551,7 +676,7 @@ and
 ```
 with
 ```csharp
-            pauseBetweenChunks: pacer.PauseForNextChunk,
+            pauseBetweenChunks: () => pacer.PauseForNextChunk(PeriodMsForChunk(chunks[pausedChunks++])),
 ```
 
 (e) Replace the `TargetFeedUnitsPerSecond` XML doc (lines 37–53) with:
@@ -599,13 +724,22 @@ constant's expression is unchanged):
     /// ~0.2 ms/event). An old production log once recorded ~13 us/event, so
     /// the original "queue-insertion (~us per call)" ledger assumption (A1)
     /// is stale for this machine -- which is why pacing is DEADLINE-based:
-    /// each chunk sleeps only max(0, ceil(14 - measured elapsed)) via
-    /// <see cref="DeadlinePacer"/> (the ceiling means the period can never
-    /// undershoot 14 ms), and a send that alone exceeds the period sleeps
-    /// zero -- SendInput itself then throttles the feed below the ceiling.
-    /// The pace stays real through PacingWaiter (the production sleep
-    /// default): its high-resolution timer keeps remainder sleeps accurate,
-    /// and the Thread.Sleep fail-safe only ever OVERSHOOTS (slower = safe).
+    /// each chunk sleeps only max(0, ceil(period - measured elapsed)) via
+    /// <see cref="DeadlinePacer"/>, where period is scaled per chunk
+    /// (<see cref="PeriodMsForChunk"/>: 14 ms for 8-unit chunks, 16 ms for
+    /// the 9-unit surrogate-straddle chunks the chunker emits rather than
+    /// split a pair -- a fixed 14 ms would let those feed ~643 units/s;
+    /// stage-2 ledger A7). The ceiling rounding means the period cannot
+    /// undershoot its floor, and a send that alone exceeds the period
+    /// sleeps zero -- SendInput itself then throttles the feed below the
+    /// ceiling. The pace stays real through PacingWaiter (the production
+    /// sleep default): Win32 frames waitable-timer inaccuracy as expiration
+    /// DELAYS, and the periods carry 0.67-1 ms of margin over what the 600
+    /// ceiling strictly needs, absorbing sub-ms jitter (stage-2 ledger A1).
+    /// The Thread.Sleep fail-safe is NOT never-early (documented to
+    /// possibly sleep LESS than requested below the ~15.6 ms clock
+    /// resolution); a broken timer path is caught by the gate's 5 ms probe
+    /// -- STOP and report, never a production regime.
     /// The per-chunk PERIOD floor is pinned on the gate host by
     /// InterChunkPacingWindowsTests.
     /// </summary>
@@ -642,12 +776,15 @@ sentence (lines 14–19 of the file's XML comment):
 with
 ```csharp
 /// risk. Under deadline pacing (DeadlinePacer, 2026-07-28) production waits
-/// are the REMAINDER of the 14 ms period (typically ~0-9 ms on the measured
-/// host, where the send itself costs ~14-18 ms/chunk); the Thread.Sleep
-/// fail-safe (~15.6 ms) only ever overshoots (feed slower = safe), the
-/// high-res timer keeps the pace deliberate, and the fixed 5 ms probe in
+/// are the REMAINDER of the per-chunk period (typically ~0-9 ms on the
+/// measured host, where the send itself costs ~14-18 ms/chunk); the
+/// high-res timer keeps the pace deliberate (its documented error mode is
+/// expiration DELAY), and the fixed 5 ms probe in
 /// InterChunkPacingWindowsTests still proves the fast path engages on the
-/// gate host. Fail-safe: if the timer cannot be created or set, falls back
+/// gate host -- which matters because the Thread.Sleep fail-safe is NOT
+/// never-early for sub-resolution waits (documented "may sleep less" below
+/// the ~15.6 ms clock tick; stage-2 ledger A1) and must never be the
+/// production regime. Fail-safe: if the timer cannot be created or set, falls back
 ```
 
 - [ ] **Step 4: Run the injection tests to verify everything passes**
@@ -681,10 +818,13 @@ Measured 2026-07-28: SendInput itself costs ~14-18 ms per 8-char chunk on
 this host, so the old unconditional 14 ms sleep halved the real feed
 (~250-285 units/s vs the 571 design point; a 458-char paste measured
 ~1.6 s vs ~0.8 s design). TextInjector now feeds each chunk through
-DeadlinePacer: sleep only max(0, ceil(14 - elapsed)); zero when the send
-alone covers the period. The bleed ceiling (feed <= 600 units/s) is
-preserved by the ceiling rounding; the halt predicate still runs once per
-chunk. The Action<int> sleep seam's inter-chunk values now mean requested
+DeadlinePacer: sleep only max(0, ceil(period - elapsed)); zero when the send
+alone covers the period. The period scales per chunk (PeriodMsForChunk:
+14 ms for 8-unit chunks, 16 ms for the 9-unit surrogate-straddle chunks the
+chunker emits rather than split a pair -- a fixed 14 ms would allow ~643
+units/s > 600; stage-2 ledger A7). The bleed ceiling (feed <= 600 units/s)
+is preserved by the ceiling rounding plus 0.67-1 ms per-period margin
+(stage-2 ledger A1); the halt predicate still runs once per chunk. The Action<int> sleep seam's inter-chunk values now mean requested
 REMAINDERS -- Linux pins retuned deliberately with a frozen injected
 monotonic clock; prelude polling (ModifierGuard.WaitForRelease) untouched.
 Constant XML docs updated: the stale queue-insertion (~us/call) assumption
@@ -810,8 +950,11 @@ public sealed class InterChunkPacingWindowsTests
 
         var avgPeriodMs = sw.Elapsed.TotalMilliseconds / periods;
         // FLOOR (bleed safety): every period is send + ceiling-rounded
-        // remainder sleep, and a waitable timer never signals before its due
-        // time, so the true per-period floor is InterChunkPauseMs;
+        // remainder sleep, and the waitable timer's documented error mode
+        // is expiration DELAY (never-early is not contractual, but early
+        // firing has never been observed on this host and the period
+        // carries 0.67 ms margin -- stage-2 ledger A1), so the per-period
+        // floor holds on real timers (this assertion is its empirical pin);
         // half-millisecond grace for measurement noise (same convention as
         // the retired raw-sleep floor).
         avgPeriodMs.ShouldBeGreaterThanOrEqualTo(TextInjector.InterChunkPauseMs - 0.5);
@@ -920,6 +1063,20 @@ survey), re-verify in Step 1:**
   sweep over three dictionaries) and all dictionary/set ops — most, but not
   all, of the measured ~0.2 ms/event (the `HookCallback` marshalling and
   heartbeat write remain).
+- (d) Stage-2 validation (2026-07-28 ledger A4/A5/A6): LLKHF_INJECTED is
+  set for ALL SendInput-generated LL-hook events (incl. KEYEVENTF_UNICODE
+  and KEYUPs; the decode at `HotkeyHook.cs:503` matches the documented bit
+  layout exactly), every hook recovery path is next-PHYSICAL-event- or
+  timer-driven (deferring bookkeeping across an injected-only paste reduces
+  to the accepted quiet-period baseline), and every KNOWN chord source is
+  physical (the trigger pedal is firmware-programmed HID; the repo shows no
+  remapper/macro layer). Accepted residual A4r: an UNKNOWN injection-based
+  chord source (remapper / RDP / on-screen keyboard) would be ignored by
+  the fast-path; if a chord ever stops working for such a source, the
+  recorded fallback design is a `dwExtraInfo` self-tag (TextInjector
+  currently sends `ExtraInfo = IntPtr.Zero`) — skip only OUR OWN injections
+  instead. The raw-capture sink forward in Step 4(a) is a load-bearing
+  invariant — do not remove it.
 
 - [ ] **Step 1: Re-verify the validation findings in code (drop-gate)**
 
@@ -1301,3 +1458,25 @@ gate is green, the plan is complete and the branch is push-ready.
    `RawKeyTransition(int VirtualKey, int ScanCode, bool IsDown, bool IsInjected, bool IsRepeat)`
    and `BeginRawCapture(Action<RawKeyTransition>)` verified against source
    on 2026-07-28.
+5. **Stage-2 revision (2026-07-28, load-bearing validation ledger at
+   `.worktrees/.the-usual-logs/injection-pacing-optimization/load-bearing-ledger.md`):**
+   two falsified assumptions fixed in place. (A7) The chunker emits 9-unit
+   surrogate-straddle chunks (pinned by `InjectionChunkerTests`), so a fixed
+   14 ms period allowed a sustained ~643 units/s counterexample — fixed with
+   per-chunk scaled periods (`PeriodMsForChunk`, `PauseForNextChunk(int)`),
+   covered by 3 new/updated tests in Tasks 1–2. (A1) "Waitable timer never
+   fires early" is not contractual and the `Thread.Sleep` fail-safe is
+   documented to possibly undershoot sub-resolution waits — all "only ever
+   overshoots"/unqualified-"provably" wording replaced with the explicit
+   premises (delay-mode error + 0.67–1 ms per-period margins + the gate's
+   5 ms probe as the timer-path check). Re-checked after editing: type
+   consistency across Tasks 1–3 holds (`PauseForNextChunk(int)` produced in
+   Task 1, consumed in Task 2; `PeriodMsForChunk` produced in Task 2 Step 3c,
+   consumed by the Step 3d call site; the Task 3 sentinel is unaffected —
+   all-`'a'` text yields 8-unit chunks and unchanged 14 ms periods); every
+   new test carries complete code and expected outcomes; no placeholders; no
+   silent deferrals (the scaled-period behavior lands in production code in
+   Task 2 and is pinned on Linux with a frozen clock). Verified findings
+   recorded: render-rate measurements (9671a84) added to Measured Facts;
+   Task 4 findings gained item (d) (stage-2 verification + accepted residual
+   A4r with the `dwExtraInfo` fallback design).

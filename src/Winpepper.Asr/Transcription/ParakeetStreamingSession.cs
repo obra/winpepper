@@ -65,6 +65,21 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
     /// path must gate leading silence too, because Parakeet-TDT deterministically
     /// deletes tokens around silence (NeMo-Speech #15757; FluidAudio #746) and
     /// the 500 ms pre-roll is mostly silence.
+    /// 
+    /// DELIBERATE DIVERGENCE from the batch SilenceTrimmer (2026-07-28,
+    /// pill-silence-observability): this latch is a START-OF-SPEECH feed
+    /// gate, not a speech-presence verdict. It has NO drop authority -- the
+    /// dictation drop decision is made exclusively by the batch
+    /// SilenceTrimmer.Trim IsSilent verdict (which now also enforces a
+    /// minimum-voiced-duration), and on a silent verdict the streaming
+    /// session is disposed unused. Consequences accepted on purpose:
+    /// (a) granularity differs (whole pushed buffer here vs 20 ms frames in
+    /// batch), so a short transient inside a large buffer may or may not
+    /// unlatch depending on buffer sizing; (b) a transient can permanently
+    /// unlatch the stream -- that costs only encoder work, never words,
+    /// because the batch verdict still governs. A minimum-voiced-duration
+    /// has no natural counterpart in a one-shot start latch; do not unify.
+    /// Mirrors the documentation precedent in InteriorSilenceSkipper.
     /// </summary>
     private const double LeadingSilenceRmsFloor = 0.002;
 

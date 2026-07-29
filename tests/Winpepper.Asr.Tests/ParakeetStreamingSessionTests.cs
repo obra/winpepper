@@ -106,6 +106,42 @@ public class ParakeetStreamingSessionTests
     }
 
     [Fact]
+    public async Task LeadingSilence_JustBelowFloor_StaysGated()
+    {
+        // Pins the 0.002 LeadingSilenceRmsFloor constant at its boundary
+        // (previously tested only with exact zeros vs speech-level audio).
+        var backend = new FakeParakeetBackend();
+        var session = NewSession(backend, chunk: 50, context: 20);
+
+        var below = new float[Hop * 60];
+        Array.Fill(below, 0.0019f); // DC: whole-buffer RMS = 0.0019 < 0.002
+        await session.PushAsync(below, TestContext.Current.CancellationToken);
+        await session.PushAsync(below, TestContext.Current.CancellationToken);
+
+        backend.EncodeMelFrameCounts.Count.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task LeadingSilence_JustAboveFloor_Unlatches()
+    {
+        var backend = new FakeParakeetBackend();
+        var session = NewSession(backend, chunk: 50, context: 20);
+
+        var above = new float[Hop * 60];
+        Array.Fill(above, 0.0021f); // DC: whole-buffer RMS = 0.0021 >= 0.002
+        await session.PushAsync(above, TestContext.Current.CancellationToken);
+        await session.PushAsync(above, TestContext.Current.CancellationToken);
+
+        // Unlatched: mel frames reach the extractor -> at least one chunk
+        // encode. Post-latch 0.0021-level frames classify as SPEECH in the
+        // InteriorSilenceSkipper (its per-frame floor is the same 0.002, and
+        // the >=floor branch bypasses quiet-recording suppression entirely),
+        // so audio flows to the encoder. Assert the latch opened, not the
+        // chunking arithmetic.
+        backend.EncodeMelFrameCounts.Count.ShouldBeGreaterThanOrEqualTo(1);
+    }
+
+    [Fact]
     public async Task InteriorSilence_LongRun_NotFedToTheEncoder()
     {
         var backend = new FakeParakeetBackend();

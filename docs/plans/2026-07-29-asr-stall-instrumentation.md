@@ -625,14 +625,23 @@ even when the native call throws, so corrupt paths still count):
 today `_stream?.Dispose()` is a raw P/Invoke into the same library that
 produced 4.5–14 s single calls in the wild, running INSIDE the `asr=` window
 but outside every timed span). Keep the existing body/semantics — take
-`_nativeGate` exactly as today, only route the `Dispose()` call through
-`TimedNativeCall`:
+`_nativeGate` exactly as today, and KEEP the existing exception swallow
+(`try { _stream?.Dispose(); } catch { /* native cleanup must not throw
+upward */ }`): `TimedNativeCall` has `try/finally` only, so without the
+outer `catch` a throwing native dispose would propagate out of
+`Session.DisposeAsync` and fail the dictation via PipelineHost's
+`await using` late-path session — a behavior change this
+instrumentation-only task must not make. Only route the `Dispose()` call
+through `TimedNativeCall` inside that guard:
 
 ```csharp
             lock (_nativeGate)
             {
                 if (_stream is { } stream) // capture a local: null-state analysis doesn't flow into lambdas (repo builds with WarningsAsErrors=nullable)
-                    TimedNativeCall("stream dispose", () => { stream.Dispose(); return true; });
+                {
+                    try { TimedNativeCall("stream dispose", () => { stream.Dispose(); return true; }); }
+                    catch { /* native cleanup must not throw upward — preserve existing swallow */ }
+                }
                 // ... any existing null-out / state updates unchanged ...
             }
 ```

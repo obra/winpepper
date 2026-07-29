@@ -19,6 +19,14 @@ public class DictationTimingSummaryTests
         AsrMs = 812,
         AsrMode = "streaming",
         AsrModel = "nemotron-streaming-en",
+        AsrWaitMs = 95,
+        AsrNativeMs = 210,
+        BacklogFrames = 2,
+        BacklogMs = 100,
+        NativeCalls = 74,
+        NativeTotalMs = 1900,
+        NativeMaxMs = 180,
+        NativeOver250 = 0,
         CorrectionsMs = 2,
         CleanupMs = 640,
         CleanupPath = "Llm",
@@ -28,6 +36,11 @@ public class DictationTimingSummaryTests
         InjectChunksSent = 58,
         InjectChunksTotal = 58,
         InjectPacingMs = 798,
+        GcGen0 = 1,
+        GcGen1 = 0,
+        GcGen2 = 0,
+        GcPauseMs = 12,
+        PrewarmActive = true,
         TotalMs = 2354,
     };
 
@@ -40,8 +53,11 @@ public class DictationTimingSummaryTests
             "session=11111111-2222-3333-4444-555555555555 kind=hold outcome=completed"
             + " rec=3512ms mic_stop=42ms trim=8ms trim_removed=1200ms"
             + " asr=812ms asr_mode=streaming asr_model=nemotron-streaming-en"
+            + " asr_wait=95ms asr_native=210ms backlog=2 backlog_ms=100ms"
+            + " native_calls=74 native_total=1900ms native_max=180ms native_over250=0"
             + " corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b"
             + " inject=850ms inject_chars=458 inject_chunks=58/58 inject_pace=798ms"
+            + " gc=1/0/0 gc_pause=12ms prewarm_active=true"
             + " total=2354ms");
         line.ShouldNotContain("\n");
     }
@@ -179,5 +195,55 @@ public class DictationTimingSummaryTests
         s.RecordMs = 600_000; // a 10-minute recording is the user's business
 
         s.Overruns().ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void FormatLine_NewDiagnosticFields_AreOmittedWhenNull()
+    {
+        var s = new DictationTimingSummary
+        {
+            SessionId = Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            Kind = "hold",
+        };
+
+        var line = s.FormatLine();
+
+        line.ShouldNotContain("asr_wait=");
+        line.ShouldNotContain("asr_native=");
+        line.ShouldNotContain("backlog");
+        line.ShouldNotContain("native_");
+        line.ShouldNotContain("gc=");
+        line.ShouldNotContain("gc_pause=");
+        line.ShouldNotContain("prewarm_active=");
+    }
+
+    [Fact]
+    public void FormatLine_GcTriple_RendersWhenAnyGenIsSet()
+    {
+        var s = Full();
+        s.GcGen0 = 3;
+        s.GcGen1 = null;
+        s.GcGen2 = null;
+
+        s.FormatLine().ShouldContain("gc=3/0/0");
+    }
+
+    [Fact]
+    public void Overruns_AsrWaitOverBudget_Warns()
+    {
+        var s = Full();
+        s.AsrWaitMs = DictationTimingSummary.AsrWaitBudgetMs + 1;
+
+        s.Overruns().ShouldContain(new StageOverrun(
+            "asr_wait", DictationTimingSummary.AsrWaitBudgetMs + 1, DictationTimingSummary.AsrWaitBudgetMs));
+    }
+
+    [Fact]
+    public void Overruns_AsrWaitAtBudget_IsClean()
+    {
+        var s = Full();
+        s.AsrWaitMs = DictationTimingSummary.AsrWaitBudgetMs;
+
+        s.Overruns().ShouldNotContain(o => o.Stage == "asr_wait");
     }
 }

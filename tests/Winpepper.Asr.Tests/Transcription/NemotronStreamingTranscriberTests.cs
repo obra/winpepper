@@ -265,4 +265,53 @@ public class NemotronStreamingTranscriberTests
         Assert.Equal("batch text", result.Text);
         Assert.False(engine.LastStream!.Finalized);
     }
+
+    [Fact]
+    public async Task Session_AggregatesNativeCallStats_AcrossPushAndFinish()
+    {
+        var engine = new FakeTranscribeCppEngine();
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // stream begin + 1 feed
+        await s.FinishAsync(Samples(2560), TestContext.Current.CancellationToken); // finalize (buffer empty: no tail feed)
+
+        var stats = Assert.IsAssignableFrom<INativeCallStatsSource>(s).NativeCallStats;
+        Assert.Equal(3, stats.Count); // begin + feed + finalize
+        Assert.Equal(0, stats.CountOver250Ms);
+        Assert.True(stats.MaxMs <= stats.TotalMs);
+    }
+
+    [Fact]
+    public async Task Session_CountsCallsAtOrOver250msAsSlow()
+    {
+        var engine = new FakeTranscribeCppEngine { FeedDelay = TimeSpan.FromMilliseconds(300) };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // one ~300 ms feed
+
+        var stats = ((INativeCallStatsSource)s).NativeCallStats;
+        Assert.True(stats.CountOver250Ms >= 1);
+        Assert.True(stats.MaxMs >= 250);
+        Assert.True(stats.Count >= 2); // begin + feed at minimum
+    }
+
+    [Fact]
+    public async Task DisposeAsync_CountsStreamDisposeAsNativeCall()
+    {
+        var engine = new FakeTranscribeCppEngine();
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // stream begin + feed
+        var before = ((INativeCallStatsSource)s).NativeCallStats.Count;
+
+        await s.DisposeAsync();
+
+        var after = ((INativeCallStatsSource)s).NativeCallStats.Count;
+        Assert.Equal(before + 1, after); // "stream dispose" is a timed native call
+    }
 }

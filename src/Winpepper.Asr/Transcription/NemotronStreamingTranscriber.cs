@@ -54,7 +54,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             new Session(_engineProvider, _batchFallback, ModelName, _attContextRight, _language, _log,
                 _nativeCallWarnAfter));
 
-    private sealed class Session : IStreamingTranscriptionSession
+    private sealed class Session : IStreamingTranscriptionSession, INativeCallStatsSource
     {
         private readonly Func<ITranscribeCppEngine> _engineProvider;
         private readonly ITranscriber _batchFallback;
@@ -73,6 +73,14 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private int _buffered;
         private ITranscribeCppStream? _stream;
         private bool _streamed;   // at least one successful native feed
+        // Native-call aggregates: mutated in TimedNativeCall's finally, which
+        // always runs under _nativeGate (every call site holds it), so plain
+        // fields need no interlocking; the snapshot getter takes the gate.
+        private int _nativeCalls;
+        private long _nativeTotalMs;
+        private long _nativeMaxMs;
+        private int _nativeOver250;
+        internal const int SlowNativeCallMs = 250;
         private bool _corrupt;
         private string? _corruptReason;
         private bool _disposed;
@@ -187,10 +195,25 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             lock (_nativeGate)
             {
                 _disposed = true;   // Push/Finish become no-ops / batch-only after this
-                try { _stream?.Dispose(); } catch { /* native cleanup must not throw upward */ }
+                if (_stream is { } stream) // capture a local: null-state analysis doesn't flow into lambdas (repo builds with WarningsAsErrors=nullable)
+                {
+                    try { TimedNativeCall("stream dispose", () => { stream.Dispose(); return true; }); }
+                    catch { /* native cleanup must not throw upward — preserve existing swallow */ }
+                }
                 _stream = null;
             }
             return ValueTask.CompletedTask;
+        }
+
+        public NativeCallStats NativeCallStats
+        {
+            get
+            {
+                lock (_nativeGate)
+                {
+                    return new NativeCallStats(_nativeCalls, (int)_nativeTotalMs, (int)_nativeMaxMs, _nativeOver250);
+                }
+            }
         }
 
         private void EnsureStream()
@@ -219,10 +242,15 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             {
                 watchdogCts.Cancel();
                 nativeSw.Stop();
+                var elapsedMs = nativeSw.ElapsedMilliseconds;
+                _nativeCalls++;
+                _nativeTotalMs += elapsedMs;
+                if (elapsedMs > _nativeMaxMs) _nativeMaxMs = elapsedMs;
+                if (elapsedMs >= SlowNativeCallMs) _nativeOver250++;
                 if (nativeSw.Elapsed >= _nativeCallWarnAfter)
                     _log?.LogWarning(
                         "nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns",
-                        op, (int)nativeSw.ElapsedMilliseconds);
+                        op, (int)elapsedMs);
             }
         }
 

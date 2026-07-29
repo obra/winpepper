@@ -421,6 +421,12 @@ public sealed class PipelineHost : IDisposable
             // all of it. Not an error -- no ErrorBus report.
             _log.LogInformation(
                 "Pending paste interrupted (focus, modifier, or mouse-button change); slot kept with full text for another click");
+        else if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.NoForeground)
+            // No observable foreground at click time (hwnd==0 transient):
+            // nothing was typed; the slot keeps the FULL text for another
+            // click. Not an error -- no ErrorBus report.
+            _log.LogInformation(
+                "Pending paste deferred: no observable foreground at click time; slot kept with full text");
         else
             _log.LogWarning("Pending paste injection failed");
 
@@ -444,7 +450,9 @@ public sealed class PipelineHost : IDisposable
             case HotkeyEventKind.HoldDown:
                 if (_engine.State != SessionState.Idle) return;
                 if (_vm.HasPendingPaste)
-                    _log.LogInformation("Pending paste discarded unpasted");
+                    _log.LogInformation(
+                        "Pending paste retained across new dictation ({Chars} chars held; a park during this dictation will append)",
+                        _vm.PendingPasteText.Length);
                 _engine.Apply(SessionEvent.StartRequested);
                 _currentSessionId = Guid.NewGuid();
                 _log.LogInformation("Session started (hold) {SessionId}", _currentSessionId);
@@ -763,6 +771,19 @@ public sealed class PipelineHost : IDisposable
                                 "Injection blocked: foreground window is elevated; held full text as pending paste ({Chars} chars)",
                                 final.Length);
                         }
+                        else if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.NoForeground)
+                        {
+                            // No observable foreground at send start
+                            // (hwnd==0; probe-gated park polarity, council
+                            // 2026-07-28): nothing was typed. Park the WHOLE
+                            // transcription with the default copy. Not an
+                            // error: no ErrorBus report, no toast -- the
+                            // pill is the surface.
+                            _vm.EnterPendingPaste(final, _targetAtStart);
+                            _log.LogInformation(
+                                "No observable foreground at injection start; held full text as pending paste ({Chars} chars)",
+                                final.Length);
+                        }
                         else if (!injected)
                         {
                             // Injection failed (SendInput refused). Consumer policy:
@@ -849,7 +870,9 @@ public sealed class PipelineHost : IDisposable
                 if (_engine.State == SessionState.Idle)
                 {
                     if (_vm.HasPendingPaste)
-                        _log.LogInformation("Pending paste discarded unpasted");
+                        _log.LogInformation(
+                            "Pending paste retained across new dictation ({Chars} chars held; a park during this dictation will append)",
+                            _vm.PendingPasteText.Length);
                     _engine.Apply(SessionEvent.StartRequested);
                     _currentSessionId = Guid.NewGuid();
                     _log.LogInformation("Session started (toggle) {SessionId}", _currentSessionId);
@@ -1159,6 +1182,19 @@ public sealed class PipelineHost : IDisposable
                                     Winpepper.Core.Pending.PendingPasteReason.ElevatedTarget);
                                 _log.LogInformation(
                                     "Injection blocked: foreground window is elevated; held full text as pending paste ({Chars} chars)",
+                                    final2.Length);
+                            }
+                            else if (outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.NoForeground)
+                            {
+                                // No observable foreground at send start
+                                // (hwnd==0; probe-gated park polarity, council
+                                // 2026-07-28): nothing was typed. Park the WHOLE
+                                // transcription with the default copy. Not an
+                                // error: no ErrorBus report, no toast -- the
+                                // pill is the surface.
+                                _vm.EnterPendingPaste(final2, _targetAtStart);
+                                _log.LogInformation(
+                                    "No observable foreground at injection start; held full text as pending paste ({Chars} chars)",
                                     final2.Length);
                             }
                             else if (!injected2)

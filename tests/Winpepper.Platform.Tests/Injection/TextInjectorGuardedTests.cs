@@ -82,17 +82,88 @@ public class TextInjectorGuardedTests
     }
 
     [Fact]
-    public void Guarded_UnknownBaseline_FailOpen_SendsEverything()
+    public void Guarded_ZeroForegroundAtStart_Parks_NothingSent_NoWaits()
     {
-        // Probe returns 0 (non-Windows / GetForegroundWindow failed): the
-        // guard is disabled and the paste behaves exactly like today.
+        // DELIBERATE PIN REVISION (council 5-1, probe-gated 2026-07-28,
+        // supersedes the paste-path-hardening fail-open pin): a 0 foreground
+        // hwnd at send start means the foreground is unobservable at exactly
+        // the moment we are about to type -- blind-injecting can silently
+        // lose the whole text, while a park is a visible one-click detour.
+        // Probe evidence: 0-readings never occur at rest; they occur only in
+        // 0.3-3.7 ms bursts during focus transitions. The park must land
+        // BEFORE the modifier/mouse release-wait preludes (no sleeps) and
+        // before any send.
         var sent = new List<string>();
-        var injector = NewInjector(() => 0, c => { sent.Add(c); return true; });
-        var text = new string('a', 80);
+        var sleeps = new List<int>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => true,           // everything held: proves no prelude ran
+            foregroundHwnd: () => 0,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: sleeps.Add);
 
-        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
+        injector.TryInjectGuarded(new string('a', 80))
+            .ShouldBe(InjectionRunOutcome.NoForeground);
 
-        string.Concat(sent).ShouldBe(text);
+        sent.ShouldBeEmpty();
+        sleeps.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Guarded_ZeroForegroundAtStart_CountsAtStartOccurrences()
+    {
+        var injector = NewInjector(() => 0, c => true);
+
+        injector.TryInjectGuarded("abc");
+        injector.TryInjectGuarded("def");
+
+        injector.Meter.AtStartCount.ShouldBe(2);
+        injector.Meter.MidStreamCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Guarded_ProbeGoesToZero_MidSend_Interrupts_AndCountsMidStream()
+    {
+        var sent = new List<string>();
+        var probes = 0;
+        var injector = NewInjector(
+            () => ++probes == 1 ? 42L : 0L,   // start check sees 42; per-chunk sees 0
+            c => { sent.Add(c); return true; });
+        var text = new string('a', 24);       // 3 chunks of 8
+
+        injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Interrupted);
+
+        string.Concat(sent).Length.ShouldBeLessThan(text.Length);
+        injector.Meter.MidStreamCount.ShouldBe(1);
+        injector.Meter.AtStartCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Guarded_DefaultForegroundProbe_OffWindows_ParksAtStart()
+    {
+        // Off-Windows-only pin: on the Windows gate's interactive desktop the
+        // real DefaultForegroundProbe returns a live nonzero hwnd, so the run
+        // would proceed (Completed / BlockedElevated) and the assertion below
+        // would fail. Same guard pattern as
+        // ElevationProbeTests.Probe_OffWindows_ReturnsUnknown_FailOpen.
+        if (OperatingSystem.IsWindows()) return;
+
+        // The production default probe returns 0 unconditionally off-Windows
+        // (TextInjector.DefaultForegroundProbe). Under the new fail-safe
+        // polarity an unseamed injector therefore PARKS off-Windows instead
+        // of injecting blind -- pinned deliberately so the off-Windows
+        // default flip is a documented decision, not an accident. Production
+        // is Windows-only; every Linux test that wants a send seams
+        // foregroundHwnd explicitly.
+        var sent = new List<string>();
+        var injector = new TextInjector(
+            NullLogger<TextInjector>.Instance,
+            isKeyDown: _ => false,
+            sendChunk: c => { sent.Add(c); return true; },
+            sleep: _ => { });
+
+        injector.TryInjectGuarded("abc").ShouldBe(InjectionRunOutcome.NoForeground);
+        sent.ShouldBeEmpty();
     }
 
     [Fact]

@@ -48,14 +48,71 @@ public class SessionViewModelPendingTests
     }
 
     [Fact]
-    public void NewDictation_DiscardsPending()
+    public void NewDictation_RetainsPending()
     {
+        // DELIBERATE PIN REVISION (council 2026-07-28, all 6 lenses:
+        // "preserve/append or fail loud -- never silently drop"; supersedes
+        // Rule 5 of the 2026-07-21 pending-paste plan, owner-approved). The
+        // old trapdoor: pressing the pedal again -- the most natural recovery
+        // gesture -- destroyed the very text the park saved.
         var (vm, engine) = NewVm();
-        vm.EnterPendingPaste("stale", T(1, "a"));
+        vm.EnterPendingPaste("saved text", T(1, "a"));
+
         engine.Apply(SessionEvent.StartRequested); // Recording
 
+        vm.HasPendingPaste.ShouldBeTrue();
+        vm.PendingPasteText.ShouldBe("saved text");
+        vm.Stage.ShouldBe(SessionStage.Recording); // dictation UX unchanged
+    }
+
+    [Fact]
+    public void ParkSurvivesDictation_EngineIdle_RestoresPendingPillAndCopy()
+    {
+        // After the retained park's dictation finishes (here: cancelled --
+        // CancelRequested drives the engine straight back to Idle), the pill
+        // must return to the PENDING presentation with the reason-correct
+        // copy, not linger on the last in-flight stage and not auto-hide.
+        var (vm, engine) = NewVm();
+        vm.EnterPendingPaste("saved text", T(1, "a"), PendingPasteReason.ElevatedTarget);
+        engine.Apply(SessionEvent.StartRequested);
+
+        engine.Apply(SessionEvent.CancelRequested); // engine -> Idle
+
+        vm.HasPendingPaste.ShouldBeTrue();
+        vm.PendingPasteText.ShouldBe("saved text");
+        vm.Stage.ShouldBe(SessionStage.PendingPaste);
+        vm.StatusText.ShouldBe("Admin window - switch & click");
+    }
+
+    [Fact]
+    public void SecondPark_Appends_AndOneClickPastesEverything()
+    {
+        var (vm, engine) = NewVm();
+        vm.EnterPendingPaste("first thought.", T(1, "a"));
+        engine.Apply(SessionEvent.StartRequested);   // new dictation; park retained
+        engine.Apply(SessionEvent.CancelRequested);  // back to Idle for clarity
+
+        vm.EnterPendingPaste("second thought.", T(2, "b")); // this dictation parked too
+
+        vm.PendingPasteText.ShouldBe("first thought. second thought.");
+        vm.Stage.ShouldBe(SessionStage.PendingPaste);
+        vm.NotifyPasteAttempted(injected: true).ShouldBeTrue(); // ONE click, everything
         vm.HasPendingPaste.ShouldBeFalse();
-        vm.Stage.ShouldBe(SessionStage.Recording);
+        vm.Stage.ShouldBe(SessionStage.Idle);
+    }
+
+    [Theory]
+    [InlineData(PendingPasteReason.Interrupted)]
+    [InlineData(PendingPasteReason.ElevatedTarget)]
+    public void PendingCopy_FitsThePillBudget(PendingPasteReason reason)
+    {
+        // ~32 chars max at FontSize 13 in the fixed 300-DIP pill (ledger A8,
+        // docs/plans/2026-07-27-paste-path-hardening.md:144-148): anything
+        // longer silently ellipsizes. Guards every current and future copy.
+        var (vm, _) = NewVm();
+        vm.EnterPendingPaste("t", T(1, "a"), reason);
+
+        vm.StatusText.Length.ShouldBeLessThanOrEqualTo(32);
     }
 
     [Fact]
@@ -90,6 +147,29 @@ public class SessionViewModelPendingTests
         bus.Report(ErrorStage.Injection, new InvalidOperationException("boom"), Guid.NewGuid());
 
         vm.Stage.ShouldBe(SessionStage.Error);
+    }
+
+    [Fact]
+    public void ErrorReport_MidDictation_WhilePending_StillTakesThePill()
+    {
+        // Since parks survive dictations (council 2026-07-28), the HasPending
+        // guard in OnBusReport became reachable MID-DICTATION -- and, written
+        // unconditionally, it silently dropped the failure of any dictation
+        // started over a held park (no pill error; Unknown never toasts).
+        // The guard is now scoped to idle: in flight, the error must present.
+        // Contrast ErrorReport_WhilePending_KeepsPendingClickable (engine
+        // Idle), which pins the guard's surviving click-to-paste rationale.
+        var (vm, engine) = NewVm();
+        var bus = new ErrorBus();
+        vm.AttachErrorBus(bus);
+        vm.EnterPendingPaste("saved text", T(1, "a"));
+        engine.Apply(SessionEvent.StartRequested); // Recording: in flight
+
+        bus.Report(ErrorStage.Unknown, new InvalidOperationException("pipeline blew up"), Guid.NewGuid());
+
+        vm.Stage.ShouldBe(SessionStage.Error);      // presented, not swallowed
+        vm.HasPendingPaste.ShouldBeTrue();          // the park itself is untouched
+        vm.PendingPasteText.ShouldBe("saved text");
     }
 
     [Fact]

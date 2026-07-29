@@ -81,6 +81,12 @@ public sealed class TextInjector
     private readonly Action<int> _sleep;
     private readonly Func<long, ForegroundElevation> _foregroundElevation;
 
+    /// <summary>
+    /// hwnd==0 occurrence counts (at-start vs mid-stream), for field
+    /// re-evaluation of the park-on-0 polarity. Internal for tests.
+    /// </summary>
+    internal HwndZeroMeter Meter { get; } = new();
+
     public TextInjector(
         ILogger<TextInjector> log,
         Func<int, bool>? isKeyDown = null,
@@ -101,7 +107,13 @@ public sealed class TextInjector
         => OperatingSystem.IsWindows()
            && (Winpepper.Platform.Hotkeys.KeyboardHookNative.GetAsyncKeyState(vk) & 0x8000) != 0;
 
-    /// <summary>Foreground HWND as Int64; 0 when unknown (non-Windows, or the call fails).</summary>
+    /// <summary>
+    /// Foreground HWND as Int64; 0 when unknown (non-Windows, or the call
+    /// fails). NOTE: since the park-on-0 polarity (2026-07-28) an unseamed
+    /// TryInjectGuarded returns NoForeground (parks) whenever this yields 0
+    /// -- including unconditionally off-Windows. Fail-safe by design;
+    /// production injection is Windows-only.
+    /// </summary>
     private static long DefaultForegroundProbe()
     {
         if (!OperatingSystem.IsWindows()) return 0;
@@ -140,22 +152,36 @@ public sealed class TextInjector
     /// starts, and a button still held past the timeout ABORTS the run
     /// (Interrupted; the pending slot keeps the full text) because there is
     /// no safe mouse neutralization -- a synthesized button-up would
-    /// fabricate a click. Fail-open: if the foreground window cannot be
-    /// determined (probe returns 0) the HWND guard is disabled, and a
-    /// key/button probe that cannot observe reports "up" and never halts.
+    /// fabricate a click. Foreground polarity is fail-SAFE (park-on-0,
+    /// 2026-07-28): a 0 foreground read parks the FULL text at start
+    /// (<see cref="InjectionRunOutcome.NoForeground"/>) and halts mid-stream
+    /// (<see cref="InjectionRunOutcome.Interrupted"/>); the meter counts
+    /// both. Key/button probes remain fail-open: a probe that cannot observe
+    /// reports "up" and never halts.
     /// </summary>
     public InjectionRunOutcome TryInjectGuarded(string text)
     {
         if (string.IsNullOrEmpty(text)) return InjectionRunOutcome.Completed;
 
         var hwndAtSendStart = _foregroundHwnd();
+        // No observable foreground at send start (council majority polarity,
+        // probe-gated 2026-07-28): park the FULL text instead of typing into
+        // an unknown window. Fail-SAFE -- deliberately opposite to the
+        // probe/elevation fail-open below, see InjectionRunOutcome.NoForeground.
+        if (hwndAtSendStart == 0)
+        {
+            var atStartZeroCount = Meter.RecordAtStart();
+            _log.LogWarning(
+                "Foreground hwnd is 0 at injection start (occurrence #{Count}); not typing -- parking the full text ({Chars} chars)",
+                atStartZeroCount, text.Length);
+            return InjectionRunOutcome.NoForeground;
+        }
         // UIPI pre-check (paste-path-hardening): SendInput into an elevated
         // window is silently dropped while reporting success, so a run
         // against an elevated target would consume the text with nothing
         // delivered. Park instead -- BEFORE any synthesis (even the
         // modifier-neutralizing KEYUPs) and before the release-wait
-        // preludes. Fail-open: an unobservable foreground or elevation
-        // keeps today's behavior (ElevatedTargetDecider).
+        // preludes. Fail-open for an unobservable ELEVATION only (Unknown => inject); an absent foreground already parked above.
         if (ElevatedTargetDecider.Decide(hwndAtSendStart, _foregroundElevation(hwndAtSendStart))
             == ElevatedTargetDecision.Park)
         {
@@ -184,7 +210,14 @@ public sealed class TextInjector
             _sendChunk,
             physicalInputDown: () => ModifierGuard.AnyDown(_isKeyDown)
                                      || MouseButtonGuard.AnyDown(_isKeyDown),
-            pauseBetweenChunks: () => _sleep(InterChunkPauseMs));
+            pauseBetweenChunks: () => _sleep(InterChunkPauseMs),
+            onZeroForeground: () =>
+            {
+                var midStreamZeroCount = Meter.RecordMidStream();
+                _log.LogWarning(
+                    "Foreground hwnd read 0 mid-paste (occurrence #{Count}); halting -- the full text will be parked",
+                    midStreamZeroCount);
+            });
         if (outcome == InjectionRunOutcome.Interrupted)
             _log.LogInformation("Injection interrupted: foreground window, physical modifier, or mouse button state changed mid-paste");
         return outcome;

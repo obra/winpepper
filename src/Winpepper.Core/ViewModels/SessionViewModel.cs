@@ -161,7 +161,7 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public void EnterPendingPaste(string text, InjectionTarget target,
         PendingPasteReason reason = PendingPasteReason.Interrupted) => _ui.Post(() =>
     {
-        _pending.SetPending(text, target);
+        _pending.HoldOrAppend(text, target, reason);
         Stage = SessionStage.PendingPaste;
         StatusText = PendingStatusFor(reason);
     });
@@ -227,11 +227,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             return;
         }
 
-        // While a pending paste is held (e.g. a failed pill-click retry), keep
-        // the pill in its clickable PENDING state instead of flipping to Error
-        // so the user can click again. The error is still recorded above and is
-        // surfaced to the user via the toast raised by the caller.
-        if (_pending.HasPending) return;
+        // While a pending paste is held AT IDLE (e.g. a failed pill-click
+        // retry), keep the pill in its clickable PENDING state instead of
+        // flipping to Error so the user can click again. The error is still
+        // recorded above (Diagnostics/tray); whether it also toasts is
+        // AppShell's ErrorToastPolicy, independent of this guard. Scoped to
+        // NOT-in-flight since parks survive dictations (council 2026-07-28):
+        // an error DURING a dictation started over a held park must still
+        // present -- an unconditional return here silently dropped that
+        // dictation's failure.
+        if (_pending.HasPending && !SessionStages.IsDictationInFlight(_engineState)) return;
         // Idle scoping: an EVENT error has no ongoing validity, so outside a
         // live dictation it never takes the pill. Keyed on the ENGINE state:
         // the presentation stage reads Error while an error is showing and
@@ -346,8 +351,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     private void ReleasePillIfUnchanged(int token)
     {
         if (token != _presentationGeneration) return; // newer state took the pill
-        if (_pending.HasPending) return;              // click-to-paste wins
         if (_stage != SessionStage.Error) return;     // stage already moved on
+        // NOTE: no HasPending early-return here. Since parks survive dictations
+        // (council 2026-07-28) an error CAN own the pill while a park is held;
+        // refusing to act would strand Stage=Error forever (the 2026-07-24
+        // squatting-pill class). "Click-to-paste wins" is honored by the
+        // resync below, whose idle arm restores the PENDING pill.
         ResyncPillToEngineState();
     }
 
@@ -378,6 +387,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                 StatusText = "Inserting...";
                 break;
             default:
+                // Mirror of the OnEngineStateChanged Idle arm: a held park
+                // must get its PENDING pill (reason-correct copy) back, not
+                // an auto-hiding "Ready".
+                if (_pending.HasPending)
+                {
+                    Stage = SessionStage.PendingPaste;
+                    StatusText = PendingStatusFor(_pending.Reason);
+                    break;
+                }
                 Stage = SessionStage.Idle;
                 StatusText = "Ready";
                 break;
@@ -395,10 +413,16 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     /// pre-existing NotifyError_Sets_ErrorStage_With_Message depends on the
     /// error still showing. A future "consistency" edit adding the in-flight
     /// check here is a REGRESSION, not a cleanup.
+    ///
+    /// INTENTIONALLY NOT pending-scoped either: the single production caller
+    /// is a real per-dictation failure, never a background report. Since
+    /// parks survive dictations (council 2026-07-28), a HasPending guard
+    /// here silently dropped the failure of any dictation started over a
+    /// held park. The park is not lost: the self-clear resync restores the
+    /// PENDING pill after the error's hold.
     /// </summary>
     public void NotifyError(string message) => _ui.Post(() =>
     {
-        if (_pending.HasPending) return;
         ShowTransientError($"Error: {message}");
     });
 
@@ -433,7 +457,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             switch (to)
             {
                 case SessionState.Recording:
-                    _pending.Discard(); // Rule 5: a new dictation discards any pending paste.
+                    // A held park deliberately SURVIVES a new dictation
+                    // (council 2026-07-28: preserve/append or fail loud --
+                    // never silently drop; supersedes Rule 5 of the
+                    // 2026-07-21 pending-paste plan, owner-approved). If this
+                    // dictation also parks, EnterPendingPaste appends.
                     _stopwatch.Restart();
                     Stage = SessionStage.Recording;
                     StatusText = "Recording...";
@@ -456,9 +484,17 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     break;
                 case SessionState.Idle:
                     _stopwatch.Stop();
-                    // If a pending paste is held, keep the PENDING pill visible
-                    // instead of returning to Idle (which would auto-hide it).
-                    if (_pending.HasPending) break;
+                    // A held park survives dictations: returning to engine
+                    // Idle with a held slot must RESTORE the PENDING pill
+                    // (stage + reason-correct copy) -- not leave the last
+                    // in-flight copy ("Inserting...") on screen and not
+                    // auto-hide the pill.
+                    if (_pending.HasPending)
+                    {
+                        Stage = SessionStage.PendingPaste;
+                        StatusText = PendingStatusFor(_pending.Reason);
+                        break;
+                    }
                     Stage = SessionStage.Idle;
                     StatusText = "Ready";
                     break;

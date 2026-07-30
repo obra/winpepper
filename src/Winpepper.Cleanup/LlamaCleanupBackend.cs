@@ -21,6 +21,7 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
     private readonly SemaphoreSlim _gate = new(initialCount: 1, maxCount: 1);
     private readonly uint? _samplingSeed;
     private readonly string _promptFormat;
+    private readonly StatelessExecutor _executor;
     private bool _disposed;
 
     /// <param name="samplingSeed">Optional fixed sampling seed. Null (production)
@@ -48,6 +49,21 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
         _log.LogInformation("Loading cleanup model: {Path}", modelPath);
         _weights = LLamaWeights.LoadFromFile(_params);
         _log.LogInformation("Cleanup model loaded.");
+        // C3: ONE executor per backend, not one per generation. Safe ONLY
+        // because _gate (SemaphoreSlim(1,1)) serializes GenerateAsync — the
+        // executor's _batch/Context are not concurrency-safe (v0.27.0 source:
+        // batch.Clear() fully wipes stale state at the top of every
+        // prompt-decode chunk, SafeLLamaContextHandle.cs:721 /
+        // LLamaBatch.cs:259-272) — and ApplyTemplate=false is constant.
+        // LLamaSharp 0.27's StatelessExecutor ctor creates and immediately
+        // disposes a throwaway context (verified against the official
+        // v0.27.0 tag — see docs/plans/2026-07-29-cleanup-asr-contention-evidence.md,
+        // section "0c — RESOLVED"), so per-call construction doubled
+        // per-generation Vulkan context churn for nothing.
+        _executor = new StatelessExecutor(_weights, _params, _log)
+        {
+            ApplyTemplate = false,
+        };
     }
 
     /// <summary>Pre-warm: pages in weights and shader pipeline (no persistent KV cache with StatelessExecutor). Spec §5.5.</summary>
@@ -85,16 +101,18 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
             maxNewTokens = CleanupPromptFormatter.ApplyMinNewTokensFloor(
                 maxNewTokens, plan.MinNewTokensFloor);
 
-            var executor = new StatelessExecutor(_weights, _params, _log)
-            {
-                ApplyTemplate = false,
-            };
             // Greedy (raw-io): temperature 0 makes llama.cpp's temp sampler
             // keep only the max-logit candidate, i.e. greedy decoding, while
             // still supporting the repetition penalty (GreedySamplingPipeline
             // has no penalty support). TopP/TopK are no-ops under greedy: the
             // argmax token always survives both filters.
-            var pipeline = new DefaultSamplingPipeline
+            // C1: BaseSamplingPipeline owns a native llama.cpp sampler chain
+            // via a finalizer-backed SafeHandle (ownsHandle: true). Undisposed,
+            // reclamation is delayed, finalizer-dependent, and non-deterministic
+            // — and native memory exerts no managed-heap pressure, so undisposed
+            // chains can pile up between collections. 'using' makes the free
+            // deterministic per generation.
+            using var pipeline = new DefaultSamplingPipeline
             {
                 Temperature = plan.Greedy ? 0f : temperature,
                 TopP = 0.95f,
@@ -111,7 +129,7 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
             };
 
             var sb = new StringBuilder();
-            await foreach (var token in executor.InferAsync(plan.PromptText, inferenceParams, ct).ConfigureAwait(false))
+            await foreach (var token in _executor.InferAsync(plan.PromptText, inferenceParams, ct).ConfigureAwait(false))
             {
                 sb.Append(token);
                 if (sb.Length > maxNewTokens * 8) // hard char cap as belt-and-braces

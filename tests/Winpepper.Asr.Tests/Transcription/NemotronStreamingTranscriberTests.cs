@@ -338,6 +338,27 @@ public class NemotronStreamingTranscriberTests
     }
 
     [Fact]
+    public async Task StreamBegin_GateWait_IsExcludedFromNativeStats()
+    {
+        // The fake's BeginStream blocks 600 ms and reports that the ENTIRE
+        // 600 ms was compute-gate wait. With B4, native stats must see ~0 ms
+        // for stream begin: no over-250 entry, native_max well under 250.
+        var engine = new FakeTranscribeCppEngine
+        {
+            BeginStreamDelay = TimeSpan.FromMilliseconds(600),
+            GateWaitMsToReport = 600, // returned per-call via BeginStream's out parameter
+        };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // forces EnsureStream
+        var stats = ((INativeCallStatsSource)s).NativeCallStats;
+        Assert.Equal(0, stats.CountOver250Ms);
+        Assert.True(stats.MaxMs < 250,
+            $"gate wait leaked into native stats: MaxMs={stats.MaxMs}");
+    }
+
+    [Fact]
     public async Task DisposeAsync_CountsStreamDisposeAsNativeCall()
     {
         var engine = new FakeTranscribeCppEngine();

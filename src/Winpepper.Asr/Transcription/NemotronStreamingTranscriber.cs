@@ -223,8 +223,36 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
 
         private void EnsureStream()
         {
-            _stream ??= TimedNativeCall("stream begin",
-                () => _engineProvider().BeginStream(_attContextRight, _language));
+            if (_stream is not null) return;
+            var engine = _engineProvider();
+            var startTick = Environment.TickCount64;
+            var sw = Stopwatch.StartNew();
+            using var watchdogCts = new CancellationTokenSource();
+            _ = WarnWhenStillRunningAsync("stream begin", watchdogCts.Token);
+            // B4: written by the engine BEFORE the gate-timeout throw (out is
+            // by-ref), so the finally sees THIS call's gate wait on both
+            // return and throw; 0 if the engine threw before the gate wait.
+            var gateWaitMs = 0;
+            try
+            {
+                _stream = engine.BeginStream(_attContextRight, _language, out gateWaitMs);
+            }
+            finally
+            {
+                watchdogCts.Cancel();
+                sw.Stop();
+                // B4: the engine returns THIS call's gate wait per-call (no
+                // shared slot to mis-read under overlapping calls); subtract
+                // it so native_* stats (and over250_at) measure compute, not
+                // queueing behind a prior stream's undisposed session.
+                var gateWait = Math.Max(0, gateWaitMs);
+                var nativeMs = Math.Max(0, sw.ElapsedMilliseconds - gateWait);
+                RecordNativeSample("stream begin", startTick + gateWait, nativeMs);
+                if (gateWait > 0)
+                    _log?.LogInformation(
+                        "stream begin: compute-gate wait {GateWaitMs} ms, native {NativeMs} ms",
+                        gateWait, (int)nativeMs);
+            }
         }
 
         /// <summary>Native streaming calls are synchronous P/Invokes that
@@ -248,23 +276,27 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             {
                 watchdogCts.Cancel();
                 nativeSw.Stop();
-                var elapsedMs = nativeSw.ElapsedMilliseconds;
-                _nativeCalls++;
-                _nativeTotalMs += elapsedMs;
-                if (elapsedMs > _nativeMaxMs) _nativeMaxMs = elapsedMs;
-                if (elapsedMs >= SlowNativeCallMs)
-                {
-                    _nativeOver250++;
-                    if (_over250StartTicks.Count < NativeCallStats.Over250ListCap)
-                        _over250StartTicks.Add(startTick);
-                    else
-                        _over250Overflow++;
-                }
-                if (nativeSw.Elapsed >= _nativeCallWarnAfter)
-                    _log?.LogWarning(
-                        "nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns",
-                        op, (int)elapsedMs);
+                RecordNativeSample(op, startTick, nativeSw.ElapsedMilliseconds);
             }
+        }
+
+        private void RecordNativeSample(string op, long startTick, long elapsedMs)
+        {
+            _nativeCalls++;
+            _nativeTotalMs += elapsedMs;
+            if (elapsedMs > _nativeMaxMs) _nativeMaxMs = elapsedMs;
+            if (elapsedMs >= SlowNativeCallMs)
+            {
+                _nativeOver250++;
+                if (_over250StartTicks.Count < NativeCallStats.Over250ListCap)
+                    _over250StartTicks.Add(startTick);
+                else
+                    _over250Overflow++;
+            }
+            if (elapsedMs >= _nativeCallWarnAfter.TotalMilliseconds)
+                _log?.LogWarning(
+                    "nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns",
+                    op, (int)elapsedMs);
         }
 
         private async Task WarnWhenStillRunningAsync(string op, CancellationToken ct)

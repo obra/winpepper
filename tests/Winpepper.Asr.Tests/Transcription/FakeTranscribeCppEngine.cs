@@ -24,8 +24,15 @@ public sealed class FakeTranscribeCppEngine : ITranscribeCppEngine
     /// wait is bounded so a failing test cannot hang the runner.</summary>
     public ManualResetEventSlim? FeedGate;
 
-    public ITranscribeCppStream BeginStream(int attContextRight, string? language = null)
+    /// <summary>Simulates a slow BeginStream (e.g. blocked on the compute gate).</summary>
+    public TimeSpan BeginStreamDelay { get; set; } = TimeSpan.Zero;
+    /// <summary>What BeginStream reports as its per-call compute-gate wait (B4).</summary>
+    public int GateWaitMsToReport { get; set; }
+
+    public ITranscribeCppStream BeginStream(int attContextRight, string? language, out int gateWaitMs)
     {
+        if (BeginStreamDelay > TimeSpan.Zero) Thread.Sleep(BeginStreamDelay);
+        gateWaitMs = GateWaitMsToReport;
         BeginStreamCalls++;
         BeginStreamLanguages.Add(language);
         if (ThrowOnBeginStream) throw new TranscribeCppException("fake begin failure");
@@ -33,8 +40,9 @@ public sealed class FakeTranscribeCppEngine : ITranscribeCppEngine
         return LastStream;
     }
 
-    public string TranscribeBatch(float[] mono16k, string? language = null)
+    public string TranscribeBatch(float[] mono16k, string? language, out int gateWaitMs)
     {
+        gateWaitMs = 0;
         LastBatchLanguage = language;
         return "fake-batch";
     }

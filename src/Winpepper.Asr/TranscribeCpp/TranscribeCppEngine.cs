@@ -198,7 +198,7 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
         if (rp.Lang != IntPtr.Zero) Marshal.FreeCoTaskMem(rp.Lang);
     }
 
-    public ITranscribeCppStream BeginStream(int attContextRight, string? language = null)
+    public ITranscribeCppStream BeginStream(int attContextRight, string? language, out int gateWaitMs)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (_batchOnly)
@@ -206,7 +206,11 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
         // One compute in flight per model: hold the gate for the stream's
         // lifetime. A previous dictation's stream normally disposes in ms; a
         // 5 s timeout means a stuck one degrades to batch, never corrupts.
-        if (!_computeGate.Wait(s_gateTimeout))
+        var gateSw = System.Diagnostics.Stopwatch.StartNew();
+        var acquired = _computeGate.Wait(s_gateTimeout);
+        gateSw.Stop();
+        gateWaitMs = (int)gateSw.ElapsedMilliseconds; // per-call, valid even on the throw below
+        if (!acquired)
             throw new TranscribeCppException(
                 "another transcription is still active on the engine (compute gate timeout)");
         try
@@ -263,11 +267,16 @@ public sealed class TranscribeCppEngine : ITranscribeCppEngine
         }
     }
 
-    public string TranscribeBatch(float[] mono16k, string? language = null)
+    public string TranscribeBatch(float[] mono16k, string? language, out int gateWaitMs)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        gateWaitMs = 0; // definite assignment for the empty-input early return
         if (mono16k.Length == 0) return "";
-        if (!_computeGate.Wait(s_gateTimeout))
+        var gateSw = System.Diagnostics.Stopwatch.StartNew();
+        var acquired = _computeGate.Wait(s_gateTimeout);
+        gateSw.Stop();
+        gateWaitMs = (int)gateSw.ElapsedMilliseconds; // per-call, valid even on the throw below
+        if (!acquired)
             throw new TranscribeCppException(
                 "another transcription is still active on the engine (compute gate timeout)");
         try

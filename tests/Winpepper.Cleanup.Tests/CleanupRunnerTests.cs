@@ -503,4 +503,108 @@ public class CleanupRunnerTests
         result.CleanedText.ShouldBe("deploy to Kubernetes now"); // correction applied deterministically
         backend.CallCount.ShouldBe(0); // LLM never called
     }
+
+    [Fact]
+    public async Task Run_ConsumedWindowContext_IsNull_WhenNoContextTaskSupplied()
+    {
+        var backend = new FakeLlamaCleanupBackend { Output = "cleaned" };
+        var runner = NewRunner(backend);
+
+        var result = await runner.RunAsync("cleaned up this sentence",
+            CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
+
+        result.ConsumedWindowContext.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Run_ConsumedWindowContext_IsNull_WhenFeatureDisabled_EvenWithTask()
+    {
+        var ready = Task.FromResult<string?>("the foreground window says hello");
+        var backend = new FakeLlamaCleanupBackend { Output = "cleaned" };
+        var runner = NewRunner(backend);
+        // DefaultOptions() has WindowContextEnabled = false.
+        var result = await runner.RunAsync("cleaned up this sentence",
+            CorrectionsData.Empty, ready, DefaultOptions(), CancellationToken.None);
+
+        result.ConsumedWindowContext.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Run_ConsumedWindowContext_IsTrue_WhenContextReadyInTime()
+    {
+        var ready = Task.FromResult<string?>("the foreground window says hello");
+        var backend = new FakeLlamaCleanupBackend { Output = "cleaned" };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromMilliseconds(500),
+        };
+
+        var result = await runner.RunAsync("cleaned up this sentence",
+            CorrectionsData.Empty, ready, opts, CancellationToken.None);
+
+        result.ConsumedWindowContext.ShouldBe(true);
+    }
+
+    [Fact]
+    public async Task Run_ConsumedWindowContext_IsFalse_WhenContextArrivesTooLate()
+    {
+        var tcs = new TaskCompletionSource<string?>();
+        var backend = new FakeLlamaCleanupBackend { Output = "cleaned" };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromMilliseconds(50),
+        };
+
+        var result = await runner.RunAsync("cleaned up this sentence",
+            CorrectionsData.Empty, tcs.Task, opts, CancellationToken.None);
+
+        result.ConsumedWindowContext.ShouldBe(false);
+        // Completing afterwards must not retroactively change the verdict —
+        // consume-time semantics, not produce-time.
+        tcs.SetResult("too late");
+        result.ConsumedWindowContext.ShouldBe(false);
+    }
+
+    [Fact]
+    public async Task Run_ConsumedWindowContext_SurvivesFallbackPaths()
+    {
+        var ready = Task.FromResult<string?>("the foreground window says hello");
+        var backend = new FakeLlamaCleanupBackend { Throw = new InvalidOperationException("boom") };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromMilliseconds(500),
+        };
+
+        var result = await runner.RunAsync("cleaned up this sentence",
+            CorrectionsData.Empty, ready, opts, CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.FallbackBackendError);
+        result.ConsumedWindowContext.ShouldBe(true);
+    }
+
+    [Fact]
+    public async Task Run_ConsumedWindowContext_IsNull_OnShortTranscriptBypass()
+    {
+        var ready = Task.FromResult<string?>("the foreground window says hello");
+        var backend = new FakeLlamaCleanupBackend { Output = "cleaned" };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromMilliseconds(500),
+        };
+
+        // 3 words -> BypassShort fires BEFORE the window-context wait.
+        var result = await runner.RunAsync("only three words",
+            CorrectionsData.Empty, ready, opts, CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.BypassShort);
+        result.ConsumedWindowContext.ShouldBeNull();
+    }
 }

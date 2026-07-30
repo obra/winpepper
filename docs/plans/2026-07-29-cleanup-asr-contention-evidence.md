@@ -34,6 +34,11 @@ Run 1 scope: step 0b (three new dictation-timing-line fields) + step 0c
 
 ## 0b — instrumentation added
 
+- Consume-time indicator (`src/Winpepper.Cleanup/`): `CleanupResult` gained
+  init-only `ConsumedWindowContext` (null = no task/disabled, false = task not
+  complete when the runner stopped waiting, true = complete within the bounded
+  wait). Set in `CleanupRunner.RunAsync`'s window-context wait; threaded onto
+  all 11 returns via `with`. Input signature of RunAsync unchanged.
 - Formatter (`src/Winpepper.Core/Diagnostics/DictationTimingSummary.cs`): added
   `Over250AtMs`/`Over250Overflow`/`CtxSrc`/`ProcCpuMs` + `StampOver250(...)`.
 - Capture (`src/Winpepper.Asr/Transcription/`): `NativeCallStats` gained

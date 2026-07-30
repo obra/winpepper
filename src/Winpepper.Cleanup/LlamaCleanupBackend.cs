@@ -24,6 +24,17 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
     private readonly StatelessExecutor _executor;
     private bool _disposed;
 
+    /// <summary>1b thread cap, tightened per the 2026-07-30 owner order:
+    /// LLamaSharp 0.27's DEFAULT Threads is already ProcessorCount/2 (=16 on
+    /// the owner's box), so the approved plan's max(1, ProcessorCount/2)
+    /// would have been a no-op. The model is fully GPU-offloaded
+    /// (GpuLayerCount=999) — CPU threads mainly drive graph orchestration —
+    /// so cap LOW to bound the CPU burst that competes with live streaming
+    /// ASR. Judged ONLY on scripts/run-cleanup-bench-windows.sh: median
+    /// latency <= 1000 ms and unchanged eval outcomes.</summary>
+    private static readonly int CleanupInferenceThreads =
+        Math.Min(4, Math.Max(1, Environment.ProcessorCount / 4));
+
     /// <param name="samplingSeed">Optional fixed sampling seed. Null (production)
     /// keeps LLamaSharp's default random seed; the prompt eval suite pins it for
     /// determinism on top of the temp-0.1 sampling.</param>
@@ -45,6 +56,8 @@ public sealed class LlamaCleanupBackend : ILlamaCleanupBackend, IDisposable
         {
             ContextSize = (uint)contextSize,
             GpuLayerCount = gpuLayerCount, // Vulkan backend picks the first device.
+            Threads = CleanupInferenceThreads,
+            BatchThreads = CleanupInferenceThreads,
         };
         _log.LogInformation("Loading cleanup model: {Path}", modelPath);
         _weights = LLamaWeights.LoadFromFile(_params);

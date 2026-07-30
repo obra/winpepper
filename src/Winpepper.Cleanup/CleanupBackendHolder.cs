@@ -199,10 +199,13 @@ public sealed class CleanupBackendHolder : IDisposable
 
     private PrewarmResult? LoadCore(CleanupModelTarget target)
     {
-        var prewarmSw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogInformation("cleanup prewarm started: {ModelName}", target.ResolvedName);
         try
         {
+            // Started INSIDE the try (not before it): a throw here would
+            // otherwise escape the method entirely, skipping the finally
+            // below and leaking _prewarmInFlight permanently.
+            var prewarmSw = System.Diagnostics.Stopwatch.StartNew();
+            _log.LogInformation("cleanup prewarm started: {ModelName}", target.ResolvedName);
             if (target.GgufPath is null)
             {
                 _log.LogWarning(

@@ -150,6 +150,16 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                 // can surface mid-drain. The `when` guard keeps OCEs with
                 // an UNcancelled ct (e.g. a dispose-aborted cloud send)
                 // classified exactly as before.
+                //
+                // Deliberate asymmetry vs the Exception catch below: this
+                // branch does NOT drain/return leftover queued frames. An
+                // ordinary cancellation is the common teardown path and
+                // draining here would just be extra work on every one of
+                // them; any PooledFrame left in the channel is simply
+                // collected with it — ArrayPool does not require returns for
+                // correctness (see PooledFrame's doc comment), so the only
+                // cost of skipping the drain is forgone buffer reuse, never
+                // a leak or a correctness gap.
             }
             catch (Exception ex)
             {
@@ -183,6 +193,15 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         frame.Span.CopyTo(buffer);
         if (_frames.Writer.TryWrite(new PooledFrame(buffer, frame.Length)))
         {
+            // Benign transient-negative window: TryWrite makes the frame
+            // available to the pump immediately, so the pump's dequeue-site
+            // decrement can run before these increments do, momentarily
+            // reading the counters low (never observably negative to a
+            // caller since nothing reads them until FinishAsync). The
+            // FinishAsync backlog snapshot itself is safe regardless: it
+            // runs after mic stop, by which point this writer thread (the
+            // capture callback) is quiescent, so every increment for every
+            // frame that will ever be written has already completed.
             Interlocked.Increment(ref _queuedFrames);
             Interlocked.Add(ref _queuedSamples, frame.Length);
         }

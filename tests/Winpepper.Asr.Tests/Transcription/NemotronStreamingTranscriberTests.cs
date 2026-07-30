@@ -241,6 +241,57 @@ public class NemotronStreamingTranscriberTests
     }
 
     [Fact]
+    public async Task Wedged_native_call_exposes_in_flight_elapsed_lock_free()
+    {
+        using var gate = new ManualResetEventSlim(false);
+        var engine = new FakeTranscribeCppEngine { FeedGate = gate };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
+            new CapturingLogger(), nativeCallWarnAfter: TimeSpan.FromSeconds(30));
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        var inFlight = (INativeCallInFlightSource)s; // cast fails until the session implements the interface
+
+        var push = Task.Run(() => s.PushAsync(Samples(2560),
+            TestContext.Current.CancellationToken).AsTask()); // exactly one native feed, wedged on the gate
+
+        var giveUp = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (inFlight.NativeCallInFlightElapsed is null && DateTime.UtcNow < giveUp)
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        Assert.NotNull(inFlight.NativeCallInFlightElapsed); // observable WHILE the call is wedged
+        gate.Set(); // unwedge the native call
+
+        await push;
+        Assert.Null(inFlight.NativeCallInFlightElapsed); // cleared once the call returned
+    }
+
+    [Fact]
+    public async Task Blocked_BeginStream_does_not_report_in_flight_elapsed()
+    {
+        // A16: the in-flight marker is deliberately NOT armed across
+        // EnsureStream/BeginStream — BeginStream's ≤5 s compute-gate wait
+        // would otherwise read as native in-flight time exactly in the
+        // zero-push phase (EnsureStream runs on the FIRST push). While the
+        // fake's BeginStream is blocked (stand-in for a pure gate wait), the
+        // probe must stay null.
+        using var beginGate = new ManualResetEventSlim(false);
+        var engine = new FakeTranscribeCppEngine { BeginStreamGate = beginGate };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
+            new CapturingLogger(), nativeCallWarnAfter: TimeSpan.FromSeconds(30));
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        var inFlight = (INativeCallInFlightSource)s;
+
+        var push = Task.Run(() => s.PushAsync(Samples(2560),
+            TestContext.Current.CancellationToken).AsTask()); // first push -> EnsureStream -> blocked BeginStream
+
+        await Task.Delay(300, TestContext.Current.CancellationToken); // let the push reach BeginStream
+        Assert.Null(inFlight.NativeCallInFlightElapsed); // gate-wait/begin time is NOT in-flight native time
+        beginGate.Set();
+        await push;
+        Assert.Null(inFlight.NativeCallInFlightElapsed);
+    }
+
+    [Fact]
     public async Task Push_after_dispose_is_a_harmless_no_op()
     {
         var engine = new FakeTranscribeCppEngine();

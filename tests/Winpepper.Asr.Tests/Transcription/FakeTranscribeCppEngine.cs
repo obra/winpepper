@@ -24,6 +24,11 @@ public sealed class FakeTranscribeCppEngine : ITranscribeCppEngine
     /// wait is bounded so a failing test cannot hang the runner.</summary>
     public ManualResetEventSlim? FeedGate;
 
+    /// <summary>When set, BeginStream blocks until the gate is released — a
+    /// deterministic stand-in for a pure compute-gate wait (A16 tests). The
+    /// wait is bounded so a failing test cannot hang the runner.</summary>
+    public ManualResetEventSlim? BeginStreamGate { get; set; }
+
     /// <summary>Simulates a slow BeginStream (e.g. blocked on the compute gate).</summary>
     public TimeSpan BeginStreamDelay { get; set; } = TimeSpan.Zero;
     /// <summary>What BeginStream reports as its per-call compute-gate wait (B4).</summary>
@@ -31,6 +36,7 @@ public sealed class FakeTranscribeCppEngine : ITranscribeCppEngine
 
     public ITranscribeCppStream BeginStream(int attContextRight, string? language, out int gateWaitMs)
     {
+        BeginStreamGate?.Wait(TimeSpan.FromSeconds(30));
         if (BeginStreamDelay > TimeSpan.Zero) Thread.Sleep(BeginStreamDelay);
         gateWaitMs = GateWaitMsToReport;
         BeginStreamCalls++;

@@ -54,7 +54,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             new Session(_engineProvider, _batchFallback, ModelName, _attContextRight, _language, _log,
                 _nativeCallWarnAfter));
 
-    private sealed class Session : IStreamingTranscriptionSession, INativeCallStatsSource
+    private sealed class Session : IStreamingTranscriptionSession, INativeCallStatsSource, INativeCallInFlightSource
     {
         private readonly Func<ITranscribeCppEngine> _engineProvider;
         private readonly ITranscriber _batchFallback;
@@ -86,6 +86,12 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private bool _corrupt;
         private string? _corruptReason;
         private bool _disposed;
+
+        /// <summary>Environment.TickCount64 when the CURRENT native call
+        /// started; 0 = no call in flight. Volatile, never under _nativeGate:
+        /// the drain's early-abandon probe reads it while a wedged call may
+        /// be HOLDING that gate (see INativeCallInFlightSource).</summary>
+        private long _inFlightSinceTick;
 
         public Session(Func<ITranscribeCppEngine> engineProvider, ITranscriber batchFallback,
             string modelName, int attContextRight, string? language, ILogger? log,
@@ -207,6 +213,17 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             return ValueTask.CompletedTask;
         }
 
+        public TimeSpan? NativeCallInFlightElapsed
+        {
+            get
+            {
+                var since = Volatile.Read(ref _inFlightSinceTick);
+                return since == 0
+                    ? null
+                    : TimeSpan.FromMilliseconds(Environment.TickCount64 - since);
+            }
+        }
+
         public NativeCallStats NativeCallStats
         {
             get
@@ -268,12 +285,14 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private T TimedNativeCall<T>(string op, Func<T> call)
         {
             var startTick = Environment.TickCount64;
+            Volatile.Write(ref _inFlightSinceTick, Math.Max(1, startTick)); // Max(1): 0 is the "no call" sentinel
             var nativeSw = Stopwatch.StartNew();
             using var watchdogCts = new CancellationTokenSource();
             _ = WarnWhenStillRunningAsync(op, watchdogCts.Token);
             try { return call(); }
             finally
             {
+                Volatile.Write(ref _inFlightSinceTick, 0);
                 watchdogCts.Cancel();
                 nativeSw.Stop();
                 RecordNativeSample(op, startTick, nativeSw.ElapsedMilliseconds);

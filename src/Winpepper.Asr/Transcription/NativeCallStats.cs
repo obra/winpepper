@@ -34,3 +34,13 @@ public interface INativeCallStatsSource
     /// <summary>Thread-safe snapshot of the aggregates so far.</summary>
     NativeCallStats NativeCallStats { get; }
 }
+
+/// <summary>E2: LOCK-FREE view of the CURRENT in-flight native call, for the
+/// drain's early-abandon decision. MUST never take the session's native gate
+/// (contrast <see cref="INativeCallStatsSource.NativeCallStats"/>, whose
+/// snapshot does): the consumer probes it precisely when a wedged native call
+/// may be holding that gate. Null when no native call is in flight.</summary>
+public interface INativeCallInFlightSource
+{
+    TimeSpan? NativeCallInFlightElapsed { get; }
+}

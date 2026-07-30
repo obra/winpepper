@@ -68,6 +68,12 @@ public sealed class PipelineHost : IDisposable
     private int _gcGen2AtStart;
     private System.TimeSpan _gcPauseAtStart;
     private System.TimeSpan _procCpuAtStart;
+    private uint? _pfAtStart;                                                            // B1
+    private Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimesSample? _sysTimesAtStart; // B3
+    private int? _memPrivMbAtStart;                                                      // B2
+    private int? _memWsMbAtStart;
+    private int? _thrAtStart;
+    private int? _hndAtStart;
 
     private readonly Winpepper.Core.Errors.ErrorBus _errorBus;
     private Guid _currentSessionId = Guid.Empty;
@@ -518,7 +524,16 @@ public sealed class PipelineHost : IDisposable
                 _gcGen1AtStart = GC.CollectionCount(1);
                 _gcGen2AtStart = GC.CollectionCount(2);
                 _gcPauseAtStart = GC.GetTotalPauseDuration();
-                _procCpuAtStart = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
+                var procAtStart = System.Diagnostics.Process.GetCurrentProcess();
+                _procCpuAtStart = procAtStart.TotalProcessorTime;
+                // B2: point-in-time resource snapshot at recording start.
+                _memPrivMbAtStart = (int)(procAtStart.PrivateMemorySize64 / (1024 * 1024));
+                _memWsMbAtStart = (int)(procAtStart.WorkingSet64 / (1024 * 1024));
+                _thrAtStart = procAtStart.Threads.Count;
+                _hndAtStart = procAtStart.HandleCount;
+                // B1/B3: baselines for stop-time deltas.
+                _pfAtStart = Winpepper.Platform.Diagnostics.ProcessResourceSampler.PageFaultCount();
+                _sysTimesAtStart = Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimes();
                 _targetAtStart = CaptureTarget();
 
                 // PLAN2-TYPE — start window-context prefetch in parallel with audio
@@ -549,6 +564,19 @@ public sealed class PipelineHost : IDisposable
                 };
                 timing.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
                 timing.ProcCpuMs = (int)(procCpuAtStop - _procCpuAtStart).TotalMilliseconds;
+                timing.MemPrivMb = _memPrivMbAtStart;
+                timing.MemWsMb = _memWsMbAtStart;
+                timing.ThreadCount = _thrAtStart;
+                timing.HandleCount = _hndAtStart;
+                if (_pfAtStart is uint pf0
+                    && Winpepper.Platform.Diagnostics.ProcessResourceSampler.PageFaultCount() is uint pf1)
+                    timing.PageFaults = (int)(pf1 - pf0);
+                if (_sysTimesAtStart is { } st0
+                    && Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimes() is { } st1)
+                    timing.SysCpuPct = Winpepper.Core.Diagnostics.DictationTimingSummary.SystemCpuPercent(
+                        st1.Idle100ns - st0.Idle100ns,
+                        st1.Kernel100ns - st0.Kernel100ns,
+                        st1.User100ns - st0.User100ns);
 
                 var micStopSw = System.Diagnostics.Stopwatch.StartNew();
                 var samples = _warmRecorder!.StopSession();
@@ -1038,7 +1066,16 @@ public sealed class PipelineHost : IDisposable
                     _gcGen1AtStart = GC.CollectionCount(1);
                     _gcGen2AtStart = GC.CollectionCount(2);
                     _gcPauseAtStart = GC.GetTotalPauseDuration();
-                    _procCpuAtStart = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
+                    var procAtStart2 = System.Diagnostics.Process.GetCurrentProcess();
+                    _procCpuAtStart = procAtStart2.TotalProcessorTime;
+                    // B2: point-in-time resource snapshot at recording start.
+                    _memPrivMbAtStart = (int)(procAtStart2.PrivateMemorySize64 / (1024 * 1024));
+                    _memWsMbAtStart = (int)(procAtStart2.WorkingSet64 / (1024 * 1024));
+                    _thrAtStart = procAtStart2.Threads.Count;
+                    _hndAtStart = procAtStart2.HandleCount;
+                    // B1/B3: baselines for stop-time deltas.
+                    _pfAtStart = Winpepper.Platform.Diagnostics.ProcessResourceSampler.PageFaultCount();
+                    _sysTimesAtStart = Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimes();
                     _targetAtStart = CaptureTarget();
 
                     // PLAN2-TYPE — start window-context prefetch in parallel with audio
@@ -1069,6 +1106,19 @@ public sealed class PipelineHost : IDisposable
                     };
                     timing2.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
                     timing2.ProcCpuMs = (int)(procCpuAtStop2 - _procCpuAtStart).TotalMilliseconds;
+                    timing2.MemPrivMb = _memPrivMbAtStart;
+                    timing2.MemWsMb = _memWsMbAtStart;
+                    timing2.ThreadCount = _thrAtStart;
+                    timing2.HandleCount = _hndAtStart;
+                    if (_pfAtStart is uint pf0_2
+                        && Winpepper.Platform.Diagnostics.ProcessResourceSampler.PageFaultCount() is uint pf1_2)
+                        timing2.PageFaults = (int)(pf1_2 - pf0_2);
+                    if (_sysTimesAtStart is { } st0_2
+                        && Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimes() is { } st1_2)
+                        timing2.SysCpuPct = Winpepper.Core.Diagnostics.DictationTimingSummary.SystemCpuPercent(
+                            st1_2.Idle100ns - st0_2.Idle100ns,
+                            st1_2.Kernel100ns - st0_2.Kernel100ns,
+                            st1_2.User100ns - st0_2.User100ns);
 
                     var micStopSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var samples2 = _warmRecorder!.StopSession();

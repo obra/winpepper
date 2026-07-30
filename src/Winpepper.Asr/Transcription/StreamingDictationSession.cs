@@ -1,8 +1,29 @@
+using System.Buffers;
 using System.Runtime.ExceptionServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
 namespace Winpepper.Asr.Transcription;
+
+/// <summary>Out-of-band per-finish metrics, mirroring the DrainTimedOut /
+/// PumpCompletion precedent: set by FinishAsync on EVERY path — including the
+/// drain-timeout abandon, where no TranscriptionResult exists and a
+/// result-attached metadata slot could never carry them. AsrWaitMs is the
+/// pump wait (_pump.WaitAsync) — usually the backlog drain, but it also spans
+/// session STARTUP work (cold factory/model load, cloud connect) when the
+/// session was still starting at stop, so read it with backlog_ms.
+/// AsrNativeMs spans the inner
+/// session's FinishAsync — tail feed + finalize on the streaming happy path;
+/// includes batch-fallback time when the transcriber falls back internally
+/// (asr_mode=batch on the timing line reveals that case). Backlog is what was
+/// queued-but-not-yet-pumped at finish entry (frames, and samples/16 as ms —
+/// samples because the pre-roll frame is oversized).</summary>
+public sealed record StreamingFinishStats(
+    int AsrWaitMs,
+    int? AsrNativeMs,
+    int BacklogFrames,
+    int BacklogMs,
+    NativeCallStats? NativeCallStats);
 
 /// <summary>
 /// Per-dictation glue between the audio frame event and a streaming session.
@@ -26,13 +47,21 @@ namespace Winpepper.Asr.Transcription;
 /// </summary>
 public sealed class StreamingDictationSession : IAsyncDisposable
 {
-    private readonly Channel<float[]> _frames = Channel.CreateUnbounded<float[]>(
+    private readonly Channel<PooledFrame> _frames = Channel.CreateUnbounded<PooledFrame>(
         new UnboundedChannelOptions { SingleReader = true });
     private readonly Task _pump;
     private readonly ILogger _log;
     private readonly TimeSpan _drainDeadline;
     private IStreamingTranscriptionSession? _session;
     private Exception? _pumpError;
+
+    private const int SamplesPerMs = 16; // mono 16 kHz
+
+    // Queue-depth counters: incremented on successful TryWrite (capture
+    // thread), decremented at every dequeue site (pump thread). Interlocked
+    // because writer and reader are different threads; read once at finish.
+    private int _queuedFrames;
+    private long _queuedSamples;
 
     /// <summary>Drain bound applied when ZERO pushes completed by stop time.
     /// In that state streaming has no latency win to preserve: the engine
@@ -48,6 +77,18 @@ public sealed class StreamingDictationSession : IAsyncDisposable
 
     private volatile bool _sessionStarted;   // written by the pump, read by FinishAsync
     private volatile bool _anyPushCompleted; // written by the pump, read by FinishAsync
+
+    /// <summary>A rented buffer + its real length (ArrayPool rounds up).
+    /// Ownership: OnFrame rents; whichever dequeue site consumes it returns it.
+    /// Frames never dequeued (channel dropped with the object) are simply
+    /// collected — ArrayPool does not require returns for correctness.</summary>
+    private readonly struct PooledFrame
+    {
+        public PooledFrame(float[] buffer, int length) { Buffer = buffer; Length = length; }
+        public float[] Buffer { get; }
+        public int Length { get; }
+        public ReadOnlyMemory<float> Memory => Buffer.AsMemory(0, Length);
+    }
 
     private StreamingDictationSession(
         Func<CancellationToken, Task<IStreamingTranscriber?>> transcriberFactory,
@@ -65,7 +106,12 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                 if (transcriber is null)
                 {
                     // No provider available: drain and drop so nothing accumulates.
-                    await foreach (var _ in _frames.Reader.ReadAllAsync(CancellationToken.None)) { }
+                    await foreach (var dropped in _frames.Reader.ReadAllAsync(CancellationToken.None))
+                    {
+                        Interlocked.Decrement(ref _queuedFrames);
+                        Interlocked.Add(ref _queuedSamples, -dropped.Length);
+                        ArrayPool<float>.Shared.Return(dropped.Buffer);
+                    }
                     return;
                 }
                 var session = await transcriber.StartSessionAsync(ct);
@@ -79,7 +125,19 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                 // benign no-op by session contract.
                 await foreach (var frame in _frames.Reader.ReadAllAsync(CancellationToken.None))
                 {
-                    await session.PushAsync(frame, ct);
+                    Interlocked.Decrement(ref _queuedFrames);
+                    Interlocked.Add(ref _queuedSamples, -frame.Length);
+                    try
+                    {
+                        await session.PushAsync(frame.Memory, ct);
+                    }
+                    finally
+                    {
+                        // Safe: every PushAsync implementation consumes the
+                        // samples before its ValueTask completes (contract on
+                        // IStreamingTranscriptionSession.PushAsync).
+                        ArrayPool<float>.Shared.Return(frame.Buffer);
+                    }
                     _anyPushCompleted = true; // keys FinishAsync's drain-deadline choice
                 }
             }
@@ -92,12 +150,27 @@ public sealed class StreamingDictationSession : IAsyncDisposable
                 // can surface mid-drain. The `when` guard keeps OCEs with
                 // an UNcancelled ct (e.g. a dispose-aborted cloud send)
                 // classified exactly as before.
+                //
+                // Deliberate asymmetry vs the Exception catch below: this
+                // branch does NOT drain/return leftover queued frames. An
+                // ordinary cancellation is the common teardown path and
+                // draining here would just be extra work on every one of
+                // them; any PooledFrame left in the channel is simply
+                // collected with it — ArrayPool does not require returns for
+                // correctness (see PooledFrame's doc comment), so the only
+                // cost of skipping the drain is forgone buffer reuse, never
+                // a leak or a correctness gap.
             }
             catch (Exception ex)
             {
                 _pumpError = ex;
                 log.LogWarning(ex, "streaming dictation pump failed");
-                while (_frames.Reader.TryRead(out _)) { } // unblock nothing-in-particular; drop leftovers
+                while (_frames.Reader.TryRead(out var leftover)) // unblock nothing-in-particular; drop leftovers
+                {
+                    Interlocked.Decrement(ref _queuedFrames);
+                    Interlocked.Add(ref _queuedSamples, -leftover.Length);
+                    ArrayPool<float>.Shared.Return(leftover.Buffer);
+                }
             }
         }, CancellationToken.None);
     }
@@ -109,10 +182,34 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         TimeSpan? drainDeadline = null)
         => new(transcriberFactory, log, ct, drainDeadline);
 
-    /// <summary>Called from the recorder's FramesAvailable event. Copies the frame
-    /// (the recorder may reuse its buffer) and never blocks the capture thread.</summary>
+    /// <summary>Called from the recorder's FramesAvailable event. Copies the
+    /// frame into a POOLED buffer (defensive copy kept — the recorder contract
+    /// allows buffer reuse — but without the per-frame float[] churn that
+    /// feeds GC-pause suspicion: ~20 x 800-float allocations/s previously).
+    /// Never blocks the capture thread.</summary>
     public void OnFrame(ReadOnlyMemory<float> frame)
-        => _frames.Writer.TryWrite(frame.ToArray()); // TryWrite is false after completion — silent drop
+    {
+        var buffer = ArrayPool<float>.Shared.Rent(frame.Length);
+        frame.Span.CopyTo(buffer);
+        if (_frames.Writer.TryWrite(new PooledFrame(buffer, frame.Length)))
+        {
+            // Benign transient-negative window: TryWrite makes the frame
+            // available to the pump immediately, so the pump's dequeue-site
+            // decrement can run before these increments do, momentarily
+            // reading the counters low (never observably negative to a
+            // caller since nothing reads them until FinishAsync). The
+            // FinishAsync backlog snapshot itself is safe regardless: it
+            // runs after mic stop, by which point this writer thread (the
+            // capture callback) is quiescent, so every increment for every
+            // frame that will ever be written has already completed.
+            Interlocked.Increment(ref _queuedFrames);
+            Interlocked.Add(ref _queuedSamples, frame.Length);
+        }
+        else
+        {
+            ArrayPool<float>.Shared.Return(buffer); // TryWrite false after completion — silent drop
+        }
+    }
 
     /// <summary>True after FinishAsync abandoned the session on drain timeout.
     /// Keys the null-return contract (FinishAsync returned null because the drain
@@ -121,6 +218,10 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     /// call on the shared ParakeetSession — callers coordinate any dispose of
     /// that shared resource via <see cref="PumpCompletion"/>.</summary>
     public bool DrainTimedOut { get; private set; }
+
+    /// <summary>Per-finish metrics; non-null after FinishAsync returns
+    /// (any outcome). See <see cref="StreamingFinishStats"/>.</summary>
+    public StreamingFinishStats? FinishStats { get; private set; }
 
     /// <summary>Completes when the background pump exits (success, fault, or after an
     /// abandon finally unwedges). Callers that abandon this coordinator while this is
@@ -135,6 +236,10 @@ public sealed class StreamingDictationSession : IAsyncDisposable
     /// also propagates to the pipeline.</summary>
     public async Task<TranscriptionResult?> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
     {
+        // Backlog snapshot BEFORE completing the writer: frames queued but not
+        // yet pumped. asr_wait below is the price of draining exactly this.
+        var backlogFrames = Volatile.Read(ref _queuedFrames);
+        var backlogMs = (int)(Interlocked.Read(ref _queuedSamples) / SamplesPerMs);
         _frames.Writer.TryComplete();
         // Short-circuit ONLY a session that actually started and still
         // completed zero pushes; a session still starting (cloud connect,
@@ -142,6 +247,7 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         var deadline = _anyPushCompleted || !_sessionStarted
             ? _drainDeadline
             : TimeSpan.FromTicks(Math.Min(_drainDeadline.Ticks, ZeroPushDrainDeadline.Ticks));
+        var waitSw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await _pump.WaitAsync(deadline, ct); // TimeoutException on a wedged drain
@@ -159,18 +265,34 @@ public sealed class StreamingDictationSession : IAsyncDisposable
             // queues behind the session's native gate). Callers that see
             // DrainTimedOut coordinate shared-native disposal via
             // PumpCompletion, exactly as before.
+            // Stats note: never probe INativeCallStatsSource here — its
+            // snapshot takes the native gate, which the wedged call is holding.
+            waitSw.Stop();
             DrainTimedOut = true;
+            FinishStats = new StreamingFinishStats(
+                (int)waitSw.ElapsedMilliseconds, null, backlogFrames, backlogMs, null);
             _log.LogWarning(
                 "streaming drain exceeded {DrainDeadline}; abandoning streaming session, batch path takes over",
                 deadline);
             _ = ScheduleAbandonedSessionDispose();
             return null;
         }
+        waitSw.Stop();
+        var asrWaitMs = (int)waitSw.ElapsedMilliseconds;
         // Captured on the pump task; rethrow via ExceptionDispatchInfo so the
         // original stack trace survives this cross-thread rethrow.
-        if (_pumpError is not null) ExceptionDispatchInfo.Capture(_pumpError).Throw();
+        if (_pumpError is not null)
+        {
+            FinishStats = new StreamingFinishStats(asrWaitMs, null, backlogFrames, backlogMs, null);
+            ExceptionDispatchInfo.Capture(_pumpError).Throw();
+        }
         var session = _session;
-        if (session is null) return null;
+        if (session is null)
+        {
+            FinishStats = new StreamingFinishStats(asrWaitMs, null, backlogFrames, backlogMs, null);
+            return null;
+        }
+        var nativeSw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             return await session.FinishAsync(fullAudio, ct);
@@ -181,6 +303,13 @@ public sealed class StreamingDictationSession : IAsyncDisposable
             // push-after-dispose guard documents why). The finally keeps the
             // session from leaking when FinishAsync throws — that exception
             // deliberately propagates to the pipeline (batch parity).
+            nativeSw.Stop();
+            FinishStats = new StreamingFinishStats(
+                asrWaitMs,
+                (int)nativeSw.ElapsedMilliseconds,
+                backlogFrames,
+                backlogMs,
+                (session as INativeCallStatsSource)?.NativeCallStats);
             await DisposeSessionAsync();
         }
     }

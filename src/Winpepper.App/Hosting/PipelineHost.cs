@@ -59,6 +59,14 @@ public sealed class PipelineHost : IDisposable
 
     private readonly Winpepper.History.HistoryArchiver _archiver;
     private System.Diagnostics.Stopwatch? _recordStopwatch;
+    // Dictation-window baselines for the timing line: GC deltas + prewarm
+    // overlap span recording start -> emit. Safe as host fields: the run
+    // loop is serial (one dictation fully processed before the next).
+    private long _dictStartTicks;
+    private int _gcGen0AtStart;
+    private int _gcGen1AtStart;
+    private int _gcGen2AtStart;
+    private System.TimeSpan _gcPauseAtStart;
 
     private readonly Winpepper.Core.Errors.ErrorBus _errorBus;
     private Guid _currentSessionId = Guid.Empty;
@@ -504,6 +512,11 @@ public sealed class PipelineHost : IDisposable
                 }
                 _warmRecorder!.StartSession(includePrerollMs: 500);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                _dictStartTicks = Environment.TickCount64;
+                _gcGen0AtStart = GC.CollectionCount(0);
+                _gcGen1AtStart = GC.CollectionCount(1);
+                _gcGen2AtStart = GC.CollectionCount(2);
+                _gcPauseAtStart = GC.GetTotalPauseDuration();
                 _targetAtStart = CaptureTarget();
 
                 // PLAN2-TYPE — start window-context prefetch in parallel with audio
@@ -533,10 +546,10 @@ public sealed class PipelineHost : IDisposable
                 };
                 timing.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
 
-                var drainSw = System.Diagnostics.Stopwatch.StartNew();
+                var micStopSw = System.Diagnostics.Stopwatch.StartNew();
                 var samples = _warmRecorder!.StopSession();
-                drainSw.Stop();
-                timing.DrainMs = (int)drainSw.ElapsedMilliseconds;
+                micStopSw.Stop();
+                timing.MicStopMs = (int)micStopSw.ElapsedMilliseconds;
                 WarnIfSessionSilent(samples, _currentSessionId);
                 _sounds.PlayStop();
 
@@ -671,6 +684,7 @@ public sealed class PipelineHost : IDisposable
                         _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
                         timing.Outcome = "failed";
                         timing.AsrMs = (int)transcribeSw.ElapsedMilliseconds;
+                        StampStreamingFinishStats(timing, streaming);
                         timing.AsrMode = "batch";
                         timing.TotalMs = TotalSince(releaseAt);
                         EmitTimingSummary(timing);
@@ -686,6 +700,7 @@ public sealed class PipelineHost : IDisposable
                 string final = transcription.Text;
                 var producedModelName = transcription.ProviderModelName;
                 timing.AsrMs = (int)transcribeSw.ElapsedMilliseconds;
+                StampStreamingFinishStats(timing, streaming);
                 // Mode from the model that ACTUALLY produced the result (not from
                 // which code arm returned): nemotron const => true local streaming;
                 // the assemblyai/ prefix => cloud (shares the batch budget); else
@@ -998,6 +1013,11 @@ public sealed class PipelineHost : IDisposable
                     }
                     _warmRecorder!.StartSession(includePrerollMs: 500);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                    _dictStartTicks = Environment.TickCount64;
+                    _gcGen0AtStart = GC.CollectionCount(0);
+                    _gcGen1AtStart = GC.CollectionCount(1);
+                    _gcGen2AtStart = GC.CollectionCount(2);
+                    _gcPauseAtStart = GC.GetTotalPauseDuration();
                     _targetAtStart = CaptureTarget();
 
                     // PLAN2-TYPE — start window-context prefetch in parallel with audio
@@ -1027,10 +1047,10 @@ public sealed class PipelineHost : IDisposable
                     };
                     timing2.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
 
-                    var drainSw2 = System.Diagnostics.Stopwatch.StartNew();
+                    var micStopSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var samples2 = _warmRecorder!.StopSession();
-                    drainSw2.Stop();
-                    timing2.DrainMs = (int)drainSw2.ElapsedMilliseconds;
+                    micStopSw2.Stop();
+                    timing2.MicStopMs = (int)micStopSw2.ElapsedMilliseconds;
                     WarnIfSessionSilent(samples2, _currentSessionId);
                     _sounds.PlayStop();
 
@@ -1164,6 +1184,7 @@ public sealed class PipelineHost : IDisposable
                             _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
                             timing2.Outcome = "failed";
                             timing2.AsrMs = (int)transcribeSw2.ElapsedMilliseconds;
+                            StampStreamingFinishStats(timing2, streaming2);
                             timing2.AsrMode = "batch";
                             timing2.TotalMs = TotalSince(releaseAt2);
                             EmitTimingSummary(timing2);
@@ -1179,6 +1200,7 @@ public sealed class PipelineHost : IDisposable
                     string final2 = transcription2.Text;
                     var producedModelName2 = transcription2.ProviderModelName;
                     timing2.AsrMs = (int)transcribeSw2.ElapsedMilliseconds;
+                    StampStreamingFinishStats(timing2, streaming2);
                     // Mode from the model that ACTUALLY produced the result (not from
                     // which code arm returned): nemotron const => true local streaming;
                     // the assemblyai/ prefix => cloud (shares the batch budget); else
@@ -1446,6 +1468,28 @@ public sealed class PipelineHost : IDisposable
         if (!s.PumpCompletion.IsCompleted) _orphanGuard.Register(s.PumpCompletion);
     }
 
+    /// <summary>Copy the streaming coordinator's out-of-band finish metrics
+    /// onto the timing summary (asr_wait/asr_native split of asr=, queued
+    /// backlog, native-call aggregates). Null-safe: no-op when streaming
+    /// never existed or FinishAsync never ran.</summary>
+    private static void StampStreamingFinishStats(
+        Winpepper.Core.Diagnostics.DictationTimingSummary timing,
+        Winpepper.Asr.Transcription.StreamingDictationSession? streaming)
+    {
+        if (streaming?.FinishStats is not { } fs) return;
+        timing.AsrWaitMs = fs.AsrWaitMs;
+        timing.AsrNativeMs = fs.AsrNativeMs;
+        timing.BacklogFrames = fs.BacklogFrames;
+        timing.BacklogMs = fs.BacklogMs;
+        if (fs.NativeCallStats is { } ns)
+        {
+            timing.NativeCalls = ns.Count;
+            timing.NativeTotalMs = ns.TotalMs;
+            timing.NativeMaxMs = ns.MaxMs;
+            timing.NativeOver250 = ns.CountOver250Ms;
+        }
+    }
+
     /// <summary>
     /// Silence-trims the finished recording for TRANSCRIPTION ONLY. Returns the
     /// trimmed samples to send to ASR, or <c>null</c> when the recording has no
@@ -1492,6 +1536,18 @@ public sealed class PipelineHost : IDisposable
     /// </summary>
     private void EmitTimingSummary(Winpepper.Core.Diagnostics.DictationTimingSummary timing)
     {
+        // Window = recording start -> emit. prewarm_active correlates the
+        // 07-28 regression suspect (cleanup pre-warm CPU load concurrent
+        // with dictation) directly on the line; gc= deltas test the
+        // GC-pause/allocation-churn hypothesis. Zero-cost reads.
+        timing.GcGen0 = GC.CollectionCount(0) - _gcGen0AtStart;
+        timing.GcGen1 = GC.CollectionCount(1) - _gcGen1AtStart;
+        timing.GcGen2 = GC.CollectionCount(2) - _gcGen2AtStart;
+        // GetTotalPauseDuration: cumulative process-wide GC pause time,
+        // monotonic by construction (verified on .NET 9; includes background
+        // GC's STW pauses, excludes its concurrent portion).
+        timing.GcPauseMs = (int)(GC.GetTotalPauseDuration() - _gcPauseAtStart).TotalMilliseconds;
+        timing.PrewarmActive = _cleanupHolder.WasPrewarmActiveSince(_dictStartTicks);
         _log.LogInformation("dictation timing {Summary}", timing.FormatLine());
         foreach (var o in timing.Overruns())
         {

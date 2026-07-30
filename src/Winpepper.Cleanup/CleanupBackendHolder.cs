@@ -54,6 +54,15 @@ public sealed class CleanupBackendHolder : IDisposable
     private CleanupRunner? _runner;
     private PendingPrewarm? _pending;
 
+    // Prewarm-activity markers for the dictation timing line. Lock-free on
+    // purpose: the dictation path must never contend with _gate (Dispose
+    // holds it across a bounded 5 s pending-load wait). In-flight count is
+    // bumped under _gate in StartPrewarmLocked BEFORE the Task.Run, and
+    // dropped in LoadCore's finally; the end-ticks stamp uses
+    // Environment.TickCount64 (monotonic, matches PipelineHost's window start).
+    private int _prewarmInFlight;
+    private long _prewarmLastEndTicks = long.MinValue;
+
     public CleanupBackendHolder(
         Func<string?> desiredModelName,
         Func<string?, CleanupModelTarget> resolve,
@@ -76,6 +85,16 @@ public sealed class CleanupBackendHolder : IDisposable
     public string? LoadedModelName
     {
         get { lock (_gate) return _swap.LoadedModelName; }
+    }
+
+    /// <summary>True when a background pre-warm (model load + warm-up
+    /// inference) was in flight at any point between
+    /// <paramref name="sinceTickCount64"/> (an Environment.TickCount64
+    /// reading) and now. Lock-free — safe on the dictation path.</summary>
+    public bool WasPrewarmActiveSince(long sinceTickCount64)
+    {
+        if (Volatile.Read(ref _prewarmInFlight) > 0) return true;
+        return Interlocked.Read(ref _prewarmLastEndTicks) >= sinceTickCount64;
     }
 
     /// <summary>
@@ -174,6 +193,7 @@ public sealed class CleanupBackendHolder : IDisposable
         }
 
         var captured = target;
+        Interlocked.Increment(ref _prewarmInFlight); // under _gate, before the task exists — no in-flight gap
         _pending = new PendingPrewarm(captured, Task.Run(() => LoadCore(captured)));
     }
 
@@ -181,6 +201,11 @@ public sealed class CleanupBackendHolder : IDisposable
     {
         try
         {
+            // Started INSIDE the try (not before it): a throw here would
+            // otherwise escape the method entirely, skipping the finally
+            // below and leaking _prewarmInFlight permanently.
+            var prewarmSw = System.Diagnostics.Stopwatch.StartNew();
+            _log.LogInformation("cleanup prewarm started: {ModelName}", target.ResolvedName);
             if (target.GgufPath is null)
             {
                 _log.LogWarning(
@@ -218,6 +243,9 @@ public sealed class CleanupBackendHolder : IDisposable
                 // ever disposed after its load+warm task completes (never with
                 // a warm-up in flight — ledger A1b).
                 _warmup?.Invoke(backend, CancellationToken.None).GetAwaiter().GetResult();
+                _log.LogInformation(
+                    "cleanup prewarm finished: {ModelName} in {ElapsedMs} ms (load + warm-up)",
+                    target.ResolvedName, (int)prewarmSw.ElapsedMilliseconds);
                 return new PrewarmResult(backend, runner);
             }
             catch
@@ -232,6 +260,11 @@ public sealed class CleanupBackendHolder : IDisposable
                 "Cleanup model {ModelName} failed to load; keeping the current model.",
                 target.ResolvedName);
             return null;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _prewarmLastEndTicks, Environment.TickCount64);
+            Interlocked.Decrement(ref _prewarmInFlight);
         }
     }
 

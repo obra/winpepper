@@ -327,6 +327,56 @@ public class CleanupBackendHolderTests
         h.DictateUntilLoaded("model-default");
     }
 
+    [Fact]
+    public void WasPrewarmActiveSince_NoPrewarmEver_IsFalse()
+    {
+        var h = new Harness { Desired = "model-a" };
+
+        h.Holder.WasPrewarmActiveSince(0).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void WasPrewarmActiveSince_WhileLoadInFlight_IsTrue()
+    {
+        // Local gate variable: FactoryGate is a nullable field and the repo
+        // builds with WarningsAsErrors=nullable.
+        using var gate = new ManualResetEventSlim(false);
+        var h = new Harness { Desired = "model-a", FactoryGate = gate };
+        try
+        {
+            h.Holder.RequestPrewarm(); // load blocks on the factory gate
+
+            h.Holder.WasPrewarmActiveSince(Environment.TickCount64).ShouldBeTrue();
+        }
+        finally
+        {
+            gate.Set(); // release so the background task can finish
+        }
+        h.DictateUntilLoaded("model-a"); // drain the load before the test ends
+    }
+
+    [Fact]
+    public void WasPrewarmActiveSince_AfterCompletion_ReflectsTheWindow()
+    {
+        var h = new Harness { Desired = "model-a" };
+        h.Holder.RequestPrewarm();
+        h.DictateUntilLoaded("model-a"); // adoption implies the load task completed
+
+        h.Holder.WasPrewarmActiveSince(0).ShouldBeTrue();                               // window overlaps the prewarm
+        h.Holder.WasPrewarmActiveSince(Environment.TickCount64 + 1000).ShouldBeFalse(); // window strictly after it
+    }
+
+    [Fact]
+    public void Prewarm_LogsStartAndFinish_WithDurationAndModelName()
+    {
+        var h = new Harness { Desired = "model-a" };
+        h.Holder.RequestPrewarm();
+        h.DictateUntilLoaded("model-a");
+
+        h.Log.Infos.ShouldContain(m => m.Contains("cleanup prewarm started") && m.Contains("model-a"));
+        h.Log.Infos.ShouldContain(m => m.Contains("cleanup prewarm finished") && m.Contains("model-a") && m.Contains("ms"));
+    }
+
     /// <summary>Harness whose resolve reports FellBackToDefault for unknown names.</summary>
     private sealed class HarnessWithFallback
     {

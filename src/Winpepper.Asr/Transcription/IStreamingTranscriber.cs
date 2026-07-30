@@ -15,7 +15,11 @@ public interface IStreamingTranscriptionSession : IAsyncDisposable
     /// <summary>Feed mono 16 kHz float samples captured during recording. May do
     /// heavy work (inference / network sends) — callers pump from a background task.
     /// CONTRACT: a push arriving after DisposeAsync must be a benign no-op — the
-    /// coordinator's pump legitimately drains queued frames after an abandon.</summary>
+    /// coordinator's pump legitimately drains queued frames after an abandon.
+    /// CONTRACT: the samples are only valid until the returned ValueTask
+    /// completes — the caller returns the buffer to a pool afterwards.
+    /// Implementations that retain audio past completion must copy it first
+    /// (all current implementations already copy or fully consume synchronously).</summary>
     ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct);
 
     /// <summary>Signal end-of-audio and await the final transcript.

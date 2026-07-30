@@ -165,3 +165,75 @@ stable comparable subset and match exactly. No ladder escalation (6/8)
 needed. LLamaSharp 0.27 `ModelParams` carries `Threads`/`BatchThreads` as
 declared — no property-name correction required (verified against the
 resolved package XML docs).
+
+## Run gates — 2026-07-30 single combined run
+
+- Linux suite: GREEN, 1583 tests. (Second attempt; the first attempt hit 1
+  failure in the pre-existing, branch-untouched load-sensitive test
+  `CleanupBackendHolderTests.FailedVerification_KeepsCurrentModel_AndNeverConstructsBackend`
+  — reproduced only under artificial 4-way concurrent CPU load, green on 5
+  quiet reruns. Not one of the two known gate flakes; noted for the record.)
+- Windows gate: GATE: GREEN (1 attempt(s); flakes retried: none).
+- Branch: feat/cleanup-asr-contention-run1, NOT pushed (root session merges/gates/installs).
+
+## Post-install validation expectations (owner-attested later, NOT by this run)
+
+From the approved plan's Validation section, minus the waived baseline
+comparison; evaluated on the FIRST 30 filtered (prewarm_active=false),
+non-excluded timing lines in log order, from
+%LOCALAPPDATA%\winpepper\logs\winpepper-YYYYMMDD.log:
+
+- native_over250 = 0 on >= 28 of 30 lines; for the (<= 2) tolerated lines,
+  list every exceedance with its over250_at offsets here (reporting).
+- native_max <= 250 ms on those same >= 28 lines.
+- asr_wait p95 < 500 ms.
+- total= p95 <= 5000 ms.
+- ctx_src REPORTING (waived criterion): raw uia / ocr / none counts over the
+  post-install dictations.
+- cleanup= medians before/after from real dictations (reporting).
+- NEW: mem= private-MB flat across a 30-dictation session (pre-fix baseline:
+  ~3.0 GB private / ~1.5 GB WS / 167 threads / ~2000 handles at 5.9 h uptime);
+  pf= deltas not growing dictation-over-dictation; sys_cpu= interpretable
+  against cleanup-off dictations.
+- Wedge-cascade check: any "streaming routed to batch for this dictation"
+  INF lines should coincide with a preceding drain-timeout WRN, and the
+  FOLLOWING dictation should not show a ~5000 ms stream-begin gate wait.
+- Early-abandon check (E2): wedged batch fallbacks should no longer show
+  asr_wait pegged at ~10000 ms when the wedge began mid-recording — expect
+  either a normal timed-out drain or an "abandoned immediately" WRN with
+  asr_wait ~0 on that line. ADDITIONALLY, on early-abandon lines compare
+  `asr=` (asr_mode=batch) against the no-wedge batch baseline
+  (p50 3.2-3.6 s / p90 6.0-7.0 s, from the pill-silence evidence) to bound
+  the contention stretch of a batch running concurrently with a wedged
+  native call: with-wedge batch p50 <= ~2x the no-wedge p50 confirms the
+  concurrent-progress assumption (A14) quantitatively; E2's "up to ~10 s
+  saved" is an upper bound until then.
+- Elapsed-at-stop WRN data (A12/A13): every abandon WRN now logs the probed
+  in-flight-elapsed-at-stop. Check (i) whether wedges typically pre-date the
+  stop by >= the 10 s drain budget (A12 — any pegged-drain WRN with
+  in-flight-at-stop < 10000 is a live counterexample; the split between the
+  two WRNs gives the onset distribution), and (ii) whether calls already
+  >= budget in flight at stop ever return quickly afterwards (A13 — each
+  such quick return is a dictation E2 traded from a salvageable streaming
+  result to batch).
+- Residuals for owner observation (assumed by this run's designs, not
+  provable from the committed record):
+  - ParakeetSession DirectML EP presence — `UsingDirectML` is set but never
+    logged; a CPU-fallback batch would compete for cores with a wedged call
+    and sharpen contention.
+  - Batch-of-full-audio transcription quality on abandoned dictations (E2
+    sends users there sooner/more often; text is never lost, quality is
+    unvalidated).
+  - The un-cancellable OCR tail (PrintWindow capture + recognize work before
+    the advisory Cancel is honored) staying short enough not to matter for
+    ASR contention.
+  - transcribe_session_free never hanging after the compute call returns —
+    a hang would hold the compute gate forever (permanent gate-timeout on
+    every later dictation); the "stream dispose" still-running WRN is the
+    instrument.
+- Outlier rule (unchanged): exclude only when asr_wait > 2000 AND
+  backlog_ms > 2000 AND native_max > 2000; excluded lines are counted and
+  listed here with offsets adjudicated against prefetch/prewarm/GC windows.
+- 1c re-open trigger (unchanged, parked): reconsider only if dictations
+  starting < 2 s after a prewarm began show native_over250 > 0 on more than
+  2 of the first 10 such dictations in log order.

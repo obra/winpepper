@@ -90,10 +90,10 @@ interop in `Winpepper.Platform`.
 | `src/Winpepper.Platform/Diagnostics/ProcessResourceSampler.cs` (create) | `[LibraryImport]` GetProcessMemoryInfo + GetSystemTimes, null off-Windows. |
 | `tests/Winpepper.Platform.Tests/Diagnostics/ProcessResourceSamplerTests.cs` (create) | Off-Windows null contract. |
 | `src/Winpepper.App/Hosting/PipelineHost.cs` (modify) | Resource sampling at start/stop; prefetch relocation; route-guard wiring (both arms). |
-| `src/Winpepper.Asr/TranscribeCpp/ITranscribeCppEngine.cs` (modify) | `LastGateWaitMs` on the engine contract. |
+| `src/Winpepper.Asr/TranscribeCpp/ITranscribeCppEngine.cs` (modify) | Per-call `out int gateWaitMs` on `BeginStream`/`TranscribeBatch`. |
 | `src/Winpepper.Asr/TranscribeCpp/TranscribeCppEngine.cs` (modify) | Measure gate wait in `BeginStream`/`TranscribeBatch`. |
 | `src/Winpepper.Asr/Transcription/NemotronStreamingTranscriber.cs` (modify) | Split gate wait out of stream-begin native stats; INF log. |
-| `tests/Winpepper.Asr.Tests/Transcription/FakeTranscribeCppEngine.cs` (modify) | Implement `LastGateWaitMs`. |
+| `tests/Winpepper.Asr.Tests/Transcription/FakeTranscribeCppEngine.cs` (modify) | Report a configurable per-call `gateWaitMs`. |
 | `tests/Winpepper.Asr.Tests/Transcription/NemotronStreamingTranscriberTests.cs` (modify) | Gate-wait exclusion test. |
 | `src/Winpepper.Cleanup/LlamaCleanupBackend.cs` (modify) | C1 pipeline dispose, C3 executor hoist, D2 thread cap. |
 | `src/Winpepper.Platform/WindowContext/OcrFallback.cs` (modify) | C2 SoftwareBitmap dispose on all paths. |
@@ -214,7 +214,11 @@ as leak-fix C3, executor hoisted to a field.)
   ArrayPool growth at scale, GC pressure as primary cause.
 - Confirmed native-memory leaks: (C1) DefaultSamplingPipeline created per
   generation and never disposed (LlamaCleanupBackend.cs:97-105; upstream
-  BaseSamplingPipeline frees its native sampler chain only in Dispose);
+  BaseSamplingPipeline's native sampler chain is a finalizer-backed
+  SafeHandle, so non-disposal means delayed, finalizer-dependent,
+  non-deterministic reclamation — native memory exerts no managed-heap
+  pressure, so undisposed chains pile up between collections; deterministic
+  disposal is still the right fix);
   (C2) SoftwareBitmap created in OcrFallback.cs:102-108, consumed at :54,
   never disposed on any path (~width*height*4 bytes, ~33 MB per 4K-window
   OCR-path dictation); (C3) a fresh StatelessExecutor per generation whose
@@ -270,6 +274,13 @@ git commit -m "docs(plans): evidence — owner waivers, 0c verdict (StatelessExe
   `int? ThreadCount`, `int? HandleCount`, `int? SysCpuPct` properties and
   `public static int? SystemCpuPercent(long idleDelta, long kernelDelta, long userDelta)`
   — Task 3 stamps these from PipelineHost.
+
+Validation note (2026-07-30, official GetSystemTimes docs): the semantics are
+DOC-CONFIRMED — kernel time INCLUDES idle ("This time value also includes the
+amount of time the system has been idle."), so
+`busy = (kernel − idle) + user` is correct verbatim; the truth-table tests
+below encode it (a mere `kernel + user > 0` check could never catch a wrong
+subtraction).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -388,8 +399,10 @@ After the existing `StampOver250` method (:142-149), add:
 ```csharp
     /// <summary>B3: system-wide CPU percent over the recording window, from two
     /// GetSystemTimes samples (100 ns FILETIME units). Windows' kernel time
-    /// INCLUDES idle time, so busy = (kernel - idle) + user. Null when the
-    /// window is empty or inconsistent (first sample failed, clock skew).</summary>
+    /// INCLUDES idle time (doc-confirmed 2026-07-30: "This time value also
+    /// includes the amount of time the system has been idle."), so
+    /// busy = (kernel - idle) + user. Null when the window is empty or
+    /// inconsistent (first sample failed, clock skew).</summary>
     public static int? SystemCpuPercent(long idleDelta, long kernelDelta, long userDelta)
     {
         var total = kernelDelta + userDelta;
@@ -459,13 +472,41 @@ public class ProcessResourceSamplerTests
     }
 
     [Fact]
-    public void OnWindows_ReturnsValues()
+    public void OnWindows_ReturnsValues_AndSysCpuIsPlausible()
     {
         if (!OperatingSystem.IsWindows()) return;
+        // A cb/layout mistake makes GetProcessMemoryInfo return false -> null.
         ProcessResourceSampler.PageFaultCount().ShouldNotBeNull();
-        var s = ProcessResourceSampler.SystemTimes();
-        s.ShouldNotBeNull();
-        (s!.Value.Kernel100ns + s.Value.User100ns).ShouldBeGreaterThan(0);
+        var s0 = ProcessResourceSampler.SystemTimes();
+        s0.ShouldNotBeNull();
+        Thread.Sleep(50);
+        var s1 = ProcessResourceSampler.SystemTimes();
+        s1.ShouldNotBeNull();
+        // Plausibility bound (upgraded 2026-07-30): `kernel + user > 0` alone
+        // cannot catch a wrong busy subtraction. A real two-sample window
+        // must satisfy the doc-confirmed structural invariants — kernel
+        // INCLUDES idle, so 0 <= busy <= total and 0 <= sys_cpu <= 100.
+        var idleD = s1!.Value.Idle100ns - s0!.Value.Idle100ns;
+        var kernelD = s1.Value.Kernel100ns - s0.Value.Kernel100ns;
+        var userD = s1.Value.User100ns - s0.Value.User100ns;
+        var busy = kernelD - idleD + userD;
+        var total = kernelD + userD;
+        total.ShouldBeGreaterThan(0);
+        busy.ShouldBeGreaterThanOrEqualTo(0); // idleΔ <= kernelΔ (kernel includes idle)
+        (busy * 100 / total).ShouldBeInRange(0, 100); // same math as SystemCpuPercent
+    }
+
+    [Fact]
+    public void MemoryCountersStruct_CbRoundTrip_MatchesDocumentedLayout()
+    {
+        // PROCESS_MEMORY_COUNTERS_EX: 2 DWORDs + 9 SIZE_Ts = 80 bytes on x64
+        // (doc-verified layout; the 2 leading DWORDs make the SIZE_Ts
+        // naturally 8-aligned — no hidden padding). cb and the function's cb
+        // argument must both carry this exact value or the call fails/truncates.
+        if (!Environment.Is64BitProcess) return;
+        System.Runtime.InteropServices.Marshal
+            .SizeOf<ProcessResourceSampler.PROCESS_MEMORY_COUNTERS_EX>()
+            .ShouldBe(80);
     }
 }
 ```
@@ -514,7 +555,10 @@ public static partial class ProcessResourceSampler
 
     /// <summary>System-wide idle/kernel/user FILETIMEs in 100 ns units.
     /// Kernel INCLUDES idle — DictationTimingSummary.SystemCpuPercent does the
-    /// subtraction.</summary>
+    /// subtraction. Caveat (doc-confirmed): on machines with more than 64
+    /// logical processors, GetSystemTimes sums only the calling thread's
+    /// primary processor group — sys_cpu then reflects one group, not the
+    /// whole machine. Negligible on the target boxes.</summary>
     public static SystemTimesSample? SystemTimes()
     {
         if (!OperatingSystem.IsWindows()) return null;
@@ -523,8 +567,10 @@ public static partial class ProcessResourceSampler
             : null;
     }
 
+    // internal (not private) so the layout/cb round-trip test can assert
+    // Marshal.SizeOf == 80 on x64 (2 DWORDs + 9 SIZE_Ts, doc-verified).
     [StructLayout(LayoutKind.Sequential)]
-    private struct PROCESS_MEMORY_COUNTERS_EX
+    internal struct PROCESS_MEMORY_COUNTERS_EX
     {
         public uint cb;
         public uint PageFaultCount;
@@ -534,9 +580,9 @@ public static partial class ProcessResourceSampler
         public nuint QuotaPagedPoolUsage;
         public nuint QuotaPeakNonPagedPoolUsage;
         public nuint QuotaNonPagedPoolUsage;
-        public nuint PagefileUsage;
+        public nuint PagefileUsage;     // documented ALWAYS ZERO on Win7/2008R2 and earlier — never report this
         public nuint PeakPagefileUsage;
-        public nuint PrivateUsage;
+        public nuint PrivateUsage;      // use THIS for private/commit bytes if ever read from the struct
     }
 
     [LibraryImport("kernel32.dll")]
@@ -647,11 +693,22 @@ git commit -m "feat(app): sample page faults, memory, threads, handles, system C
 **Interfaces:**
 - Consumes: existing `_computeGate` / `s_gateTimeout` in `TranscribeCppEngine`
   (:52-53), `TimedNativeCall` aggregates, `NativeCallStats`.
-- Produces: `int LastGateWaitMs { get; }` on `ITranscribeCppEngine` (valid
-  immediately after `BeginStream`/`TranscribeBatch` returns or throws; callers
-  serialized by the engine contract) and
+- Produces: a trailing `out int gateWaitMs` parameter on
+  `ITranscribeCppEngine.BeginStream` and `.TranscribeBatch` (the gate wait is
+  RETURNED PER-CALL; written by the engine immediately after the gate wait
+  completes and BEFORE the gate-timeout throw, so — `out` being by-ref — the
+  value is valid to the caller on both return and throw) and
   `private void RecordNativeSample(string op, long startTick, long elapsedMs)`
   inside `NemotronStreamingTranscriber.Session`.
+
+Why per-call, not a mutable engine property (assumption falsified
+2026-07-30): calls on the shared singleton engine DO overlap — a wedged
+`BeginStream` returning ~16 s late would read the NEXT dictation's 5000 ms
+gate-timeout write off a shared `LastGateWaitMs` slot (the cancel path
+orphans the pump without `FinishAsync`, so the orphan's call runs concurrently
+with the next dictation's), corrupting `native_max`/`over250_at` — the
+adjudication evidence. A per-call return has no shared mutable slot and needs
+no happens-before argument.
 
 Mismatch-rule note (already recorded in the evidence file by Task 1): the spec
 pointed at `TranscribeCppEngine.cs:206-220/:270` for the "booked as native
@@ -679,7 +736,7 @@ below is binding, the names are pointers):
         var engine = new FakeTranscribeCppEngine
         {
             BeginStreamDelay = TimeSpan.FromMilliseconds(600),
-            GateWaitMsToReport = 600,
+            GateWaitMsToReport = 600, // returned per-call via BeginStream's out parameter
         };
         var session = CreateSession(engine); // same helper/pattern as the :303 over250 test
         await session.PushAsync(OneChunk(), TestContext.Current.CancellationToken); // forces EnsureStream
@@ -695,15 +752,19 @@ In `FakeTranscribeCppEngine.cs`, add the members the test needs:
 ```csharp
     public TimeSpan BeginStreamDelay { get; set; } = TimeSpan.Zero;
     public int GateWaitMsToReport { get; set; }
-    public int LastGateWaitMs { get; private set; }
 ```
 
-and at the top of the fake's `BeginStream` implementation:
+update the fake's `BeginStream` (and `TranscribeBatch`) signatures to the new
+interface shape (trailing `out int gateWaitMs`), and at the top of the fake's
+`BeginStream` implementation:
 
 ```csharp
         if (BeginStreamDelay > TimeSpan.Zero) Thread.Sleep(BeginStreamDelay);
-        LastGateWaitMs = GateWaitMsToReport;
+        gateWaitMs = GateWaitMsToReport;
 ```
+
+(`TranscribeBatch` in the fake just sets `gateWaitMs = 0;` unless a test needs
+otherwise.)
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -711,31 +772,33 @@ and at the top of the fake's `BeginStream` implementation:
 dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 ```
 
-Expected: BUILD FAILS — `FakeTranscribeCppEngine` does not implement the (not
-yet existing) interface member; after adding the interface member in Step 3 the
-TEST fails (`CountOver250Ms` is 1: the 600 ms begin is booked as native) until
-Step 4's transcriber change lands. Record both red states.
+Expected: BUILD FAILS — the fake's `BeginStream` signature does not yet match
+the changed interface (and the test passes `GateWaitMsToReport` nowhere);
+after the Step 3 signature change lands the TEST fails (`CountOver250Ms` is
+1: the 600 ms begin is booked as native) until Step 4's transcriber change
+lands. Record both red states.
 
-- [ ] **Step 3: Add the interface member + engine measurement**
+- [ ] **Step 3: Change the signatures + engine measurement (per-call gate wait)**
 
-`ITranscribeCppEngine.cs`, inside `ITranscribeCppEngine`:
-
-```csharp
-    /// <summary>B4: how long the LAST BeginStream/TranscribeBatch call spent
-    /// waiting on the compute gate before any native work started. Callers are
-    /// serialized by the one-compute-in-flight contract; read this immediately
-    /// after the call returns (or throws). Lets the caller book queueing
-    /// behind a prior stream separately from native compute.</summary>
-    int LastGateWaitMs { get; }
-```
-
-`TranscribeCppEngine.cs`: add the auto-property to the class:
+`ITranscribeCppEngine.cs`: add a trailing `out int gateWaitMs` parameter to
+`BeginStream` (:27) and `TranscribeBatch` (an `out` parameter cannot follow an
+optional one — drop the `= null` default on `language` if needed; call sites
+already pass it explicitly):
 
 ```csharp
-    public int LastGateWaitMs { get; private set; }
+    /// <summary>B4 (gateWaitMs): how long THIS call spent waiting on the
+    /// compute gate before any native work started, returned PER CALL — never
+    /// a shared mutable slot: calls on the singleton engine can overlap (a
+    /// cancel-orphaned pump's wedged BeginStream vs the next dictation's), so
+    /// a read-after-call property would mis-attribute another call's gate
+    /// wait. The engine writes this immediately after the gate wait completes
+    /// and BEFORE the gate-timeout throw; `out` is by-ref, so the value is
+    /// valid to the caller on both return and throw. Lets the caller book
+    /// queueing behind a prior stream separately from native compute.</summary>
+    ITranscribeCppStream BeginStream(int attContextRight, string? language, out int gateWaitMs);
 ```
 
-In `BeginStream` (~:209) replace:
+`TranscribeCppEngine.cs`: in `BeginStream` (~:209) replace:
 
 ```csharp
         if (!_computeGate.Wait(s_gateTimeout))
@@ -749,18 +812,21 @@ with:
         var gateSw = System.Diagnostics.Stopwatch.StartNew();
         var acquired = _computeGate.Wait(s_gateTimeout);
         gateSw.Stop();
-        LastGateWaitMs = (int)gateSw.ElapsedMilliseconds;
+        gateWaitMs = (int)gateSw.ElapsedMilliseconds; // per-call, valid even on the throw below
         if (!acquired)
             throw new TranscribeCppException(
                 "another transcription is still active on the engine (compute gate timeout)");
 ```
 
 Apply the IDENTICAL replacement to the same `_computeGate.Wait(s_gateTimeout)`
-block in `TranscribeBatch` (~:270-272).
+block in `TranscribeBatch` (~:270-272), with its own trailing
+`out int gateWaitMs`.
 
 If any other class implements `ITranscribeCppEngine` (search
-`grep -rn ": ITranscribeCppEngine" src/ tests/`), implement the property there
-too (wrappers delegate to the inner engine).
+`grep -rn ": ITranscribeCppEngine" src/ tests/`), update its signatures too
+(wrappers pass the `out` value straight through from the inner engine). Fix
+any `TranscribeBatch` call sites the compiler finds with `out _` where the
+value is unused.
 
 - [ ] **Step 4: Split the gate wait out in the transcriber**
 
@@ -811,24 +877,29 @@ Replace `EnsureStream` (:224-228) with:
             var sw = Stopwatch.StartNew();
             using var watchdogCts = new CancellationTokenSource();
             _ = WarnWhenStillRunningAsync("stream begin", watchdogCts.Token);
+            // B4: written by the engine BEFORE the gate-timeout throw (out is
+            // by-ref), so the finally sees THIS call's gate wait on both
+            // return and throw; 0 if the engine threw before the gate wait.
+            var gateWaitMs = 0;
             try
             {
-                _stream = engine.BeginStream(_attContextRight, _language);
+                _stream = engine.BeginStream(_attContextRight, _language, out gateWaitMs);
             }
             finally
             {
                 watchdogCts.Cancel();
                 sw.Stop();
-                // B4: the engine books gate wait separately; subtract it so
-                // native_* stats (and over250_at) measure compute, not
+                // B4: the engine returns THIS call's gate wait per-call (no
+                // shared slot to mis-read under overlapping calls); subtract
+                // it so native_* stats (and over250_at) measure compute, not
                 // queueing behind a prior stream's undisposed session.
-                var gateWaitMs = Math.Max(0, engine.LastGateWaitMs);
-                var nativeMs = Math.Max(0, sw.ElapsedMilliseconds - gateWaitMs);
-                RecordNativeSample("stream begin", startTick + gateWaitMs, nativeMs);
-                if (gateWaitMs > 0)
+                var gateWait = Math.Max(0, gateWaitMs);
+                var nativeMs = Math.Max(0, sw.ElapsedMilliseconds - gateWait);
+                RecordNativeSample("stream begin", startTick + gateWait, nativeMs);
+                if (gateWait > 0)
                     _log?.LogInformation(
                         "stream begin: compute-gate wait {GateWaitMs} ms, native {NativeMs} ms",
-                        gateWaitMs, (int)nativeMs);
+                        gateWait, (int)nativeMs);
             }
         }
 ```
@@ -851,7 +922,7 @@ Run `./scripts/linux-tests.sh` → `LINUX SUITE: GREEN`, then:
 ```bash
 git add src/Winpepper.Asr/TranscribeCpp/ITranscribeCppEngine.cs src/Winpepper.Asr/TranscribeCpp/TranscribeCppEngine.cs src/Winpepper.Asr/Transcription/NemotronStreamingTranscriber.cs tests/Winpepper.Asr.Tests/Transcription/FakeTranscribeCppEngine.cs tests/Winpepper.Asr.Tests/Transcription/NemotronStreamingTranscriberTests.cs
 git commit -m "feat(asr): measure and log compute-gate wait separately from native stream-begin time" \
-  -m "BeginStream/TranscribeBatch expose LastGateWaitMs; EnsureStream subtracts it from native_* stats and logs 'compute-gate wait X ms, native Y ms' at INF. Gate contention is no longer booked as native compute in over250_at." \
+  -m "BeginStream/TranscribeBatch return the gate wait PER CALL (out int gateWaitMs — a mutable engine property would mis-attribute across overlapping calls: a cancel-orphaned wedged BeginStream returning ~16 s late would read the next dictation's 5000 ms gate-timeout write); EnsureStream subtracts it from native_* stats and logs 'compute-gate wait X ms, native Y ms' at INF. Gate contention is no longer booked as native compute in over250_at." \
   -m "Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
 ```
 
@@ -873,6 +944,23 @@ This file is entirely `#if WINDOWS` — it cannot fail Linux tests. TDD here is
 "compile + existing Windows integration tests via the Task 11 gate"; the steps
 are edit → suite → commit.
 
+C3 validation notes (source-verified 2026-07-30 against the pinned v0.27.0
+tag; load-bearing — keep true):
+
+- Hoist safety is proven, not assumed: `batch.Clear()` runs at the top of
+  EVERY prompt-decode chunk (`SafeLLamaContextHandle.cs:721`), and
+  `LLamaBatch.Clear()` (`LLamaBatch.cs:259-272`) is a FULL wipe (token count,
+  logit positions, and `Array.Clear` of every buffer) — stale `_batch` state
+  from a prior call is destroyed before the first native decode of the next
+  call.
+- The `_gate` SemaphoreSlim(1,1) serialization is LOAD-BEARING for the
+  hoisted executor: `_batch` and the `Context` property are NOT
+  concurrency-safe. Never remove or weaken the gate.
+- Never mutate the shared `ModelParams` instance after construction: its
+  values (`Threads`/`BatchThreads` etc.) are re-read LIVE at every
+  per-generation context creation, so a later mutation silently changes
+  generation-time behavior.
+
 - [ ] **Step 1: Hoist the executor (C3)**
 
 Add a field after `_promptFormat` (:23):
@@ -885,8 +973,12 @@ In the constructor, after `_log.LogInformation("Cleanup model loaded.");`
 (:50), add:
 
 ```csharp
-        // C3: ONE executor per backend, not one per generation. Safe: _gate
-        // serializes GenerateAsync, and ApplyTemplate=false is constant.
+        // C3: ONE executor per backend, not one per generation. Safe ONLY
+        // because _gate (SemaphoreSlim(1,1)) serializes GenerateAsync — the
+        // executor's _batch/Context are not concurrency-safe (v0.27.0 source:
+        // batch.Clear() fully wipes stale state at the top of every
+        // prompt-decode chunk, SafeLLamaContextHandle.cs:721 /
+        // LLamaBatch.cs:259-272) — and ApplyTemplate=false is constant.
         // LLamaSharp 0.27's StatelessExecutor ctor creates and immediately
         // disposes a throwaway context (verified against the official
         // v0.27.0 tag — see docs/plans/2026-07-29-cleanup-asr-contention-evidence.md,
@@ -922,8 +1014,11 @@ to
 
 ```csharp
             // C1: BaseSamplingPipeline owns a native llama.cpp sampler chain
-            // freed only in Dispose(); created per generation and leaked, it
-            // accumulated native memory for the process lifetime.
+            // via a finalizer-backed SafeHandle (ownsHandle: true). Undisposed,
+            // reclamation is delayed, finalizer-dependent, and non-deterministic
+            // — and native memory exerts no managed-heap pressure, so undisposed
+            // chains can pile up between collections. 'using' makes the free
+            // deterministic per generation.
             using var pipeline = new DefaultSamplingPipeline
 ```
 
@@ -943,7 +1038,7 @@ comes from Task 11's Windows gate, which also runs
 ```bash
 git add src/Winpepper.Cleanup/LlamaCleanupBackend.cs
 git commit -m "fix(cleanup): dispose sampling pipeline per generation; reuse one StatelessExecutor" \
-  -m "C1: DefaultSamplingPipeline holds a native sampler chain freed only in Dispose — now 'using' per generation. C3: executor hoisted to a ctor field (gate-serialized, ApplyTemplate constant); halves per-generation Vulkan context churn per the 0c evidence." \
+  -m "C1: DefaultSamplingPipeline's native sampler chain is a finalizer-backed SafeHandle — undisposed, reclamation is delayed, finalizer-dependent, and non-deterministic; 'using' per generation makes it deterministic. C3: executor hoisted to a ctor field (gate-serialized — load-bearing; ApplyTemplate constant); halves per-generation Vulkan context churn per the 0c evidence." \
   -m "Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
 ```
 
@@ -958,72 +1053,121 @@ git commit -m "fix(cleanup): dispose sampling pipeline per generation; reuse one
 **Interfaces:**
 - Consumes: nothing new. Produces: unchanged public surface.
 
-- [ ] **Step 1: Wrap consumption in try/finally**
+Why NOT `finally { swBitmap.Dispose(); }` (design falsified 2026-07-30): the
+CsWinRT `AsTask(ct)` bridge registers ct → `TrySetCanceled` EAGERLY (shipped
+`WinRT.Runtime` 2.2.0.48161, via CsWinRT PR #1539), so on cancellation the
+awaited Task goes terminal while the native `OcrEngine.RecognizeAsync`
+operation can still be Running and READING the SoftwareBitmap —
+`IAsyncInfo.Cancel()` is only a request. A finally-dispose on the awaiting
+frame would close the pixel buffer under a live native read on D1's ROUTINE
+per-dictation-CTS cancel path (every rapid re-dictation). Disposal must
+instead be owned by a continuation that observes the WinRT op's OWN terminal
+state, with a TOKEN-LESS `AsTask()` (the bridge then completes ONLY from the
+op's Completed handler) and `WaitAsync(ct)` keeping the caller's prompt
+unblock.
 
-In `CaptureAsync`, after `if (swBitmap is null) return WindowContextResult.Empty;`
-(:42), wrap EVERYTHING from the `OcrEngine.TryCreateFromUserProfileLanguages()`
-call (:44) through the final `return` (:73-75) in:
+Residual (accepted, unverifiable from public sources): that `OcrEngine`'s
+native implementation stops reading the input bitmap strictly before firing
+`Completed` is contract-conformant WinRT behavior but cannot be proven
+(closed-source Windows.Media.Ocr).
+
+- [ ] **Step 1: Cheap ct check before the capture stage**
+
+The capture stage (`GetClientRect`/size checks +
+`CaptureWindowToSoftwareBitmap`, i.e. `PrintWindow` + `LockBits` + buffer copy
++ `CreateCopyFromBuffer`) currently never observes `ct` at all. At the top of
+`CaptureAsync`, before the size checks and the capture call (:35), add:
 
 ```csharp
-        try
-        {
+        // D1: the capture stage (PrintWindow etc.) is blocking native work
+        // that cannot observe ct mid-call — at least skip it entirely when
+        // this dictation's prefetch is already cancelled.
+        ct.ThrowIfCancellationRequested();
+```
+
+- [ ] **Step 2: Continuation-owned dispose + advisory cancel for the recognize stage**
+
+In `CaptureAsync`, after `if (swBitmap is null) return WindowContextResult.Empty;`
+(:42):
+
+1. On the no-engine early return (engine is null, :44-49), the native op never
+   saw the bitmap — dispose inline before returning:
+
+```csharp
             var engine = OcrEngine.TryCreateFromUserProfileLanguages();
             if (engine is null)
             {
                 _log.LogDebug("OcrEngine.TryCreateFromUserProfileLanguages returned null; no OCR languages installed");
+                swBitmap.Dispose(); // C2: no native op ever touched it — safe to close here
                 return WindowContextResult.Empty;
             }
+```
 
+2. Replace the recognize await (:54 today,
+   `ocr = await engine.RecognizeAsync(swBitmap).AsTask(ct).ConfigureAwait(false);`)
+   and its surrounding try/catch with:
+
+```csharp
             OcrResult ocr;
             try
             {
-                ocr = await engine.RecognizeAsync(swBitmap).AsTask(ct).ConfigureAwait(false);
+                // C2: dispose is owned by a CONTINUATION on a TOKEN-LESS
+                // AsTask(): that Task reaches terminal state ONLY via the
+                // WinRT op's Completed handler, so the bitmap is never closed
+                // while the native op may still read it. Passing ct to
+                // AsTask would be a use-after-close: the CsWinRT bridge
+                // (WinRT.Runtime 2.2.0) cancels the TASK eagerly while the
+                // native op keeps running (Cancel() is advisory).
+                var op = engine.RecognizeAsync(swBitmap);
+                var opTask = op.AsTask(); // NO token — terminal only from Completed
+                using var reg = ct.Register(() =>
+                {
+                    try { op.Cancel(); } catch { /* COM disconnect */ }
+                });
+                _ = opTask.ContinueWith(
+                    _ => swBitmap.Dispose(), // runs only after the op is observably terminal
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+                // WaitAsync(ct): the CALLER still unblocks promptly on ct
+                // (D1's routine cancellation stays fast); the op + dispose
+                // continuation finish in the background on their own schedule.
+                ocr = await opTask.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw; // prompt cancel for the caller; dispose continuation still pending
             }
             catch (Exception ex)
             {
                 _log.LogDebug(ex, "OcrEngine.RecognizeAsync threw");
                 return WindowContextResult.Empty;
             }
-
-            var lines = ocr.Lines.Select(l => new OcrLineSort.Line(
-                Top: (int)(l.Words.Count > 0 ? l.Words[0].BoundingRect.Top : 0),
-                Words: l.Words.Select(w => new OcrLineSort.Word(
-                    Left: (int)w.BoundingRect.Left,
-                    Text: w.Text,
-                    Confidence: 1.0)).ToList())).ToList();
-
-            var text = OcrLineSort.SortAndJoin(lines);
-            var confidence = OcrLineSort.AverageConfidence(lines);
-            _log.LogDebug("OCR recovered {Chars} chars, avg confidence {Conf:F2}", text.Length, confidence);
-
-            return text.Length == 0
-                ? WindowContextResult.Empty
-                : WindowContextResult.FromOcr(text, confidence);
-        }
-        finally
-        {
-            // C2: SoftwareBitmap wraps native WinRT memory (width*height*4
-            // bytes — ~33 MB for a 4K window) and previously leaked once per
-            // OCR-path dictation on every return and throw path.
-            swBitmap.Dispose();
-        }
 ```
 
-The inner statements are the existing code verbatim (only re-indented one
-level); the ONLY behavioral change is the `finally { swBitmap.Dispose(); }`.
+   (If the existing catch shape differs — e.g. no OCE distinction today —
+   preserve the existing non-cancel behavior per the mismatch rule; the
+   binding substance is: token-less `AsTask()`, `ct.Register(op.Cancel)`,
+   dispose in a continuation on the op's own task, caller unblocked via
+   `WaitAsync(ct)` or equivalent. A synchronous throw from `RecognizeAsync`
+   itself leaves the bitmap to the finalizer — rare failure path, accepted.)
 
-- [ ] **Step 2: Linux suite green**
+3. The lines/text processing and the success/empty returns after the await
+   are UNCHANGED (the bitmap is not used after recognition; its dispose rides
+   the continuation).
+
+- [ ] **Step 3: Linux suite green**
 
 Run: `./scripts/linux-tests.sh` → `LINUX SUITE: GREEN` (this file is
 `#if WINDOWS`; the Task 11 gate compiles it and runs `OcrIntegrationTests` on
 the Windows TFM).
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add src/Winpepper.Platform/WindowContext/OcrFallback.cs
 git commit -m "fix(platform): dispose the OCR SoftwareBitmap on all paths" \
-  -m "Created at CaptureWindowToSoftwareBitmap, consumed by RecognizeAsync, previously never disposed — native WinRT memory (~33 MB per 4K-window OCR dictation). try/finally covers the no-engine, throw, and success paths." \
+  -m "Created at CaptureWindowToSoftwareBitmap, consumed by RecognizeAsync, previously never disposed — native WinRT memory (~33 MB per 4K-window OCR dictation). Dispose is continuation-owned on a token-less AsTask() (the CsWinRT AsTask(ct) bridge cancels the Task eagerly while the native op may still read the bitmap — a finally-dispose would be use-after-close on the routine cancel path); ct.Register(op.Cancel) keeps cancellation advisory to the op, WaitAsync(ct) keeps the caller's prompt unblock, and a cheap ct check now guards the capture stage." \
   -m "Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
 ```
 
@@ -1076,6 +1220,16 @@ as nullable ints — if the property names differ in the resolved package
 (check `~/.nuget/packages/llamasharp/0.27.0/lib/`), set the equivalent
 context-params members and record the correction in the evidence file.
 
+Rationale source-confirmed (2026-07-30, pinned v0.27.0 source): `Threads=null`
+resolves in `IContextParamsExtensions.Threads()` to
+`Math.Max(Environment.ProcessorCount / 2, 1)` = 16 on the owner's 32-LP box,
+inside `ToLlamaContextParams` — i.e. at CONTEXT CREATION, per generation; and
+the `ModelParams` set here propagate to EVERY per-generation context
+(`ToLlamaContextParams` re-reads them live on each `CreateContext`), so the
+cap governs generation-time compute, not merely model load. (Corollary of the
+live re-read: never mutate the shared `ModelParams` after construction — see
+Task 5's C3 notes.)
+
 - [ ] **Step 2: Linux suite green, then commit the code change**
 
 Run `./scripts/linux-tests.sh` → `LINUX SUITE: GREEN`, then:
@@ -1095,6 +1249,18 @@ git commit -m "perf(cleanup): cap cleanup inference threads via named constant (
 
 (Long-running: allow up to 2 hours. Final line:
 `run-cleanup-bench-windows: done -- results in artifacts/cleanup-bench/<stamp>/ ...`.)
+
+Bench notes (2026-07-30):
+- The bench judges the REGISTRY-DEFAULT cleanup model
+  (`qwen2.5-0.5b-instruct-q4_k_m` — no `--model` flag), the SAME model as the
+  prior committed 2026-07-27 record (p50 334 ms), NOT the app's
+  currently-selected `sotto-cleanup-lfm25-350m-q8_0`. That is DELIBERATE, for
+  comparability with the committed baseline — do NOT read this step's ladder
+  decisions (raise the cap to 6, then 8) as covering the active model; they
+  cover the registry default only.
+- NEVER run this bench concurrently with `./scripts/windows-gate.sh` or
+  `./scripts/linux-tests.sh` — the bench pre-cleans `src/*/bin,obj` and would
+  corrupt a concurrent build.
 
 Then read `artifacts/cleanup-bench/<stamp>/results.md` and verify BOTH:
 1. median latency <= 1000 ms;
@@ -1754,14 +1920,45 @@ git commit -m "feat(app): move window-context prefetch from recording start to s
 **Interfaces:**
 - Consumes: `StreamingDictationSession.DrainTimedOut` (bool) and
   `StreamingDictationSession.PumpCompletion` (Task) — both existing.
-- Produces: `StreamingRouteGuard` with `void NoteAbandoned(Task pumpCompletion)`
-  and `bool TryClaimStreaming(out string? blockReason)`.
+- Produces: `StreamingRouteGuard` with `void NoteAbandoned(Task pumpCompletion)`,
+  `void NoteDisposeOutcome(bool drainTimedOut, Task pumpCompletion)` (the
+  single post-dispose predicate every dispose site calls), and
+  `bool TryClaimStreaming(out string? blockReason)`.
 
 The invariants this preserves: callers stay serialized (the guard is touched
 only from the hotkey loop); the batch fallback contract is untouched — a
 dictation with no streaming session simply takes the EXISTING late batch path
 (`maybeTranscription is null` branch), exactly as when streaming is disabled by
 settings.
+
+What `PumpCompletion` actually is (restated honestly, 2026-07-30 validation):
+a CONSERVATIVE, ONE-SIDED-SAFE over-approximation of compute-gate
+availability — NOT an exact proxy. It may block-to-batch while the gate is
+actually free (e.g. a pump stuck in the transcriber factory /
+`StartSessionAsync` before any stream exists, or a wedged socket transcriber
+— acceptable: batch degradation, never a hang). It NEVER clears while the
+gate is held for the targeted nemotron wedge: pump-incomplete is NECESSARY
+for a wedged-call-held gate on that path, and the pump-complete →
+gate-release window is milliseconds (thread-pool scheduling + monitor handoff
++ one `transcribe_session_free`), absorbed by BeginStream's 5 s gate timeout.
+`NativeStream.Dispose` releases the gate in a `finally`, so even a THROWING
+native free cannot skip the release.
+
+Coverage gap closed by design (2026-07-30): the cancel, silence-drop, and
+teardown paths call the session's `DisposeAsync` WITHOUT `FinishAsync`;
+`DisposeAsync` waits the pump only ~5 s and then deliberately orphans it —
+with `DrainTimedOut == false`. A wedged gate-holding pump orphaned that way
+would bypass a DrainTimedOut-only `NoteAbandoned` and the next dictation
+would stream straight into the 5 s gate timeout — the exact cascade E1 exists
+to kill, entering via cancel. Fix: note the abandon whenever ANY
+`DisposeAsync` returns with `PumpCompletion` still incomplete, regardless of
+`DrainTimedOut` — that is `NoteDisposeOutcome`, wired at EVERY dispose site.
+
+Residual (accepted; log-instrumented, not provable statically):
+`transcribe_session_free` returning promptly once the wedged compute call has
+returned is assumed — a hung free would permanently false-clear nothing here
+(the pump stays incomplete) but WOULD hold the gate forever; the `stream
+dispose` TimedNativeCall 3 s still-running WRN is the field instrument.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1832,6 +2029,32 @@ public class StreamingRouteGuardTests
         second.SetResult();
         Assert.True(guard.TryClaimStreaming(out _));
     }
+
+    // E1 coverage-gap fix: cancel/silence-drop/teardown call DisposeAsync
+    // WITHOUT FinishAsync, so DrainTimedOut stays false while a wedged
+    // gate-holding pump is orphaned — the abandon must key off
+    // PumpCompletion-incomplete, not DrainTimedOut alone.
+    [Fact]
+    public void DisposeOutcome_PumpIncompleteWithoutDrainTimeout_RoutesToBatch()
+    {
+        var guard = new StreamingRouteGuard();
+        var orphaned = new TaskCompletionSource();
+        guard.NoteDisposeOutcome(drainTimedOut: false, orphaned.Task); // the cancel-path orphan
+
+        Assert.False(guard.TryClaimStreaming(out var reason));
+        Assert.NotNull(reason);
+        orphaned.SetResult(); // the wedged call finally returned
+        Assert.True(guard.TryClaimStreaming(out _));
+    }
+
+    [Fact]
+    public void DisposeOutcome_PumpCompleteWithoutDrainTimeout_DoesNotBlock()
+    {
+        var guard = new StreamingRouteGuard();
+        guard.NoteDisposeOutcome(drainTimedOut: false, Task.CompletedTask); // healthy dispose
+
+        Assert.True(guard.TryClaimStreaming(out _));
+    }
 }
 ```
 
@@ -1856,10 +2079,15 @@ namespace Winpepper.Asr.Transcription;
 /// would block up to 5 s on the gate and then batch-fallback anyway, turning
 /// one wedged native call into a multi-dictation hang. This guard routes
 /// subsequent dictations straight to the existing batch path until the
-/// abandoned pump's completion has ACTUALLY completed — the only signal that
-/// the wedged call returned and the gate release (queued on the dispose
-/// chain) can happen. Pure decision logic; touched only from the serialized
-/// hotkey loop, so no locking. Linux-tested.</summary>
+/// abandoned pump's completion has ACTUALLY completed. PumpCompletion is a
+/// CONSERVATIVE, ONE-SIDED-SAFE over-approximation of gate availability, not
+/// an exact proxy: it can block-to-batch while the gate is free (factory/
+/// StartSessionAsync stalls, socket transcribers — batch degradation, never a
+/// hang) but never clears while the gate is held for the targeted nemotron
+/// wedge; the pump-complete → gate-release window is milliseconds and is
+/// absorbed by BeginStream's 5 s gate timeout (NativeStream.Dispose releases
+/// the gate in a finally — throw-proof). Pure decision logic; touched only
+/// from the serialized hotkey loop, so no locking. Linux-tested.</summary>
 public sealed class StreamingRouteGuard
 {
     private Task? _abandonedPump;
@@ -1867,6 +2095,18 @@ public sealed class StreamingRouteGuard
     /// <summary>Record a drain-timeout abandon. The latest wedge wins:
     /// streaming resumes only when the most recent abandoned pump completes.</summary>
     public void NoteAbandoned(Task pumpCompletion) => _abandonedPump = pumpCompletion;
+
+    /// <summary>Call after EVERY streaming-session DisposeAsync returns —
+    /// finish finally, cancel, silence-drop, teardown. Notes the abandon when
+    /// the drain timed out OR the pump is still incomplete: the cancel-path
+    /// dispose orphans a wedged gate-holding pump after ~5 s with
+    /// DrainTimedOut still false, and keying off DrainTimedOut alone would
+    /// let the wedge cascade re-enter via cancel.</summary>
+    public void NoteDisposeOutcome(bool drainTimedOut, Task pumpCompletion)
+    {
+        if (drainTimedOut || !pumpCompletion.IsCompleted)
+            NoteAbandoned(pumpCompletion);
+    }
 
     /// <summary>True when streaming may start for the next dictation. False
     /// (with a loggable reason) while a previously abandoned pump is still
@@ -1957,12 +2197,34 @@ to
                         // E1: a drain-timeout abandon leaves the wedged pump
                         // holding the compute gate via the queued dispose —
                         // route later dictations to batch until it completes.
-                        if (streaming.DrainTimedOut)
-                            _routeGuard.NoteAbandoned(streaming.PumpCompletion);
+                        // NoteDisposeOutcome also catches the orphan case
+                        // (pump still incomplete with DrainTimedOut false).
+                        _routeGuard.NoteDisposeOutcome(
+                            streaming.DrainTimedOut, streaming.PumpCompletion);
                     }
 ```
 
 Toggle arm: same extension in its clone.
+
+Then close the CANCEL-PATH coverage gap: at EVERY OTHER site that disposes a
+streaming session without `FinishAsync` — the Cancel case (~:985-995), the
+silence-drop path (~:596-602; toggle clone ~:1115-1120), and teardown
+(~:1652-1657), in BOTH arms (find them all with
+`grep -n "DisposeSessionAsync\|_streamingSession" src/Winpepper.App/Hosting/PipelineHost.cs`
+plus any dispose helper they share) — add the same call immediately after the
+dispose completes:
+
+```csharp
+                // E1 coverage gap: cancel/silence-drop/teardown orphan a
+                // wedged pump after ~5 s with DrainTimedOut still false; a
+                // gate-holding orphan must still arm the batch routing or the
+                // cascade re-enters via cancel.
+                _routeGuard.NoteDisposeOutcome(session.DrainTimedOut, session.PumpCompletion);
+```
+
+(adapting the local variable name per site; if the arms share one
+dispose-session helper, put the call there ONCE and note that in the evidence
+file).
 
 - [ ] **Step 6: Linux suite green, then commit**
 
@@ -1971,7 +2233,7 @@ Run `./scripts/linux-tests.sh` → `LINUX SUITE: GREEN`, then:
 ```bash
 git add src/Winpepper.Asr/Transcription/StreamingRouteGuard.cs tests/Winpepper.Asr.Tests/Transcription/StreamingRouteGuardTests.cs src/Winpepper.App/Hosting/PipelineHost.cs
 git commit -m "feat(asr): route dictations to batch while an abandoned wedged stream still holds the compute gate" \
-  -m "E1: after a DrainTimedOut abandon the next BeginStream blocked up to 5 s on the gate and batch-degraded anyway — one wedge became a multi-dictation hang. StreamingRouteGuard (pure, Linux-tested) skips streaming until the abandoned pump completes; routing decision logged at INF with the reason; batch fallback contract and serialized-caller invariants unchanged." \
+  -m "E1: after a DrainTimedOut abandon the next BeginStream blocked up to 5 s on the gate and batch-degraded anyway — one wedge became a multi-dictation hang. StreamingRouteGuard (pure, Linux-tested) skips streaming until the abandoned pump completes (a conservative one-sided-safe over-approximation of gate availability); NoteDisposeOutcome also arms the guard when cancel/silence-drop/teardown orphan a still-incomplete pump with DrainTimedOut false, closing the cancel-path cascade entrance. Routing decision logged at INF with the reason; batch fallback contract and serialized-caller invariants unchanged." \
   -m "Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
 ```
 
@@ -2007,15 +2269,20 @@ git commit -m "feat(asr): route dictations to batch while an abandoned wedged st
   TimeSpan drainBudget) : bool`.
 - E1 interplay (no extra wiring): the early abandon sets the SAME
   `DrainTimedOut` flag as the timeout abandon, so Task 10's
-  `StreamingRouteGuard.NoteAbandoned(...)` call in PipelineHost fires for this
-  path too, unchanged.
+  `StreamingRouteGuard.NoteDisposeOutcome(...)` call in PipelineHost (which
+  notes the abandon on `DrainTimedOut` OR an incomplete pump) fires for this
+  path too, unchanged. This coupling is also why the A15 futility floor below
+  matters: a wrong early abandon would arm E1's blockade off a non-wedge.
 
 Why: every wedged batch fallback today shows `asr_wait` pegged at
 10013-10024 ms — `FinishAsync` waits out the full 10 s deadline even when the
 in-flight native call had ALREADY been running longer than the whole budget at
 stop time, so the drain could not possibly complete. Total cost 13-18 s per
 dictation. A native call cannot be aborted; the win is to stop WAITING for it
-when the wait is provably futile.
+when the wait is provably futile. Expected saving: up to ~10 s per
+E2-triggered dictation — an UPPER BOUND: the contention stretch of the
+concurrent batch is unmeasured (field-bounded ≤ ~2×; Task 12's owner
+comparison quantifies it).
 
 Two hard constraints (load-bearing, from the code):
 1. The probe must be LOCK-FREE. The existing
@@ -2063,6 +2330,26 @@ public class DrainAbandonPolicyTests
     public void InFlightFarPastBudget_AbandonsImmediately()
         => DrainAbandonPolicy.ShouldAbandonImmediately(
             TimeSpan.FromSeconds(35), TimeSpan.FromSeconds(10)).ShouldBeTrue();
+
+    // A15 pins: `elapsed >= budget` bounds the PAST, not the REMAINING time.
+    // With the zero-push shortcut the effective deadline shrinks to ~1.5 s;
+    // healthy 2.9-3.96 s calls (observed and RECOVERED in the field) must
+    // never be abandoned there — abandon iff
+    // elapsed >= max(effectiveDeadline, MinInFlightForFutility).
+    [Fact]
+    public void ShortEffectiveDeadline_HealthyClassCallInFlight_DoesNotAbandon()
+        => DrainAbandonPolicy.ShouldAbandonImmediately(
+            TimeSpan.FromSeconds(2.5), TimeSpan.FromSeconds(1.5)).ShouldBeFalse();
+
+    [Fact]
+    public void ShortEffectiveDeadline_RecoveredClassCall_DoesNotAbandon()
+        => DrainAbandonPolicy.ShouldAbandonImmediately(
+            TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(1.5)).ShouldBeFalse(); // native_max=3960 ms was a recovered dictation
+
+    [Fact]
+    public void ShortEffectiveDeadline_PastTheFutilityFloor_Abandons()
+        => DrainAbandonPolicy.ShouldAbandonImmediately(
+            TimeSpan.FromSeconds(12), TimeSpan.FromSeconds(1.5)).ShouldBeTrue();
 }
 ```
 
@@ -2083,17 +2370,35 @@ namespace Winpepper.Asr.Transcription;
 
 /// <summary>E2: the drain's early-abandon decision, pure so it is
 /// Linux-testable. A wedged native call cannot be aborted; when the CURRENT
-/// in-flight call has already been running at least as long as the whole
+/// in-flight call has already been running at least as long as the FULL
 /// drain budget, waiting the budget out buys nothing — the pump cannot
 /// possibly drain in time. Abandon immediately so the caller's late batch
 /// path starts up to a full deadline sooner (observed pre-fix: asr_wait
 /// pegged at 10013-10024 ms on every wedged batch fallback; 13-18 s total
-/// per dictation).</summary>
+/// per dictation; the saving is an upper bound — contention stretch of the
+/// concurrent batch unmeasured, field-bounded ≤ ~2×).
+/// Semantics: abandon iff inFlightElapsed >= max(effectiveDeadline,
+/// MinInFlightForFutility). `elapsed >= effectiveDeadline` alone is NOT a
+/// futility proof — it bounds the PAST, not the REMAINING time — and the
+/// zero-push shortcut shrinks the effective deadline to ~1.5 s, where
+/// healthy 2.9-3.96 s calls (observed and recovered in the field) would be
+/// wrongly abandoned AND arm E1's blockade off a non-wedge.</summary>
 public static class DrainAbandonPolicy
 {
+    /// <summary>Futility floor == the full 10 s drain budget: >= the 5 s
+    /// compute-gate timeout + the observed healthy native max (~4 s), while
+    /// real wedges run >= 15 s. Since every effective deadline is <= the
+    /// full budget, this reduces to full-budget-only in production — E2
+    /// fires exactly on its motivating evidence (in-flight >= 10 s at stop)
+    /// and never on the zero-push 1.5 s shortcut (whose max waste is 1.5 s
+    /// regardless).</summary>
+    public static readonly TimeSpan MinInFlightForFutility = TimeSpan.FromSeconds(10);
+
     public static bool ShouldAbandonImmediately(
         TimeSpan? inFlightElapsed, TimeSpan drainBudget)
-        => inFlightElapsed is { } elapsed && elapsed >= drainBudget;
+        => inFlightElapsed is { } elapsed
+            && elapsed >= drainBudget
+            && elapsed >= MinInFlightForFutility;
 }
 ```
 
@@ -2155,7 +2460,41 @@ helper names per the mismatch rule):
     }
 ```
 
-Run (same two commands as Step 4). Expected: the new test FAILS — the cast to
+And the A16 pin — gate-wait-only elapsed must NEVER read as in-flight native
+time (add `public ManualResetEventSlim? BeginStreamGate { get; set; }` to
+`FakeTranscribeCppEngine` with `BeginStreamGate?.Wait();` at the top of its
+`BeginStream`, mirroring the existing `FeedGate` pattern):
+
+```csharp
+    [Fact]
+    public async Task Blocked_BeginStream_does_not_report_in_flight_elapsed()
+    {
+        // A16: the in-flight marker is deliberately NOT armed across
+        // EnsureStream/BeginStream — BeginStream's ≤5 s compute-gate wait
+        // would otherwise read as native in-flight time exactly in the
+        // zero-push phase (EnsureStream runs on the FIRST push). While the
+        // fake's BeginStream is blocked (stand-in for a pure gate wait), the
+        // probe must stay null.
+        using var beginGate = new ManualResetEventSlim(false);
+        var engine = new FakeTranscribeCppEngine { BeginStreamGate = beginGate };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
+            new CapturingLogger(), nativeCallWarnAfter: TimeSpan.FromSeconds(30));
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        var inFlight = (INativeCallInFlightSource)s;
+
+        var push = Task.Run(() => s.PushAsync(Samples(2560),
+            TestContext.Current.CancellationToken).AsTask()); // first push -> EnsureStream -> blocked BeginStream
+
+        await Task.Delay(300, TestContext.Current.CancellationToken); // let the push reach BeginStream
+        Assert.Null(inFlight.NativeCallInFlightElapsed); // gate-wait/begin time is NOT in-flight native time
+        beginGate.Set();
+        await push;
+        Assert.Null(inFlight.NativeCallInFlightElapsed);
+    }
+```
+
+Run (same two commands as Step 4). Expected: the new tests FAIL — the cast to
 `INativeCallInFlightSource` throws `InvalidCastException` (the session does
 not implement it yet).
 
@@ -2201,10 +2540,19 @@ In `NemotronStreamingTranscriber.Session` (post-Task-4 shape):
                 Volatile.Write(ref _inFlightSinceTick, 0);
 ```
 
-4. Apply the IDENTICAL pair to `EnsureStream` (post-Task-4 shape): the write
-   after its `var startTick = Environment.TickCount64;`, the clear as the
-   FIRST line of its `finally` — a wedged `BeginStream` stalls the pump just
-   like a wedged feed.
+4. Do NOT arm the marker in `EnsureStream` (A16, falsified 2026-07-30 — this
+   is deliberate, not an omission): `EnsureStream` stamps its start tick
+   BEFORE `engine.BeginStream`, whose ≤5 s compute-gate wait happens FIRST
+   inside the engine — so a marker there would count pure queueing as native
+   in-flight time, and it would do so exactly in the zero-push phase
+   (`EnsureStream` runs on the FIRST push, precisely when the effective
+   deadline is shortest). Task 4's per-call `out gateWaitMs` cannot help the
+   LIVE probe: it exists only after the call returns. The marker lives ONLY
+   in `TimedNativeCall`, whose ops — feed/finalize/dispose — never wait on
+   the compute gate (the stream already holds it). Cost: a wedged
+   `BeginStream` gets no early abandon and degrades safely to today's
+   full-deadline behavior (never a wrong abandon; begin-wedges were not the
+   motivating evidence).
 
 5. Wrapper transparency: run
    `grep -rn "INativeCallStatsSource" src/ tests/`. For every WRAPPER session
@@ -2243,23 +2591,27 @@ mean anything):
         public sealed class WedgingSession : IStreamingTranscriptionSession, INativeCallInFlightSource
         {
             private readonly TaskCompletionSource _wedge = new();
-            private readonly TaskCompletionSource _secondPushStarted = new();
+            private readonly TaskCompletionSource _wedgedPushStarted = new();
             private int _pushes;
 
             /// <summary>What the wedged "native call" claims its elapsed is.</summary>
             public TimeSpan? InFlightToReport { get; set; } = TimeSpan.FromSeconds(60);
 
-            /// <summary>The second push starting proves the first COMPLETED —
-            /// so the zero-push short deadline is NOT what bounds this test.</summary>
-            public Task SecondPushStarted => _secondPushStarted.Task;
+            /// <summary>Which push wedges. Default 2: the first push COMPLETES,
+            /// so the zero-push short deadline is NOT what bounds those tests.
+            /// Set 1 for the zero-completed-pushes (1.5 s shortcut) pairing.</summary>
+            public int WedgeOnPush { get; set; } = 2;
+
+            /// <summary>Completes when the wedging push has started.</summary>
+            public Task WedgedPushStarted => _wedgedPushStarted.Task;
 
             public TimeSpan? NativeCallInFlightElapsed
-                => _secondPushStarted.Task.IsCompleted ? InFlightToReport : null;
+                => _wedgedPushStarted.Task.IsCompleted ? InFlightToReport : null;
 
             public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
             {
-                if (Interlocked.Increment(ref _pushes) == 1) return; // first push succeeds
-                _secondPushStarted.TrySetResult();
+                if (Interlocked.Increment(ref _pushes) < WedgeOnPush) return; // earlier pushes succeed
+                _wedgedPushStarted.TrySetResult();
                 await _wedge.Task; // the wedged native feed
             }
 
@@ -2293,7 +2645,7 @@ Then the two tests (same file — copy the loud-guard structure of
             drainDeadline: TimeSpan.FromSeconds(30)); // FULL deadline: must NOT be waited out
         session.OnFrame(new float[800]); // first push — completes, full deadline applies
         session.OnFrame(new float[800]); // second push — wedges, reports 60 s in flight
-        await transcriber.Session.SecondPushStarted.WaitAsync(
+        await transcriber.Session.WedgedPushStarted.WaitAsync(
             TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         // The in-flight call already exceeds the 30 s budget, so FinishAsync
@@ -2325,7 +2677,7 @@ Then the two tests (same file — copy the loud-guard structure of
             drainDeadline: TimeSpan.FromMilliseconds(200));
         session.OnFrame(new float[800]);
         session.OnFrame(new float[800]);
-        await transcriber.Session.SecondPushStarted.WaitAsync(
+        await transcriber.Session.WedgedPushStarted.WaitAsync(
             TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
 
         var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
@@ -2334,6 +2686,37 @@ Then the two tests (same file — copy the loud-guard structure of
         session.DrainTimedOut.ShouldBeTrue();
         var stats = session.FinishStats.ShouldNotBeNull();
         stats.AsrWaitMs.ShouldBeGreaterThanOrEqualTo(150); // paid the ~200 ms deadline — NO early abandon
+
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task ZeroPushShortDeadline_HealthyClassCallInFlight_WaitsTheWindowOut()
+    {
+        // A15 pin: zero COMPLETED pushes shrinks the effective deadline to
+        // ~1.5 s. A call 2.5 s in flight is a healthy-class call (2.9-3.96 s
+        // observed and recovered in the field) — FinishAsync must NOT abandon
+        // at t=0 (which would also arm E1's blockade off a non-wedge); it
+        // waits the short window out: abandon iff
+        // elapsed >= max(effectiveDeadline, MinInFlightForFutility).
+        var transcriber = new InFlightPastBudgetTranscriber();
+        transcriber.Session.WedgeOnPush = 1; // FIRST push wedges: zero completed pushes
+        transcriber.Session.InFlightToReport = TimeSpan.FromSeconds(2.5);
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromSeconds(10)); // full budget; zero-push shortcut applies
+        session.OnFrame(new float[800]); // first push — wedges immediately
+        await transcriber.Session.WedgedPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue(); // the 1.5 s window expired normally (dispose unwedges the fake)
+        var stats = session.FinishStats.ShouldNotBeNull();
+        stats.AsrWaitMs.ShouldBeGreaterThanOrEqualTo(1000); // paid the ~1.5 s zero-push window — NO abandon at t=0
 
         await session.PumpCompletion.WaitAsync(
             TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -2354,13 +2737,15 @@ In `StreamingDictationSession.FinishAsync`, insert between the effective
 
 ```csharp
         // E2: a native call cannot be aborted. If the CURRENT in-flight
-        // native call has already run at least the whole drain budget, the
-        // pump cannot possibly drain in time — waiting just delays the
-        // caller's late batch path by the full deadline (observed pre-fix:
-        // asr_wait pegged at ~10 s on every wedged batch fallback). The probe
-        // is LOCK-FREE by contract (INativeCallInFlightSource) — never
-        // NativeCallStats here: its snapshot takes the native gate the wedged
-        // call is holding. A session/wrapper that does not expose the
+        // native call has already run at least the FULL drain budget (the
+        // policy floors the check at MinInFlightForFutility, so the zero-push
+        // 1.5 s shortcut can never trigger it against a healthy 2.9-3.96 s
+        // call), the pump cannot possibly drain in time — waiting just delays
+        // the caller's late batch path by the full deadline (observed
+        // pre-fix: asr_wait pegged at ~10 s on every wedged batch fallback).
+        // The probe is LOCK-FREE by contract (INativeCallInFlightSource) —
+        // never NativeCallStats here: its snapshot takes the native gate the
+        // wedged call is holding. A session/wrapper that does not expose the
         // interface yields null → no early abandon (previous behavior).
         var inFlightElapsed = (_session as INativeCallInFlightSource)?.NativeCallInFlightElapsed;
         if (DrainAbandonPolicy.ShouldAbandonImmediately(inFlightElapsed, deadline))
@@ -2375,10 +2760,33 @@ In `StreamingDictationSession.FinishAsync`, insert between the effective
         }
 ```
 
+Then ONE further, log-only extension (A12 accepted-risk observability): the
+committed record cannot show whether wedges typically pre-date the stop by
+≥ the drain budget — only field WRNs can. Extend the EXISTING timeout-abandon
+WRN in the `catch (TimeoutException)` block ("streaming drain exceeded
+{DrainDeadline}; abandoning streaming session, batch path takes over",
+`StreamingDictationSession.cs` ~:274-276) to also log the probed
+in-flight-elapsed-at-stop, reusing the `inFlightElapsed` local computed ABOVE
+the wait (i.e. the value AT STOP, not after the deadline):
+
+```csharp
+            _log.LogWarning(
+                "streaming drain exceeded {DrainDeadline}; abandoning streaming session, batch path takes over (in-flight native call at stop: {InFlightAtStopMs} ms)",
+                deadline, (long?)inFlightElapsed?.TotalMilliseconds ?? -1);
+```
+
+With the Step 8 early-abandon WRN already carrying `{InFlightMs}`, EVERY
+abandon path now reports elapsed-at-stop. WRN-only: zero behavior change, no
+timing-line schema change, no golden-string impact, lock-free by contract.
+Post-merge, the first owner session settles A12 directly (any pegged-drain
+WRN with in-flight-at-stop < 10000 is a live counterexample) and bounds A13
+(whether ≥-budget calls ever return quickly).
+
 Nothing else in the method changes: the healthy path keeps its single
 `await _pump.WaitAsync(deadline, ct)` and `waitSw`-based `AsrWaitMs`
 measurement, and the `catch (TimeoutException)` abandon block stays exactly
-as-is for wedges that had NOT yet exceeded the budget at stop time.
+as-is (plus the WRN field above) for wedges that had NOT yet exceeded the
+budget at stop time.
 
 - [ ] **Step 9: Run tests to verify they pass**
 
@@ -2401,7 +2809,7 @@ Run `./scripts/linux-tests.sh` → `LINUX SUITE: GREEN`, then:
 git add src/Winpepper.Asr/Transcription/DrainAbandonPolicy.cs src/Winpepper.Asr/Transcription/NativeCallStats.cs src/Winpepper.Asr/Transcription/NemotronStreamingTranscriber.cs src/Winpepper.Asr/Transcription/StreamingDictationSession.cs tests/Winpepper.Asr.Tests/Transcription/DrainAbandonPolicyTests.cs tests/Winpepper.Asr.Tests/Transcription/NemotronStreamingTranscriberTests.cs tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs
 # plus any wrapper file touched in Step 6.5 (e.g. src/Winpepper.Asr/Transcription/FallbackStreamingTranscriber.cs)
 git commit -m "feat(asr): abandon the drain immediately when the in-flight native call already exceeds the budget" \
-  -m "E2: FinishAsync burned the full 10 s deadline even when the wedged native call had already been running longer than the whole budget (asr_wait pegged at 10013-10024 ms on every wedged batch fallback; 13-18 s per dictation). NemotronStreamingTranscriber exposes a LOCK-FREE in-flight-since tick (never under the native gate); pure DrainAbandonPolicy (Linux-tested) decides; the early abandon takes the exact same DrainTimedOut path, so E1's batch routing fires for it too." \
+  -m "E2: FinishAsync burned the full 10 s deadline even when the wedged native call had already been running longer than the whole budget (asr_wait pegged at 10013-10024 ms on every wedged batch fallback; 13-18 s per dictation; saving is an upper bound — concurrent-batch contention stretch field-bounded <= ~2x). NemotronStreamingTranscriber exposes a LOCK-FREE in-flight-since tick (never under the native gate; NOT armed across BeginStream, whose gate wait is queueing, not compute); pure DrainAbandonPolicy (Linux-tested) decides with a full-drain-budget futility floor so the zero-push 1.5 s shortcut can never abandon a healthy 2.9-3.96 s call; every abandon WRN now logs in-flight-elapsed-at-stop; the early abandon takes the exact same DrainTimedOut path, so E1's batch routing fires for it too." \
   -m "Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
 ```
 
@@ -2466,7 +2874,36 @@ non-excluded timing lines in log order, from
 - Early-abandon check (E2): wedged batch fallbacks should no longer show
   asr_wait pegged at ~10000 ms when the wedge began mid-recording — expect
   either a normal timed-out drain or an "abandoned immediately" WRN with
-  asr_wait ~0 on that line.
+  asr_wait ~0 on that line. ADDITIONALLY, on early-abandon lines compare
+  `asr=` (asr_mode=batch) against the no-wedge batch baseline
+  (p50 3.2-3.6 s / p90 6.0-7.0 s, from the pill-silence evidence) to bound
+  the contention stretch of a batch running concurrently with a wedged
+  native call: with-wedge batch p50 <= ~2x the no-wedge p50 confirms the
+  concurrent-progress assumption (A14) quantitatively; E2's "up to ~10 s
+  saved" is an upper bound until then.
+- Elapsed-at-stop WRN data (A12/A13): every abandon WRN now logs the probed
+  in-flight-elapsed-at-stop. Check (i) whether wedges typically pre-date the
+  stop by >= the 10 s drain budget (A12 — any pegged-drain WRN with
+  in-flight-at-stop < 10000 is a live counterexample; the split between the
+  two WRNs gives the onset distribution), and (ii) whether calls already
+  >= budget in flight at stop ever return quickly afterwards (A13 — each
+  such quick return is a dictation E2 traded from a salvageable streaming
+  result to batch).
+- Residuals for owner observation (assumed by this run's designs, not
+  provable from the committed record):
+  - ParakeetSession DirectML EP presence — `UsingDirectML` is set but never
+    logged; a CPU-fallback batch would compete for cores with a wedged call
+    and sharpen contention.
+  - Batch-of-full-audio transcription quality on abandoned dictations (E2
+    sends users there sooner/more often; text is never lost, quality is
+    unvalidated).
+  - The un-cancellable OCR tail (PrintWindow capture + recognize work before
+    the advisory Cancel is honored) staying short enough not to matter for
+    ASR contention.
+  - transcribe_session_free never hanging after the compute call returns —
+    a hang would hold the compute gate forever (permanent gate-timeout on
+    every later dictation); the "stream dispose" still-running WRN is the
+    instrument.
 - Outlier rule (unchanged): exclude only when asr_wait > 2000 AND
   backlog_ms > 2000 AND native_max > 2000; excluded lines are counted and
   listed here with offsets adjudicated against prefetch/prewarm/GC windows.
@@ -2524,9 +2961,122 @@ Do NOT push.
   `WindowContextPrefetchCoordinator.OnRecordingStart/Start/CancelAndClear/Current`,
   and `WindowContextStamp.CtxSrc(bool?, Task<WindowContextResult>?)` match
   between Tasks 8 and 9; `StreamingRouteGuard.NoteAbandoned(Task)` /
-  `TryClaimStreaming(out string?)` match between Task 10's tests and wiring;
-  `LastGateWaitMs` matches between interface, engine, fake, and `EnsureStream`;
+  `NoteDisposeOutcome(bool, Task)` / `TryClaimStreaming(out string?)` match
+  between Task 10's tests and wiring;
+  the per-call `out int gateWaitMs` shape matches between interface, engine,
+  fake, and `EnsureStream`;
   `INativeCallInFlightSource.NativeCallInFlightElapsed` and
   `DrainAbandonPolicy.ShouldAbandonImmediately(TimeSpan?, TimeSpan)` match
   between Task 11's interface/policy definitions, the transcriber
   implementation, the `FinishAsync` probe, and all three test files.
+
+### Load-bearing validation fixes (2026-07-30)
+
+Applied after the load-bearing assumption validation pass (validator reports
+V1–V8); the plan's self-review discipline was re-run over every edited task.
+
+- **Task 2/3 (A7 confirmed + hardening):** GetSystemTimes semantics noted as
+  doc-confirmed (kernel INCLUDES idle → busy = (kernel−idle)+user); Task 3's
+  Windows gate test upgraded from `kernel+user > 0` to a two-sample
+  plausibility bound (0 ≤ busy ≤ total, 0 ≤ sys_cpu ≤ 100); new cb/layout
+  round-trip test (PROCESS_MEMORY_COUNTERS_EX = 80 bytes x64; struct made
+  `internal` for the test); struct comments pin `PrivateUsage` (never
+  `PagefileUsage`, documented zero on older OS); `SystemTimes()` doc comment
+  records the >64-LP processor-group caveat.
+- **Task 4 (A6 FALSIFIED):** the mutable `LastGateWaitMs` engine property +
+  read-after-call protocol replaced by a per-call trailing `out int
+  gateWaitMs` on `BeginStream`/`TranscribeBatch` (written before the
+  gate-timeout throw; `out` is by-ref, so valid on return AND throw).
+  Witness recorded: a cancel-orphaned wedged BeginStream returning ~16 s late
+  would read the next dictation's 5000 ms gate-timeout write on the shared
+  singleton engine. Fake, tests, EnsureStream, commit message, File Structure
+  table, and the Self-Review type-consistency entry all updated in lockstep.
+- **Task 5 (A2 overstated + A1 confirmed):** C1 wording softened everywhere
+  (planned code comment, commit message, Task 1's investigation-summary
+  evidence text): the chain is a finalizer-backed SafeHandle — non-disposal
+  means delayed, finalizer-dependent, non-deterministic reclamation, not a
+  process-lifetime leak; the `using` lands regardless. C3 notes added: hoist
+  safety source-verified on v0.27.0 (`batch.Clear()` full wipe,
+  SafeLLamaContextHandle.cs:721 / LLamaBatch.cs:259-272); the `_gate`
+  SemaphoreSlim(1,1) is LOAD-BEARING (never remove); never mutate the shared
+  `ModelParams` after construction (values re-read live per context).
+- **Task 6 (A3b FALSIFIED):** `finally { swBitmap.Dispose(); }` replaced —
+  CsWinRT's `AsTask(ct)` bridge (shipped WinRT.Runtime 2.2.0.48161) cancels
+  the Task EAGERLY while the native op may still read the bitmap, so
+  finally-dispose was a use-after-close on the routine cancel path. New
+  design: token-less `AsTask()` (terminal only via Completed),
+  `ct.Register(op.Cancel)` advisory cancel, dispose in a continuation on the
+  op's own task, caller unblocked via `WaitAsync(ct)`; plus a cheap
+  `ct.ThrowIfCancellationRequested()` before the (never-ct-checked) capture
+  stage. Residual recorded: OcrEngine stopping input reads before Completed
+  is contract-conformant but unverifiable.
+- **Task 7 (A9/A11 confirmed + A10 notes):** D2 rationale marked
+  source-confirmed (Threads=null → Math.Max(ProcessorCount/2,1)=16 at context
+  creation; params propagate per generation). Bench notes added: judges the
+  REGISTRY-DEFAULT qwen2.5-0.5b (comparable to the committed 2026-07-27
+  record, p50 334 ms), NOT the active sotto-cleanup-lfm25 model — deliberate;
+  never run concurrently with windows-gate.sh / linux-tests.sh (pre-cleans
+  src/*/bin,obj).
+- **Task 10 (A5i falsified as biconditional; design survives):** rationale
+  restated honestly — PumpCompletion is a CONSERVATIVE ONE-SIDED-SAFE
+  over-approximation of gate availability (may block while free; never
+  clears while held for the nemotron wedge; ms release window absorbed by
+  the 5 s gate timeout; gate release is finally-guarded). Coverage gap fixed
+  as a design element: new `NoteDisposeOutcome(drainTimedOut,
+  pumpCompletion)` notes the abandon whenever ANY DisposeAsync returns with
+  the pump still incomplete (cancel/silence-drop/teardown orphans included),
+  wired at every dispose site in both arms, with two new pure tests.
+  Residual recorded: `transcribe_session_free` never hanging post-compute is
+  assumed (log-instrumented).
+- **Task 11 (A15/A16 FALSIFIED; A12/A13 inconclusive → observability; A14
+  bounded):** predicate now abandons iff inFlightElapsed ≥
+  max(effectiveDeadline, `MinInFlightForFutility` = 10 s full drain budget) —
+  never fires on the zero-push 1.5 s shortcut against healthy 2.9-3.96 s
+  calls (three new policy pins + a zero-push session test; fake gains
+  `WedgeOnPush`, `SecondPushStarted` renamed `WedgedPushStarted`). Step 6.4's
+  EnsureStream marker writes DROPPED (gate wait would read as in-flight time
+  exactly in the zero-push phase; begin-wedges degrade to today's
+  full-deadline behavior) with a gate-wait-never-abandons pin test. The
+  timeout-abandon WRN now logs in-flight-elapsed-at-stop (WRN-only, zero
+  behavior change) so field data settles A12/A13. Latency figures labeled
+  "upper bound — contention stretch of the concurrent batch unmeasured
+  (field-bounded ≤ ~2×)".
+- **Task 12:** post-install expectations extended: early-abandon `asr=` vs
+  the no-wedge batch baseline (p50 3.2-3.6 s / p90 6.0-7.0 s) to bound
+  contention stretch (A14); elapsed-at-stop WRN adjudication for A12/A13;
+  residuals for owner observation (DirectML EP presence, abandoned-dictation
+  batch quality, un-cancellable OCR tail, session_free post-compute hang).
+
+Item-by-item self-review outcome:
+
+- Code claims vs repo reality: spot-checked anchors hold —
+  `TranscribeCppEngine.cs:53/:209/:270` (gate timeout + both Wait sites),
+  `ITranscribeCppEngine.cs:27` (`BeginStream(int, string? = null)` — the new
+  `out` param requires dropping the optional default, noted in Task 4 Step 3),
+  `NemotronStreamingTranscriber.cs:111/:162/:224-228` (EnsureStream on first
+  push), `StreamingDictationSession.cs:76/:220/:230/:247-249/:253/:274-276/:354`
+  (zero-push deadline, DrainTimedOut, PumpCompletion, drain wait, timeout WRN,
+  orphaning dispose), `OcrFallback.cs:32-42/:54` (bitmap creation + AsTask(ct)),
+  `FakeTranscribeCppEngine.cs:25/:27` (FeedGate pattern the new
+  BeginStreamGate mirrors). Upstream/API claims carry validator citations.
+- Test names/scaffolding: existing referenced tests unchanged
+  (`Wedged_native_call_logs_a_still_running_warning...`,
+  `ZeroCompletedPushes_AtFinish_UsesTheShortDrainDeadline`, the :303 over-250
+  pattern); renames are confined to plan-introduced (not-yet-written)
+  scaffolding (`WedgedPushStarted`), updated at every reference.
+- Golden strings: untouched — no new timing-line field; the A12 extension is
+  WRN-log-only, and Task 2's golden-line edit is exactly as before.
+- Cross-task consistency: Task 4's per-call `out gateWaitMs` ↔ Task 11 Step
+  6.4's rationale (live probe cannot use a post-call value); Task 10's
+  `NoteDisposeOutcome` ↔ Task 11's E1-interplay note (DrainTimedOut OR
+  incomplete pump); Task 5's ModelParams-mutation note ↔ Task 7's live
+  re-read corollary; Task 11's upper-bound label ↔ Task 12's A14 comparison.
+- Global constraints: intact — Tasks 2/3/4 remain measurement-only (zero
+  behavior change); the E2 probe still reads ONLY the volatile field and
+  never takes `_nativeGate` (the A15/A16 fixes are policy/placement-level);
+  both-arms rule preserved in the new Task 10 wiring text.
+- Task numbering / cross-references: intact — Task 6's steps renumbered
+  internally (now 1-4) with no external step-number references to Task 6;
+  all other task and step numbers unchanged; the Spec-coverage map above
+  still reads correctly (B4 = Task 4, C1/C3 = Task 5, C2 = Task 6, D2 =
+  Task 7, E1 = Task 10, E2 = Task 11).

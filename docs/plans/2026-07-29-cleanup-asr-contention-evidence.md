@@ -34,8 +34,12 @@ Run 1 scope: step 0b (three new dictation-timing-line fields) + step 0c
 
 ## 0b — instrumentation added
 
-(to be filled during implementation: field semantics as shipped, files/lines
-touched, and the exact timing-line grammar for the three new fields)
+- Formatter (`src/Winpepper.Core/Diagnostics/DictationTimingSummary.cs`): added
+  `Over250AtMs`/`Over250Overflow`/`CtxSrc`/`ProcCpuMs` + `StampOver250(...)`.
+  Line grammar: `over250_at=[a,b,...]` (first 16, unclamped ms offsets from
+  recording start) with `+N` overflow suffix; `ctx_src=uia|ocr|none` after
+  `cleanup_model=`; `proc_cpu_ms=<n>` after `prewarm_active=`. All omitted when
+  null. No budget/Overruns changes.
 
 ## 0c — StatelessExecutor native-context lifetime (Planner B vs Planner C)
 

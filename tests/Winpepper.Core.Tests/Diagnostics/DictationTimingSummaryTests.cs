@@ -25,8 +25,14 @@ public class DictationTimingSummaryTests
         BacklogMs = 100,
         NativeCalls = 74,
         NativeTotalMs = 1900,
-        NativeMaxMs = 180,
-        NativeOver250 = 0,
+        // Over-250 diagnostics — keep the fixture self-consistent: max and the
+        // over-250 count must agree with the offsets list.
+        NativeMaxMs = 620,
+        NativeOver250 = 2,
+        Over250AtMs = new[] { 1180, 3420 },
+        Over250Overflow = 0,
+        CtxSrc = "uia",
+        ProcCpuMs = 1875,
         CorrectionsMs = 2,
         CleanupMs = 640,
         CleanupPath = "Llm",
@@ -54,10 +60,10 @@ public class DictationTimingSummaryTests
             + " rec=3512ms mic_stop=42ms trim=8ms trim_removed=1200ms"
             + " asr=812ms asr_mode=streaming asr_model=nemotron-streaming-en"
             + " asr_wait=95ms asr_native=210ms backlog=2 backlog_ms=100ms"
-            + " native_calls=74 native_total=1900ms native_max=180ms native_over250=0"
-            + " corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b"
+            + " native_calls=74 native_total=1900ms native_max=620ms native_over250=2 over250_at=[1180,3420]"
+            + " corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b ctx_src=uia"
             + " inject=850ms inject_chars=458 inject_chunks=58/58 inject_pace=798ms"
-            + " gc=1/0/0 gc_pause=12ms prewarm_active=true"
+            + " gc=1/0/0 gc_pause=12ms prewarm_active=true proc_cpu_ms=1875"
             + " total=2354ms");
         line.ShouldNotContain("\n");
     }
@@ -215,6 +221,9 @@ public class DictationTimingSummaryTests
         line.ShouldNotContain("gc=");
         line.ShouldNotContain("gc_pause=");
         line.ShouldNotContain("prewarm_active=");
+        line.ShouldNotContain("over250_at=");
+        line.ShouldNotContain("ctx_src=");
+        line.ShouldNotContain("proc_cpu_ms=");
     }
 
     [Fact]
@@ -245,5 +254,51 @@ public class DictationTimingSummaryTests
         s.AsrWaitMs = DictationTimingSummary.AsrWaitBudgetMs;
 
         s.Overruns().ShouldNotContain(o => o.Stage == "asr_wait");
+    }
+
+    [Fact]
+    public void FormatLine_Over250_RendersOverflowSuffix_OnlyWhenPositive()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold" };
+        t.Over250AtMs = new[] { 300, 5100 };
+        t.Over250Overflow = 3;
+        t.FormatLine().ShouldContain(" over250_at=[300,5100]+3");
+
+        t.Over250Overflow = 0;
+        t.FormatLine().ShouldContain(" over250_at=[300,5100]");
+        t.FormatLine().ShouldNotContain("]+");
+    }
+
+    [Fact]
+    public void FormatLine_Over250_EmptyList_IsOmitted()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold" };
+        t.Over250AtMs = Array.Empty<int>();
+        t.Over250Overflow = 0;
+        t.FormatLine().ShouldNotContain("over250_at=");
+    }
+
+    [Fact]
+    public void StampOver250_ConvertsTicksToOffsets_Unclamped()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold" };
+        // Recording started at tick 10_000. Third entry is AFTER the stop
+        // request — offsets are unclamped on purpose (post-stop offsets are
+        // themselves evidence, per the approved plan's 0b).
+        t.StampOver250(new long[] { 10_300, 12_000, 19_999 }, overflowCount: 1, recordingStartTicks: 10_000);
+        t.Over250AtMs.ShouldBe(new[] { 300, 2000, 9999 });
+        t.Over250Overflow.ShouldBe(1);
+        t.FormatLine().ShouldContain(" over250_at=[300,2000,9999]+1");
+    }
+
+    [Fact]
+    public void FormatLine_CtxSrcAndProcCpu_RenderAsPlainKeyValues()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold" };
+        t.CtxSrc = "none";
+        t.ProcCpuMs = 42;
+        var line = t.FormatLine();
+        line.ShouldContain(" ctx_src=none");
+        line.ShouldContain(" proc_cpu_ms=42");
     }
 }

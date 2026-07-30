@@ -48,6 +48,9 @@ public sealed class PipelineHost : IDisposable
     private Action<ReadOnlyMemory<float>>? _frameHandler;
     private Winpepper.Asr.Transcription.StreamingDictationSession? _streamingSession;
     private Action<ReadOnlyMemory<float>>? _streamFrameHandler;
+    // E1: routes dictations to batch while an abandoned wedged stream still
+    // holds the compute gate. Hotkey-loop-only by contract.
+    private readonly Winpepper.Asr.Transcription.StreamingRouteGuard _routeGuard = new();
 
     private readonly Winpepper.Cleanup.CleanupBackendHolder _cleanupHolder;
     // NOTE: no CleanupOptions field. Options are built PER DICTATION from the
@@ -501,21 +504,32 @@ public sealed class PipelineHost : IDisposable
                 var settingsForStream = _settingsProvider();
                 if (settingsForStream.StreamingEnabled)
                 {
-                    _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
-                        ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
-                        {
-                            var cloudSel = string.Equals(settingsForStream.AsrProvider, "assemblyai",
-                                StringComparison.OrdinalIgnoreCase);
-                            var ready = TryEnsureAsrModel(reportErrors: false);
-                            if ((!ready && !cloudSel) || _asr is null) return null;
-                            return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream, notice =>
-                                _ = _toasts.ShowAsync(
-                                    "Winpepper",
-                                    "Cloud transcription unavailable — used local speech recognition instead.",
-                                    Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                                    TimeSpan.FromSeconds(6)));
-                        }, ct2),
-                        _log, ct);
+                    if (_routeGuard.TryClaimStreaming(out var routeBlockReason))
+                    {
+                        _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                            ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                            {
+                                var cloudSel = string.Equals(settingsForStream.AsrProvider, "assemblyai",
+                                    StringComparison.OrdinalIgnoreCase);
+                                var ready = TryEnsureAsrModel(reportErrors: false);
+                                if ((!ready && !cloudSel) || _asr is null) return null;
+                                return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream, notice =>
+                                    _ = _toasts.ShowAsync(
+                                        "Winpepper",
+                                        "Cloud transcription unavailable — used local speech recognition instead.",
+                                        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                        TimeSpan.FromSeconds(6)));
+                            }, ct2),
+                            _log, ct);
+                    }
+                    else
+                    {
+                        // E1: leave _streamingSession null — the existing
+                        // late batch path takes over at stop, same as when
+                        // streaming is disabled by settings.
+                        _log.LogInformation(
+                            "streaming routed to batch for this dictation: {Reason}", routeBlockReason);
+                    }
                 }
                 else
                 {
@@ -640,6 +654,12 @@ public sealed class PipelineHost : IDisposable
                         _streamingSession = null;
                         await droppedStreaming.DisposeAsync();
                         NoteStreamingReleased(droppedStreaming);
+                        // E1 coverage gap: cancel/silence-drop/teardown orphan a
+                        // wedged pump after ~5 s with DrainTimedOut still false; a
+                        // gate-holding orphan must still arm the batch routing or the
+                        // cascade re-enters via cancel.
+                        _routeGuard.NoteDisposeOutcome(
+                            droppedStreaming.DrainTimedOut, droppedStreaming.PumpCompletion);
                     }
                     _recordStopwatch = null;
                     timing.Outcome = "silent";
@@ -686,6 +706,13 @@ public sealed class PipelineHost : IDisposable
                         // bounded dispose wait expired), register it so no model
                         // dispose can race the native call it may still be in.
                         NoteStreamingReleased(streaming);
+                        // E1: a drain-timeout abandon leaves the wedged pump
+                        // holding the compute gate via the queued dispose —
+                        // route later dictations to batch until it completes.
+                        // NoteDisposeOutcome also catches the orphan case
+                        // (pump still incomplete with DrainTimedOut false).
+                        _routeGuard.NoteDisposeOutcome(
+                            streaming.DrainTimedOut, streaming.PumpCompletion);
                     }
                 }
                 if (maybeTranscription is null)
@@ -1023,6 +1050,12 @@ public sealed class PipelineHost : IDisposable
                     _streamingSession = null;
                     await cancelledStreaming.DisposeAsync();
                     NoteStreamingReleased(cancelledStreaming);
+                    // E1 coverage gap: cancel/silence-drop/teardown orphan a
+                    // wedged pump after ~5 s with DrainTimedOut still false; a
+                    // gate-holding orphan must still arm the batch routing or the
+                    // cascade re-enters via cancel.
+                    _routeGuard.NoteDisposeOutcome(
+                        cancelledStreaming.DrainTimedOut, cancelledStreaming.PumpCompletion);
                 }
                 break;
             case HotkeyEventKind.Toggle:
@@ -1042,21 +1075,32 @@ public sealed class PipelineHost : IDisposable
                     var settingsForStream2 = _settingsProvider();
                     if (settingsForStream2.StreamingEnabled)
                     {
-                        _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
-                            ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
-                            {
-                                var cloudSel2 = string.Equals(settingsForStream2.AsrProvider, "assemblyai",
-                                    StringComparison.OrdinalIgnoreCase);
-                                var ready2 = TryEnsureAsrModel(reportErrors: false);
-                                if ((!ready2 && !cloudSel2) || _asr is null) return null;
-                                return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream2, notice =>
-                                    _ = _toasts.ShowAsync(
-                                        "Winpepper",
-                                        "Cloud transcription unavailable — used local speech recognition instead.",
-                                        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                                        TimeSpan.FromSeconds(6)));
-                            }, ct2),
-                            _log, ct);
+                        if (_routeGuard.TryClaimStreaming(out var routeBlockReason2))
+                        {
+                            _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                                ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                                {
+                                    var cloudSel2 = string.Equals(settingsForStream2.AsrProvider, "assemblyai",
+                                        StringComparison.OrdinalIgnoreCase);
+                                    var ready2 = TryEnsureAsrModel(reportErrors: false);
+                                    if ((!ready2 && !cloudSel2) || _asr is null) return null;
+                                    return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream2, notice =>
+                                        _ = _toasts.ShowAsync(
+                                            "Winpepper",
+                                            "Cloud transcription unavailable — used local speech recognition instead.",
+                                            Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                            TimeSpan.FromSeconds(6)));
+                                }, ct2),
+                                _log, ct);
+                        }
+                        else
+                        {
+                            // E1: leave _streamingSession null — the existing
+                            // late batch path takes over at stop, same as when
+                            // streaming is disabled by settings.
+                            _log.LogInformation(
+                                "streaming routed to batch for this dictation: {Reason}", routeBlockReason2);
+                        }
                     }
                     else
                     {
@@ -1180,6 +1224,12 @@ public sealed class PipelineHost : IDisposable
                             _streamingSession = null;
                             await droppedStreaming2.DisposeAsync();
                             NoteStreamingReleased(droppedStreaming2);
+                            // E1 coverage gap: cancel/silence-drop/teardown orphan a
+                            // wedged pump after ~5 s with DrainTimedOut still false; a
+                            // gate-holding orphan must still arm the batch routing or the
+                            // cascade re-enters via cancel.
+                            _routeGuard.NoteDisposeOutcome(
+                                droppedStreaming2.DrainTimedOut, droppedStreaming2.PumpCompletion);
                         }
                         _recordStopwatch = null;
                         timing2.Outcome = "silent";
@@ -1226,6 +1276,13 @@ public sealed class PipelineHost : IDisposable
                             // bounded dispose wait expired), register it so no model
                             // dispose can race the native call it may still be in.
                             NoteStreamingReleased(streaming2);
+                            // E1: a drain-timeout abandon leaves the wedged pump
+                            // holding the compute gate via the queued dispose —
+                            // route later dictations to batch until it completes.
+                            // NoteDisposeOutcome also catches the orphan case
+                            // (pump still incomplete with DrainTimedOut false).
+                            _routeGuard.NoteDisposeOutcome(
+                                streaming2.DrainTimedOut, streaming2.PumpCompletion);
                         }
                     }
                     if (maybeTranscription2 is null)
@@ -1706,6 +1763,12 @@ public sealed class PipelineHost : IDisposable
             {
                 try { Task.Run(() => streamingAtTeardown.DisposeAsync().AsTask()).Wait(TimeSpan.FromSeconds(2)); } catch { }
                 NoteStreamingReleased(streamingAtTeardown);
+                // E1 coverage gap: cancel/silence-drop/teardown orphan a
+                // wedged pump after ~5 s with DrainTimedOut still false; a
+                // gate-holding orphan must still arm the batch routing or the
+                // cascade re-enters via cancel.
+                _routeGuard.NoteDisposeOutcome(
+                    streamingAtTeardown.DrainTimedOut, streamingAtTeardown.PumpCompletion);
             }
             lock (_startGate)
             {

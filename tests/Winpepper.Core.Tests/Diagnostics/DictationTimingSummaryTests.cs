@@ -33,6 +33,12 @@ public class DictationTimingSummaryTests
         Over250Overflow = 0,
         CtxSrc = "uia",
         ProcCpuMs = 1875,
+        PageFaults = 418,
+        MemPrivMb = 3061,
+        MemWsMb = 1542,
+        ThreadCount = 167,
+        HandleCount = 2003,
+        SysCpuPct = 37,
         CorrectionsMs = 2,
         CleanupMs = 640,
         CleanupPath = "Llm",
@@ -64,6 +70,7 @@ public class DictationTimingSummaryTests
             + " corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b ctx_src=uia"
             + " inject=850ms inject_chars=458 inject_chunks=58/58 inject_pace=798ms"
             + " gc=1/0/0 gc_pause=12ms prewarm_active=true proc_cpu_ms=1875"
+            + " pf=418 mem=3061/1542 thr=167 hnd=2003 sys_cpu=37"
             + " total=2354ms");
         line.ShouldNotContain("\n");
     }
@@ -300,5 +307,51 @@ public class DictationTimingSummaryTests
         var line = t.FormatLine();
         line.ShouldContain(" ctx_src=none");
         line.ShouldContain(" proc_cpu_ms=42");
+    }
+
+    [Fact]
+    public void FormatLine_ResourceFields_RenderAsPlainKeyValues()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold" };
+        t.PageFaults = 418;
+        t.MemPrivMb = 3061;
+        t.MemWsMb = 1542;
+        t.ThreadCount = 167;
+        t.HandleCount = 2003;
+        t.SysCpuPct = 37;
+        var line = t.FormatLine();
+        line.ShouldContain(" pf=418");
+        line.ShouldContain(" mem=3061/1542");
+        line.ShouldContain(" thr=167");
+        line.ShouldContain(" hnd=2003");
+        line.ShouldContain(" sys_cpu=37");
+    }
+
+    [Fact]
+    public void FormatLine_ResourceFields_OmittedWhenNull()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold" };
+        var line = t.FormatLine();
+        line.ShouldNotContain(" pf=");
+        line.ShouldNotContain(" mem=");
+        line.ShouldNotContain(" thr=");
+        line.ShouldNotContain(" hnd=");
+        line.ShouldNotContain(" sys_cpu=");
+    }
+
+    [Theory]
+    [InlineData(900, 1000, 0, 10)]   // busy = (1000-900)+0 = 100 of 1000
+    [InlineData(0, 500, 500, 100)]   // fully busy
+    [InlineData(1000, 1000, 0, 0)]   // fully idle
+    public void SystemCpuPercent_ComputesBusyShareOfTotal(long idle, long kernel, long user, int expected)
+    {
+        DictationTimingSummary.SystemCpuPercent(idle, kernel, user).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void SystemCpuPercent_InvalidWindow_ReturnsNull()
+    {
+        DictationTimingSummary.SystemCpuPercent(0, 0, 0).ShouldBeNull();      // empty window
+        DictationTimingSummary.SystemCpuPercent(2000, 1000, 0).ShouldBeNull(); // busy < 0 (clock skew)
     }
 }

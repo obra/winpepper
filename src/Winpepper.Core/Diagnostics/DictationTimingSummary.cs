@@ -82,6 +82,12 @@ public sealed class DictationTimingSummary
     public int? Over250Overflow { get; set; }              // 0b: over-250 events beyond the 16-entry cap
     public string? CtxSrc { get; set; }                    // 0b: window context the cleanup LLM ACTUALLY consumed: uia|ocr|none (consume-time semantics)
     public int? ProcCpuMs { get; set; }                    // 0b: Process.TotalProcessorTime delta, recording start -> StopRequested (NOT emit)
+    public int? PageFaults { get; set; }   // B1: page-fault count delta, recording start -> StopRequested
+    public int? MemPrivMb { get; set; }    // B2: private bytes MB, sampled once at recording start
+    public int? MemWsMb { get; set; }      // B2: working set MB, sampled once at recording start
+    public int? ThreadCount { get; set; }  // B2: process thread count at recording start
+    public int? HandleCount { get; set; }  // B2: process handle count at recording start
+    public int? SysCpuPct { get; set; }    // B3: system-wide CPU % over the recording window (GetSystemTimes delta)
     public int? TotalMs { get; set; }                   // hotkey-release -> emit, wall clock
 
     public string FormatLine()
@@ -132,6 +138,12 @@ public sealed class DictationTimingSummary
         if (PrewarmActive is bool prewarm)
             sb.Append(" prewarm_active=").Append(prewarm ? "true" : "false");
         AppendOptNum(sb, "proc_cpu_ms", ProcCpuMs);
+        AppendOptNum(sb, "pf", PageFaults);
+        if (MemPrivMb is not null || MemWsMb is not null)
+            sb.Append(" mem=").Append(MemPrivMb ?? 0).Append('/').Append(MemWsMb ?? 0);
+        AppendOptNum(sb, "thr", ThreadCount);
+        AppendOptNum(sb, "hnd", HandleCount);
+        AppendOptNum(sb, "sys_cpu", SysCpuPct);
         AppendCoreMs(sb, "total", TotalMs);
         return sb.ToString();
     }
@@ -146,6 +158,21 @@ public sealed class DictationTimingSummary
             offsets[i] = (int)(startTicks[i] - recordingStartTicks);
         Over250AtMs = offsets;
         Over250Overflow = overflowCount;
+    }
+
+    /// <summary>B3: system-wide CPU percent over the recording window, from two
+    /// GetSystemTimes samples (100 ns FILETIME units). Windows' kernel time
+    /// INCLUDES idle time (doc-confirmed 2026-07-30: "This time value also
+    /// includes the amount of time the system has been idle."), so
+    /// busy = (kernel - idle) + user. Null when the window is empty or
+    /// inconsistent (first sample failed, clock skew).</summary>
+    public static int? SystemCpuPercent(long idleDelta, long kernelDelta, long userDelta)
+    {
+        var total = kernelDelta + userDelta;
+        if (total <= 0) return null;
+        var busy = kernelDelta - idleDelta + userDelta;
+        if (busy < 0) return null;
+        return (int)(busy * 100 / total);
     }
 
     public IReadOnlyList<StageOverrun> Overruns()

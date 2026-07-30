@@ -78,6 +78,16 @@ public sealed class DictationTimingSummary
     public int? GcPauseMs { get; set; }         // GC.GetTotalPauseDuration() delta, recording start -> emit:
                                                 // actual GC pause TIME (counts can't convey magnitude)
     public bool? PrewarmActive { get; set; }    // cleanup pre-warm overlapped this dictation
+    public IReadOnlyList<int>? Over250AtMs { get; set; }   // 0b: ms offsets from recording start of native calls >= 250 ms; capped upstream at 16 entries
+    public int? Over250Overflow { get; set; }              // 0b: over-250 events beyond the 16-entry cap
+    public string? CtxSrc { get; set; }                    // 0b: window context the cleanup LLM ACTUALLY consumed: uia|ocr|none (consume-time semantics)
+    public int? ProcCpuMs { get; set; }                    // 0b: Process.TotalProcessorTime delta, recording start -> StopRequested (NOT emit)
+    public int? PageFaults { get; set; }   // B1: page-fault count delta, recording start -> StopRequested
+    public int? MemPrivMb { get; set; }    // B2: private bytes MB, sampled once at recording start
+    public int? MemWsMb { get; set; }      // B2: working set MB, sampled once at recording start
+    public int? ThreadCount { get; set; }  // B2: process thread count at recording start
+    public int? HandleCount { get; set; }  // B2: process handle count at recording start
+    public int? SysCpuPct { get; set; }    // B3: system-wide CPU % over the recording window (GetSystemTimes delta)
     public int? TotalMs { get; set; }                   // hotkey-release -> emit, wall clock
 
     public string FormatLine()
@@ -101,10 +111,22 @@ public sealed class DictationTimingSummary
         AppendOptMs(sb, "native_total", NativeTotalMs);
         AppendOptMs(sb, "native_max", NativeMaxMs);
         AppendOptNum(sb, "native_over250", NativeOver250);
+        if (Over250AtMs is { Count: > 0 } over250)
+        {
+            sb.Append(" over250_at=[");
+            for (var i = 0; i < over250.Count; i++)
+            {
+                if (i > 0) sb.Append(',');
+                sb.Append(over250[i]);
+            }
+            sb.Append(']');
+            if (Over250Overflow is int extra and > 0) sb.Append('+').Append(extra);
+        }
         AppendCoreMs(sb, "corrections", CorrectionsMs);
         AppendCoreMs(sb, "cleanup", CleanupMs);
         AppendOptStr(sb, "cleanup_path", CleanupPath);
         AppendOptStr(sb, "cleanup_model", CleanupModel);
+        AppendOptStr(sb, "ctx_src", CtxSrc);
         AppendCoreMs(sb, "inject", InjectMs);
         AppendOptNum(sb, "inject_chars", InjectChars);
         if (InjectChunksSent is not null || InjectChunksTotal is not null)
@@ -115,8 +137,42 @@ public sealed class DictationTimingSummary
         AppendOptMs(sb, "gc_pause", GcPauseMs);
         if (PrewarmActive is bool prewarm)
             sb.Append(" prewarm_active=").Append(prewarm ? "true" : "false");
+        AppendOptNum(sb, "proc_cpu_ms", ProcCpuMs);
+        AppendOptNum(sb, "pf", PageFaults);
+        if (MemPrivMb is not null || MemWsMb is not null)
+            sb.Append(" mem=").Append(MemPrivMb ?? 0).Append('/').Append(MemWsMb ?? 0);
+        AppendOptNum(sb, "thr", ThreadCount);
+        AppendOptNum(sb, "hnd", HandleCount);
+        AppendOptNum(sb, "sys_cpu", SysCpuPct);
         AppendCoreMs(sb, "total", TotalMs);
         return sb.ToString();
+    }
+
+    /// <summary>0b: convert absolute <see cref="Environment.TickCount64"/> stamps of
+    /// slow native calls into ms offsets from recording start. Offsets are UNCLAMPED
+    /// on purpose — values after the stop request are themselves evidence.</summary>
+    public void StampOver250(IReadOnlyList<long> startTicks, int overflowCount, long recordingStartTicks)
+    {
+        var offsets = new int[startTicks.Count];
+        for (var i = 0; i < startTicks.Count; i++)
+            offsets[i] = (int)(startTicks[i] - recordingStartTicks);
+        Over250AtMs = offsets;
+        Over250Overflow = overflowCount;
+    }
+
+    /// <summary>B3: system-wide CPU percent over the recording window, from two
+    /// GetSystemTimes samples (100 ns FILETIME units). Windows' kernel time
+    /// INCLUDES idle time (doc-confirmed 2026-07-30: "This time value also
+    /// includes the amount of time the system has been idle."), so
+    /// busy = (kernel - idle) + user. Null when the window is empty or
+    /// inconsistent (first sample failed, clock skew).</summary>
+    public static int? SystemCpuPercent(long idleDelta, long kernelDelta, long userDelta)
+    {
+        var total = kernelDelta + userDelta;
+        if (total <= 0) return null;
+        var busy = kernelDelta - idleDelta + userDelta;
+        if (busy < 0) return null;
+        return (int)(busy * 100 / total);
     }
 
     public IReadOnlyList<StageOverrun> Overruns()

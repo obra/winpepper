@@ -54,7 +54,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             new Session(_engineProvider, _batchFallback, ModelName, _attContextRight, _language, _log,
                 _nativeCallWarnAfter));
 
-    private sealed class Session : IStreamingTranscriptionSession, INativeCallStatsSource
+    private sealed class Session : IStreamingTranscriptionSession, INativeCallStatsSource, INativeCallInFlightSource
     {
         private readonly Func<ITranscribeCppEngine> _engineProvider;
         private readonly ITranscriber _batchFallback;
@@ -81,9 +81,17 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private long _nativeMaxMs;
         private int _nativeOver250;
         internal const int SlowNativeCallMs = 250;
+        private readonly List<long> _over250StartTicks = new();
+        private int _over250Overflow;
         private bool _corrupt;
         private string? _corruptReason;
         private bool _disposed;
+
+        /// <summary>Environment.TickCount64 when the CURRENT native call
+        /// started; 0 = no call in flight. Volatile, never under _nativeGate:
+        /// the drain's early-abandon probe reads it while a wedged call may
+        /// be HOLDING that gate (see INativeCallInFlightSource).</summary>
+        private long _inFlightSinceTick;
 
         public Session(Func<ITranscribeCppEngine> engineProvider, ITranscriber batchFallback,
             string modelName, int attContextRight, string? language, ILogger? log,
@@ -205,21 +213,63 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             return ValueTask.CompletedTask;
         }
 
+        public TimeSpan? NativeCallInFlightElapsed
+        {
+            get
+            {
+                var since = Volatile.Read(ref _inFlightSinceTick);
+                return since == 0
+                    ? null
+                    : TimeSpan.FromMilliseconds(Environment.TickCount64 - since);
+            }
+        }
+
         public NativeCallStats NativeCallStats
         {
             get
             {
                 lock (_nativeGate)
                 {
-                    return new NativeCallStats(_nativeCalls, (int)_nativeTotalMs, (int)_nativeMaxMs, _nativeOver250);
+                    return new NativeCallStats(
+                        _nativeCalls, (int)_nativeTotalMs, (int)_nativeMaxMs, _nativeOver250,
+                        _over250StartTicks.Count > 0 ? _over250StartTicks.ToArray() : null,
+                        _over250Overflow);
                 }
             }
         }
 
         private void EnsureStream()
         {
-            _stream ??= TimedNativeCall("stream begin",
-                () => _engineProvider().BeginStream(_attContextRight, _language));
+            if (_stream is not null) return;
+            var engine = _engineProvider();
+            var startTick = Environment.TickCount64;
+            var sw = Stopwatch.StartNew();
+            using var watchdogCts = new CancellationTokenSource();
+            _ = WarnWhenStillRunningAsync("stream begin", watchdogCts.Token);
+            // B4: written by the engine BEFORE the gate-timeout throw (out is
+            // by-ref), so the finally sees THIS call's gate wait on both
+            // return and throw; 0 if the engine threw before the gate wait.
+            var gateWaitMs = 0;
+            try
+            {
+                _stream = engine.BeginStream(_attContextRight, _language, out gateWaitMs);
+            }
+            finally
+            {
+                watchdogCts.Cancel();
+                sw.Stop();
+                // B4: the engine returns THIS call's gate wait per-call (no
+                // shared slot to mis-read under overlapping calls); subtract
+                // it so native_* stats (and over250_at) measure compute, not
+                // queueing behind a prior stream's undisposed session.
+                var gateWait = Math.Max(0, gateWaitMs);
+                var nativeMs = Math.Max(0, sw.ElapsedMilliseconds - gateWait);
+                RecordNativeSample("stream begin", startTick + gateWait, nativeMs);
+                if (gateWait > 0)
+                    _log?.LogInformation(
+                        "stream begin: compute-gate wait {GateWaitMs} ms, native {NativeMs} ms",
+                        gateWait, (int)nativeMs);
+            }
         }
 
         /// <summary>Native streaming calls are synchronous P/Invokes that
@@ -234,24 +284,38 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         /// diagnosable from the log alone.</summary>
         private T TimedNativeCall<T>(string op, Func<T> call)
         {
+            var startTick = Environment.TickCount64;
+            Volatile.Write(ref _inFlightSinceTick, Math.Max(1, startTick)); // Max(1): 0 is the "no call" sentinel
             var nativeSw = Stopwatch.StartNew();
             using var watchdogCts = new CancellationTokenSource();
             _ = WarnWhenStillRunningAsync(op, watchdogCts.Token);
             try { return call(); }
             finally
             {
+                Volatile.Write(ref _inFlightSinceTick, 0);
                 watchdogCts.Cancel();
                 nativeSw.Stop();
-                var elapsedMs = nativeSw.ElapsedMilliseconds;
-                _nativeCalls++;
-                _nativeTotalMs += elapsedMs;
-                if (elapsedMs > _nativeMaxMs) _nativeMaxMs = elapsedMs;
-                if (elapsedMs >= SlowNativeCallMs) _nativeOver250++;
-                if (nativeSw.Elapsed >= _nativeCallWarnAfter)
-                    _log?.LogWarning(
-                        "nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns",
-                        op, (int)elapsedMs);
+                RecordNativeSample(op, startTick, nativeSw.ElapsedMilliseconds);
             }
+        }
+
+        private void RecordNativeSample(string op, long startTick, long elapsedMs)
+        {
+            _nativeCalls++;
+            _nativeTotalMs += elapsedMs;
+            if (elapsedMs > _nativeMaxMs) _nativeMaxMs = elapsedMs;
+            if (elapsedMs >= SlowNativeCallMs)
+            {
+                _nativeOver250++;
+                if (_over250StartTicks.Count < NativeCallStats.Over250ListCap)
+                    _over250StartTicks.Add(startTick);
+                else
+                    _over250Overflow++;
+            }
+            if (elapsedMs >= _nativeCallWarnAfter.TotalMilliseconds)
+                _log?.LogWarning(
+                    "nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns",
+                    op, (int)elapsedMs);
         }
 
         private async Task WarnWhenStillRunningAsync(string op, CancellationToken ct)

@@ -241,6 +241,57 @@ public class NemotronStreamingTranscriberTests
     }
 
     [Fact]
+    public async Task Wedged_native_call_exposes_in_flight_elapsed_lock_free()
+    {
+        using var gate = new ManualResetEventSlim(false);
+        var engine = new FakeTranscribeCppEngine { FeedGate = gate };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
+            new CapturingLogger(), nativeCallWarnAfter: TimeSpan.FromSeconds(30));
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        var inFlight = (INativeCallInFlightSource)s; // cast fails until the session implements the interface
+
+        var push = Task.Run(() => s.PushAsync(Samples(2560),
+            TestContext.Current.CancellationToken).AsTask()); // exactly one native feed, wedged on the gate
+
+        var giveUp = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (inFlight.NativeCallInFlightElapsed is null && DateTime.UtcNow < giveUp)
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        Assert.NotNull(inFlight.NativeCallInFlightElapsed); // observable WHILE the call is wedged
+        gate.Set(); // unwedge the native call
+
+        await push;
+        Assert.Null(inFlight.NativeCallInFlightElapsed); // cleared once the call returned
+    }
+
+    [Fact]
+    public async Task Blocked_BeginStream_does_not_report_in_flight_elapsed()
+    {
+        // A16: the in-flight marker is deliberately NOT armed across
+        // EnsureStream/BeginStream — BeginStream's ≤5 s compute-gate wait
+        // would otherwise read as native in-flight time exactly in the
+        // zero-push phase (EnsureStream runs on the FIRST push). While the
+        // fake's BeginStream is blocked (stand-in for a pure gate wait), the
+        // probe must stay null.
+        using var beginGate = new ManualResetEventSlim(false);
+        var engine = new FakeTranscribeCppEngine { BeginStreamGate = beginGate };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
+            new CapturingLogger(), nativeCallWarnAfter: TimeSpan.FromSeconds(30));
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        var inFlight = (INativeCallInFlightSource)s;
+
+        var push = Task.Run(() => s.PushAsync(Samples(2560),
+            TestContext.Current.CancellationToken).AsTask()); // first push -> EnsureStream -> blocked BeginStream
+
+        await Task.Delay(300, TestContext.Current.CancellationToken); // let the push reach BeginStream
+        Assert.Null(inFlight.NativeCallInFlightElapsed); // gate-wait/begin time is NOT in-flight native time
+        beginGate.Set();
+        await push;
+        Assert.Null(inFlight.NativeCallInFlightElapsed);
+    }
+
+    [Fact]
     public async Task Push_after_dispose_is_a_harmless_no_op()
     {
         var engine = new FakeTranscribeCppEngine();
@@ -297,6 +348,65 @@ public class NemotronStreamingTranscriberTests
         Assert.True(stats.CountOver250Ms >= 1);
         Assert.True(stats.MaxMs >= 250);
         Assert.True(stats.Count >= 2); // begin + feed at minimum
+    }
+
+    [Fact]
+    public async Task Session_RecordsOver250StartTicks_Absolute()
+    {
+        var engine = new FakeTranscribeCppEngine { FeedDelay = TimeSpan.FromMilliseconds(300) };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        var before = Environment.TickCount64;
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // one ~300 ms feed
+        var after = Environment.TickCount64;
+
+        var stats = ((INativeCallStatsSource)s).NativeCallStats;
+        Assert.True(stats.CountOver250Ms >= 1);
+        Assert.NotNull(stats.Over250StartTicks);
+        Assert.Equal(stats.CountOver250Ms, stats.Over250StartTicks!.Count);
+        Assert.All(stats.Over250StartTicks, tick => Assert.InRange(tick, before, after));
+        Assert.Equal(0, stats.Over250Overflow);
+    }
+
+    [Fact]
+    public async Task Session_CapsOver250StartTicksAt16_AndCountsOverflow()
+    {
+        var engine = new FakeTranscribeCppEngine { FeedDelay = TimeSpan.FromMilliseconds(300) };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        for (var i = 0; i < NativeCallStats.Over250ListCap + 1; i++)
+            await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken);
+
+        var stats = ((INativeCallStatsSource)s).NativeCallStats;
+        Assert.Equal(17, stats.CountOver250Ms);   // 17 slow feeds; begin is fast
+        Assert.NotNull(stats.Over250StartTicks);
+        Assert.Equal(NativeCallStats.Over250ListCap, stats.Over250StartTicks!.Count);
+        Assert.Equal(1, stats.Over250Overflow);
+    }
+
+    [Fact]
+    public async Task StreamBegin_GateWait_IsExcludedFromNativeStats()
+    {
+        // The fake's BeginStream blocks 600 ms and reports that the ENTIRE
+        // 600 ms was compute-gate wait. With B4, native stats must see ~0 ms
+        // for stream begin: no over-250 entry, native_max well under 250.
+        var engine = new FakeTranscribeCppEngine
+        {
+            BeginStreamDelay = TimeSpan.FromMilliseconds(600),
+            GateWaitMsToReport = 600, // returned per-call via BeginStream's out parameter
+        };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // forces EnsureStream
+        var stats = ((INativeCallStatsSource)s).NativeCallStats;
+        Assert.Equal(0, stats.CountOver250Ms);
+        Assert.True(stats.MaxMs < 250,
+            $"gate wait leaked into native stats: MaxMs={stats.MaxMs}");
     }
 
     [Fact]

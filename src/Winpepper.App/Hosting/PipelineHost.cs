@@ -48,14 +48,19 @@ public sealed class PipelineHost : IDisposable
     private Action<ReadOnlyMemory<float>>? _frameHandler;
     private Winpepper.Asr.Transcription.StreamingDictationSession? _streamingSession;
     private Action<ReadOnlyMemory<float>>? _streamFrameHandler;
+    // E1: routes dictations to batch while an abandoned wedged stream still
+    // holds the compute gate. Hotkey-loop-only by contract.
+    private readonly Winpepper.Asr.Transcription.StreamingRouteGuard _routeGuard = new();
 
     private readonly Winpepper.Cleanup.CleanupBackendHolder _cleanupHolder;
     // NOTE: no CleanupOptions field. Options are built PER DICTATION from the
     // settings provider (CleanupOptionsFactory.FromSettings) so Cleanup-tab
     // changes — including the Enabled toggle — take effect immediately.
     private readonly Winpepper.Corrections.CorrectionStore? _corrections; // PLAN2-TYPE
-    private readonly Winpepper.Platform.WindowContext.WindowContextPrefetch? _windowContext; // PLAN2-TYPE
-    private Task<Winpepper.Platform.WindowContext.WindowContextResult>? _ctxPrefetchTask;    // PLAN2-TYPE
+    // 1a: prefetch launched at recording STOP; lifecycle (per-dictation CTS,
+    // cancellation ruling) owned by the coordinator. Hwnd captured at START.
+    private readonly Winpepper.Platform.WindowContext.WindowContextPrefetchCoordinator? _ctxCoordinator;
+    private IntPtr _ctxHwndAtStart = IntPtr.Zero;
 
     private readonly Winpepper.History.HistoryArchiver _archiver;
     private System.Diagnostics.Stopwatch? _recordStopwatch;
@@ -67,6 +72,13 @@ public sealed class PipelineHost : IDisposable
     private int _gcGen1AtStart;
     private int _gcGen2AtStart;
     private System.TimeSpan _gcPauseAtStart;
+    private System.TimeSpan _procCpuAtStart;
+    private uint? _pfAtStart;                                                            // B1
+    private Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimesSample? _sysTimesAtStart; // B3
+    private int? _memPrivMbAtStart;                                                      // B2
+    private int? _memWsMbAtStart;
+    private int? _thrAtStart;
+    private int? _hndAtStart;
 
     private readonly Winpepper.Core.Errors.ErrorBus _errorBus;
     private Guid _currentSessionId = Guid.Empty;
@@ -125,7 +137,9 @@ public sealed class PipelineHost : IDisposable
         _archiver = archiver;
         _cleanupHolder = cleanupHolder;
         _corrections = corrections;
-        _windowContext = windowContext;
+        _ctxCoordinator = windowContext is null
+            ? null
+            : new Winpepper.Platform.WindowContext.WindowContextPrefetchCoordinator(windowContext.StartAsync);
         _clipboardFallback = clipboardFallback;
         _toasts = toasts;
         _settingsProvider = settingsProvider;
@@ -490,21 +504,32 @@ public sealed class PipelineHost : IDisposable
                 var settingsForStream = _settingsProvider();
                 if (settingsForStream.StreamingEnabled)
                 {
-                    _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
-                        ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
-                        {
-                            var cloudSel = string.Equals(settingsForStream.AsrProvider, "assemblyai",
-                                StringComparison.OrdinalIgnoreCase);
-                            var ready = TryEnsureAsrModel(reportErrors: false);
-                            if ((!ready && !cloudSel) || _asr is null) return null;
-                            return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream, notice =>
-                                _ = _toasts.ShowAsync(
-                                    "Winpepper",
-                                    "Cloud transcription unavailable — used local speech recognition instead.",
-                                    Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                                    TimeSpan.FromSeconds(6)));
-                        }, ct2),
-                        _log, ct);
+                    if (_routeGuard.TryClaimStreaming(out var routeBlockReason))
+                    {
+                        _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                            ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                            {
+                                var cloudSel = string.Equals(settingsForStream.AsrProvider, "assemblyai",
+                                    StringComparison.OrdinalIgnoreCase);
+                                var ready = TryEnsureAsrModel(reportErrors: false);
+                                if ((!ready && !cloudSel) || _asr is null) return null;
+                                return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream, notice =>
+                                    _ = _toasts.ShowAsync(
+                                        "Winpepper",
+                                        "Cloud transcription unavailable — used local speech recognition instead.",
+                                        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                        TimeSpan.FromSeconds(6)));
+                            }, ct2),
+                            _log, ct);
+                    }
+                    else
+                    {
+                        // E1: leave _streamingSession null — the existing
+                        // late batch path takes over at stop, same as when
+                        // streaming is disabled by settings.
+                        _log.LogInformation(
+                            "streaming routed to batch for this dictation: {Reason}", routeBlockReason);
+                    }
                 }
                 else
                 {
@@ -517,26 +542,33 @@ public sealed class PipelineHost : IDisposable
                 _gcGen1AtStart = GC.CollectionCount(1);
                 _gcGen2AtStart = GC.CollectionCount(2);
                 _gcPauseAtStart = GC.GetTotalPauseDuration();
+                var procAtStart = System.Diagnostics.Process.GetCurrentProcess();
+                _procCpuAtStart = procAtStart.TotalProcessorTime;
+                // B2: point-in-time resource snapshot at recording start.
+                _memPrivMbAtStart = (int)(procAtStart.PrivateMemorySize64 / (1024 * 1024));
+                _memWsMbAtStart = (int)(procAtStart.WorkingSet64 / (1024 * 1024));
+                _thrAtStart = procAtStart.Threads.Count;
+                _hndAtStart = procAtStart.HandleCount;
+                // B1/B3: baselines for stop-time deltas.
+                _pfAtStart = Winpepper.Platform.Diagnostics.ProcessResourceSampler.PageFaultCount();
+                _sysTimesAtStart = Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimes();
                 _targetAtStart = CaptureTarget();
 
-                // PLAN2-TYPE — start window-context prefetch in parallel with audio
-                // capture. Gated on LIVE settings (not a boot snapshot) so a
-                // Cleanup-tab change applies to this dictation; prefetch is only
-                // useful when the cleanup LLM is enabled at all.
-                _ctxPrefetchTask = null;
-                var settingsAtStart = _settingsProvider();
-                if (_windowContext is not null
-                    && settingsAtStart.CleanupEnabled
-                    && settingsAtStart.CleanupWindowContextEnabled)
-                {
-                    var hwnd = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
-                    _ctxPrefetchTask = _windowContext.StartAsync(hwnd, ct);
-                }
+                // 1a ruling: a prior dictation's still-running prefetch dies
+                // the moment new speech starts — live speech wins over a
+                // stale context fetch; the prior dictation stamps
+                // ctx_src=none, an accepted counted loss.
+                _ctxCoordinator?.OnRecordingStart();
+                // 1a(b): capture the dictated-into window NOW; the relocated
+                // prefetch (at stop) must read THIS window, not whatever has
+                // focus by then.
+                _ctxHwndAtStart = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
                 break;
             case HotkeyEventKind.HoldUp:
                 if (_engine.State != SessionState.Recording) return;
                 _engine.Apply(SessionEvent.StopRequested);
                 _recordStopwatch?.Stop();
+                var procCpuAtStop = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
 
                 var releaseAt = evt.Timestamp;
                 var timing = new Winpepper.Core.Diagnostics.DictationTimingSummary
@@ -545,6 +577,33 @@ public sealed class PipelineHost : IDisposable
                     Kind = "hold",
                 };
                 timing.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
+                timing.ProcCpuMs = (int)(procCpuAtStop - _procCpuAtStart).TotalMilliseconds;
+                timing.MemPrivMb = _memPrivMbAtStart;
+                timing.MemWsMb = _memWsMbAtStart;
+                timing.ThreadCount = _thrAtStart;
+                timing.HandleCount = _hndAtStart;
+                if (_pfAtStart is uint pf0
+                    && Winpepper.Platform.Diagnostics.ProcessResourceSampler.PageFaultCount() is uint pf1)
+                    timing.PageFaults = (int)(pf1 - pf0);
+                if (_sysTimesAtStart is { } st0
+                    && Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimes() is { } st1)
+                    timing.SysCpuPct = Winpepper.Core.Diagnostics.DictationTimingSummary.SystemCpuPercent(
+                        st1.Idle100ns - st0.Idle100ns,
+                        st1.Kernel100ns - st0.Kernel100ns,
+                        st1.User100ns - st0.User100ns);
+
+                // 1a: launch the window-context prefetch AT STOP — it now
+                // overlaps mic-stop, trimming, and transcription finish
+                // instead of competing with live streaming ASR. Gated on LIVE
+                // settings so a Cleanup-tab change applies to this dictation.
+                Winpepper.Platform.WindowContext.WindowContextPrefetchHandle? ctxPrefetch = null;
+                var settingsAtStop = _settingsProvider();
+                if (_ctxCoordinator is not null
+                    && settingsAtStop.CleanupEnabled
+                    && settingsAtStop.CleanupWindowContextEnabled)
+                {
+                    ctxPrefetch = _ctxCoordinator.Start(_ctxHwndAtStart);
+                }
 
                 var micStopSw = System.Diagnostics.Stopwatch.StartNew();
                 var samples = _warmRecorder!.StopSession();
@@ -588,13 +647,19 @@ public sealed class PipelineHost : IDisposable
                     });
                     _engine.Apply(SessionEvent.TranscriptReady);
                     _engine.Apply(SessionEvent.InjectionCompleted);
-                    _ctxPrefetchTask = null;
+                    _ctxCoordinator?.CancelAndClear();
                     if (_streamingSession is not null)
                     {
                         var droppedStreaming = _streamingSession;
                         _streamingSession = null;
                         await droppedStreaming.DisposeAsync();
                         NoteStreamingReleased(droppedStreaming);
+                        // E1 coverage gap: cancel/silence-drop/teardown orphan a
+                        // wedged pump after ~5 s with DrainTimedOut still false; a
+                        // gate-holding orphan must still arm the batch routing or the
+                        // cascade re-enters via cancel.
+                        _routeGuard.NoteDisposeOutcome(
+                            droppedStreaming.DrainTimedOut, droppedStreaming.PumpCompletion);
                     }
                     _recordStopwatch = null;
                     timing.Outcome = "silent";
@@ -641,6 +706,13 @@ public sealed class PipelineHost : IDisposable
                         // bounded dispose wait expired), register it so no model
                         // dispose can race the native call it may still be in.
                         NoteStreamingReleased(streaming);
+                        // E1: a drain-timeout abandon leaves the wedged pump
+                        // holding the compute gate via the queued dispose —
+                        // route later dictations to batch until it completes.
+                        // NoteDisposeOutcome also catches the orphan case
+                        // (pump still incomplete with DrainTimedOut false).
+                        _routeGuard.NoteDisposeOutcome(
+                            streaming.DrainTimedOut, streaming.PumpCompletion);
                     }
                 }
                 if (maybeTranscription is null)
@@ -684,7 +756,7 @@ public sealed class PipelineHost : IDisposable
                         _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
                         timing.Outcome = "failed";
                         timing.AsrMs = (int)transcribeSw.ElapsedMilliseconds;
-                        StampStreamingFinishStats(timing, streaming);
+                        StampStreamingFinishStats(timing, streaming, _dictStartTicks);
                         timing.AsrMode = "batch";
                         timing.TotalMs = TotalSince(releaseAt);
                         EmitTimingSummary(timing);
@@ -700,7 +772,7 @@ public sealed class PipelineHost : IDisposable
                 string final = transcription.Text;
                 var producedModelName = transcription.ProviderModelName;
                 timing.AsrMs = (int)transcribeSw.ElapsedMilliseconds;
-                StampStreamingFinishStats(timing, streaming);
+                StampStreamingFinishStats(timing, streaming, _dictStartTicks);
                 // Mode from the model that ACTUALLY produced the result (not from
                 // which code arm returned): nemotron const => true local streaming;
                 // the assemblyai/ prefix => cloud (shares the batch budget); else
@@ -742,9 +814,9 @@ public sealed class PipelineHost : IDisposable
                     // .Text out (or null on failure). This mirrors Plan 2 Cli/Pipeline.cs
                     // lines 3749-3751.
                     Task<string?>? ctxTextTask = null;
-                    if (_ctxPrefetchTask is not null)
+                    if (ctxPrefetch is not null)
                     {
-                        ctxTextTask = _ctxPrefetchTask.ContinueWith(
+                        ctxTextTask = ctxPrefetch.Task.ContinueWith(
                             t => t.IsCompletedSuccessfully ? t.Result.Text : null,
                             ct,
                             TaskContinuationOptions.ExecuteSynchronously,
@@ -783,6 +855,10 @@ public sealed class PipelineHost : IDisposable
                         timing.CleanupModel = string.IsNullOrWhiteSpace(cleanupUsedModel) ? null : cleanupUsedModel;
                         windowContextUsed = ctxTextTask is not null
                                             && result.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
+                        // 0b consume-time ctx_src, via the pure Linux-tested
+                        // stamp (see WindowContextStamp).
+                        timing.CtxSrc = Winpepper.Platform.WindowContext.WindowContextStamp.CtxSrc(
+                            result.ConsumedWindowContext, ctxPrefetch?.Task);
                     }
                     catch (Exception ex)
                     {
@@ -959,11 +1035,13 @@ public sealed class PipelineHost : IDisposable
                     },
                 });
 
-                _ctxPrefetchTask = null;
+                // prefetch handle is per-dictation (local); the coordinator's reference is
+                // cleared by the next OnRecordingStart.
                 _recordStopwatch = null;
                 break;
             case HotkeyEventKind.Cancel:
                 _engine.Apply(SessionEvent.CancelRequested);
+                _ctxCoordinator?.CancelAndClear();
                 _log.LogInformation("Session cancelled {SessionId}", _currentSessionId);
                 _ = _warmRecorder?.StopSession();
                 if (_streamingSession is not null)
@@ -972,6 +1050,12 @@ public sealed class PipelineHost : IDisposable
                     _streamingSession = null;
                     await cancelledStreaming.DisposeAsync();
                     NoteStreamingReleased(cancelledStreaming);
+                    // E1 coverage gap: cancel/silence-drop/teardown orphan a
+                    // wedged pump after ~5 s with DrainTimedOut still false; a
+                    // gate-holding orphan must still arm the batch routing or the
+                    // cascade re-enters via cancel.
+                    _routeGuard.NoteDisposeOutcome(
+                        cancelledStreaming.DrainTimedOut, cancelledStreaming.PumpCompletion);
                 }
                 break;
             case HotkeyEventKind.Toggle:
@@ -991,21 +1075,32 @@ public sealed class PipelineHost : IDisposable
                     var settingsForStream2 = _settingsProvider();
                     if (settingsForStream2.StreamingEnabled)
                     {
-                        _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
-                            ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
-                            {
-                                var cloudSel2 = string.Equals(settingsForStream2.AsrProvider, "assemblyai",
-                                    StringComparison.OrdinalIgnoreCase);
-                                var ready2 = TryEnsureAsrModel(reportErrors: false);
-                                if ((!ready2 && !cloudSel2) || _asr is null) return null;
-                                return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream2, notice =>
-                                    _ = _toasts.ShowAsync(
-                                        "Winpepper",
-                                        "Cloud transcription unavailable — used local speech recognition instead.",
-                                        Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
-                                        TimeSpan.FromSeconds(6)));
-                            }, ct2),
-                            _log, ct);
+                        if (_routeGuard.TryClaimStreaming(out var routeBlockReason2))
+                        {
+                            _streamingSession = Winpepper.Asr.Transcription.StreamingDictationSession.Start(
+                                ct2 => Task.Run<Winpepper.Asr.Transcription.IStreamingTranscriber?>(() =>
+                                {
+                                    var cloudSel2 = string.Equals(settingsForStream2.AsrProvider, "assemblyai",
+                                        StringComparison.OrdinalIgnoreCase);
+                                    var ready2 = TryEnsureAsrModel(reportErrors: false);
+                                    if ((!ready2 && !cloudSel2) || _asr is null) return null;
+                                    return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream2, notice =>
+                                        _ = _toasts.ShowAsync(
+                                            "Winpepper",
+                                            "Cloud transcription unavailable — used local speech recognition instead.",
+                                            Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
+                                            TimeSpan.FromSeconds(6)));
+                                }, ct2),
+                                _log, ct);
+                        }
+                        else
+                        {
+                            // E1: leave _streamingSession null — the existing
+                            // late batch path takes over at stop, same as when
+                            // streaming is disabled by settings.
+                            _log.LogInformation(
+                                "streaming routed to batch for this dictation: {Reason}", routeBlockReason2);
+                        }
                     }
                     else
                     {
@@ -1018,26 +1113,33 @@ public sealed class PipelineHost : IDisposable
                     _gcGen1AtStart = GC.CollectionCount(1);
                     _gcGen2AtStart = GC.CollectionCount(2);
                     _gcPauseAtStart = GC.GetTotalPauseDuration();
+                    var procAtStart2 = System.Diagnostics.Process.GetCurrentProcess();
+                    _procCpuAtStart = procAtStart2.TotalProcessorTime;
+                    // B2: point-in-time resource snapshot at recording start.
+                    _memPrivMbAtStart = (int)(procAtStart2.PrivateMemorySize64 / (1024 * 1024));
+                    _memWsMbAtStart = (int)(procAtStart2.WorkingSet64 / (1024 * 1024));
+                    _thrAtStart = procAtStart2.Threads.Count;
+                    _hndAtStart = procAtStart2.HandleCount;
+                    // B1/B3: baselines for stop-time deltas.
+                    _pfAtStart = Winpepper.Platform.Diagnostics.ProcessResourceSampler.PageFaultCount();
+                    _sysTimesAtStart = Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimes();
                     _targetAtStart = CaptureTarget();
 
-                    // PLAN2-TYPE — start window-context prefetch in parallel with audio
-                    // capture. Gated on LIVE settings (not a boot snapshot) so a
-                    // Cleanup-tab change applies to this dictation; prefetch is only
-                    // useful when the cleanup LLM is enabled at all.
-                    _ctxPrefetchTask = null;
-                    var settingsAtStart2 = _settingsProvider();
-                    if (_windowContext is not null
-                        && settingsAtStart2.CleanupEnabled
-                        && settingsAtStart2.CleanupWindowContextEnabled)
-                    {
-                        var hwnd = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
-                        _ctxPrefetchTask = _windowContext.StartAsync(hwnd, ct);
-                    }
+                    // 1a ruling: a prior dictation's still-running prefetch dies
+                    // the moment new speech starts — live speech wins over a
+                    // stale context fetch; the prior dictation stamps
+                    // ctx_src=none, an accepted counted loss.
+                    _ctxCoordinator?.OnRecordingStart();
+                    // 1a(b): capture the dictated-into window NOW; the relocated
+                    // prefetch (at stop) must read THIS window, not whatever has
+                    // focus by then.
+                    _ctxHwndAtStart = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
                 }
                 else if (_engine.State == SessionState.Recording)
                 {
                     _engine.Apply(SessionEvent.StopRequested);
                     _recordStopwatch?.Stop();
+                    var procCpuAtStop2 = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
 
                     var releaseAt2 = evt.Timestamp;
                     var timing2 = new Winpepper.Core.Diagnostics.DictationTimingSummary
@@ -1046,6 +1148,33 @@ public sealed class PipelineHost : IDisposable
                         Kind = "toggle",
                     };
                     timing2.RecordMs = (int?)_recordStopwatch?.ElapsedMilliseconds;
+                    timing2.ProcCpuMs = (int)(procCpuAtStop2 - _procCpuAtStart).TotalMilliseconds;
+                    timing2.MemPrivMb = _memPrivMbAtStart;
+                    timing2.MemWsMb = _memWsMbAtStart;
+                    timing2.ThreadCount = _thrAtStart;
+                    timing2.HandleCount = _hndAtStart;
+                    if (_pfAtStart is uint pf0_2
+                        && Winpepper.Platform.Diagnostics.ProcessResourceSampler.PageFaultCount() is uint pf1_2)
+                        timing2.PageFaults = (int)(pf1_2 - pf0_2);
+                    if (_sysTimesAtStart is { } st0_2
+                        && Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimes() is { } st1_2)
+                        timing2.SysCpuPct = Winpepper.Core.Diagnostics.DictationTimingSummary.SystemCpuPercent(
+                            st1_2.Idle100ns - st0_2.Idle100ns,
+                            st1_2.Kernel100ns - st0_2.Kernel100ns,
+                            st1_2.User100ns - st0_2.User100ns);
+
+                    // 1a: launch the window-context prefetch AT STOP — it now
+                    // overlaps mic-stop, trimming, and transcription finish
+                    // instead of competing with live streaming ASR. Gated on LIVE
+                    // settings so a Cleanup-tab change applies to this dictation.
+                    Winpepper.Platform.WindowContext.WindowContextPrefetchHandle? ctxPrefetch2 = null;
+                    var settingsAtStop2 = _settingsProvider();
+                    if (_ctxCoordinator is not null
+                        && settingsAtStop2.CleanupEnabled
+                        && settingsAtStop2.CleanupWindowContextEnabled)
+                    {
+                        ctxPrefetch2 = _ctxCoordinator.Start(_ctxHwndAtStart);
+                    }
 
                     var micStopSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var samples2 = _warmRecorder!.StopSession();
@@ -1088,13 +1217,19 @@ public sealed class PipelineHost : IDisposable
                         });
                         _engine.Apply(SessionEvent.TranscriptReady);
                         _engine.Apply(SessionEvent.InjectionCompleted);
-                        _ctxPrefetchTask = null;
+                        _ctxCoordinator?.CancelAndClear();
                         if (_streamingSession is not null)
                         {
                             var droppedStreaming2 = _streamingSession;
                             _streamingSession = null;
                             await droppedStreaming2.DisposeAsync();
                             NoteStreamingReleased(droppedStreaming2);
+                            // E1 coverage gap: cancel/silence-drop/teardown orphan a
+                            // wedged pump after ~5 s with DrainTimedOut still false; a
+                            // gate-holding orphan must still arm the batch routing or the
+                            // cascade re-enters via cancel.
+                            _routeGuard.NoteDisposeOutcome(
+                                droppedStreaming2.DrainTimedOut, droppedStreaming2.PumpCompletion);
                         }
                         _recordStopwatch = null;
                         timing2.Outcome = "silent";
@@ -1141,6 +1276,13 @@ public sealed class PipelineHost : IDisposable
                             // bounded dispose wait expired), register it so no model
                             // dispose can race the native call it may still be in.
                             NoteStreamingReleased(streaming2);
+                            // E1: a drain-timeout abandon leaves the wedged pump
+                            // holding the compute gate via the queued dispose —
+                            // route later dictations to batch until it completes.
+                            // NoteDisposeOutcome also catches the orphan case
+                            // (pump still incomplete with DrainTimedOut false).
+                            _routeGuard.NoteDisposeOutcome(
+                                streaming2.DrainTimedOut, streaming2.PumpCompletion);
                         }
                     }
                     if (maybeTranscription2 is null)
@@ -1184,7 +1326,7 @@ public sealed class PipelineHost : IDisposable
                             _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
                             timing2.Outcome = "failed";
                             timing2.AsrMs = (int)transcribeSw2.ElapsedMilliseconds;
-                            StampStreamingFinishStats(timing2, streaming2);
+                            StampStreamingFinishStats(timing2, streaming2, _dictStartTicks);
                             timing2.AsrMode = "batch";
                             timing2.TotalMs = TotalSince(releaseAt2);
                             EmitTimingSummary(timing2);
@@ -1200,7 +1342,7 @@ public sealed class PipelineHost : IDisposable
                     string final2 = transcription2.Text;
                     var producedModelName2 = transcription2.ProviderModelName;
                     timing2.AsrMs = (int)transcribeSw2.ElapsedMilliseconds;
-                    StampStreamingFinishStats(timing2, streaming2);
+                    StampStreamingFinishStats(timing2, streaming2, _dictStartTicks);
                     // Mode from the model that ACTUALLY produced the result (not from
                     // which code arm returned): nemotron const => true local streaming;
                     // the assemblyai/ prefix => cloud (shares the batch budget); else
@@ -1239,9 +1381,9 @@ public sealed class PipelineHost : IDisposable
                         // .Text out (or null on failure). This mirrors Plan 2 Cli/Pipeline.cs
                         // lines 3749-3751.
                         Task<string?>? ctxTextTask2 = null;
-                        if (_ctxPrefetchTask is not null)
+                        if (ctxPrefetch2 is not null)
                         {
-                            ctxTextTask2 = _ctxPrefetchTask.ContinueWith(
+                            ctxTextTask2 = ctxPrefetch2.Task.ContinueWith(
                                 t => t.IsCompletedSuccessfully ? t.Result.Text : null,
                                 ct,
                                 TaskContinuationOptions.ExecuteSynchronously,
@@ -1280,6 +1422,10 @@ public sealed class PipelineHost : IDisposable
                             timing2.CleanupModel = string.IsNullOrWhiteSpace(cleanupUsedModel2) ? null : cleanupUsedModel2;
                             windowContextUsed2 = ctxTextTask2 is not null
                                                 && result2.AssembledPrompt.Contains("<WINDOW-OCR-CONTENT>");
+                            // 0b consume-time ctx_src, via the pure Linux-tested
+                            // stamp (see WindowContextStamp).
+                            timing2.CtxSrc = Winpepper.Platform.WindowContext.WindowContextStamp.CtxSrc(
+                                result2.ConsumedWindowContext, ctxPrefetch2?.Task);
                         }
                         catch (Exception ex)
                         {
@@ -1454,7 +1600,8 @@ public sealed class PipelineHost : IDisposable
                         },
                     });
 
-                    _ctxPrefetchTask = null;
+                    // prefetch handle is per-dictation (local); the coordinator's reference is
+                    // cleared by the next OnRecordingStart.
                     _recordStopwatch = null;
                 }
                 break;
@@ -1474,7 +1621,8 @@ public sealed class PipelineHost : IDisposable
     /// never existed or FinishAsync never ran.</summary>
     private static void StampStreamingFinishStats(
         Winpepper.Core.Diagnostics.DictationTimingSummary timing,
-        Winpepper.Asr.Transcription.StreamingDictationSession? streaming)
+        Winpepper.Asr.Transcription.StreamingDictationSession? streaming,
+        long dictStartTicks)
     {
         if (streaming?.FinishStats is not { } fs) return;
         timing.AsrWaitMs = fs.AsrWaitMs;
@@ -1487,6 +1635,8 @@ public sealed class PipelineHost : IDisposable
             timing.NativeTotalMs = ns.TotalMs;
             timing.NativeMaxMs = ns.MaxMs;
             timing.NativeOver250 = ns.CountOver250Ms;
+            if (ns.Over250StartTicks is { Count: > 0 })
+                timing.StampOver250(ns.Over250StartTicks, ns.Over250Overflow, dictStartTicks);
         }
     }
 
@@ -1613,6 +1763,12 @@ public sealed class PipelineHost : IDisposable
             {
                 try { Task.Run(() => streamingAtTeardown.DisposeAsync().AsTask()).Wait(TimeSpan.FromSeconds(2)); } catch { }
                 NoteStreamingReleased(streamingAtTeardown);
+                // E1 coverage gap: cancel/silence-drop/teardown orphan a
+                // wedged pump after ~5 s with DrainTimedOut still false; a
+                // gate-holding orphan must still arm the batch routing or the
+                // cascade re-enters via cancel.
+                _routeGuard.NoteDisposeOutcome(
+                    streamingAtTeardown.DrainTimedOut, streamingAtTeardown.PumpCompletion);
             }
             lock (_startGate)
             {

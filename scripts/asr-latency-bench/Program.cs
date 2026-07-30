@@ -296,7 +296,7 @@ foreach (var scenario in requested)
 
                     // (a) nemotron BATCH — the parity reference (same engine, offline).
                     var swNb = Stopwatch.StartNew();
-                    var nemBatchText = engine.TranscribeBatch(wavAudio);
+                    var nemBatchText = engine.TranscribeBatch(wavAudio, null, out _);
                     swNb.Stop();
                     rows.Add(($"nem-batch {name}", "REAL nemotron", seconds, swNb.ElapsedMilliseconds));
                     Console.WriteLine($"# nem-batch[{name}]: \"{nemBatchText}\"");
@@ -447,7 +447,7 @@ foreach (var scenario in requested)
                         //     Gate-safe: it runs before any streaming session exists on this
                         //     engine, so its compute gate is free.
                         var swBatch = Stopwatch.StartNew();
-                        var batchText = corpusEngine.TranscribeBatch(wavAudio, language);
+                        var batchText = corpusEngine.TranscribeBatch(wavAudio, language, out _);
                         swBatch.Stop();
                         tally.BatchMs.Add(swBatch.ElapsedMilliseconds);
                         var afterBatch = ResourceUsage.Capture();
@@ -784,7 +784,7 @@ sealed class EngineBatchTranscriber : ITranscriber
     // Same language hint as the streaming session and the batch parity decode:
     // a fallback transcript must not differ from batch just because it lost the hint.
     public Task<TranscriptionResult> TranscribeAsync(ReadOnlyMemory<float> audio, CancellationToken ct)
-        => Task.FromResult(new TranscriptionResult(_engine.TranscribeBatch(audio.ToArray(), _language), ModelName));
+        => Task.FromResult(new TranscriptionResult(_engine.TranscribeBatch(audio.ToArray(), _language, out _), ModelName));
 }
 
 /// <summary>Per-clip accumulator for the corpus eval's multi-pass loop: latency and

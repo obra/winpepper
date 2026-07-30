@@ -24,6 +24,11 @@ public sealed class OcrFallback
     {
         if (foregroundHwnd == IntPtr.Zero) return WindowContextResult.Empty;
 
+        // D1: the capture stage (PrintWindow etc.) is blocking native work
+        // that cannot observe ct mid-call — at least skip it entirely when
+        // this dictation's prefetch is already cancelled.
+        ct.ThrowIfCancellationRequested();
+
         if (!PrintWindowNative.GetClientRect(foregroundHwnd, out var rect)) return WindowContextResult.Empty;
         var w = rect.Width;
         var h = rect.Height;
@@ -45,13 +50,39 @@ public sealed class OcrFallback
         if (engine is null)
         {
             _log.LogDebug("OcrEngine.TryCreateFromUserProfileLanguages returned null; no OCR languages installed");
+            swBitmap.Dispose(); // C2: no native op ever touched it — safe to close here
             return WindowContextResult.Empty;
         }
 
         OcrResult ocr;
         try
         {
-            ocr = await engine.RecognizeAsync(swBitmap).AsTask(ct).ConfigureAwait(false);
+            // C2: dispose is owned by a CONTINUATION on a TOKEN-LESS
+            // AsTask(): that Task reaches terminal state ONLY via the
+            // WinRT op's Completed handler, so the bitmap is never closed
+            // while the native op may still read it. Passing ct to
+            // AsTask would be a use-after-close: the CsWinRT bridge
+            // (WinRT.Runtime 2.2.0) cancels the TASK eagerly while the
+            // native op keeps running (Cancel() is advisory).
+            var op = engine.RecognizeAsync(swBitmap);
+            var opTask = op.AsTask(); // NO token — terminal only from Completed
+            using var reg = ct.Register(() =>
+            {
+                try { op.Cancel(); } catch { /* COM disconnect */ }
+            });
+            _ = opTask.ContinueWith(
+                _ => swBitmap.Dispose(), // runs only after the op is observably terminal
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            // WaitAsync(ct): the CALLER still unblocks promptly on ct
+            // (D1's routine cancellation stays fast); the op + dispose
+            // continuation finish in the background on their own schedule.
+            ocr = await opTask.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw; // prompt cancel for the caller; dispose continuation still pending
         }
         catch (Exception ex)
         {

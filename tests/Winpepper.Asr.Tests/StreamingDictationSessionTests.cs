@@ -560,6 +560,142 @@ public class StreamingDictationSessionTests
             TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
     }
 
+    // E2: streaming genuinely underway (first push completed), then the
+    // second push wedges INSIDE a native call that reports it has ALREADY
+    // been running longer than the drain budget — the drain must abandon
+    // immediately instead of waiting out the full deadline.
+    private sealed class InFlightPastBudgetTranscriber : IStreamingTranscriber
+    {
+        public string ModelName => "in-flight-past-budget";
+        public WedgingSession Session { get; } = new();
+        public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
+            => Task.FromResult<IStreamingTranscriptionSession>(Session);
+
+        public sealed class WedgingSession : IStreamingTranscriptionSession, INativeCallInFlightSource
+        {
+            private readonly TaskCompletionSource _wedge = new();
+            private readonly TaskCompletionSource _wedgedPushStarted = new();
+            private int _pushes;
+
+            /// <summary>What the wedged "native call" claims its elapsed is.</summary>
+            public TimeSpan? InFlightToReport { get; set; } = TimeSpan.FromSeconds(60);
+
+            /// <summary>Which push wedges. Default 2: the first push COMPLETES,
+            /// so the zero-push short deadline is NOT what bounds those tests.
+            /// Set 1 for the zero-completed-pushes (1.5 s shortcut) pairing.</summary>
+            public int WedgeOnPush { get; set; } = 2;
+
+            /// <summary>Completes when the wedging push has started.</summary>
+            public Task WedgedPushStarted => _wedgedPushStarted.Task;
+
+            public TimeSpan? NativeCallInFlightElapsed
+                => _wedgedPushStarted.Task.IsCompleted ? InFlightToReport : null;
+
+            public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
+            {
+                if (Interlocked.Increment(ref _pushes) < WedgeOnPush) return; // earlier pushes succeed
+                _wedgedPushStarted.TrySetResult();
+                await _wedge.Task; // the wedged native feed
+            }
+
+            public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
+                => throw new InvalidOperationException("FinishAsync must not run on an abandoned session");
+
+            public ValueTask DisposeAsync()
+            {
+                _wedge.TrySetResult(); // socket-style: dispose unwedges the push
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
+    [Fact]
+    public async Task InFlightCallPastDrainBudget_AtFinish_AbandonsImmediately()
+    {
+        var transcriber = new InFlightPastBudgetTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromSeconds(30)); // FULL deadline: must NOT be waited out
+        session.OnFrame(new float[800]); // first push — completes, full deadline applies
+        session.OnFrame(new float[800]); // second push — wedges, reports 60 s in flight
+        await transcriber.Session.WedgedPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        // The in-flight call already exceeds the 30 s budget, so FinishAsync
+        // must abandon IMMEDIATELY. The 10 s guard sits between "immediate"
+        // and the 30 s deadline so waiting the deadline out fails loudly.
+        var result = await session
+            .FinishAsync(new float[800], TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue(); // same contract as a timed-out drain (E1 routing keys off this)
+        var stats = session.FinishStats.ShouldNotBeNull();
+        stats.AsrWaitMs.ShouldBeLessThan(5000); // did not pay the 30 s deadline
+        stats.NativeCallStats.ShouldBeNull();   // never probed on abandon (gate may be wedged)
+
+        // The background abandon dispose unwedges this socket-style fake.
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task InFlightCallBelowDrainBudget_AtFinish_WaitsOutTheDeadline()
+    {
+        var transcriber = new InFlightPastBudgetTranscriber();
+        transcriber.Session.InFlightToReport = TimeSpan.FromMilliseconds(50); // well under budget
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromMilliseconds(200));
+        session.OnFrame(new float[800]);
+        session.OnFrame(new float[800]);
+        await transcriber.Session.WedgedPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue();
+        var stats = session.FinishStats.ShouldNotBeNull();
+        stats.AsrWaitMs.ShouldBeGreaterThanOrEqualTo(150); // paid the ~200 ms deadline — NO early abandon
+
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task ZeroPushShortDeadline_HealthyClassCallInFlight_WaitsTheWindowOut()
+    {
+        // A15 pin: zero COMPLETED pushes shrinks the effective deadline to
+        // ~1.5 s. A call 2.5 s in flight is a healthy-class call (2.9-3.96 s
+        // observed and recovered in the field) — FinishAsync must NOT abandon
+        // at t=0 (which would also arm E1's blockade off a non-wedge); it
+        // waits the short window out: abandon iff
+        // elapsed >= max(effectiveDeadline, MinInFlightForFutility).
+        var transcriber = new InFlightPastBudgetTranscriber();
+        transcriber.Session.WedgeOnPush = 1; // FIRST push wedges: zero completed pushes
+        transcriber.Session.InFlightToReport = TimeSpan.FromSeconds(2.5);
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromSeconds(10)); // full budget; zero-push shortcut applies
+        session.OnFrame(new float[800]); // first push — wedges immediately
+        await transcriber.Session.WedgedPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue(); // the 1.5 s window expired normally (dispose unwedges the fake)
+        var stats = session.FinishStats.ShouldNotBeNull();
+        stats.AsrWaitMs.ShouldBeGreaterThanOrEqualTo(1000); // paid the ~1.5 s zero-push window — NO abandon at t=0
+
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
     // A healthy session still STARTING at stop time must keep the FULL drain
     // deadline: cloud connect is designed-bounded at 10 s and a cold factory
     // load takes seconds — both sit in FRONT of the first push. The
@@ -668,6 +804,24 @@ public class StreamingDictationSessionTests
     }
 
     [Fact]
+    public async Task FinishAsync_PropagatesOver250Ticks_ThroughFinishStats()
+    {
+        var transcriber = new StatsExposingTranscriber();
+        transcriber.Session.NativeCallStats = new NativeCallStats(7, 900, 400, 2,
+            Over250StartTicks: new long[] { 100_000, 100_400 }, Over250Overflow: 3);
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken);
+        session.OnFrame(new float[800]);
+
+        (await session.FinishAsync(new float[800], TestContext.Current.CancellationToken)).ShouldNotBeNull();
+
+        var ns = session.FinishStats.ShouldNotBeNull().NativeCallStats.ShouldNotBeNull();
+        ns.Over250StartTicks.ShouldBe(new long[] { 100_000, 100_400 });
+        ns.Over250Overflow.ShouldBe(3);
+    }
+
+    [Fact]
     public async Task FinishAsync_NullFactory_StillSetsFinishStats()
     {
         var session = StreamingDictationSession.Start(
@@ -691,7 +845,7 @@ public class StreamingDictationSessionTests
 
         public sealed class StatsSession : IStreamingTranscriptionSession, INativeCallStatsSource
         {
-            public NativeCallStats NativeCallStats { get; } = new(7, 900, 400, 2);
+            public NativeCallStats NativeCallStats { get; set; } = new(7, 900, 400, 2);
             public ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct) => ValueTask.CompletedTask;
             public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
                 => Task.FromResult(new TranscriptionResult("OK", "stats"));

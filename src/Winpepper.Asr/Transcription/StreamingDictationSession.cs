@@ -247,6 +247,28 @@ public sealed class StreamingDictationSession : IAsyncDisposable
         var deadline = _anyPushCompleted || !_sessionStarted
             ? _drainDeadline
             : TimeSpan.FromTicks(Math.Min(_drainDeadline.Ticks, ZeroPushDrainDeadline.Ticks));
+        // E2: a native call cannot be aborted. If the CURRENT in-flight
+        // native call has already run at least the FULL drain budget (the
+        // policy floors the check at MinInFlightForFutility, so the zero-push
+        // 1.5 s shortcut can never trigger it against a healthy 2.9-3.96 s
+        // call), the pump cannot possibly drain in time — waiting just delays
+        // the caller's late batch path by the full deadline (observed
+        // pre-fix: asr_wait pegged at ~10 s on every wedged batch fallback).
+        // The probe is LOCK-FREE by contract (INativeCallInFlightSource) —
+        // never NativeCallStats here: its snapshot takes the native gate the
+        // wedged call is holding. A session/wrapper that does not expose the
+        // interface yields null → no early abandon (previous behavior).
+        var inFlightElapsed = (_session as INativeCallInFlightSource)?.NativeCallInFlightElapsed;
+        if (DrainAbandonPolicy.ShouldAbandonImmediately(inFlightElapsed, deadline))
+        {
+            DrainTimedOut = true; // same contract as the timeout abandon below
+            FinishStats = new StreamingFinishStats(0, null, backlogFrames, backlogMs, null);
+            _log.LogWarning(
+                "streaming drain abandoned immediately: in-flight native call already running {InFlightMs} ms, past the {DrainDeadline} drain budget; batch path takes over",
+                (int)inFlightElapsed!.Value.TotalMilliseconds, deadline);
+            _ = ScheduleAbandonedSessionDispose();
+            return null;
+        }
         var waitSw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
@@ -272,8 +294,8 @@ public sealed class StreamingDictationSession : IAsyncDisposable
             FinishStats = new StreamingFinishStats(
                 (int)waitSw.ElapsedMilliseconds, null, backlogFrames, backlogMs, null);
             _log.LogWarning(
-                "streaming drain exceeded {DrainDeadline}; abandoning streaming session, batch path takes over",
-                deadline);
+                "streaming drain exceeded {DrainDeadline}; abandoning streaming session, batch path takes over (in-flight native call at stop: {InFlightAtStopMs} ms)",
+                deadline, (long?)inFlightElapsed?.TotalMilliseconds ?? -1);
             _ = ScheduleAbandonedSessionDispose();
             return null;
         }

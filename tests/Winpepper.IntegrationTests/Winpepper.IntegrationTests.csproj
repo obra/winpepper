@@ -15,5 +15,7 @@
     <ProjectReference Include="..\..\src\Winpepper.Corrections\Winpepper.Corrections.csproj" />
     <ProjectReference Include="..\..\src\Winpepper.Models\Winpepper.Models.csproj" />
     <ProjectReference Include="..\..\src\Winpepper.Asr\Winpepper.Asr.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Platform\Winpepper.Platform.csproj" />
+    <ProjectReference Include="..\..\src\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
   </ItemGroup>
 </Project>

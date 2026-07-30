@@ -59,13 +59,24 @@ Run 1 scope: step 0b (three new dictation-timing-line fields) + step 0c
   CleanupResult.ConsumedWindowContext + _ctxPrefetchTask.Result.Source.
   The legacy windowContextUsed prompt sniff is intentionally untouched.
 
-## 0c — StatelessExecutor native-context lifetime (Planner B vs Planner C)
+## 0c — RESOLVED: Planner B correct; 1d NOT TRIGGERED
 
-(pending — the finding MUST quote LLamaSharp v0.27.0 file and line numbers, from
-either the official GitHub tag or a decompile of the NuGet-resolved assembly at
-`~/.nuget/packages/llamasharp/0.27.0/lib/net8.0/LLamaSharp.dll`. If neither is
-possible, write "could not verify" — which means step 1d is NOT triggered. Never
-settle this from memory.)
+Verified against the official LLamaSharp v0.27.0 tag
+(LLama/LLamaStatelessExecutor.cs fetched from GitHub raw):
+
+- Constructor: creates a context and immediately disposes it —
+  line 66: `Context = _weights.CreateContext(_params, logger);`
+  line 67: `Context.Dispose();`
+- InferAsync: the working context is created inside a `using` and disposed
+  deterministically when the async enumerator completes —
+  line 78: `// Create an inference context which will be disposed when this method exits`
+  line 79: `using var context = _weights.CreateContext(_params, _logger);`
+  line 80: `Context = context;`
+
+Verdict: nothing native lingers between generations awaiting GC finalization.
+Plan 1d (explicit context disposal after each generation) is NOT TRIGGERED.
+(The per-generation constructor churn is still real waste — fixed separately
+as leak-fix C3, executor hoisted to a field.)
 
 ## Owner sections (NOT Run 1 — the owner fills these after install)
 
@@ -75,3 +86,58 @@ settle this from memory.)
   PARTIAL, counted once over the first 20 qualifying lines): pending owner.
 - Excluded-outlier tally + over250_at adjudication against logged prefetch /
   prewarm / GC windows: pending owner.
+
+## Owner supersession — 2026-07-30 (single combined run)
+
+Recorded per the owner's 2026-07-30 order, which supersedes the approved plan's
+"How this gets executed" numbered sequence:
+
+1. WAIVED: the step-2/3 owner gate (baseline collection + explicit approval
+   stop). Everything (0b remnants, 1a, 1b, leak fixes, new instrumentation,
+   wedge-cascade fix) lands in this ONE run on one branch.
+2. WAIVED: experiment 0a (window-context OFF branch). Superseded by stronger
+   log evidence: dictations where the cleanup LLM was bypassed but the
+   recording-start prefetch ran are degraded anyway (e.g. native_max=3960 ms
+   with cleanup=0 ms), confirming the prefetch mechanism directly.
+3. DOWNGRADED to REPORTING: the baseline-relative context-quality criterion
+   (uia/ocr shares each dropping < 10 pp vs a pre-fix baseline). Because 0b and
+   1a land together, no pre-fix ctx_src baseline can exist. Instead: report the
+   raw ctx_src counts (uia / ocr / none) over the owner's post-install
+   dictations.
+
+## Investigation summary — 2026-07-30 stall investigation
+
+- Confirmed shape: EPISODIC contention (recording-start prefetch + cleanup
+  inference competing with live streaming ASR) plus a WEDGE CASCADE amplifier:
+  a wedged native call causes the 10 s drain abandon; the abandoned stream's
+  dispose queues behind the wedged call while holding the engine-wide compute
+  gate, so the NEXT dictation's BeginStream blocks up to 5 s and then
+  batch-degrades — one wedge becomes a multi-dictation hang.
+- Refuted hypotheses: native context/thread accumulation across dictations,
+  ArrayPool growth at scale, GC pressure as primary cause.
+- Confirmed native-memory leaks: (C1) DefaultSamplingPipeline created per
+  generation and never disposed (LlamaCleanupBackend.cs:97-105; upstream
+  BaseSamplingPipeline's native sampler chain is a finalizer-backed
+  SafeHandle, so non-disposal means delayed, finalizer-dependent,
+  non-deterministic reclamation — native memory exerts no managed-heap
+  pressure, so undisposed chains pile up between collections; deterministic
+  disposal is still the right fix);
+  (C2) SoftwareBitmap created in OcrFallback.cs:102-108, consumed at :54,
+  never disposed on any path (~width*height*4 bytes, ~33 MB per 4K-window
+  OCR-path dictation); (C3) a fresh StatelessExecutor per generation whose
+  0.27 constructor creates AND immediately disposes a throwaway context —
+  doubled per-generation Vulkan context churn.
+- Gate-wait attribution bug (B4): the "stream begin took X ms" log and the
+  native_* stats book compute-gate wait as native call time. Mismatch-rule
+  correction: the claimed site TranscribeCppEngine.cs:206-220/:270 has no
+  timing/logging; the wrapper actually lives in
+  NemotronStreamingTranscriber.EnsureStream (:224-228) + TimedNativeCall
+  (:230-277), and the 5 s gate wait itself is inside
+  TranscribeCppEngine.BeginStream (:209).
+
+## Memory baseline (pre-fix, owner's machine, 2026-07-30)
+
+At 5.9 h uptime: ~3.0 GB private / ~1.5 GB working set / 167 threads /
+~2000 handles. Post-install expectation: mem= private should be flat across a
+30-dictation session (see the validation-expectations section appended at the
+end of this run).

@@ -141,3 +141,27 @@ At 5.9 h uptime: ~3.0 GB private / ~1.5 GB working set / 167 threads /
 ~2000 handles. Post-install expectation: mem= private should be flat across a
 30-dictation session (see the validation-expectations section appended at the
 end of this run).
+
+## 1b — thread cap bench (run-cleanup-bench-windows.sh)
+
+Cap: Threads = BatchThreads = min(4, max(1, ProcessorCount/4)).
+Results (artifacts/cleanup-bench/20260730-115010/results.md):
+- median latency: 284 ms (criterion: <= 1000 ms) — PASS
+- eval outcomes: all 18 eval cases ran with zero errors (Failed: 0), per-case
+  paths identical to the latest committed qwen record (bake-off run
+  `20260727-214235`, docs/plans/2026-07-27-cleanup-model-bakeoff-prep.md §7):
+  17 Llm + `trap-poem-request` FallbackImplausible (the known
+  `KnownFailingBaseline` plausibility-guard rejection) — PASS
+
+Notes: registry-default model `qwen2.5-0.5b-instruct-q4_k_m`, 3 passes,
+seed 42; 118 statements, Llm calls 306 — p50 284 ms / p95 461 ms / mean
+310.8 ms; paths Llm=306, BypassShort=24, FallbackImplausible=24; model load
+1861 ms, warm 223 ms. Median IMPROVED vs both committed qwen records (334 ms
+morning baseline `20260727-115614`, 445 ms bake-off `20260727-214235`) — the
+cap costs nothing on this fully-GPU-offloaded model. Path-count differences
+vs the 2026-07-27 runs (BypassShort 24 vs 48) come from the documented
+history-corpus drift, not the cap; the 18 committed eval cases are the
+stable comparable subset and match exactly. No ladder escalation (6/8)
+needed. LLamaSharp 0.27 `ModelParams` carries `Threads`/`BatchThreads` as
+declared — no property-name correction required (verified against the
+resolved package XML docs).

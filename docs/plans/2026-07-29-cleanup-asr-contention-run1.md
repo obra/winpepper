@@ -1218,7 +1218,9 @@ git diff --cached --quiet || git commit \
 
 ```bash
 git status --short   # expected: clean
-git log --oneline 8f5db7d..HEAD   # expected: the 4-6 commits from Tasks 1-6
+git log --oneline 8f5db7d..HEAD   # expected: 8-9 commits — the 3 pre-existing docs
+                                  # commits (evidence file, plan, plan hardening)
+                                  # plus the 5-6 commits from Tasks 1-6
 ```
 
 Do NOT push. Do NOT start 0a, 1a, 1b, 1d, or Phase 2 — the next step belongs to

@@ -51,6 +51,13 @@ Run 1 scope: step 0b (three new dictation-timing-line fields) + step 0c
   recording start) with `+N` overflow suffix; `ctx_src=uia|ocr|none` after
   `cleanup_model=`; `proc_cpu_ms=<n>` after `prewarm_active=`. All omitted when
   null. No budget/Overruns changes.
+- Stamping (`src/Winpepper.App/Hosting/PipelineHost.cs`, both arms):
+  `proc_cpu_ms` = Process.TotalProcessorTime delta sampled at recording start
+  and at StopRequested (hold :538-area, toggle :1039-area; never at emit);
+  `over250_at` stamped via StampStreamingFinishStats(+ _dictStartTicks) ->
+  DictationTimingSummary.StampOver250; `ctx_src` mapped from
+  CleanupResult.ConsumedWindowContext + _ctxPrefetchTask.Result.Source.
+  The legacy windowContextUsed prompt sniff is intentionally untouched.
 
 ## 0c — StatelessExecutor native-context lifetime (Planner B vs Planner C)
 

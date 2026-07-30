@@ -1218,9 +1218,15 @@ git diff --cached --quiet || git commit \
 
 ```bash
 git status --short   # expected: clean
-git log --oneline 8f5db7d..HEAD   # expected: 8-9 commits — the 3 pre-existing docs
-                                  # commits (evidence file, plan, plan hardening)
-                                  # plus the 5-6 commits from Tasks 1-6
+git log --oneline 8f5db7d..HEAD   # expected: exactly the 5-6 NEW commits from
+                                  # Tasks 1-6 (one each from Tasks 1-5, plus
+                                  # Task 6's conditional wrap-up commit) on top
+                                  # of the docs commits that pre-dated Task 1
+                                  # (evidence file, plan, plan hardening, and
+                                  # any plan-review fix commits). Do NOT check
+                                  # against a fixed total count — verify only
+                                  # that the Task 1-6 commits are present and
+                                  # no unexpected commits appear.
 ```
 
 Do NOT push. Do NOT start 0a, 1a, 1b, 1d, or Phase 2 — the next step belongs to

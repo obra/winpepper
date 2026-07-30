@@ -81,6 +81,8 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         private long _nativeMaxMs;
         private int _nativeOver250;
         internal const int SlowNativeCallMs = 250;
+        private readonly List<long> _over250StartTicks = new();
+        private int _over250Overflow;
         private bool _corrupt;
         private string? _corruptReason;
         private bool _disposed;
@@ -211,7 +213,10 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
             {
                 lock (_nativeGate)
                 {
-                    return new NativeCallStats(_nativeCalls, (int)_nativeTotalMs, (int)_nativeMaxMs, _nativeOver250);
+                    return new NativeCallStats(
+                        _nativeCalls, (int)_nativeTotalMs, (int)_nativeMaxMs, _nativeOver250,
+                        _over250StartTicks.Count > 0 ? _over250StartTicks.ToArray() : null,
+                        _over250Overflow);
                 }
             }
         }
@@ -234,6 +239,7 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
         /// diagnosable from the log alone.</summary>
         private T TimedNativeCall<T>(string op, Func<T> call)
         {
+            var startTick = Environment.TickCount64;
             var nativeSw = Stopwatch.StartNew();
             using var watchdogCts = new CancellationTokenSource();
             _ = WarnWhenStillRunningAsync(op, watchdogCts.Token);
@@ -246,7 +252,14 @@ public sealed class NemotronStreamingTranscriber : IStreamingTranscriber
                 _nativeCalls++;
                 _nativeTotalMs += elapsedMs;
                 if (elapsedMs > _nativeMaxMs) _nativeMaxMs = elapsedMs;
-                if (elapsedMs >= SlowNativeCallMs) _nativeOver250++;
+                if (elapsedMs >= SlowNativeCallMs)
+                {
+                    _nativeOver250++;
+                    if (_over250StartTicks.Count < NativeCallStats.Over250ListCap)
+                        _over250StartTicks.Add(startTick);
+                    else
+                        _over250Overflow++;
+                }
                 if (nativeSw.Elapsed >= _nativeCallWarnAfter)
                     _log?.LogWarning(
                         "nemotron native {Op} took {ElapsedMs} ms; a call this slow stalls the streaming pump until it returns",

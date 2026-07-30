@@ -36,6 +36,12 @@ Run 1 scope: step 0b (three new dictation-timing-line fields) + step 0c
 
 - Formatter (`src/Winpepper.Core/Diagnostics/DictationTimingSummary.cs`): added
   `Over250AtMs`/`Over250Overflow`/`CtxSrc`/`ProcCpuMs` + `StampOver250(...)`.
+- Capture (`src/Winpepper.Asr/Transcription/`): `NativeCallStats` gained
+  `Over250StartTicks` (absolute TickCount64 at call START, cap 16 via
+  `NativeCallStats.Over250ListCap`) + `Over250Overflow`;
+  `NemotronStreamingTranscriber.Session.TimedNativeCall` records them under
+  `_nativeGate`. Rides the existing `StreamingFinishStats` chain unchanged;
+  absent on the drain-timeout/abandon path by design (stats never probed there).
   Line grammar: `over250_at=[a,b,...]` (first 16, unclamped ms offsets from
   recording start) with `+N` overflow suffix; `ctx_src=uia|ocr|none` after
   `cleanup_model=`; `proc_cpu_ms=<n>` after `prewarm_active=`. All omitted when

@@ -668,6 +668,24 @@ public class StreamingDictationSessionTests
     }
 
     [Fact]
+    public async Task FinishAsync_PropagatesOver250Ticks_ThroughFinishStats()
+    {
+        var transcriber = new StatsExposingTranscriber();
+        transcriber.Session.NativeCallStats = new NativeCallStats(7, 900, 400, 2,
+            Over250StartTicks: new long[] { 100_000, 100_400 }, Over250Overflow: 3);
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken);
+        session.OnFrame(new float[800]);
+
+        (await session.FinishAsync(new float[800], TestContext.Current.CancellationToken)).ShouldNotBeNull();
+
+        var ns = session.FinishStats.ShouldNotBeNull().NativeCallStats.ShouldNotBeNull();
+        ns.Over250StartTicks.ShouldBe(new long[] { 100_000, 100_400 });
+        ns.Over250Overflow.ShouldBe(3);
+    }
+
+    [Fact]
     public async Task FinishAsync_NullFactory_StillSetsFinishStats()
     {
         var session = StreamingDictationSession.Start(
@@ -691,7 +709,7 @@ public class StreamingDictationSessionTests
 
         public sealed class StatsSession : IStreamingTranscriptionSession, INativeCallStatsSource
         {
-            public NativeCallStats NativeCallStats { get; } = new(7, 900, 400, 2);
+            public NativeCallStats NativeCallStats { get; set; } = new(7, 900, 400, 2);
             public ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct) => ValueTask.CompletedTask;
             public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
                 => Task.FromResult(new TranscriptionResult("OK", "stats"));

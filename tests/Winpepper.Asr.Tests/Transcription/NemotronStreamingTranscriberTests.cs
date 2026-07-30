@@ -300,6 +300,44 @@ public class NemotronStreamingTranscriberTests
     }
 
     [Fact]
+    public async Task Session_RecordsOver250StartTicks_Absolute()
+    {
+        var engine = new FakeTranscribeCppEngine { FeedDelay = TimeSpan.FromMilliseconds(300) };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        var before = Environment.TickCount64;
+        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // one ~300 ms feed
+        var after = Environment.TickCount64;
+
+        var stats = ((INativeCallStatsSource)s).NativeCallStats;
+        Assert.True(stats.CountOver250Ms >= 1);
+        Assert.NotNull(stats.Over250StartTicks);
+        Assert.Equal(stats.CountOver250Ms, stats.Over250StartTicks!.Count);
+        Assert.All(stats.Over250StartTicks, tick => Assert.InRange(tick, before, after));
+        Assert.Equal(0, stats.Over250Overflow);
+    }
+
+    [Fact]
+    public async Task Session_CapsOver250StartTicksAt16_AndCountsOverflow()
+    {
+        var engine = new FakeTranscribeCppEngine { FeedDelay = TimeSpan.FromMilliseconds(300) };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+
+        for (var i = 0; i < NativeCallStats.Over250ListCap + 1; i++)
+            await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken);
+
+        var stats = ((INativeCallStatsSource)s).NativeCallStats;
+        Assert.Equal(17, stats.CountOver250Ms);   // 17 slow feeds; begin is fast
+        Assert.NotNull(stats.Over250StartTicks);
+        Assert.Equal(NativeCallStats.Over250ListCap, stats.Over250StartTicks!.Count);
+        Assert.Equal(1, stats.Over250Overflow);
+    }
+
+    [Fact]
     public async Task DisposeAsync_CountsStreamDisposeAsNativeCall()
     {
         var engine = new FakeTranscribeCppEngine();

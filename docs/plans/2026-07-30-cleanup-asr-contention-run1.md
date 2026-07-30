@@ -11,10 +11,12 @@ degrading live transcription: the remaining evidence work from the approved plan
 faults, memory, threads, handles, system CPU, gate-wait visibility), three
 verified native-memory leak fixes, the two approved contention fixes (prefetch
 moved to recording-stop with full cancellation policy; cleanup thread cap), and
-the wedge-cascade routing fix.
+the two wedge-cascade fixes (batch routing after an abandon; early drain abandon
+when the in-flight native call has already exceeded the drain budget).
 
 **Architecture:** All pure logic (timing-line formatting, system-CPU math,
-prefetch cancellation policy, ctx_src stamping, batch-routing decision) lives in
+prefetch cancellation policy, ctx_src stamping, batch-routing decision, early
+drain-abandon decision) lives in
 Linux-testable classes (`Winpepper.Core`, `Winpepper.Platform`, `Winpepper.Asr`
 net9.0 TFM). Windows-only code (`PipelineHost`, `LlamaCleanupBackend`,
 `OcrFallback`, P/Invoke call paths) does nothing but sample values and delegate
@@ -102,6 +104,11 @@ interop in `Winpepper.Platform`.
 | `tests/Winpepper.IntegrationTests/WindowContextConsumedStampTests.cs` (create) | 1a(c): real-CTS path asserts consumed stamp `ctx_src=uia`. |
 | `src/Winpepper.Asr/Transcription/StreamingRouteGuard.cs` (create) | E1 pure routing decision. |
 | `tests/Winpepper.Asr.Tests/Transcription/StreamingRouteGuardTests.cs` (create) | E1 decision tests. |
+| `src/Winpepper.Asr/Transcription/DrainAbandonPolicy.cs` (create) | E2 pure early-abandon decision. |
+| `src/Winpepper.Asr/Transcription/NativeCallStats.cs` (modify) | E2 `INativeCallInFlightSource` (lock-free in-flight probe). |
+| `src/Winpepper.Asr/Transcription/StreamingDictationSession.cs` (modify) | E2 early-abandon branch in `FinishAsync`. |
+| `tests/Winpepper.Asr.Tests/Transcription/DrainAbandonPolicyTests.cs` (create) | E2 decision tests. |
+| `tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs` (modify) | E2 immediate-abandon + no-early-abandon session tests. |
 
 ---
 
@@ -1970,7 +1977,437 @@ git commit -m "feat(asr): route dictations to batch while an abandoned wedged st
 
 ---
 
-### Task 11: Final gates + evidence wrap-up (validation expectations for the owner)
+### Task 11: E2 — abandon the drain immediately when the in-flight native call has already exceeded the drain budget
+
+**Files:**
+- Create: `src/Winpepper.Asr/Transcription/DrainAbandonPolicy.cs`
+- Modify: `src/Winpepper.Asr/Transcription/NativeCallStats.cs` (add
+  `INativeCallInFlightSource` beside `INativeCallStatsSource` ~:32-36)
+- Modify: `src/Winpepper.Asr/Transcription/NemotronStreamingTranscriber.cs`
+  (`TimedNativeCall` and `EnsureStream` — the POST-Task-4 shape of both)
+- Modify: `src/Winpepper.Asr/Transcription/StreamingDictationSession.cs`
+  (`FinishAsync` ~:237-315; the drain wait is the single
+  `await _pump.WaitAsync(deadline, ct)` at ~:253)
+- Create: `tests/Winpepper.Asr.Tests/Transcription/DrainAbandonPolicyTests.cs`
+- Test: `tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs`
+- Test: `tests/Winpepper.Asr.Tests/Transcription/NemotronStreamingTranscriberTests.cs`
+
+**Interfaces:**
+- Consumes: Task 4's post-change `TimedNativeCall`/`EnsureStream` in
+  `NemotronStreamingTranscriber.Session`; the existing drain machinery in
+  `StreamingDictationSession.FinishAsync` (`_drainDeadline` ~:54 assigned :100,
+  effective `deadline` computed ~:247-249, abandon block ~:255-279,
+  `ScheduleAbandonedSessionDispose()` ~:326-332, 5-arg
+  `StreamingFinishStats(asrWaitMs, asrNativeMs, backlogFrames, backlogMs,
+  nativeCallStats)`).
+- Produces: `INativeCallInFlightSource` with
+  `TimeSpan? NativeCallInFlightElapsed { get; }` (lock-free, null when no
+  native call is in flight) and
+  `DrainAbandonPolicy.ShouldAbandonImmediately(TimeSpan? inFlightElapsed,
+  TimeSpan drainBudget) : bool`.
+- E1 interplay (no extra wiring): the early abandon sets the SAME
+  `DrainTimedOut` flag as the timeout abandon, so Task 10's
+  `StreamingRouteGuard.NoteAbandoned(...)` call in PipelineHost fires for this
+  path too, unchanged.
+
+Why: every wedged batch fallback today shows `asr_wait` pegged at
+10013-10024 ms — `FinishAsync` waits out the full 10 s deadline even when the
+in-flight native call had ALREADY been running longer than the whole budget at
+stop time, so the drain could not possibly complete. Total cost 13-18 s per
+dictation. A native call cannot be aborted; the win is to stop WAITING for it
+when the wait is provably futile.
+
+Two hard constraints (load-bearing, from the code):
+1. The probe must be LOCK-FREE. The existing
+   `INativeCallStatsSource.NativeCallStats` snapshot takes the session's
+   `_nativeGate` — the very lock the wedged call is holding — which is why
+   `FinishAsync`'s abandon path explicitly never probes it
+   (`StreamingDictationSession.cs` ~:268-269). The new interface reads ONLY a
+   volatile field.
+2. Wrapper transparency degrades safely: the coordinator probes its
+   `_session` with a soft cast (`as INativeCallInFlightSource`), exactly like
+   the existing `as INativeCallStatsSource` probe at ~:312. A wrapper session
+   that does not implement/forward the interface yields null → no early
+   abandon → today's behavior.
+
+- [ ] **Step 1: Write the failing pure-policy tests**
+
+Create `tests/Winpepper.Asr.Tests/Transcription/DrainAbandonPolicyTests.cs`
+(match the namespace of the neighboring test files in that folder):
+
+```csharp
+using Shouldly;
+using Winpepper.Asr.Transcription;
+using Xunit;
+
+namespace Winpepper.Asr.Tests.Transcription;
+
+public class DrainAbandonPolicyTests
+{
+    [Fact]
+    public void NoCallInFlight_NeverAbandonsEarly()
+        => DrainAbandonPolicy.ShouldAbandonImmediately(
+            null, TimeSpan.FromSeconds(10)).ShouldBeFalse();
+
+    [Fact]
+    public void InFlightBelowBudget_WaitsOutTheDeadline()
+        => DrainAbandonPolicy.ShouldAbandonImmediately(
+            TimeSpan.FromSeconds(9.9), TimeSpan.FromSeconds(10)).ShouldBeFalse();
+
+    [Fact]
+    public void InFlightAtBudget_AbandonsImmediately()
+        => DrainAbandonPolicy.ShouldAbandonImmediately(
+            TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10)).ShouldBeTrue();
+
+    [Fact]
+    public void InFlightFarPastBudget_AbandonsImmediately()
+        => DrainAbandonPolicy.ShouldAbandonImmediately(
+            TimeSpan.FromSeconds(35), TimeSpan.FromSeconds(10)).ShouldBeTrue();
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+```bash
+dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+```
+
+Expected: BUILD FAILS — `DrainAbandonPolicy` does not exist.
+
+- [ ] **Step 3: Implement the pure policy + the lock-free interface**
+
+Create `src/Winpepper.Asr/Transcription/DrainAbandonPolicy.cs`:
+
+```csharp
+namespace Winpepper.Asr.Transcription;
+
+/// <summary>E2: the drain's early-abandon decision, pure so it is
+/// Linux-testable. A wedged native call cannot be aborted; when the CURRENT
+/// in-flight call has already been running at least as long as the whole
+/// drain budget, waiting the budget out buys nothing — the pump cannot
+/// possibly drain in time. Abandon immediately so the caller's late batch
+/// path starts up to a full deadline sooner (observed pre-fix: asr_wait
+/// pegged at 10013-10024 ms on every wedged batch fallback; 13-18 s total
+/// per dictation).</summary>
+public static class DrainAbandonPolicy
+{
+    public static bool ShouldAbandonImmediately(
+        TimeSpan? inFlightElapsed, TimeSpan drainBudget)
+        => inFlightElapsed is { } elapsed && elapsed >= drainBudget;
+}
+```
+
+In `src/Winpepper.Asr/Transcription/NativeCallStats.cs`, next to
+`INativeCallStatsSource` (~:32-36), add:
+
+```csharp
+/// <summary>E2: LOCK-FREE view of the CURRENT in-flight native call, for the
+/// drain's early-abandon decision. MUST never take the session's native gate
+/// (contrast <see cref="INativeCallStatsSource.NativeCallStats"/>, whose
+/// snapshot does): the consumer probes it precisely when a wedged native call
+/// may be holding that gate. Null when no native call is in flight.</summary>
+public interface INativeCallInFlightSource
+{
+    TimeSpan? NativeCallInFlightElapsed { get; }
+}
+```
+
+- [ ] **Step 4: Run the policy tests to verify they pass**
+
+```bash
+dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -notrait "Platform=Windows"
+```
+
+Expected: `Errors: 0`, `Failed: 0` (all four new policy tests pass).
+
+- [ ] **Step 5: Write the failing transcriber test (in-flight elapsed is observable while wedged)**
+
+In `tests/Winpepper.Asr.Tests/Transcription/NemotronStreamingTranscriberTests.cs`,
+mirror the construction of the existing watchdog test
+`Wedged_native_call_logs_a_still_running_warning_before_it_returns` (~:210-241
+— `FakeTranscribeCppEngine.FeedGate` is the deterministic native wedge; adapt
+helper names per the mismatch rule):
+
+```csharp
+    [Fact]
+    public async Task Wedged_native_call_exposes_in_flight_elapsed_lock_free()
+    {
+        using var gate = new ManualResetEventSlim(false);
+        var engine = new FakeTranscribeCppEngine { FeedGate = gate };
+        var t = new NemotronStreamingTranscriber(
+            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en",
+            new CapturingLogger(), nativeCallWarnAfter: TimeSpan.FromSeconds(30));
+        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+        var inFlight = (INativeCallInFlightSource)s; // cast fails until Step 6
+
+        var push = Task.Run(() => s.PushAsync(Samples(2560),
+            TestContext.Current.CancellationToken).AsTask()); // exactly one native feed, wedged on the gate
+
+        var giveUp = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (inFlight.NativeCallInFlightElapsed is null && DateTime.UtcNow < giveUp)
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+        Assert.NotNull(inFlight.NativeCallInFlightElapsed); // observable WHILE the call is wedged
+        gate.Set(); // unwedge the native call
+
+        await push;
+        Assert.Null(inFlight.NativeCallInFlightElapsed); // cleared once the call returned
+    }
+```
+
+Run (same two commands as Step 4). Expected: the new test FAILS — the cast to
+`INativeCallInFlightSource` throws `InvalidCastException` (the session does
+not implement it yet).
+
+- [ ] **Step 6: Implement the in-flight marker in the transcriber**
+
+In `NemotronStreamingTranscriber.Session` (post-Task-4 shape):
+
+1. Add `INativeCallInFlightSource` to the class's interface list (it already
+   implements `IStreamingTranscriptionSession` and `INativeCallStatsSource`).
+
+2. Add the field and property:
+
+```csharp
+        /// <summary>Environment.TickCount64 when the CURRENT native call
+        /// started; 0 = no call in flight. Volatile, never under _nativeGate:
+        /// the drain's early-abandon probe reads it while a wedged call may
+        /// be HOLDING that gate (see INativeCallInFlightSource).</summary>
+        private long _inFlightSinceTick;
+
+        public TimeSpan? NativeCallInFlightElapsed
+        {
+            get
+            {
+                var since = Volatile.Read(ref _inFlightSinceTick);
+                return since == 0
+                    ? null
+                    : TimeSpan.FromMilliseconds(Environment.TickCount64 - since);
+            }
+        }
+```
+
+3. In `TimedNativeCall`, immediately after the existing
+   `var startTick = Environment.TickCount64;` line, add:
+
+```csharp
+            Volatile.Write(ref _inFlightSinceTick, Math.Max(1, startTick)); // Max(1): 0 is the "no call" sentinel
+```
+
+   and add this as the FIRST line of its `finally` block (before
+   `watchdogCts.Cancel();`):
+
+```csharp
+                Volatile.Write(ref _inFlightSinceTick, 0);
+```
+
+4. Apply the IDENTICAL pair to `EnsureStream` (post-Task-4 shape): the write
+   after its `var startTick = Environment.TickCount64;`, the clear as the
+   FIRST line of its `finally` — a wedged `BeginStream` stalls the pump just
+   like a wedged feed.
+
+5. Wrapper transparency: run
+   `grep -rn "INativeCallStatsSource" src/ tests/`. For every WRAPPER session
+   class that implements or forwards `INativeCallStatsSource` to an inner
+   session (e.g. `FallbackStreamingTranscriber`'s session, if it does),
+   forward `INativeCallInFlightSource` in exactly the same way (implement the
+   interface, delegate the property to
+   `(inner as INativeCallInFlightSource)?.NativeCallInFlightElapsed`). If a
+   wrapper does NOT forward the stats interface, add nothing there — the
+   coordinator's soft cast degrades to null (today's behavior) by design.
+
+Run (same two commands as Step 4). Expected: `Errors: 0`, `Failed: 0` —
+including the Step 5 test and all pre-existing transcriber tests.
+
+- [ ] **Step 7: Write the failing session-level tests (immediate abandon + no-early-abandon guard)**
+
+In `tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs`, add a fake
+alongside the existing wedge fakes (copy the `WedgesOnSecondPushTranscriber`
+first-push-completes pattern at ~:498-521 so the ZERO-PUSH 1.5 s shortcut
+provably does NOT apply — the FULL deadline must be in force for the test to
+mean anything):
+
+```csharp
+    // E2: streaming genuinely underway (first push completed), then the
+    // second push wedges INSIDE a native call that reports it has ALREADY
+    // been running longer than the drain budget — the drain must abandon
+    // immediately instead of waiting out the full deadline.
+    private sealed class InFlightPastBudgetTranscriber : IStreamingTranscriber
+    {
+        public string ModelName => "in-flight-past-budget";
+        public WedgingSession Session { get; } = new();
+        public Task<IStreamingTranscriber?> Self() => Task.FromResult<IStreamingTranscriber?>(this);
+        public Task<IStreamingTranscriptionSession> StartSessionAsync(CancellationToken ct)
+            => Task.FromResult<IStreamingTranscriptionSession>(Session);
+
+        public sealed class WedgingSession : IStreamingTranscriptionSession, INativeCallInFlightSource
+        {
+            private readonly TaskCompletionSource _wedge = new();
+            private readonly TaskCompletionSource _secondPushStarted = new();
+            private int _pushes;
+
+            /// <summary>What the wedged "native call" claims its elapsed is.</summary>
+            public TimeSpan? InFlightToReport { get; set; } = TimeSpan.FromSeconds(60);
+
+            /// <summary>The second push starting proves the first COMPLETED —
+            /// so the zero-push short deadline is NOT what bounds this test.</summary>
+            public Task SecondPushStarted => _secondPushStarted.Task;
+
+            public TimeSpan? NativeCallInFlightElapsed
+                => _secondPushStarted.Task.IsCompleted ? InFlightToReport : null;
+
+            public async ValueTask PushAsync(ReadOnlyMemory<float> mono16k, CancellationToken ct)
+            {
+                if (Interlocked.Increment(ref _pushes) == 1) return; // first push succeeds
+                _secondPushStarted.TrySetResult();
+                await _wedge.Task; // the wedged native feed
+            }
+
+            public Task<TranscriptionResult> FinishAsync(ReadOnlyMemory<float> fullAudio, CancellationToken ct)
+                => throw new InvalidOperationException("FinishAsync must not run on an abandoned session");
+
+            public ValueTask DisposeAsync()
+            {
+                _wedge.TrySetResult(); // socket-style: dispose unwedges the push
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+```
+
+(Adapt member lists to `IStreamingTranscriber`/`IStreamingTranscriptionSession`
+exactly as the neighboring fakes in this file do — mismatch rule; e.g. drop the
+`Self()` helper if the neighboring fakes inline the factory lambda.)
+
+Then the two tests (same file — copy the loud-guard structure of
+`ZeroCompletedPushes_AtFinish_UsesTheShortDrainDeadline` ~:467-496):
+
+```csharp
+    [Fact]
+    public async Task InFlightCallPastDrainBudget_AtFinish_AbandonsImmediately()
+    {
+        var transcriber = new InFlightPastBudgetTranscriber();
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromSeconds(30)); // FULL deadline: must NOT be waited out
+        session.OnFrame(new float[800]); // first push — completes, full deadline applies
+        session.OnFrame(new float[800]); // second push — wedges, reports 60 s in flight
+        await transcriber.Session.SecondPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        // The in-flight call already exceeds the 30 s budget, so FinishAsync
+        // must abandon IMMEDIATELY. The 10 s guard sits between "immediate"
+        // and the 30 s deadline so waiting the deadline out fails loudly.
+        var result = await session
+            .FinishAsync(new float[800], TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue(); // same contract as a timed-out drain (E1 routing keys off this)
+        var stats = session.FinishStats.ShouldNotBeNull();
+        stats.AsrWaitMs.ShouldBeLessThan(5000); // did not pay the 30 s deadline
+        stats.NativeCallStats.ShouldBeNull();   // never probed on abandon (gate may be wedged)
+
+        // The background abandon dispose unwedges this socket-style fake.
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task InFlightCallBelowDrainBudget_AtFinish_WaitsOutTheDeadline()
+    {
+        var transcriber = new InFlightPastBudgetTranscriber();
+        transcriber.Session.InFlightToReport = TimeSpan.FromMilliseconds(50); // well under budget
+        var session = StreamingDictationSession.Start(
+            _ => Task.FromResult<IStreamingTranscriber?>(transcriber),
+            NullLogger.Instance, TestContext.Current.CancellationToken,
+            drainDeadline: TimeSpan.FromMilliseconds(200));
+        session.OnFrame(new float[800]);
+        session.OnFrame(new float[800]);
+        await transcriber.Session.SecondPushStarted.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+
+        var result = await session.FinishAsync(new float[800], TestContext.Current.CancellationToken);
+
+        result.ShouldBeNull();
+        session.DrainTimedOut.ShouldBeTrue();
+        var stats = session.FinishStats.ShouldNotBeNull();
+        stats.AsrWaitMs.ShouldBeGreaterThanOrEqualTo(150); // paid the ~200 ms deadline — NO early abandon
+
+        await session.PumpCompletion.WaitAsync(
+            TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+    }
+```
+
+Run (same two commands as Step 4). Expected:
+`InFlightCallPastDrainBudget_AtFinish_AbandonsImmediately` FAILS with a
+`TimeoutException` from the 10 s guard (the drain still waits the full 30 s);
+`InFlightCallBelowDrainBudget_AtFinish_WaitsOutTheDeadline` already passes
+(it pins today's behavior so the fix cannot overreach).
+
+- [ ] **Step 8: Implement the early-abandon branch in FinishAsync**
+
+In `StreamingDictationSession.FinishAsync`, insert between the effective
+`deadline` computation (~:247-249) and the
+`var waitSw = System.Diagnostics.Stopwatch.StartNew();` line:
+
+```csharp
+        // E2: a native call cannot be aborted. If the CURRENT in-flight
+        // native call has already run at least the whole drain budget, the
+        // pump cannot possibly drain in time — waiting just delays the
+        // caller's late batch path by the full deadline (observed pre-fix:
+        // asr_wait pegged at ~10 s on every wedged batch fallback). The probe
+        // is LOCK-FREE by contract (INativeCallInFlightSource) — never
+        // NativeCallStats here: its snapshot takes the native gate the wedged
+        // call is holding. A session/wrapper that does not expose the
+        // interface yields null → no early abandon (previous behavior).
+        var inFlightElapsed = (_session as INativeCallInFlightSource)?.NativeCallInFlightElapsed;
+        if (DrainAbandonPolicy.ShouldAbandonImmediately(inFlightElapsed, deadline))
+        {
+            DrainTimedOut = true; // same contract as the timeout abandon below
+            FinishStats = new StreamingFinishStats(0, null, backlogFrames, backlogMs, null);
+            _log.LogWarning(
+                "streaming drain abandoned immediately: in-flight native call already running {InFlightMs} ms, past the {DrainDeadline} drain budget; batch path takes over",
+                (int)inFlightElapsed!.Value.TotalMilliseconds, deadline);
+            _ = ScheduleAbandonedSessionDispose();
+            return null;
+        }
+```
+
+Nothing else in the method changes: the healthy path keeps its single
+`await _pump.WaitAsync(deadline, ct)` and `waitSw`-based `AsrWaitMs`
+measurement, and the `catch (TimeoutException)` abandon block stays exactly
+as-is for wedges that had NOT yet exceeded the budget at stop time.
+
+- [ ] **Step 9: Run tests to verify they pass**
+
+```bash
+dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -notrait "Platform=Windows"
+```
+
+Expected: `Errors: 0`, `Failed: 0` — both Step 7 tests, the Step 5 transcriber
+test, the Step 1 policy tests, and every pre-existing drain test
+(`WedgedPush_DrainDeadlineExpires_...`,
+`ZeroCompletedPushes_AtFinish_UsesTheShortDrainDeadline`,
+`FinishAsync_DrainTimeout_StillReportsWaitAndBacklog`, ...) unchanged.
+
+- [ ] **Step 10: Linux suite green, then commit**
+
+Run `./scripts/linux-tests.sh` → `LINUX SUITE: GREEN`, then:
+
+```bash
+git add src/Winpepper.Asr/Transcription/DrainAbandonPolicy.cs src/Winpepper.Asr/Transcription/NativeCallStats.cs src/Winpepper.Asr/Transcription/NemotronStreamingTranscriber.cs src/Winpepper.Asr/Transcription/StreamingDictationSession.cs tests/Winpepper.Asr.Tests/Transcription/DrainAbandonPolicyTests.cs tests/Winpepper.Asr.Tests/Transcription/NemotronStreamingTranscriberTests.cs tests/Winpepper.Asr.Tests/StreamingDictationSessionTests.cs
+# plus any wrapper file touched in Step 6.5 (e.g. src/Winpepper.Asr/Transcription/FallbackStreamingTranscriber.cs)
+git commit -m "feat(asr): abandon the drain immediately when the in-flight native call already exceeds the budget" \
+  -m "E2: FinishAsync burned the full 10 s deadline even when the wedged native call had already been running longer than the whole budget (asr_wait pegged at 10013-10024 ms on every wedged batch fallback; 13-18 s per dictation). NemotronStreamingTranscriber exposes a LOCK-FREE in-flight-since tick (never under the native gate); pure DrainAbandonPolicy (Linux-tested) decides; the early abandon takes the exact same DrainTimedOut path, so E1's batch routing fires for it too." \
+  -m "Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
+```
+
+---
+
+### Task 12: Final gates + evidence wrap-up (validation expectations for the owner)
 
 **Files:**
 - Modify (append): `docs/plans/2026-07-29-cleanup-asr-contention-evidence.md`
@@ -2026,6 +2463,10 @@ non-excluded timing lines in log order, from
 - Wedge-cascade check: any "streaming routed to batch for this dictation"
   INF lines should coincide with a preceding drain-timeout WRN, and the
   FOLLOWING dictation should not show a ~5000 ms stream-begin gate wait.
+- Early-abandon check (E2): wedged batch fallbacks should no longer show
+  asr_wait pegged at ~10000 ms when the wedge began mid-recording — expect
+  either a normal timed-out drain or an "abandoned immediately" WRN with
+  asr_wait ~0 on that line.
 - Outlier rule (unchanged): exclude only when asr_wait > 2000 AND
   backlog_ms > 2000 AND native_max > 2000; excluded lines are counted and
   listed here with offsets adjudicated against prefetch/prewarm/GC windows.
@@ -2064,9 +2505,12 @@ Do NOT push.
   (c) consumed-stamp `ctx_src=uia` real-CTS-path test — Task 8's
   `WindowContextConsumedStampTests`; (d) both named race tests with named
   observables — Task 8's coordinator tests). D2 = Task 7 (named constant,
-  lower cap with rationale, bench-judged). E1 = Task 10. F1–F3 = Task 1;
-  bench numbers and validation expectations = Tasks 7/11. No known coverage
-  gaps; no requirement deferred.
+  lower cap with rationale, bench-judged). E1 = Task 10. E2 = Task 11
+  (lock-free `INativeCallInFlightSource` probe + pure `DrainAbandonPolicy` +
+  immediate-abandon branch in `FinishAsync`, sharing the `DrainTimedOut`
+  contract so E1's routing covers it). F1–F3 = Task 1; bench numbers and
+  validation expectations = Tasks 7/12. No known coverage gaps; no
+  requirement deferred.
 - **No silent deferrals:** the only stub-like element is `EchoBackend` in Task
   8's integration test — production cleanup behavior is exercised by the real
   `CleanupRunner` (the unit under test is consumption timing + stamping, not
@@ -2081,4 +2525,8 @@ Do NOT push.
   and `WindowContextStamp.CtxSrc(bool?, Task<WindowContextResult>?)` match
   between Tasks 8 and 9; `StreamingRouteGuard.NoteAbandoned(Task)` /
   `TryClaimStreaming(out string?)` match between Task 10's tests and wiring;
-  `LastGateWaitMs` matches between interface, engine, fake, and `EnsureStream`.
+  `LastGateWaitMs` matches between interface, engine, fake, and `EnsureStream`;
+  `INativeCallInFlightSource.NativeCallInFlightElapsed` and
+  `DrainAbandonPolicy.ShouldAbandonImmediately(TimeSpan?, TimeSpan)` match
+  between Task 11's interface/policy definitions, the transcriber
+  implementation, the `FinishAsync` probe, and all three test files.

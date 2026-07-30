@@ -60,7 +60,12 @@ NEVER `dotnet test`), LLamaSharp 0.27.0 (NuGet, Windows TFM only).
 - **New timing-line grammar (exact, all three optional — omitted when null):**
   - `over250_at=[1180,3420]` — ms offsets from recording start of each native
     call ≥ 250 ms, unclamped, first 16 only; `+N` suffix when more were dropped:
-    `over250_at=[...]+3`. Placed immediately after `native_over250=`.
+    `over250_at=[...]+3`. Placed immediately after `native_over250=`. Unclamped
+    cuts BOTH ways: offsets may exceed the stop request (post-stop calls are
+    evidence), and in rare cold-start races may be slightly NEGATIVE — the
+    streaming session's `Start()` runs a few lines before `_dictStartTicks` is
+    stamped, so a slow first native call can begin just before the stamp.
+    Negative offsets are valid evidence, not bugs; do not clamp.
   - `ctx_src=uia|ocr|none` — placed immediately after `cleanup_model=`.
   - `proc_cpu_ms=1875` — placed immediately after `prewarm_active=`, before `total=`.
 
@@ -1045,16 +1050,26 @@ or neither may be wrong. Never settle this from memory — evidence only.
 
 ```bash
 mkdir -p /tmp/llamasharp-0c
-curl -fsSL -o /tmp/llamasharp-0c/StatelessExecutor.cs \
-  https://raw.githubusercontent.com/SciSharp/LLamaSharp/v0.27.0/LLama/StatelessExecutor.cs \
+curl -fsSL -o /tmp/llamasharp-0c/LLamaStatelessExecutor.cs \
+  https://raw.githubusercontent.com/SciSharp/LLamaSharp/v0.27.0/LLama/LLamaStatelessExecutor.cs \
   && echo FETCHED || echo FETCH_FAILED
 ```
+
+(NOTE — verified 2026-07-29: the file is `LLama/LLamaStatelessExecutor.cs`; the
+path `LLama/StatelessExecutor.cs` 404s. The class inside is `StatelessExecutor`.
+Tag `v0.27.0` resolves to commit `7cbbc45e421d55794d5050d126e0b96511007007`,
+which exactly matches the `<repository commit="...">` stamp in the cached
+`~/.nuget/packages/llamasharp/0.27.0/llamasharp.nuspec` — so the tag source is
+faithful to the NuGet binary; cite this sha match in the evidence file as the
+source-fidelity note.)
 
 Expected: `FETCHED` and a non-empty C# file. If `FETCH_FAILED` (no network, tag
 missing), go to Step 2. If FETCHED, also pull the files StatelessExecutor's
 context lifetime depends on, as needed to follow the code (same raw-URL pattern,
-path `LLama/<File>.cs`) — typically `LLamaContext.cs` and, if referenced,
-`LLamaWeights.cs` / `Native/SafeLLamaContextHandle.cs`.
+path `LLama/<File>.cs` or `LLama/Native/<File>.cs`) — typically `LLamaContext.cs`
+and, if referenced, `LLamaWeights.cs` / `Native/SafeLLamaContextHandle.cs` /
+`Native/SafeLLamaHandleBase.cs` (the SafeHandle base — needed to trace whether
+`LLamaContext.Dispose()` releases the NATIVE handle deterministically).
 
 - [ ] **Step 2 (fallback): decompile the NuGet-resolved assembly**
 
@@ -1103,12 +1118,12 @@ Replace the `(pending ...)` placeholder under
   are of the decompiled output, stated as such):
 
   ```csharp
-  // LLama/StatelessExecutor.cs:<n>-<m> (v0.27.0)
+  // LLama/LLamaStatelessExecutor.cs:<n>-<m> (v0.27.0)
   <the constructor's context handling, verbatim>
   ```
 
   ```csharp
-  // LLama/StatelessExecutor.cs:<n>-<m> (v0.27.0)
+  // LLama/LLamaStatelessExecutor.cs:<n>-<m> (v0.27.0)
   <the per-generation context creation/disposal inside InferAsync, verbatim>
   ```
 
@@ -1179,9 +1194,14 @@ Expected: `LINUX SUITE: GREEN`.
 
 Expected: exit 0 with `GATE: GREEN` (~12 min; use a 20–30 min timeout). This is
 also the ONLY compile verification for Task 4's `#if WINDOWS` PipelineHost
-edits. Known transient flakes — retry the whole gate (up to 3 attempts) if the
-failure is one of: UNC path `MSB4025` build errors, or vsock/`powershell.exe`
-interop connection failures. A REAL test failure or a compile error in
+edits. Prerequisites (verified 2026-07-29, when the gate ran GREEN at base):
+the Windows host desktop must be unlocked/interactive (hook tests TIME OUT on a
+locked/headless desktop — the gate script itself documents this), and NEVER run
+the gate concurrently with `./scripts/linux-tests.sh` (the gate pre-cleans all
+`bin/`/`obj/`). Known transient flakes — retry the whole gate (up to 3 attempts)
+if the failure is one of: UNC path `MSB4025` build errors, vsock/`powershell.exe`
+interop connection failures, or hook-test TIMEOUTs (re-check the desktop is
+unlocked before retrying that class). A REAL test failure or a compile error in
 `PipelineHost.cs` is NOT a flake: fix it, re-run the Linux suite, commit the fix
 (same message discipline as Task 4), and re-run the gate.
 

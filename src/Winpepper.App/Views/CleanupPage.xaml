@@ -25,6 +25,12 @@
                     <TextBlock Text="Behavior" Style="{ThemeResource BodyStrongTextBlockStyle}" />
                     <ToggleSwitch x:Name="EnabledSwitch" AutomationProperties.AutomationId="CleanupEnabledToggle" Header="Enable cleanup LLM" />
                     <ToggleSwitch x:Name="WindowCtxSwitch" AutomationProperties.AutomationId="CleanupWindowContextToggle" Header="Use window context (UIA + OCR)" />
+                    <TextBlock x:Name="WindowCtxHonestyNote"
+                               Text="The selected cleanup model does not read window context. This setting is kept and will apply if you switch to an instruction-style model."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed" />
                 </StackPanel>
             </Border>
 
@@ -34,6 +40,13 @@
                     BorderThickness="1" CornerRadius="8" Padding="16">
                 <StackPanel Spacing="12">
                     <TextBlock Text="Prompt" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <TextBlock x:Name="ModelHonestyNote"
+                               Text="The selected cleanup model was trained to clean transcripts directly and does not read instructions, custom prompts, or window context. These settings are kept and will apply if you switch to an instruction-style model."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Margin="0,0,0,8"
+                               Visibility="Collapsed" />
                     <StackPanel Spacing="4">
                         <TextBlock Text="Prompt profile" />
                         <ComboBox x:Name="ProfileCombo" AutomationProperties.AutomationId="CleanupProfileCombo" SelectedValuePath="Tag" MinWidth="280">

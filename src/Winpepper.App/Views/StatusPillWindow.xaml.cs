@@ -87,6 +87,13 @@ public sealed partial class StatusPillWindow : Window
             _vm.Tick();
             ElapsedText.Text = $"{_vm.ElapsedMs / 1000} s";
 
+            // Pegged meter: decision is made in SessionViewModel on tick 4 (~400 ms
+            // after recording start) and stays fixed for the pill's lifetime; read on
+            // the tick like ElapsedMs/InputLevel (no new notification path, no
+            // per-tick allocations).
+            PeggedIndicator.Visibility =
+                _vm.CpuPegged == true ? Visibility.Visible : Visibility.Collapsed;
+
             // Cheap: keep us pinned to the top even if another topmost window
             // was created after our last show. Only while visible. This tick
             // now also runs during PendingPaste/Error (PillTimerPolicy), so

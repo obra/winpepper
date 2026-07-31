@@ -17,6 +17,7 @@
             <ColumnDefinition Width="Auto" />
             <ColumnDefinition Width="*" />
             <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
         <Ellipse x:Name="Dot" Width="10" Height="10" Fill="#FFEF4444"
                  VerticalAlignment="Center"
@@ -48,5 +49,14 @@
                    FontSize="12"
                    VerticalAlignment="Center"
                    Text="0 s" />
+        <TextBlock x:Name="PeggedIndicator"
+                   Grid.Column="4"
+                   VerticalAlignment="Center"
+                   FontFamily="Segoe MDL2 Assets"
+                   FontSize="14"
+                   Text="&#xE9D9;"
+                   Foreground="#F59E0B"
+                   Visibility="Collapsed"
+                   ToolTipService.ToolTip="System CPU is busy — this dictation may be slower" />
     </Grid>
 </Window>

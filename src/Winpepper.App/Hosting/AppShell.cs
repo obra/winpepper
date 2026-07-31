@@ -154,6 +154,23 @@ public sealed class AppShell : IDisposable
         // Cleanup settings persist into AppSettings (Cleanup* properties) and are
         // read LIVE per dictation by PipelineHost, so a Cleanup-tab change (incl.
         // the Enabled toggle) takes effect on the very next dictation.
+        // Hoisted above the settings VMs so honesty delegates (cleanup VM, pipeline
+        // prefetch gate) can close over the same active-model source the cleanup
+        // call uses.
+        var cleanupSelection = new Winpepper.Core.Settings.CleanupModelSelectionSlot();
+        cleanupSelection.Publish(settings.CleanupModelName); // seed with the persisted boot value
+
+        Func<string?, Winpepper.Cleanup.CleanupModelTarget> resolveCleanupTarget = raw =>
+        {
+            // CleanupModelResolution -> CleanupModelTarget: field-for-field
+            // copy (Winpepper.Cleanup does not reference Winpepper.Models).
+            var r = Winpepper.Models.CleanupModelPathResolver.Resolve(
+                modelsServices.Registry, modelsServices.ModelsRoot, raw);
+            return new Winpepper.Cleanup.CleanupModelTarget(
+                r.GgufPath, r.ResolvedName, r.FellBackToDefault,
+                r.PromptFormat, r.OmitPromptExample);
+        };
+
         var cleanupContract = CleanupSettingsContract.FromSettings(settings);
         var cleanupVm = new CleanupSettingsViewModel(cleanupContract,
             c => _ = writer.QueueAndFlushAsync(c.ApplyTo));
@@ -189,20 +206,9 @@ public sealed class AppShell : IDisposable
         // cleanup seam. Boot no longer blocks on the GGUF load —
         // RequestPrewarm loads in the background and a dictation that wins the
         // race falls back to the raw transcript once, then self-heals.
-        var cleanupSelection = new Winpepper.Core.Settings.CleanupModelSelectionSlot();
-        cleanupSelection.Publish(settings.CleanupModelName); // seed with the persisted boot value
         var cleanupHolder = new Winpepper.Cleanup.CleanupBackendHolder(
             desiredModelName: () => cleanupSelection.Read(),
-            resolve: raw =>
-            {
-                // CleanupModelResolution -> CleanupModelTarget: field-for-field
-                // copy (Winpepper.Cleanup does not reference Winpepper.Models).
-                var r = Winpepper.Models.CleanupModelPathResolver.Resolve(
-                    modelsServices.Registry, modelsServices.ModelsRoot, raw);
-                return new Winpepper.Cleanup.CleanupModelTarget(
-                    r.GgufPath, r.ResolvedName, r.FellBackToDefault,
-                    r.PromptFormat, r.OmitPromptExample);
-            },
+            resolve: resolveCleanupTarget,
             verifyReady: name => modelsServices.VerifyCleanupModelReady(name),
             backendFactory: target => new Winpepper.Cleanup.LlamaCleanupBackend(
                 target.GgufPath!,
@@ -327,7 +333,8 @@ public sealed class AppShell : IDisposable
                                          correctionStore, windowContext,
                                          postPaste: postPaste, focusedCapturer: focusedCapturer,
                                          postPasteLearningEnabled: settings.PostPasteLearningEnabled,
-                                         prewarmMicEnabled: settings.PrewarmMicEnabled);
+                                         prewarmMicEnabled: settings.PrewarmMicEnabled,
+                                         activeCleanupPromptFormat: () => resolveCleanupTarget(cleanupSelection.Read()).PromptFormat);
 
         // Shell publication and StartAsync are now driven by PublishedStartup
         // (App.OnLaunched): Create() stays synchronous and returns the fully

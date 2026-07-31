@@ -85,6 +85,10 @@ public sealed class PipelineHost : IDisposable
     private readonly Winpepper.Platform.Injection.ClipboardFallback _clipboardFallback;
     private readonly Winpepper.Core.Notifications.IToastService _toasts;
     private readonly Func<AppSettings> _settingsProvider;
+    /// <summary>Prompt format of the ACTIVE cleanup model (slot -> resolver, the
+    /// same source the cleanup call uses), or null when unknown -- null behaves
+    /// as today (prefetch allowed). See WindowContextPrefetchGate.</summary>
+    private readonly Func<string?>? _activeCleanupPromptFormat;
     private readonly Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> _buildTranscriber;
     private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
     private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
@@ -114,7 +118,8 @@ public sealed class PipelineHost : IDisposable
         Winpepper.Core.Learning.PostPasteWatcher? postPaste = null,
         Winpepper.Platform.Learning.FocusedElementCapturer? focusedCapturer = null,
         bool postPasteLearningEnabled = false,
-        bool prewarmMicEnabled = true)
+        bool prewarmMicEnabled = true,
+        Func<string?>? activeCleanupPromptFormat = null)
     {
         _log = factory.CreateLogger<PipelineHost>();
         _orphanGuard = new(ex => _log.LogWarning(ex, "deferred ASR session dispose failed"));
@@ -598,9 +603,14 @@ public sealed class PipelineHost : IDisposable
                 // settings so a Cleanup-tab change applies to this dictation.
                 Winpepper.Platform.WindowContext.WindowContextPrefetchHandle? ctxPrefetch = null;
                 var settingsAtStop = _settingsProvider();
+                // Gated on LIVE settings AND the ACTIVE model's prompt format: a raw-io
+                // model discards the system prompt, so no context gathering runs for it
+                // (no UIA walk, no waits; ctx_src omitted as when the feature is off).
                 if (_ctxCoordinator is not null
-                    && settingsAtStop.CleanupEnabled
-                    && settingsAtStop.CleanupWindowContextEnabled)
+                    && Winpepper.Cleanup.WindowContextPrefetchGate.ShouldPrefetch(
+                        settingsAtStop.CleanupEnabled,
+                        settingsAtStop.CleanupWindowContextEnabled,
+                        _activeCleanupPromptFormat?.Invoke()))
                 {
                     ctxPrefetch = _ctxCoordinator.Start(_ctxHwndAtStart);
                 }
@@ -1169,9 +1179,14 @@ public sealed class PipelineHost : IDisposable
                     // settings so a Cleanup-tab change applies to this dictation.
                     Winpepper.Platform.WindowContext.WindowContextPrefetchHandle? ctxPrefetch2 = null;
                     var settingsAtStop2 = _settingsProvider();
+                    // Gated on LIVE settings AND the ACTIVE model's prompt format: a raw-io
+                    // model discards the system prompt, so no context gathering runs for it
+                    // (no UIA walk, no waits; ctx_src omitted as when the feature is off).
                     if (_ctxCoordinator is not null
-                        && settingsAtStop2.CleanupEnabled
-                        && settingsAtStop2.CleanupWindowContextEnabled)
+                        && Winpepper.Cleanup.WindowContextPrefetchGate.ShouldPrefetch(
+                            settingsAtStop2.CleanupEnabled,
+                            settingsAtStop2.CleanupWindowContextEnabled,
+                            _activeCleanupPromptFormat?.Invoke()))
                     {
                         ctxPrefetch2 = _ctxCoordinator.Start(_ctxHwndAtStart);
                     }

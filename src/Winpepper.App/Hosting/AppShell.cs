@@ -107,6 +107,12 @@ public sealed class AppShell : IDisposable
         var engine = new SessionEngine();
         var sessionVm = new SessionViewModel(engine, uiThread,
             log: factory.CreateLogger<SessionViewModel>());
+        // Pegged-indicator sampling reuses the ONE existing sampler mechanism
+        // (GetSystemTimes via ProcessResourceSampler); returns null off-Windows.
+        sessionVm.SystemTimesSampler = () =>
+            Winpepper.Platform.Diagnostics.ProcessResourceSampler.SystemTimes() is { } s
+                ? (s.Idle100ns, s.Kernel100ns, s.User100ns)
+                : null;
         var errorBus = new Winpepper.Core.Errors.ErrorBus();
         sessionVm.AttachErrorBus(errorBus);
 

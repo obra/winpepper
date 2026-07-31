@@ -107,6 +107,25 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         private set { if (_elapsedMs == value) return; _elapsedMs = value; Raise(nameof(ElapsedMs)); }
     }
 
+    // --- CPU-pegged near-start sampling (Feature: pill pegged indicator) ---
+    // Sampling rides the pill's existing 100 ms tick -- no new threads/timers.
+    // All writes happen on the UI thread (Recording arm via _ui.Post, Tick via
+    // the pill's DispatcherTimer); the volatile int lets PipelineHost's run loop
+    // read the decision for the timing line without tearing.
+
+    /// <summary>Raw cumulative system times (GetSystemTimes semantics), wired in
+    /// AppShell to ProcessResourceSampler.SystemTimes(). Null delegate or null
+    /// reading => no decision (CpuPegged stays null, log field omitted).</summary>
+    public Func<(long Idle100ns, long Kernel100ns, long User100ns)?>? SystemTimesSampler { get; set; }
+
+    private (long Idle100ns, long Kernel100ns, long User100ns)? _cpuBaseline;
+    private int _cpuTicksSinceStart;
+    private volatile int _cpuPeggedState; // 0=pending 1=no-reading 2=not-pegged 3=pegged
+
+    /// <summary>Null until decided (or when no reading was possible); otherwise
+    /// fixed for the rest of the dictation and shown for the pill's lifetime.</summary>
+    public bool? CpuPegged => _cpuPeggedState switch { 2 => false, 3 => true, _ => null };
+
     /// <summary>
     /// Smoothed microphone level (0..1) while recording, for the pill's voice
     /// meter. Zero when not recording. Fed via <see cref="ReportAudioFrame"/>.
@@ -438,6 +457,21 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     public void Tick() => _ui.Post(() =>
     {
         if (_stopwatch.IsRunning) ElapsedMs = _stopwatch.ElapsedMilliseconds;
+
+        if (_cpuPeggedState == 0
+            && Stage == SessionStage.Recording
+            && ++_cpuTicksSinceStart >= Winpepper.Core.Diagnostics.CpuPeggedPolicy.SampleAfterTicks)
+        {
+            _cpuPeggedState =
+                _cpuBaseline is { } s0
+                && SystemTimesSampler?.Invoke() is { } s1
+                && Winpepper.Core.Diagnostics.DictationTimingSummary.SystemCpuPercent(
+                       s1.Idle100ns - s0.Idle100ns,
+                       s1.Kernel100ns - s0.Kernel100ns,
+                       s1.User100ns - s0.User100ns) is { } pct
+                    ? (Winpepper.Core.Diagnostics.CpuPeggedPolicy.IsPegged(pct) ? 3 : 2)
+                    : 1; // evaluated, no reading -- never retried, field omitted from the log
+        }
     });
 
     /// <summary>
@@ -472,6 +506,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     // 2026-07-21 pending-paste plan, owner-approved). If this
                     // dictation also parks, EnterPendingPaste appends.
                     _stopwatch.Restart();
+                    _cpuBaseline = SystemTimesSampler?.Invoke();
+                    _cpuTicksSinceStart = 0;
+                    _cpuPeggedState = 0;
                     Stage = SessionStage.Recording;
                     StatusText = "Recording...";
                     break;

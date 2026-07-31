@@ -1713,6 +1713,7 @@ public sealed class PipelineHost : IDisposable
         // GC's STW pauses, excludes its concurrent portion).
         timing.GcPauseMs = (int)(GC.GetTotalPauseDuration() - _gcPauseAtStart).TotalMilliseconds;
         timing.PrewarmActive = _cleanupHolder.WasPrewarmActiveSince(_dictStartTicks);
+        timing.CpuPegged = _vm.CpuPegged; // same value that drove the pill's pegged meter
         _log.LogInformation("dictation timing {Summary}", timing.FormatLine());
         foreach (var o in timing.Overruns())
         {

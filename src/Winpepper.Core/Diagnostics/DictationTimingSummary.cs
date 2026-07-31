@@ -88,6 +88,7 @@ public sealed class DictationTimingSummary
     public int? ThreadCount { get; set; }  // B2: process thread count at recording start
     public int? HandleCount { get; set; }  // B2: process handle count at recording start
     public int? SysCpuPct { get; set; }    // B3: system-wide CPU % over the recording window (GetSystemTimes delta)
+    public bool? CpuPegged { get; set; }   // pegged decision near recording start (what the pill showed); null = no reading, field omitted
     public int? TotalMs { get; set; }                   // hotkey-release -> emit, wall clock
 
     public string FormatLine()
@@ -144,6 +145,8 @@ public sealed class DictationTimingSummary
         AppendOptNum(sb, "thr", ThreadCount);
         AppendOptNum(sb, "hnd", HandleCount);
         AppendOptNum(sb, "sys_cpu", SysCpuPct);
+        if (CpuPegged is bool pegged)
+            sb.Append(" cpu_pegged=").Append(pegged ? "true" : "false");
         AppendCoreMs(sb, "total", TotalMs);
         return sb.ToString();
     }

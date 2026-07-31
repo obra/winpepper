@@ -39,6 +39,7 @@ public class DictationTimingSummaryTests
         ThreadCount = 167,
         HandleCount = 2003,
         SysCpuPct = 37,
+        CpuPegged = true,
         CorrectionsMs = 2,
         CleanupMs = 640,
         CleanupPath = "Llm",
@@ -70,7 +71,7 @@ public class DictationTimingSummaryTests
             + " corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b ctx_src=uia"
             + " inject=850ms inject_chars=458 inject_chunks=58/58 inject_pace=798ms"
             + " gc=1/0/0 gc_pause=12ms prewarm_active=true proc_cpu_ms=1875"
-            + " pf=418 mem=3061/1542 thr=167 hnd=2003 sys_cpu=37"
+            + " pf=418 mem=3061/1542 thr=167 hnd=2003 sys_cpu=37 cpu_pegged=true"
             + " total=2354ms");
         line.ShouldNotContain("\n");
     }
@@ -337,6 +338,20 @@ public class DictationTimingSummaryTests
         line.ShouldNotContain(" thr=");
         line.ShouldNotContain(" hnd=");
         line.ShouldNotContain(" sys_cpu=");
+    }
+
+    [Fact]
+    public void CpuPegged_False_Is_Emitted_Explicitly()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold", CpuPegged = false };
+        t.FormatLine().ShouldContain(" cpu_pegged=false");
+    }
+
+    [Fact]
+    public void CpuPegged_Null_Omits_The_Field()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold" };
+        t.FormatLine().ShouldNotContain("cpu_pegged=");
     }
 
     [Theory]

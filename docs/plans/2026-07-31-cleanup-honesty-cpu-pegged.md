@@ -93,7 +93,8 @@ location, search by symbol under `src/` only, never `.worktrees/`):
   `DictationTimingSummary.SystemCpuPercent(idleDelta, kernelDelta, userDelta)`
   at `src/Winpepper.Core/Diagnostics/DictationTimingSummary.cs:169`, returns `int?`.
 - Max-new-tokens on raw-io (VERIFY resolved during planning): the setting is a
-  cap that is FLOOR-overRIDDEN — `LlamaCleanupBackend.ApplyMinNewTokensFloor`
+  cap that is FLOOR-overRIDDEN — `CleanupPromptFormatter.ApplyMinNewTokensFloor`
+  (`CleanupPromptFormatter.cs:115`, invoked from `LlamaCleanupBackend.cs:114`)
   is `Math.Max(maxNewTokens, plan.MinNewTokensFloor)` with raw-io floor 900
   (`CleanupPromptFormatter.cs:46`), so effective tokens =
   `max(900, min(clamp(setting,64,4096), ceil(chars*2)))`. At the default 512
@@ -709,7 +710,10 @@ In the **Prompt** card, immediately AFTER the card's section-header
 
 - [ ] **Step 3: Wire enable-state + notes in CleanupPage.xaml.cs**
 
-The page is imperative seed-then-subscribe (no bindings). Add to the class
+The page is imperative seed-then-subscribe (no bindings). FIRST add
+`using Microsoft.UI.Xaml;` to the file's using block (the file currently has
+only `Microsoft.UI.Xaml.Controls`/`.Navigation` — `Visibility` lives in
+`Microsoft.UI.Xaml` and will not compile without it). Then add to the class
 (inside the existing `#if WINDOWS` region):
 
 ```csharp
@@ -745,6 +749,22 @@ ApplyModelCapabilities();
 // outlives the page, so be exact here).
 vm.PropertyChanged -= OnVmPropertyChanged;
 vm.PropertyChanged += OnVmPropertyChanged;
+```
+
+ALSO add an `OnNavigatedFrom` override to the same class. The page is NOT
+cached (`NavigationCacheMode` defaults to Disabled — no page in Views/ sets
+it), so every visit to the Cleanup tab creates a NEW page instance; the
+`-=`/`+=` pair above only dedupes for the SAME instance and would leak one
+dead page (handler → page → whole control tree) per visit on the app-lifetime
+ViewModel without this:
+
+```csharp
+protected override void OnNavigatedFrom(NavigationEventArgs e)
+{
+    if (_vm is { } vm) vm.PropertyChanged -= OnVmPropertyChanged;
+    _vm = null;
+    base.OnNavigatedFrom(e);
+}
 ```
 
 - [ ] **Step 4: Live refresh from the Models page promote callback**
@@ -817,7 +837,8 @@ Append to `docs/plans/2026-07-29-cleanup-asr-contention-evidence.md`:
   same capability (`WindowContextPrefetchGate`) — no UIA walk runs for
   a model that cannot consume it.
 - Max-new-tokens under raw-io: the setting is a cap that the raw-io
-  floor overrides — `LlamaCleanupBackend.ApplyMinNewTokensFloor` is
+  floor overrides — `CleanupPromptFormatter.ApplyMinNewTokensFloor`
+  (invoked from `LlamaCleanupBackend.cs:114`) is
   `Math.Max(cap, 900)` (`RawIoMinNewTokensFloor`,
   `CleanupPromptFormatter.cs:46`), so effective tokens =
   `max(900, min(clamp(setting,64,4096), ceil(chars*2)))`. At the
@@ -1083,8 +1104,8 @@ public class SessionViewModelCpuPeggedTests
 
         // Walk the engine back to Idle the way the pipeline does, then start again.
         engine.Apply(SessionEvent.StopRequested);
-        engine.Apply(SessionEvent.PipelineCompleted);
-        engine.Apply(SessionEvent.Dismissed);        // adjust to the engine's actual events if these names differ
+        engine.Apply(SessionEvent.TranscriptReady);     // -> Injecting
+        engine.Apply(SessionEvent.InjectionCompleted);  // -> Idle (verified against SessionEvent.cs and SessionViewModelTests.cs:48-54)
         engine.State.ShouldBe(SessionState.Idle);
 
         engine.Apply(SessionEvent.StartRequested);   // dictation 2

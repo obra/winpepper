@@ -237,3 +237,31 @@ non-excluded timing lines in log order, from
 - 1c re-open trigger (unchanged, parked): reconsider only if dictations
   starting < 2 s after a prewarm began show native_over250 > 0 on more than
   2 of the first 10 such dictations in log order.
+
+## Raw-io steering investigation — UI honesty follow-up (2026-07-31)
+
+- Empirically confirmed 2026-07-30/31: the sotto raw-io model ignores
+  every in-prompt steering channel (context blocks, vocabulary hints,
+  few-shot); its training data contains no context fields. Experiments
+  at `~/models-work/dbg/steer2/`.
+- Structural cause: `CleanupPromptFormatter.Build`'s raw-io arm
+  (`CleanupPromptFormatter.cs:101-109`) builds the prompt from ONLY the
+  transcript — the system prompt assembled by `PromptBuilder.BuildSystem`
+  (profile, custom prompt, corrections vocabulary, window context) is
+  discarded.
+- The UI now reflects it: while a raw-io model is active, the Cleanup
+  tab grays out profile / custom prompt / window context with a
+  plain-language note (`PromptFormatCapabilities`, single source of
+  truth), and PipelineHost's window-context prefetch is gated on the
+  same capability (`WindowContextPrefetchGate`) — no UIA walk runs for
+  a model that cannot consume it.
+- Max-new-tokens under raw-io: the setting is a cap that the raw-io
+  floor overrides — `CleanupPromptFormatter.ApplyMinNewTokensFloor`
+  (invoked from `LlamaCleanupBackend.cs:114`) is
+  `Math.Max(cap, 900)` (`RawIoMinNewTokensFloor`,
+  `CleanupPromptFormatter.cs:46`), so effective tokens =
+  `max(900, min(clamp(setting,64,4096), ceil(chars*2)))`. At the
+  shipped default 512 the setting is inert under raw-io; it takes
+  effect only above 900 with transcripts > ~450 chars. The slider
+  therefore stays ENABLED. Still fully effective under raw-io:
+  cleanup enabled, timeout, model selection.

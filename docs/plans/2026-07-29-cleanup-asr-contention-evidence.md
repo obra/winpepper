@@ -265,3 +265,14 @@ non-excluded timing lines in log order, from
   effect only above 900 with transcripts > ~450 chars. The slider
   therefore stays ENABLED. Still fully effective under raw-io:
   cleanup enabled, timeout, model selection.
+- Gates (2026-07-31, cleanup-honesty + cpu-pegged branch): Linux suite
+  GREEN, run repeatedly across the branch (final full run: 1613 tests,
+  9/9 projects, `scripts/linux-tests.sh`). Windows gate
+  (`scripts/windows-gate.sh`) was NOT run in this implementation
+  session by design — the owning root session runs it separately
+  before merge/install, so App-layer XAML compilation (CleanupPage,
+  StatusPillWindow) and on-device glyph rendering are proven there,
+  not here.
+- NEW: `cpu_pegged=` on the dictation timing line (after `sys_cpu=`),
+  mirroring the pill's pegged-meter decision (>=75% system CPU over the
+  first ~400 ms of recording).

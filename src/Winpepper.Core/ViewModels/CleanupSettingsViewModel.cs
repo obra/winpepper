@@ -8,12 +8,40 @@ public sealed class CleanupSettingsViewModel : INotifyPropertyChanged
     private readonly Action<CleanupSettingsContract> _persist;
     private CleanupSettingsContract _state;
 
+    /// <summary>Pull delegate wired in AppShell: does the ACTIVE cleanup model's
+    /// prompt format carry system-prompt content (profile, custom prompt, window
+    /// context)? Core has no project references, so the capability arrives as a
+    /// delegate over PromptFormatCapabilities + the selection slot. Null (tests,
+    /// legacy callers) means "supported".</summary>
+    private readonly Func<bool>? _promptSettingsSupported;
+    private bool _promptSettingsSupportedValue;
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    public CleanupSettingsViewModel(CleanupSettingsContract initial, Action<CleanupSettingsContract> persist)
+    public CleanupSettingsViewModel(
+        CleanupSettingsContract initial,
+        Action<CleanupSettingsContract> persist,
+        Func<bool>? promptSettingsSupported = null)
     {
         _state = initial;
         _persist = persist;
+        _promptSettingsSupported = promptSettingsSupported;
+        _promptSettingsSupportedValue = promptSettingsSupported?.Invoke() ?? true;
+    }
+
+    /// <summary>False while the active cleanup model ignores in-prompt steering
+    /// (raw-io). The page grays out Profile/CustomPrompt/WindowContext and shows
+    /// the honesty note. Stored values are never touched.</summary>
+    public bool PromptSettingsSupported => _promptSettingsSupportedValue;
+
+    /// <summary>Re-read the capability delegate; called on page entry and from
+    /// the Models-page promote callback so the note updates live.</summary>
+    public void RefreshModelCapabilities()
+    {
+        var next = _promptSettingsSupported?.Invoke() ?? true;
+        if (next == _promptSettingsSupportedValue) return;
+        _promptSettingsSupportedValue = next;
+        Raise(nameof(PromptSettingsSupported));
     }
 
     public bool Enabled

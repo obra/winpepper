@@ -58,4 +58,62 @@ public class CleanupSettingsViewModelTests
         vm.Enabled = false;
         calls.ShouldBe(1);
     }
+
+    [Fact]
+    public void PromptSettingsSupported_Defaults_True_Without_Delegate()
+    {
+        var vm = new CleanupSettingsViewModel(CleanupSettingsContract.Defaults(), _ => { });
+        vm.PromptSettingsSupported.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void PromptSettingsSupported_Reads_Delegate_At_Construction()
+    {
+        var vm = new CleanupSettingsViewModel(
+            CleanupSettingsContract.Defaults(), _ => { }, () => false);
+        vm.PromptSettingsSupported.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void RefreshModelCapabilities_Raises_Only_On_Change()
+    {
+        var supported = false;
+        var vm = new CleanupSettingsViewModel(
+            CleanupSettingsContract.Defaults(), _ => { }, () => supported);
+        var raised = 0;
+        vm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(CleanupSettingsViewModel.PromptSettingsSupported))
+                raised++;
+        };
+
+        vm.RefreshModelCapabilities();          // false -> false: no raise
+        raised.ShouldBe(0);
+
+        supported = true;
+        vm.RefreshModelCapabilities();          // false -> true: raise
+        vm.PromptSettingsSupported.ShouldBeTrue();
+        raised.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Capability_Change_Never_Touches_Stored_Values()
+    {
+        var supported = true;
+        CleanupSettingsContract? last = null;
+        var vm = new CleanupSettingsViewModel(
+            CleanupSettingsContract.Defaults(), s => last = s, () => supported);
+        vm.Profile = "Custom";
+        vm.CustomPrompt = "keep me";
+        vm.WindowContextEnabled = true;
+
+        supported = false;
+        vm.RefreshModelCapabilities();
+
+        vm.Profile.ShouldBe("Custom");
+        vm.CustomPrompt.ShouldBe("keep me");
+        vm.WindowContextEnabled.ShouldBeTrue();
+        last.ShouldNotBeNull();
+        last!.CustomPrompt.ShouldBe("keep me");
+    }
 }

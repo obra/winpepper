@@ -44,6 +44,7 @@ public sealed partial class ModelsPage : Page
             {
                 var shell = App.Shell!;
                 shell.CleanupModelSelection.Publish(name); // effective immediately (next dictation)
+                shell.CleanupVm.RefreshModelCapabilities(); // honesty note tracks the ACTIVE selection live
                 shell.CleanupBackend.RequestPrewarm();     // background load so the next dictation doesn't pay it
                 _ = shell.SettingsWriter.QueueAndFlushAsync(s2 => s2 with { CleanupModelName = name }); // durability
             },

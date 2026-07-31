@@ -173,7 +173,10 @@ public sealed class AppShell : IDisposable
 
         var cleanupContract = CleanupSettingsContract.FromSettings(settings);
         var cleanupVm = new CleanupSettingsViewModel(cleanupContract,
-            c => _ = writer.QueueAndFlushAsync(c.ApplyTo));
+            c => _ = writer.QueueAndFlushAsync(c.ApplyTo),
+            promptSettingsSupported: () =>
+                Winpepper.Cleanup.PromptFormatCapabilities.CarriesSystemPrompt(
+                    resolveCleanupTarget(cleanupSelection.Read()).PromptFormat));
 
         // Plan 2 normally provides initial corrections; until then, empty.
         var correctionsVm = new CorrectionsViewModel(

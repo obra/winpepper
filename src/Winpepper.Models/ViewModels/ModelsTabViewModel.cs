@@ -115,6 +115,31 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         }
     }
 
+    /// <summary>
+    /// Downloads exactly the given descriptors — the page computes the
+    /// "selected and missing" set via SelectedModelsPolicy, so this method
+    /// never reaches for unselected registry models. Manual-install-only
+    /// descriptors are skipped defensively: the policy filters them
+    /// upstream, and the raw downloader throws if one reaches it.
+    /// </summary>
+    public async Task DownloadSelectedAsync(IReadOnlyList<ModelDescriptor> models, CancellationToken ct)
+    {
+        await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            foreach (var d in models)
+            {
+                if (d.ManualInstallOnly) continue;
+                await DownloadOneAsync(d, ct).ConfigureAwait(false);
+            }
+
+            AsrCard.RaiseIsSelectedInstalledChanged();
+            CleanupCard.RaiseIsSelectedInstalledChanged();
+            StreamingCard.RaiseIsSelectedInstalledChanged();
+        }
+        finally { _downloadGate.Release(); }
+    }
+
     private async Task DownloadOneAsync(ModelDescriptor d, CancellationToken ct)
     {
         var card = d.Kind switch

@@ -7,7 +7,7 @@
 
 **Goal:** Rework the Models page so the streaming model is a registry-driven dropdown like the other cards, the bottom button downloads only selected-and-missing models (and disables when nothing is missing), manual-install-only models get an inline explanation instead of a silent no-op, and the cleanup card grays out with a note when cleanup is disabled.
 
-**Architecture:** All decision logic (which selected models are missing/downloadable, button enable state, manual-install detection, cleanup gate) lives in a new pure static policy class `SelectedModelsPolicy` in `Winpepper.Models` (Linux-tested, following the `CpuPeggedPolicy`/`PromptFormatCapabilities` idiom). `ModelsTabViewModel` gains one new orchestration method `DownloadSelectedAsync` that downloads an explicit descriptor list. The Windows-only `ModelsPage` code-behind stays thin: it gathers inputs from the sources it already uses (verified-ASR flag, card presence checks, `CleanupVm.Enabled`), asks the policy, and applies results to controls imperatively — matching the page's existing imperative style and the CleanupPage `ApplyModelCapabilities` gray-out precedent.
+**Architecture:** All decision logic (which selected models are missing/downloadable, button enable state, manual-install detection, cleanup gate) lives in a new pure static policy class `SelectedModelsPolicy` in `Winpepper.Models` (Linux-tested, following the `CpuPeggedPolicy`/`PromptFormatCapabilities` idiom), plus one extraction-aware installed check `ModelDescriptor.IsFullyInstalledAndExtracted` (Task 1b) so a broken-but-present streaming install counts as missing. `ModelsTabViewModel` gains one new orchestration method `DownloadSelectedAsync` that downloads an explicit descriptor list. The Windows-only `ModelsPage` code-behind stays thin: it gathers inputs from the sources it already uses (verified-ASR flag, card presence checks, `CleanupVm.Enabled`), asks the policy, and applies results to controls imperatively — matching the page's existing imperative style and the CleanupPage `ApplyModelCapabilities` gray-out precedent.
 
 **Tech Stack:** C# / .NET 9, WinUI 3 (`Winpepper.App`, Windows-only, `#if WINDOWS`), xUnit v3 + Shouldly (`tests/Winpepper.Models.Tests`, Linux-run).
 
@@ -16,6 +16,7 @@
 - Worktree root (all commands run here): `/home/dan/code/winpepper/.worktrees/models-page-ux`, branch `feat/models-page-ux`. All file paths below are relative to this root.
 - NEVER read or edit anything under a nested `.worktrees/` directory (stale copies mislead).
 - Linux suite green before EVERY commit: `./scripts/linux-tests.sh` (NEVER `dotnet test`). Ends `LINUX SUITE: GREEN` on pass.
+- Raw `dotnet` commands (the per-task `dotnet build`/`dotnet exec` steps) require the SDK on PATH first — run once per shell (verified: fresh shells have no `dotnet`): `export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet && export PATH="$DOTNET_ROOT:$PATH"`. The scripts set this up themselves; only raw commands need it.
 - Full Windows gate before done and after each task that touches `Winpepper.App`: `./scripts/windows-gate.sh` (use a 20–30 min timeout; UNC `MSB4025` and vsock interop failures are known transient flakes — retry the gate, do not "fix" them). Ends `GATE: GREEN` on pass.
 - Never mix Linux- and Windows-side builds in the same `bin/`/`obj/` (clean when switching sides).
 - Every commit message ends with the trailer line: `Co-authored-by: Amplifier <amplifier@users.noreply.github.com>`
@@ -50,12 +51,28 @@ The implementer of each task can rely on these without re-deriving them:
 - Test idiom (`tests/Winpepper.Models.Tests`): xUnit v3 + Shouldly, file-scoped namespace mirroring the folder, `public class <Type>Tests`, methods named `Pascal_Snake_Case` sentences, `[Theory]`+`[InlineData]` for truth tables, cancellation via `TestContext.Current.CancellationToken`. Pure policy tests carry no traits.
 - Known bug being fixed in passing (required for change 1's "live after download" rule): `OnDownloadMissing` discards the post-download verify result, so `_asrSelectedVerified` stays stale and the ASR label can read "Not downloaded" after a successful download.
 
+### Validation findings (load-bearing check, 2026-08-01 — evidence in `.worktrees/.the-usual-logs/models-page-ux/`)
+
+- Both gates verified green at base FROM THIS WORKTREE: `./scripts/linux-tests.sh` (1613 tests, `LINUX SUITE: GREEN`, ~50 s) and `./scripts/windows-gate.sh` (`GATE: GREEN`, ~9.5 min, Winpepper.App XAML compile OK, no flakes). The gate script self-cleans `bin/`/`obj/` before building.
+- `ModelDescriptor.IsFullyInstalled` is presence-only — it does NOT check the extracted `runtime/` tree. A broken-but-present streaming install is reachable: `ModelDownloader` moves the verified archive into place (~:184) BEFORE `EnsureExtracted` (~:185), which can throw (locked native DLLs, `TarGzExtractor.cs:47-54`, whose error text says to restart the app; or IO failure mid-extract); the `runtime/` tree can also be deleted post-install. That state reads "Installed" under the weak check while streaming is actually broken. This is why the plan uses the extraction-aware check (Task 1b) for streaming.
+- The downloader IS the heal path: its verify-short-circuit (`ModelDownloader.cs:76-89`) calls `EnsureExtracted` even when present files hash-verify, so routing a broken-but-present streaming install through `DownloadSelectedAsync` repairs the extraction WITHOUT re-downloading ~720 MB.
+- `TarGzExtractor` is a public static class: `IsExtracted(archivePath, destinationDir, archiveSha256)` (cheap: marker read + `Directory.Exists`, no hashing; marker = `<archivePath>.extracted` containing the archive SHA-256) and `EnsureExtracted(archivePath, destinationDir, archiveSha256)`.
+- `StreamingAutoInstaller` is GATED on `StreamingEnabled` (`SkippedStreamingDisabled`, `StreamingAutoInstaller.cs:97-101`) and on `OnboardingCompleted` (`AppShell.cs:482-487`), and latches `Installed` in-process — next-launch auto-heal is conditional, never guaranteed. The toggle-INDEPENDENT precedent is the manual install button (`DownloadStreamingAsync` has no toggle check); the new bottom button inherits that role.
+- `StreamingEnabled` has no live change-notification channel (the toggle only queues a settings write, `ModelsPage.xaml.cs:220-225`; consumers re-read settings). Do not attempt a live streaming gate.
+- `StreamingAutoInstaller.IsInstalledAndExtracted` is PRIVATE (instance) — pages/VMs cannot call it; Task 1b adds the public equivalent on `ModelDescriptor`.
+- WinUI 3 does NOT show tooltips on disabled controls and has no `ShowOnDisabled` equivalent (WinUI 3 `ToolTipService` exposes only Placement/PlacementTarget/ToolTip; microsoft/microsoft-ui-xaml#1149). Accepted: the tooltip aids the enabled state; the disabled state is explained by the per-card installed labels and the manual-install note.
+- No end-user documentation exists for manually installing the sotto model (README and all non-plan docs: zero hits) — the manual-install note copy is therefore self-contained (no "see the docs" pointer).
+- ASR verify transients are existing behavior, preserved (not regressed) by this plan: the page renders before the off-thread verify completes (stale-false window → label "Not downloaded"/button enabled transiently), and `OnAsrChanged` re-verifies without resetting the flag (stale-true window → button may transiently gray during a re-hash of a corrupt install). Both self-correct when the verify lands and `UpdateInstalledLabels` re-runs; no tri-state policy input is warranted.
+- `ModelFile` properties: `RelativePath`, `Url`, `Sha256`, `SizeBytes`, `ExtractToRelative` (`string?`; only the streaming runtime archive sets it, to `"runtime"`). `ModelDescriptor` is a sealed record with `required` init properties and `Files : IReadOnlyList<ModelFile>`.
+
 ## File Structure
 
 | File | Action | Responsibility |
 |---|---|---|
 | `src/Winpepper.Models/SelectedModelsPolicy.cs` | Create (Task 1) | Pure decisions: selected-set construction (incl. cleanup gate), missing/downloadable names, manual-only names, button enable, cleanup-card enable/note |
 | `tests/Winpepper.Models.Tests/SelectedModelsPolicyTests.cs` | Create (Task 1) | Policy unit tests (Linux) |
+| `src/Winpepper.Models/ModelDescriptor.cs` | Modify (Task 1b) | Add `IsFullyInstalledAndExtracted` — extraction-aware installed check for streaming |
+| `tests/Winpepper.Models.Tests/ModelDescriptorTests.cs` | Modify (Task 1b) | Tests for the extraction-aware check (Linux) |
 | `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs` | Modify (Tasks 2, 6) | Add `DownloadSelectedAsync`; later remove superseded `DownloadMissingAsync`/`DownloadStreamingAsync` |
 | `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelDownloadSelectedTests.cs` | Create (Task 2) | New VM method tests (Linux) |
 | `src/Winpepper.App/Views/ModelsPage.xaml` | Modify (Tasks 3, 4, 5) | Streaming combo replaces install button; bottom button rename + name + tooltip; manual-install note; cleanup-off note |
@@ -64,7 +81,7 @@ The implementer of each task can rely on these without re-deriving them:
 | `tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs` | Modify (Task 6) | Migrate streaming-download coverage to `DownloadSelectedAsync` |
 | `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` | Modify (Task 6) | Remove tests of deleted `DownloadMissingAsync` semantics |
 
-Task order keeps every intermediate commit compiling on both sides: pure additions first (Tasks 1–2), then page rework that switches callers (Tasks 3–5), then removal of the superseded VM methods once nothing calls them (Task 6).
+Task order keeps every intermediate commit compiling on both sides: pure additions first (Tasks 1, 1b, 2), then page rework that switches callers (Tasks 3–5), then removal of the superseded VM methods once nothing calls them (Task 6).
 
 ---
 
@@ -332,6 +349,178 @@ Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
 
 ---
 
+### Task 1b: `ModelDescriptor.IsFullyInstalledAndExtracted` — extraction-aware installed check
+
+**Why (from the load-bearing validation):** `IsFullyInstalled` is presence-only. A streaming install can be broken-but-present (archive moved into place before `EnsureExtracted`, which can throw; or the extracted `runtime/` tree deleted later) — that state must count as NOT installed so the bottom button includes streaming and the downloader's verify-short-circuit + `EnsureExtracted` heal path repairs it (without re-downloading: present files hash-verify and only re-extract). The strong check that exists today (`StreamingAutoInstaller.IsInstalledAndExtracted`) is private; this task adds the public equivalent where it belongs, on the descriptor. Tasks 3–4 use it for the streaming card and selection snapshot.
+
+**Files:**
+- Modify: `src/Winpepper.Models/ModelDescriptor.cs` (add one method after `IsFullyInstalled`)
+- Test: `tests/Winpepper.Models.Tests/ModelDescriptorTests.cs` (append tests; reuse its existing `TempDir` helper)
+
+**Interfaces:**
+- Consumes: `TarGzExtractor.IsExtracted(string archivePath, string destinationDir, string archiveSha256)` (public static; marker read + `Directory.Exists`, no hashing), existing `IsFullyInstalled`.
+- Produces: `public bool IsFullyInstalledAndExtracted(string installRoot)` — Tasks 3–4 call exactly this. For descriptors with no `ExtractToRelative` files it equals `IsFullyInstalled`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/Winpepper.Models.Tests/ModelDescriptorTests.cs` (add `using System.Formats.Tar;` and `using System.IO.Compression;` if not present; mirror the archive-building idiom from `TarGzExtractorTests.MakeArchive`):
+
+```csharp
+    [Fact]
+    public void IsFullyInstalledAndExtracted_Equals_IsFullyInstalled_When_No_Archive_Files()
+    {
+        using var temp = new TempDir();
+        var d = new ModelDescriptor
+        {
+            Name = "plain", Kind = ModelKind.Asr, DisplayName = "Plain",
+            InstallDirRelative = "plain",
+            Files = new[]
+            {
+                new ModelFile { RelativePath = "a.bin", Url = "https://x", Sha256 = "deadbeef", SizeBytes = 5 },
+            },
+        };
+        Directory.CreateDirectory(Path.Combine(temp.Path, "plain"));
+        File.WriteAllText(Path.Combine(temp.Path, "plain", "a.bin"), "hello");
+
+        d.IsFullyInstalled(temp.Path).ShouldBeTrue();
+        d.IsFullyInstalledAndExtracted(temp.Path).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void IsFullyInstalledAndExtracted_False_When_Archive_Present_But_Not_Extracted()
+    {
+        using var temp = new TempDir();
+        var d = MakeArchiveDescriptor(temp, out _);
+
+        // Broken-but-present: files exist and are non-empty, but nothing was
+        // ever extracted. The weak check says installed; the strong one must not.
+        d.IsFullyInstalled(temp.Path).ShouldBeTrue();
+        d.IsFullyInstalledAndExtracted(temp.Path).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void IsFullyInstalledAndExtracted_True_After_Extraction_And_False_After_Tree_Deleted()
+    {
+        using var temp = new TempDir();
+        var d = MakeArchiveDescriptor(temp, out var archivePath);
+        var runtimeDir = Path.Combine(temp.Path, "streamy", "runtime");
+
+        TarGzExtractor.EnsureExtracted(archivePath, runtimeDir, "cafebabe");
+        d.IsFullyInstalledAndExtracted(temp.Path).ShouldBeTrue();
+
+        Directory.Delete(runtimeDir, recursive: true);
+        d.IsFullyInstalledAndExtracted(temp.Path).ShouldBeFalse();
+    }
+
+    /// <summary>Descriptor with one plain file and one archive file (ExtractToRelative
+    /// = "runtime"), both present on disk; the archive is a real (tiny) tar.gz so
+    /// EnsureExtracted can extract it. Sha256 "cafebabe" is arbitrary — IsExtracted
+    /// compares it to the marker file EnsureExtracted writes, not to a real hash.</summary>
+    private static ModelDescriptor MakeArchiveDescriptor(TempDir temp, out string archivePath)
+    {
+        var dir = Path.Combine(temp.Path, "streamy");
+        var src = Path.Combine(temp.Path, "src", "toplevel");
+        Directory.CreateDirectory(dir);
+        Directory.CreateDirectory(src);
+        File.WriteAllText(Path.Combine(dir, "model.gguf"), "weights");
+        File.WriteAllText(Path.Combine(src, "transcribe.dll"), "fake dll bytes");
+        archivePath = Path.Combine(dir, "runtime.tar.gz");
+        using (var fs = File.Create(archivePath))
+        using (var gz = new GZipStream(fs, CompressionMode.Compress))
+        {
+            TarFile.CreateFromDirectory(Path.Combine(temp.Path, "src"), gz, includeBaseDirectory: false);
+        }
+
+        return new ModelDescriptor
+        {
+            Name = "streamy", Kind = ModelKind.StreamingAsr, DisplayName = "Streamy",
+            InstallDirRelative = "streamy",
+            Files = new[]
+            {
+                new ModelFile { RelativePath = "model.gguf", Url = "https://x", Sha256 = "deadbeef", SizeBytes = 7 },
+                new ModelFile { RelativePath = "runtime.tar.gz", Url = "https://x", Sha256 = "cafebabe", SizeBytes = 1, ExtractToRelative = "runtime" },
+            },
+        };
+    }
+```
+
+(If `ModelFile`'s object-initializer shape differs — e.g. `ExtractToRelative` has another name — STOP and re-check `src/Winpepper.Models/ModelDescriptor.cs`/the `ModelFile` type; the registry's streaming archive entry at `ModelRegistry.cs:~181-188` shows the real property names.)
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+cd /home/dan/code/winpepper/.worktrees/models-page-ux
+export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet && export PATH="$DOTNET_ROOT:$PATH"
+dotnet build tests/Winpepper.Models.Tests -c Release -f net9.0 -p:EnableWindowsTargeting=true
+```
+Expected: BUILD FAILS with `CS1061: 'ModelDescriptor' does not contain a definition for 'IsFullyInstalledAndExtracted'`.
+
+- [ ] **Step 3: Write the implementation**
+
+In `src/Winpepper.Models/ModelDescriptor.cs`, add immediately after `IsFullyInstalled`:
+
+```csharp
+    /// <summary>
+    /// <see cref="IsFullyInstalled"/> plus extraction state: every file with
+    /// an ExtractToRelative must also have its extracted tree present
+    /// (extraction marker + directory, via TarGzExtractor.IsExtracted).
+    /// Presence-only checks cannot distinguish ready files from a corrupt
+    /// install whose archive landed but whose extraction failed or whose
+    /// extracted tree was deleted — those must read as NOT installed so the
+    /// downloader's verify-short-circuit + EnsureExtracted heal path runs.
+    /// Cheap: marker read + Directory.Exists, no hashing.
+    /// </summary>
+    public bool IsFullyInstalledAndExtracted(string installRoot)
+    {
+        if (!IsFullyInstalled(installRoot)) return false;
+        foreach (var f in Files)
+        {
+            if (f.ExtractToRelative is null) continue;
+            var dir = Path.Combine(installRoot, InstallDirRelative);
+            if (!TarGzExtractor.IsExtracted(
+                    Path.Combine(dir, f.RelativePath),
+                    Path.Combine(dir, f.ExtractToRelative),
+                    f.Sha256))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+```bash
+dotnet build tests/Winpepper.Models.Tests -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -class "Winpepper.Models.Tests.ModelDescriptorTests"
+```
+Expected: all `ModelDescriptorTests` PASS, 0 failures.
+
+- [ ] **Step 5: Run the full Linux suite**
+
+```bash
+./scripts/linux-tests.sh
+```
+Expected: `LINUX SUITE: GREEN`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/Winpepper.Models/ModelDescriptor.cs tests/Winpepper.Models.Tests/ModelDescriptorTests.cs
+git commit -m "feat(models): ModelDescriptor.IsFullyInstalledAndExtracted — extraction-aware installed check
+
+Presence-only IsFullyInstalled cannot see a broken extraction (archive
+landed, runtime/ tree missing or deleted). The Models page's streaming
+installed-state and download work-list need the strong check so
+broken-but-present installs count as missing and get healed by the
+downloader's verify-short-circuit + EnsureExtracted path.
+
+Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
+```
+
+---
+
 ### Task 2: `ModelsTabViewModel.DownloadSelectedAsync`
 
 **Files:**
@@ -485,6 +674,8 @@ In `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs`, add immediately AFTE
     }
 ```
 
+CAUTION (pinned by existing tests): do NOT add an `IsFullyInstalled` pre-filter inside this method. `ModelsTabViewModelStreamingTests` (:51, :81) pin the always-route-through-the-downloader semantics — the downloader's verify-short-circuit + `EnsureExtracted` is the heal path for broken-but-present installs, and a presence pre-filter would remove exactly that. Callers decide what is "missing" (via `SelectedModelsPolicy` with the strong installed check); this method downloads what it is given.
+
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
@@ -519,7 +710,7 @@ Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
 - Modify: `docs/automation-ids.md` (Models page section: add `ModelsStreamingCombo`)
 
 **Interfaces:**
-- Consumes: `ViewModel.StreamingCard` (`ModelCardViewModel`: `Available`, `SelectedName`, `SelectedDescriptor`, `CommitSelection()` — promote is a deliberate no-op for streaming); `ModelDescriptor.IsFullyInstalled(string)`; `App.Shell.StreamingAutoInstaller.Status`.
+- Consumes: `ViewModel.StreamingCard` (`ModelCardViewModel`: `Available`, `SelectedName`, `SelectedDescriptor`, `CommitSelection()` — promote is a deliberate no-op for streaming); `ModelDescriptor.IsFullyInstalledAndExtracted(string)` (Task 1b — extraction-aware; NOT the presence-only `IsFullyInstalled`, see Validation findings); `App.Shell.StreamingAutoInstaller.Status`.
 - Produces: `StreamingCombo` (`x:Name`, AutomationId `ModelsStreamingCombo`) and handler `private void OnStreamingChanged(object sender, SelectionChangedEventArgs e)`. Task 4 relies on `ViewModel.StreamingCard.SelectedDescriptor` reflecting the combo choice.
 - Deliberately unchanged: the card's descriptive paragraph, `StreamingToggle`, the installed/not-installed icon row, the progress `ListView`, `DownloadStreamingAsync` (now uncalled from the page; removed in Task 6), `StreamingAutoInstaller`.
 - Spec cross-reference: change 1's "disable the streaming install button when installed" is satisfied here by change 2's stronger requirement — the button is deleted outright; installing a missing streaming model becomes the bottom button's job (Task 4), which disables when satisfied.
@@ -597,8 +788,10 @@ NEW (selection-aware — the label follows the dropdown):
 ```csharp
         var models = App.Shell!.ModelsServices;
         var streamingInstalled = ViewModel.StreamingCard.SelectedDescriptor
-            ?.IsFullyInstalled(models.ModelsRoot) ?? false;
+            ?.IsFullyInstalledAndExtracted(models.ModelsRoot) ?? false;
 ```
+
+The strong check matters here (validated): a streaming install whose archive landed but whose `runtime/` extraction failed or was deleted reads "Installed" under presence-only `IsFullyInstalled` — masking a `Failed` auto-install AND excluding streaming from the bottom button, stranding the user with no repair path (the old install button had no pre-filter precisely to heal this; this page deletes that button). With `IsFullyInstalledAndExtracted`, that state reads "not installed": the failed label shows when applicable, the bottom button includes streaming, and the downloader heals via verify-short-circuit + `EnsureExtracted` (no ~720 MB re-download — present files hash-verify and only re-extract).
 
 And replace the busy/label lines. OLD:
 
@@ -711,6 +904,8 @@ NEW (same position; note follows the button):
                        Visibility="Collapsed" />
 ```
 
+Known platform limitation (validated; accepted — do not "fix"): WinUI 3 does not show tooltips on disabled controls and has no `ShowOnDisabled` equivalent (WinUI 3 `ToolTipService` exposes only Placement/PlacementTarget/ToolTip; microsoft/microsoft-ui-xaml#1149). The tooltip therefore aids the enabled state only; the disabled state is explained by the per-card installed labels and `ManualInstallNote`. Keep the tooltip exactly as spec'd — do not add wrapper-element workarounds or extra copy.
+
 - [ ] **Step 2: Code-behind — fields, selection snapshot, button state**
 
 In `src/Winpepper.App/Views/ModelsPage.xaml.cs`:
@@ -743,7 +938,7 @@ In `src/Winpepper.App/Views/ModelsPage.xaml.cs`:
         SelectedModelsPolicy.SelectedModel? asr = ViewModel.AsrCard.SelectedDescriptor is { } a
             ? new(a.Name, _asrSelectedVerified, a.ManualInstallOnly) : null;
         SelectedModelsPolicy.SelectedModel? streaming = ViewModel.StreamingCard.SelectedDescriptor is { } s
-            ? new(s.Name, s.IsFullyInstalled(models.ModelsRoot), s.ManualInstallOnly) : null;
+            ? new(s.Name, s.IsFullyInstalledAndExtracted(models.ModelsRoot), s.ManualInstallOnly) : null;
         SelectedModelsPolicy.SelectedModel? cleanup = ViewModel.CleanupCard.SelectedDescriptor is { } c
             ? new(c.Name, ViewModel.CleanupCard.IsSelectedInstalled, c.ManualInstallOnly) : null;
 
@@ -765,7 +960,7 @@ In `src/Winpepper.App/Views/ModelsPage.xaml.cs`:
             var registry = App.Shell!.ModelsServices.Registry;
             var displays = manualNames.Select(n => registry.Find(n)?.DisplayName ?? n);
             ManualInstallNote.Text =
-                $"{string.Join(", ", displays)} is installed manually — see the docs. The download button won't fetch it.";
+                $"{string.Join(", ", displays)} must be installed manually — the download button can't fetch it.";
             ManualInstallNote.Visibility = Visibility.Visible;
         }
         else
@@ -857,6 +1052,9 @@ Replace the entire `OnDownloadMissing` method (~:287-329) with:
 
 Notes for the implementer:
 - `CurrentSelection`/`UpdateDownloadButtonState`/`OnDownloadSelected` use LINQ (`Select`, `Any`, `ToList`). If the Windows gate reports missing names, add `using System.Linq;` at the top of `ModelsPage.xaml.cs` (inside the `#if WINDOWS` region, with the other usings).
+- Streaming's installed input is `IsFullyInstalledAndExtracted` (Task 1b), NOT `IsFullyInstalled` — a broken-but-present install (archive landed, `runtime/` missing) must count as missing so this button heals it via the downloader's verify-short-circuit + `EnsureExtracted` (present files hash-verify; no ~720 MB re-download).
+- The gate asymmetry is deliberate (validated + recorded): the cleanup model is excluded while `CleanupEnabled` is off, but streaming is included regardless of `StreamingToggle`. Precedent: today's manual "Install streaming model" button works regardless of the toggle, and this button inherits that role; also `StreamingEnabled` has no live change-notification channel (only a queued settings write), so a live streaming gate is not implementable without new machinery the constraints forbid. Do NOT add a `streamingEnabled` parameter to `BuildSelection`.
+- Known transients (validated as existing behavior, preserved — do not "fix" with a tri-state): on a cold cache the ASR verify completes off-thread after first render, so the button can be transiently enabled with everything installed (today's page has the same window with an always-enabled button); and `OnAsrChanged` re-verifies without resetting the flag, so the button can transiently gray during a re-hash of a corrupt install. Both self-correct when the verify lands and `UpdateInstalledLabels` re-runs.
 - Behavior change vs old code is intentional and specified: the selected ASR model is no longer downloaded unconditionally — it is included only when `_asrSelectedVerified` is false. `_asrSelectedVerified` is hash-verified, so a corrupt-but-present install still reads as missing and gets repaired through the coordinator path.
 - Progress UI needs no change: `DownloadOneAsync` already routes per-file rows to the card matching each descriptor's kind, so rows appear under exactly the cards whose models are downloading (now including streaming).
 

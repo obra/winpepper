@@ -79,7 +79,8 @@ The implementer of each task can rely on these without re-deriving them:
 | `src/Winpepper.App/Views/ModelsPage.xaml.cs` | Modify (Tasks 3, 4, 5) | `OnStreamingChanged`; `OnDownloadSelected` + `CurrentSelection()` + `UpdateDownloadButtonState()`; cleanup gate seed/subscription + `ApplyCleanupGate()` |
 | `docs/automation-ids.md` | Modify (Tasks 3, 4, 5) | Register new AutomationIds |
 | `tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs` | Modify (Task 6) | Migrate streaming-download coverage to `DownloadSelectedAsync` |
-| `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` | Modify (Task 6) | Remove tests of deleted `DownloadMissingAsync` semantics |
+| `tests/Winpepper.Models.Tests/StreamingAutoInstallerTests.cs` | Modify (Task 6) | Migrate the shared-gate concurrency test's `DownloadStreamingAsync` call (:218) to `DownloadSelectedAsync` |
+| `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` | Modify (Task 6) | Delete tests of deleted `DownloadMissingAsync` selection semantics; migrate the three plumbing-contract tests (gate serialization, sync-context, progress burst) to `DownloadSelectedAsync` |
 
 Task order keeps every intermediate commit compiling on both sides: pure additions first (Tasks 1, 1b, 2), then page rework that switches callers (Tasks 3–5), then removal of the superseded VM methods once nothing calls them (Task 6).
 
@@ -1232,9 +1233,10 @@ Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
 ### Task 6: Remove superseded VM entry points, final gates, evidence + smoke checklist
 
 **Files:**
-- Modify: `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs` (delete `DownloadMissingAsync` ~:64-91 and `DownloadStreamingAsync` ~:93-116 — nothing calls them after Tasks 3–4; verified callers were only the page's two old handlers)
+- Modify: `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs` (delete `DownloadMissingAsync` ~:64-91 and `DownloadStreamingAsync` ~:93-116 — no production caller remains after Tasks 3–4; verified production callers were only the page's two old handlers. Test callers span THREE files: `ModelsTabViewModelStreamingTests.cs` :46/:76/:112/:123, `ViewModels/ModelsTabViewModelTests.cs` :75/:92/:117/:139/:176/:215/:217, and `StreamingAutoInstallerTests.cs` :218 — all migrated or deleted below. `ModelCardViewModelDispatchTests.cs:13` mentions `DownloadMissingAsync` in a doc comment only — no call, no compile impact; leave it.)
 - Modify: `tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs` (migrate calls)
-- Modify: `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` (remove tests of deleted semantics)
+- Modify: `tests/Winpepper.Models.Tests/StreamingAutoInstallerTests.cs` (migrate the one call in `AutoInstall_and_models_card_download_never_run_concurrently` :218)
+- Modify: `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` (delete tests of deleted semantics; MIGRATE the three plumbing-contract tests)
 - Modify: `docs/plans/2026-08-01-models-page-ux.md` (append evidence section)
 
 **Interfaces:**
@@ -1252,7 +1254,13 @@ cd /home/dan/code/winpepper/.worktrees/models-page-ux
 grep -rn "DownloadMissingAsync\|DownloadStreamingAsync" src/ tests/
 dotnet build tests/Winpepper.Models.Tests -c Release -f net9.0 -p:EnableWindowsTargeting=true
 ```
-Expected: grep hits ONLY in the two test files below (if any hit remains under `src/`, STOP — a production caller was missed; re-check Tasks 3–4 landed). Build FAILS only in those test files.
+Expected: ZERO hits under `src/` (Step 1 deleted the definitions; the page's two old handlers were removed by Tasks 3–4 — if ANY `src/` hit remains, STOP: a production caller was missed; re-check Tasks 3–4 landed). Under `tests/`, expect hits in exactly THREE test files plus one comment-only mention:
+- `tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs` (:46, :76, :112, :123) — migrate in Step 3(a)
+- `tests/Winpepper.Models.Tests/StreamingAutoInstallerTests.cs` (:218) — migrate in Step 3(b)
+- `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` (:75, :92, :117, :139, :176, :215, :217) — delete/migrate per Step 3(c)
+- `tests/Winpepper.Models.Tests/ModelCardViewModelDispatchTests.cs:13` — doc-comment prose only, no call; leave as-is (it names the method to explain a historical crash; it compiles fine)
+
+Build FAILS (CS1061) only in those three test files.
 
 - [ ] **Step 3: Migrate the tests**
 
@@ -1271,7 +1279,48 @@ await vm.DownloadSelectedAsync(
 ```
 keeping each test's arrangement and assertions unchanged (`DownloadSelectedAsync` routes the descriptor through the same `DownloadOneAsync` path the old method used, so download/progress/gate assertions still hold). If a test asserts that `RaiseIsSelectedInstalledChanged` fired ONLY on the streaming card, relax it to assert the streaming card fired (the new method raises on all three cards — covered by `Raises_IsSelectedInstalled_Changed_On_All_Three_Cards` in Task 2).
 
-(b) In `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` — tests that exercise `DownloadMissingAsync`'s OLD semantics (ASR downloaded unconditionally; cleanup filtered through `MissingModelsResolver`; streaming excluded) describe behavior that no longer exists anywhere: DELETE those test methods. The new semantics are covered by `SelectedModelsPolicyTests` (what to download) and `ModelsTabViewModelDownloadSelectedTests` (that exactly the given set downloads). Keep any test in the file that does not call `DownloadMissingAsync`.
+(b) In `tests/Winpepper.Models.Tests/StreamingAutoInstallerTests.cs`, test `AutoInstall_and_models_card_download_never_run_concurrently` (:218) — this pins the shared per-downloader operation gate between the auto-installer and the Models page VM; it MUST be kept. It captures the task un-awaited (`var card = ...`), so apply the same descriptor mapping WITHOUT adding `await`. Replace:
+
+```csharp
+var card = vm.DownloadStreamingAsync(TestContext.Current.CancellationToken);
+```
+with:
+
+```csharp
+var card = vm.DownloadSelectedAsync(
+    new[] { new ModelRegistry().Find(ModelRegistry.StreamingAsrName)! },
+    TestContext.Current.CancellationToken);
+```
+Everything else in the test stays unchanged: `DownloadSelectedAsync` takes the same `_downloadGate` at entry, so `fake.SawOverlap == false` and `fake.EnteredCount == 2` still hold.
+
+(c) In `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` — split the `DownloadMissingAsync` callers into two groups:
+
+DELETE exactly these three tests, which exercise the OLD selection semantics (ASR downloaded unconditionally; cleanup filtered through `MissingModelsResolver`; streaming excluded) — behavior that no longer exists anywhere; the new semantics are covered by `SelectedModelsPolicyTests` (what to download) and `ModelsTabViewModelDownloadSelectedTests` (that exactly the given set downloads):
+- `DownloadMissingAsync_ManualInstallOnlySelection_IsSkippedGracefully` (:66)
+- `DownloadMissingAsync_OnlyEnqueuesMissingSelected` (:83)
+- `DownloadMissingAsync_AlwaysRoutesSelectedAsrThroughAuthoritativeProvisioning` (:99)
+
+MIGRATE these three tests to `DownloadSelectedAsync` — they pin still-live plumbing contracts (cross-VM `_downloadGate` serialization; no ambient sync-context capture with a bounded dispatcher queue; single-flight progress-bridge burst behavior) that the Task 2 suite does NOT cover, and that `DownloadSelectedAsync` inherits via the same gate/`DownloadOneAsync` path. Do NOT delete them:
+- `DownloadMissingAsync_DoesNotCaptureAmbientUiContextForEitherDescriptor` (:123)
+- `DownloadMissingAsync_ShowsIntermediateBurstProgressWithoutGrowingUiQueue` (:160)
+- `DownloadMissingAsync_SerializesViewModelsSharingDownloader` (:203)
+
+Migration rules for those three (apply exactly):
+1. Each VM in these tests is constructed with `currentAsrName: "parakeet-tdt-0.6b-v3"` and `currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m"` against an empty `_root`, so the old method downloaded exactly those two descriptors per call. Preserve that by passing the same two descriptors explicitly. At the top of each test add:
+```csharp
+var registry = new ModelRegistry();
+var selected = new[]
+{
+    registry.Find("parakeet-tdt-0.6b-v3")!,
+    registry.Find("qwen2.5-0.5b-instruct-q4_k_m")!,
+};
+```
+(reuse `registry` for the VM constructor's first argument) and replace every `vm.DownloadMissingAsync(<token>)` / `firstVm.DownloadMissingAsync(...)` / `secondVm.DownloadMissingAsync(...)` call with `...DownloadSelectedAsync(selected, <token>)`, preserving whether the returned task was awaited or captured.
+2. `DownloadSelectedAsync` raises `RaiseIsSelectedInstalledChanged` on all THREE cards (Task 2), where the old method raised on two. In the two dispatcher tests, relax the constant queue bound from 2 to 3 — change `dispatcher.MaxPendingCount.ShouldBeLessThanOrEqualTo(2)` to `ShouldBeLessThanOrEqualTo(3)` (both occurrences, :154 and :199) and update the adjacent comment to say "one installed-state notification per card, so the whole tab's constant upper bound is three". Leave the mid-burst `MaxPendingCount.ShouldBe(1)` asserts unchanged (single-flight bridge is unaffected).
+3. In `..._SerializesViewModelsSharingDownloader`, keep `downloader.DownloadCount.ShouldBe(4, ...)` (2 VMs x 2 selected descriptors — the count is unchanged because the selected set matches what the old method computed) but update its reason string to "each request downloads its two selected descriptors, but downloader calls must never overlap".
+4. Rename the three migrated tests' `DownloadMissingAsync_` prefix to `DownloadSelectedAsync_` so the names match the method they now exercise.
+
+Keep any test in the file that does not call `DownloadMissingAsync`.
 
 - [ ] **Step 4: Run the migrated tests, then the full Linux suite**
 
@@ -1285,7 +1334,7 @@ Expected: 0 failures; `LINUX SUITE: GREEN`.
 - [ ] **Step 5: Commit the removal**
 
 ```bash
-git add src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs
+git add src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs tests/Winpepper.Models.Tests/StreamingAutoInstallerTests.cs tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs
 git commit -m "refactor(models): remove DownloadMissingAsync/DownloadStreamingAsync, superseded by DownloadSelectedAsync
 
 Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"

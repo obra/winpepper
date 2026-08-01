@@ -1,0 +1,1132 @@
+# Models Page UX Overhaul Implementation Plan
+
+> **For agentic workers:** This plan is executed task-by-task by the
+> workflow's execute stage: a fresh implementer per task, with a spec +
+> quality review after each task. Steps use checkbox (`- [ ]`) syntax
+> for tracking.
+
+**Goal:** Rework the Models page so the streaming model is a registry-driven dropdown like the other cards, the bottom button downloads only selected-and-missing models (and disables when nothing is missing), manual-install-only models get an inline explanation instead of a silent no-op, and the cleanup card grays out with a note when cleanup is disabled.
+
+**Architecture:** All decision logic (which selected models are missing/downloadable, button enable state, manual-install detection, cleanup gate) lives in a new pure static policy class `SelectedModelsPolicy` in `Winpepper.Models` (Linux-tested, following the `CpuPeggedPolicy`/`PromptFormatCapabilities` idiom). `ModelsTabViewModel` gains one new orchestration method `DownloadSelectedAsync` that downloads an explicit descriptor list. The Windows-only `ModelsPage` code-behind stays thin: it gathers inputs from the sources it already uses (verified-ASR flag, card presence checks, `CleanupVm.Enabled`), asks the policy, and applies results to controls imperatively — matching the page's existing imperative style and the CleanupPage `ApplyModelCapabilities` gray-out precedent.
+
+**Tech Stack:** C# / .NET 9, WinUI 3 (`Winpepper.App`, Windows-only, `#if WINDOWS`), xUnit v3 + Shouldly (`tests/Winpepper.Models.Tests`, Linux-run).
+
+## Global Constraints
+
+- Worktree root (all commands run here): `/home/dan/code/winpepper/.worktrees/models-page-ux`, branch `feat/models-page-ux`. All file paths below are relative to this root.
+- NEVER read or edit anything under a nested `.worktrees/` directory (stale copies mislead).
+- Linux suite green before EVERY commit: `./scripts/linux-tests.sh` (NEVER `dotnet test`). Ends `LINUX SUITE: GREEN` on pass.
+- Full Windows gate before done and after each task that touches `Winpepper.App`: `./scripts/windows-gate.sh` (use a 20–30 min timeout; UNC `MSB4025` and vsock interop failures are known transient flakes — retry the gate, do not "fix" them). Ends `GATE: GREEN` on pass.
+- Never mix Linux- and Windows-side builds in the same `bin/`/`obj/` (clean when switching sides).
+- Every commit message ends with the trailer line: `Co-authored-by: Amplifier <amplifier@users.noreply.github.com>`
+- Do NOT push to origin — leave the branch local.
+- Do NOT change: model selection semantics (promote callbacks publishing to selection slots + durable settings writes), the live-swap/pre-warm machinery, the AssemblyAI key controls, the `StreamingToggle` behavior, or download mechanics (`ModelDownloader`, `ModelsServices.DownloadAsync`, `ModelProvisioningCoordinator`).
+- No new settings in `AppSettings`. Streaming model selection is NOT persisted (the registry pins it via `ModelRegistry.StreamingAsrName`; the card's promote callback stays a deliberate no-op).
+- AutomationIds are a test-facing contract: `ModelsDownloadButton` must keep its ID. New named controls get new AutomationIds documented in `docs/automation-ids.md`.
+- Exact user-facing copy (verbatim, do not restyle):
+  - Bottom button label: `Download selected models`
+  - Bottom button tooltip: `Downloads the models chosen above that aren't installed yet.`
+  - Cleanup-off note: `Cleanup is turned off — enable it in the Cleanup tab to choose a model.`
+  - Streaming failed label: `Install failed — use the download button to retry`
+- `ModelsPage.xaml.cs` is `#if WINDOWS`-gated: it cannot compile or run on Linux. Windows-gate compiles it; on-device visual verification is the owner's post-install step (spec-approved), recorded as a smoke checklist in the final commit message (Task 6).
+- Line numbers cited below are anchors as of `main @ 7345ca1` — re-locate by symbol if drifted. STOP only if the claimed code cannot be found anywhere under `src/` or contradicts in substance.
+
+---
+
+## Verified current-state facts (from code survey @ 7345ca1)
+
+The implementer of each task can rely on these without re-deriving them:
+
+- `ModelKind` (`src/Winpepper.Models/ModelKind.cs`) has exactly `Asr`, `Cleanup`, `StreamingAsr`.
+- `ModelRegistry` (`src/Winpepper.Models/ModelRegistry.cs`): `ByKind(ModelKind)`, `Find(string) : ModelDescriptor?`, `All`, constants `DefaultAsrName`, `DefaultCleanupName`, `StreamingAsrName = "nemotron-streaming-en"`. `ResolveOrDefault` THROWS for `ModelKind.StreamingAsr` — never call it for streaming.
+- `ModelDescriptor` has `Name`, `DisplayName`, `Kind`, `ManualInstallOnly` (only `sotto-cleanup-lfm25-350m-q8_0` sets it; its file has an empty URL), and `IsFullyInstalled(string installRoot)` (presence + non-empty check).
+- `ModelDownloader.DownloadAsync` throws `InvalidOperationException` if a `ManualInstallOnly` descriptor reaches it — download paths must filter these out.
+- `ModelsTabViewModel` (`src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs`): nested `IDownloader` interface; cards `AsrCard`/`CleanupCard`/`StreamingCard` (each `ModelCardViewModel` built from `registry.ByKind(...)`); `_downloadGate` = `SharedOperationGateFor(downloader)`; private `DownloadOneAsync(ModelDescriptor, CancellationToken)` routes progress to the card matching `d.Kind` (already handles `StreamingAsr`). `StreamingCard`'s promote callback is `_ => { }` (deliberate no-op) and its seed name is `ModelRegistry.StreamingAsrName`.
+- `ModelCardViewModel`: `Available` (ObservableCollection, bound as combo ItemsSource with `DisplayMemberPath="DisplayName"`), `SelectedName`, `SelectedDescriptor`, `IsSelectedInstalled`, `CommitSelection()`, `RaiseIsSelectedInstalledChanged()`.
+- `ModelsPage.xaml.cs` (`src/Winpepper.App/Views/ModelsPage.xaml.cs`, ~404 lines, all `#if WINDOWS`): `OnNavigatedTo` builds a fresh `ModelsTabViewModel` per navigation (page is NOT cached) and seeds `AsrCombo.SelectedItem`/`CleanupCombo.SelectedItem` imperatively; `UpdateInstalledLabels()` (~:361-389) computes all installed icons/labels imperatively and is called from every state-changing site (navigation seed, both selection handlers, both download handlers, the auto-installer status lambda); `_asrSelectedVerified` is the page's hash-verified ASR installed flag (set off-thread via `ModelsServices.VerifyAsrModelReady`); `OnDownloadMissing` (~:287-329) is the bottom button handler; `OnInstallStreamingModel` (~:331-359) is the streaming install handler; `OnNavigatedFrom` (~:391-402) unsubscribes the auto-installer handler and cancels `_lifetimeCts`.
+- There is NO settings change event anywhere. The only live channel for `CleanupEnabled` is `App.Shell.CleanupVm.PropertyChanged` filtered on `nameof(CleanupSettingsViewModel.Enabled)` (`CleanupSettingsViewModel` is a shell singleton in `Winpepper.Core.ViewModels`, exposes `Enabled : bool`). This is the "cheap live-update path" the spec prefers.
+- AssemblyAI implies NO downloadable models (`AssemblyAiModels` is remote vendor IDs, outside the registry). The local ASR model remains a required fallback regardless of provider, and it is always "chosen" via `AsrCombo` — so the selected set never needs an AssemblyAI special case.
+- Gray-out precedent (`src/Winpepper.App/Views/CleanupPage.xaml.cs`, `ApplyModelCapabilities`, ~:22-32): set `IsEnabled` on interactive controls only (never `Opacity`, never hide, never clear values); notes are `TextBlock` with `CaptionTextBlockStyle` + `TextFillColorSecondaryBrush` + `TextWrapping="Wrap"` + `Visibility="Collapsed"` default; live refresh via `PropertyChanged` subscription with `-=`/`+=` re-subscribe in `OnNavigatedTo`.
+- Test idiom (`tests/Winpepper.Models.Tests`): xUnit v3 + Shouldly, file-scoped namespace mirroring the folder, `public class <Type>Tests`, methods named `Pascal_Snake_Case` sentences, `[Theory]`+`[InlineData]` for truth tables, cancellation via `TestContext.Current.CancellationToken`. Pure policy tests carry no traits.
+- Known bug being fixed in passing (required for change 1's "live after download" rule): `OnDownloadMissing` discards the post-download verify result, so `_asrSelectedVerified` stays stale and the ASR label can read "Not downloaded" after a successful download.
+
+## File Structure
+
+| File | Action | Responsibility |
+|---|---|---|
+| `src/Winpepper.Models/SelectedModelsPolicy.cs` | Create (Task 1) | Pure decisions: selected-set construction (incl. cleanup gate), missing/downloadable names, manual-only names, button enable, cleanup-card enable/note |
+| `tests/Winpepper.Models.Tests/SelectedModelsPolicyTests.cs` | Create (Task 1) | Policy unit tests (Linux) |
+| `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs` | Modify (Tasks 2, 6) | Add `DownloadSelectedAsync`; later remove superseded `DownloadMissingAsync`/`DownloadStreamingAsync` |
+| `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelDownloadSelectedTests.cs` | Create (Task 2) | New VM method tests (Linux) |
+| `src/Winpepper.App/Views/ModelsPage.xaml` | Modify (Tasks 3, 4, 5) | Streaming combo replaces install button; bottom button rename + name + tooltip; manual-install note; cleanup-off note |
+| `src/Winpepper.App/Views/ModelsPage.xaml.cs` | Modify (Tasks 3, 4, 5) | `OnStreamingChanged`; `OnDownloadSelected` + `CurrentSelection()` + `UpdateDownloadButtonState()`; cleanup gate seed/subscription + `ApplyCleanupGate()` |
+| `docs/automation-ids.md` | Modify (Tasks 3, 4, 5) | Register new AutomationIds |
+| `tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs` | Modify (Task 6) | Migrate streaming-download coverage to `DownloadSelectedAsync` |
+| `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` | Modify (Task 6) | Remove tests of deleted `DownloadMissingAsync` semantics |
+
+Task order keeps every intermediate commit compiling on both sides: pure additions first (Tasks 1–2), then page rework that switches callers (Tasks 3–5), then removal of the superseded VM methods once nothing calls them (Task 6).
+
+---
+
+### Task 1: `SelectedModelsPolicy` — pure decision logic
+
+**Files:**
+- Create: `src/Winpepper.Models/SelectedModelsPolicy.cs`
+- Test: `tests/Winpepper.Models.Tests/SelectedModelsPolicyTests.cs`
+
+**Interfaces:**
+- Consumes: nothing (pure; no dependency on `ModelDescriptor` — the page maps descriptors to inputs).
+- Produces (later tasks rely on these exact signatures):
+  - `SelectedModelsPolicy.SelectedModel` — `readonly record struct SelectedModel(string Name, bool IsInstalled, bool IsManualInstallOnly)`
+  - `static IReadOnlyList<SelectedModel> BuildSelection(SelectedModel? asr, SelectedModel? streaming, SelectedModel? cleanup, bool cleanupEnabled)`
+  - `static IReadOnlyList<string> DownloadableMissingNames(IReadOnlyList<SelectedModel> selection)`
+  - `static IReadOnlyList<string> ManualOnlyMissingNames(IReadOnlyList<SelectedModel> selection)`
+  - `static bool DownloadButtonEnabled(IReadOnlyList<SelectedModel> selection)`
+  - `static bool CleanupCardEnabled(bool cleanupEnabled)`
+  - `static bool CleanupOffNoteVisible(bool cleanupEnabled)`
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/Winpepper.Models.Tests/SelectedModelsPolicyTests.cs`:
+
+```csharp
+using Shouldly;
+using Winpepper.Models;
+using Xunit;
+
+namespace Winpepper.Models.Tests;
+
+public class SelectedModelsPolicyTests
+{
+    private static SelectedModelsPolicy.SelectedModel Model(
+        string name, bool installed, bool manual = false) => new(name, installed, manual);
+
+    [Fact]
+    public void BuildSelection_Includes_Asr_Streaming_And_Cleanup_When_Cleanup_Enabled()
+    {
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed: true),
+            streaming: Model("stream-a", installed: false),
+            cleanup: Model("clean-a", installed: false),
+            cleanupEnabled: true);
+
+        selection.Count.ShouldBe(3);
+        selection[0].Name.ShouldBe("asr-a");
+        selection[1].Name.ShouldBe("stream-a");
+        selection[2].Name.ShouldBe("clean-a");
+    }
+
+    [Fact]
+    public void BuildSelection_Excludes_Cleanup_When_Cleanup_Disabled()
+    {
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed: true),
+            streaming: Model("stream-a", installed: false),
+            cleanup: Model("clean-a", installed: false),
+            cleanupEnabled: false);
+
+        selection.ShouldAllBe(m => m.Name != "clean-a");
+        selection.Count.ShouldBe(2);
+    }
+
+    [Fact]
+    public void BuildSelection_Skips_Null_Slots()
+    {
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: null, streaming: null, cleanup: null, cleanupEnabled: true);
+
+        selection.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void DownloadableMissingNames_Returns_Only_Missing_Downloadable_Models()
+    {
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed: true),
+            streaming: Model("stream-a", installed: false),
+            cleanup: Model("clean-a", installed: false),
+            cleanupEnabled: true);
+
+        SelectedModelsPolicy.DownloadableMissingNames(selection)
+            .ShouldBe(new[] { "stream-a", "clean-a" });
+    }
+
+    [Fact]
+    public void DownloadableMissingNames_Excludes_Manual_Install_Only_Models()
+    {
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed: false),
+            streaming: null,
+            cleanup: Model("sotto", installed: false, manual: true),
+            cleanupEnabled: true);
+
+        SelectedModelsPolicy.DownloadableMissingNames(selection)
+            .ShouldBe(new[] { "asr-a" });
+    }
+
+    [Fact]
+    public void DownloadableMissingNames_Deduplicates_Repeated_Names()
+    {
+        // Two dropdowns pointing at the same registry entry must not download it twice.
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("same", installed: false),
+            streaming: Model("same", installed: false),
+            cleanup: null,
+            cleanupEnabled: true);
+
+        SelectedModelsPolicy.DownloadableMissingNames(selection)
+            .ShouldBe(new[] { "same" });
+    }
+
+    [Fact]
+    public void ManualOnlyMissingNames_Returns_Manual_Models_That_Are_Missing()
+    {
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed: true),
+            streaming: null,
+            cleanup: Model("sotto", installed: false, manual: true),
+            cleanupEnabled: true);
+
+        SelectedModelsPolicy.ManualOnlyMissingNames(selection)
+            .ShouldBe(new[] { "sotto" });
+    }
+
+    [Fact]
+    public void ManualOnlyMissingNames_Excludes_Installed_Manual_Models()
+    {
+        // An installed manual model needs no note and no download.
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed: true),
+            streaming: null,
+            cleanup: Model("sotto", installed: true, manual: true),
+            cleanupEnabled: true);
+
+        SelectedModelsPolicy.ManualOnlyMissingNames(selection).ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(false, false, true)]  // missing + downloadable => enabled
+    [InlineData(true, false, false)]  // installed => nothing to do
+    [InlineData(false, true, false)]  // missing but manual-only => button cannot help
+    [InlineData(true, true, false)]   // installed manual model => nothing to do
+    public void DownloadButtonEnabled_Truth_Table(bool installed, bool manual, bool expected)
+    {
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed, manual),
+            streaming: null, cleanup: null, cleanupEnabled: true);
+
+        SelectedModelsPolicy.DownloadButtonEnabled(selection).ShouldBe(expected);
+    }
+
+    [Fact]
+    public void DownloadButtonEnabled_Is_False_For_Empty_Selection() =>
+        SelectedModelsPolicy.DownloadButtonEnabled([]).ShouldBeFalse();
+
+    [Theory]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, true)]
+    public void Cleanup_Gate_Mirrors_The_Setting(bool cleanupEnabled, bool cardEnabled, bool noteVisible)
+    {
+        SelectedModelsPolicy.CleanupCardEnabled(cleanupEnabled).ShouldBe(cardEnabled);
+        SelectedModelsPolicy.CleanupOffNoteVisible(cleanupEnabled).ShouldBe(noteVisible);
+    }
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+cd /home/dan/code/winpepper/.worktrees/models-page-ux
+dotnet build tests/Winpepper.Models.Tests -c Release -f net9.0 -p:EnableWindowsTargeting=true
+```
+Expected: BUILD FAILS with `CS0103: The name 'SelectedModelsPolicy' does not exist` (compile failure is the RED state for a new type).
+
+- [ ] **Step 3: Write the implementation**
+
+Create `src/Winpepper.Models/SelectedModelsPolicy.cs`:
+
+```csharp
+namespace Winpepper.Models;
+
+/// <summary>
+/// Pure decision logic for the Models page: which selected models are
+/// missing and downloadable, whether the bottom download button should be
+/// enabled, which selected models can only be installed manually, and the
+/// cleanup-gate state. Pure decision — Linux-tested by design. The page
+/// supplies installed-state inputs from the same sources it already
+/// renders (the hash-verified flag for ASR, presence checks for cleanup
+/// and streaming), so this class never touches the file system.
+/// </summary>
+public static class SelectedModelsPolicy
+{
+    /// <summary>One dropdown's current choice, reduced to what decisions need.</summary>
+    public readonly record struct SelectedModel(string Name, bool IsInstalled, bool IsManualInstallOnly);
+
+    /// <summary>
+    /// The set of models the page's dropdowns currently choose. The cleanup
+    /// choice only counts while cleanup is enabled (change 4's gate): a
+    /// disabled feature's model is not "selected" for download purposes.
+    /// Null slots (no selection in that combo) are skipped.
+    /// </summary>
+    public static IReadOnlyList<SelectedModel> BuildSelection(
+        SelectedModel? asr, SelectedModel? streaming, SelectedModel? cleanup, bool cleanupEnabled)
+    {
+        var selection = new List<SelectedModel>(3);
+        if (asr is { } a) selection.Add(a);
+        if (streaming is { } s) selection.Add(s);
+        if (cleanupEnabled && cleanup is { } c) selection.Add(c);
+        return selection;
+    }
+
+    /// <summary>Selected, not installed, and fetchable by the downloader — the bottom button's work list.</summary>
+    public static IReadOnlyList<string> DownloadableMissingNames(IReadOnlyList<SelectedModel> selection) =>
+        selection.Where(m => !m.IsInstalled && !m.IsManualInstallOnly)
+                 .Select(m => m.Name)
+                 .Distinct(StringComparer.Ordinal)
+                 .ToList();
+
+    /// <summary>Selected, not installed, but manual-install only — the button must not attempt these; the UI explains instead.</summary>
+    public static IReadOnlyList<string> ManualOnlyMissingNames(IReadOnlyList<SelectedModel> selection) =>
+        selection.Where(m => !m.IsInstalled && m.IsManualInstallOnly)
+                 .Select(m => m.Name)
+                 .Distinct(StringComparer.Ordinal)
+                 .ToList();
+
+    /// <summary>A button whose only effect is already satisfied must be disabled, not hidden.</summary>
+    public static bool DownloadButtonEnabled(IReadOnlyList<SelectedModel> selection) =>
+        DownloadableMissingNames(selection).Count > 0;
+
+    /// <summary>Gray out (never hide, never clear): the combo disables, values are preserved.</summary>
+    public static bool CleanupCardEnabled(bool cleanupEnabled) => cleanupEnabled;
+
+    /// <summary>The note shows exactly when the card is gated off.</summary>
+    public static bool CleanupOffNoteVisible(bool cleanupEnabled) => !cleanupEnabled;
+}
+```
+
+Note: the project uses implicit usings — `System.Linq`/`System.Collections.Generic` are already in scope. If the build reports missing usings, add `using System.Linq;` at the top.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+```bash
+dotnet build tests/Winpepper.Models.Tests -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -class "Winpepper.Models.Tests.SelectedModelsPolicyTests"
+```
+Expected: all `SelectedModelsPolicyTests` PASS, 0 failures.
+
+- [ ] **Step 5: Run the full Linux suite**
+
+```bash
+./scripts/linux-tests.sh
+```
+Expected: `LINUX SUITE: GREEN` (use a 10+ min timeout).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/Winpepper.Models/SelectedModelsPolicy.cs tests/Winpepper.Models.Tests/SelectedModelsPolicyTests.cs
+git commit -m "feat(models): SelectedModelsPolicy — pure decisions for the Models page download button and cleanup gate
+
+Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
+```
+
+---
+
+### Task 2: `ModelsTabViewModel.DownloadSelectedAsync`
+
+**Files:**
+- Modify: `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs` (add one method after `DownloadStreamingAsync`, ~line 116; do NOT remove the existing methods yet — the page still calls them until Tasks 3–4)
+- Test: `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelDownloadSelectedTests.cs`
+
+**Interfaces:**
+- Consumes: existing private `DownloadOneAsync(ModelDescriptor, CancellationToken)` (routes progress to the card matching `d.Kind` — already handles `StreamingAsr`), existing `_downloadGate`, `ModelDescriptor.ManualInstallOnly`.
+- Produces: `public async Task DownloadSelectedAsync(IReadOnlyList<ModelDescriptor> models, CancellationToken ct)` — Task 4's page handler and Task 6's migrated tests call exactly this.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelDownloadSelectedTests.cs`:
+
+```csharp
+using Shouldly;
+using Winpepper.Models;
+using Winpepper.Models.ViewModels;
+using Xunit;
+
+namespace Winpepper.Models.Tests.ViewModels;
+
+public class ModelsTabViewModelDownloadSelectedTests
+{
+    private readonly string _root = Directory.CreateTempSubdirectory("winpepper-dl-selected-").FullName;
+
+    private sealed class RecordingDownloader : ModelsTabViewModel.IDownloader
+    {
+        public List<string> Downloaded { get; } = [];
+
+        public Task DownloadAsync(ModelDescriptor descriptor, string installRoot,
+                                  IProgress<DownloadProgress> progress, CancellationToken ct)
+        {
+            Downloaded.Add(descriptor.Name);
+            return Task.CompletedTask;
+        }
+    }
+
+    private ModelsTabViewModel CreateVm(ModelsTabViewModel.IDownloader downloader) =>
+        new(new ModelRegistry(), _root, downloader,
+            currentAsrName: ModelRegistry.DefaultAsrName,
+            currentCleanupName: ModelRegistry.DefaultCleanupName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { });
+
+    [Fact]
+    public async Task Downloads_Exactly_The_Given_Descriptors_In_Order()
+    {
+        var downloader = new RecordingDownloader();
+        var vm = CreateVm(downloader);
+        var registry = new ModelRegistry();
+        var selected = new[]
+        {
+            registry.Find(ModelRegistry.DefaultAsrName)!,
+            registry.Find(ModelRegistry.StreamingAsrName)!,
+        };
+
+        await vm.DownloadSelectedAsync(selected, TestContext.Current.CancellationToken);
+
+        downloader.Downloaded.ShouldBe(
+            new[] { ModelRegistry.DefaultAsrName, ModelRegistry.StreamingAsrName });
+    }
+
+    [Fact]
+    public async Task Does_Not_Download_Unlisted_Registry_Models()
+    {
+        var downloader = new RecordingDownloader();
+        var vm = CreateVm(downloader);
+        var registry = new ModelRegistry();
+
+        await vm.DownloadSelectedAsync(
+            new[] { registry.Find(ModelRegistry.DefaultCleanupName)! },
+            TestContext.Current.CancellationToken);
+
+        downloader.Downloaded.ShouldBe(new[] { ModelRegistry.DefaultCleanupName });
+    }
+
+    [Fact]
+    public async Task Skips_Manual_Install_Only_Descriptors()
+    {
+        // Belt-and-braces: the policy filters these upstream, and the raw
+        // downloader would throw InvalidOperationException if one got through.
+        var downloader = new RecordingDownloader();
+        var vm = CreateVm(downloader);
+        var sotto = new ModelRegistry().Find("sotto-cleanup-lfm25-350m-q8_0")!;
+        sotto.ManualInstallOnly.ShouldBeTrue(); // pin the registry assumption
+
+        await vm.DownloadSelectedAsync(new[] { sotto }, TestContext.Current.CancellationToken);
+
+        downloader.Downloaded.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Raises_IsSelectedInstalled_Changed_On_All_Three_Cards()
+    {
+        var vm = CreateVm(new RecordingDownloader());
+        var changed = new List<string>();
+        vm.AsrCard.PropertyChanged += (_, e) =>
+        { if (e.PropertyName == nameof(ModelCardViewModel.IsSelectedInstalled)) changed.Add("asr"); };
+        vm.CleanupCard.PropertyChanged += (_, e) =>
+        { if (e.PropertyName == nameof(ModelCardViewModel.IsSelectedInstalled)) changed.Add("cleanup"); };
+        vm.StreamingCard.PropertyChanged += (_, e) =>
+        { if (e.PropertyName == nameof(ModelCardViewModel.IsSelectedInstalled)) changed.Add("streaming"); };
+
+        await vm.DownloadSelectedAsync([], TestContext.Current.CancellationToken);
+
+        changed.ShouldContain("asr");
+        changed.ShouldContain("cleanup");
+        changed.ShouldContain("streaming");
+    }
+}
+```
+
+(If `ModelDescriptor.ManualInstallOnly` is `init`-only and `sotto` resolution differs, the pin assertion in `Skips_Manual_Install_Only_Descriptors` will catch it loudly — that is its job.)
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+cd /home/dan/code/winpepper/.worktrees/models-page-ux
+dotnet build tests/Winpepper.Models.Tests -c Release -f net9.0 -p:EnableWindowsTargeting=true
+```
+Expected: BUILD FAILS with `CS1061: 'ModelsTabViewModel' does not contain a definition for 'DownloadSelectedAsync'`.
+
+- [ ] **Step 3: Write the implementation**
+
+In `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs`, add immediately AFTER the `DownloadStreamingAsync` method (~line 116):
+
+```csharp
+    /// <summary>
+    /// Downloads exactly the given descriptors — the page computes the
+    /// "selected and missing" set via SelectedModelsPolicy, so this method
+    /// never reaches for unselected registry models. Manual-install-only
+    /// descriptors are skipped defensively: the policy filters them
+    /// upstream, and the raw downloader throws if one reaches it.
+    /// </summary>
+    public async Task DownloadSelectedAsync(IReadOnlyList<ModelDescriptor> models, CancellationToken ct)
+    {
+        await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            foreach (var d in models)
+            {
+                if (d.ManualInstallOnly) continue;
+                await DownloadOneAsync(d, ct).ConfigureAwait(false);
+            }
+
+            AsrCard.RaiseIsSelectedInstalledChanged();
+            CleanupCard.RaiseIsSelectedInstalledChanged();
+            StreamingCard.RaiseIsSelectedInstalledChanged();
+        }
+        finally { _downloadGate.Release(); }
+    }
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+```bash
+dotnet build tests/Winpepper.Models.Tests -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll -class "Winpepper.Models.Tests.ViewModels.ModelsTabViewModelDownloadSelectedTests"
+```
+Expected: all 4 tests PASS.
+
+- [ ] **Step 5: Run the full Linux suite**
+
+```bash
+./scripts/linux-tests.sh
+```
+Expected: `LINUX SUITE: GREEN`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelDownloadSelectedTests.cs
+git commit -m "feat(models): ModelsTabViewModel.DownloadSelectedAsync downloads an explicit descriptor set
+
+Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
+```
+
+---
+
+### Task 3: Streaming card becomes a registry-driven dropdown (change 2)
+
+**Files:**
+- Modify: `src/Winpepper.App/Views/ModelsPage.xaml` (streaming card, ~:194-252: add `StreamingCombo`, delete `StreamingModelInstallButton`)
+- Modify: `src/Winpepper.App/Views/ModelsPage.xaml.cs` (add `OnStreamingChanged`; delete `OnInstallStreamingModel` (~:331-359) and `_streamingDownloadInProgress`; rework the streaming section of `UpdateInstalledLabels` (~:361-389); seed `StreamingCombo` in `OnNavigatedTo`)
+- Modify: `docs/automation-ids.md` (Models page section: add `ModelsStreamingCombo`)
+
+**Interfaces:**
+- Consumes: `ViewModel.StreamingCard` (`ModelCardViewModel`: `Available`, `SelectedName`, `SelectedDescriptor`, `CommitSelection()` — promote is a deliberate no-op for streaming); `ModelDescriptor.IsFullyInstalled(string)`; `App.Shell.StreamingAutoInstaller.Status`.
+- Produces: `StreamingCombo` (`x:Name`, AutomationId `ModelsStreamingCombo`) and handler `private void OnStreamingChanged(object sender, SelectionChangedEventArgs e)`. Task 4 relies on `ViewModel.StreamingCard.SelectedDescriptor` reflecting the combo choice.
+- Deliberately unchanged: the card's descriptive paragraph, `StreamingToggle`, the installed/not-installed icon row, the progress `ListView`, `DownloadStreamingAsync` (now uncalled from the page; removed in Task 6), `StreamingAutoInstaller`.
+- Spec cross-reference: change 1's "disable the streaming install button when installed" is satisfied here by change 2's stronger requirement — the button is deleted outright; installing a missing streaming model becomes the bottom button's job (Task 4), which disables when satisfied.
+- NOT added: any "(none)" combo entry — `StreamingToggle` governs whether streaming is used; the dropdown only selects which model. NOT added: persistence of the streaming choice (no new settings; registry pins the name, promote stays no-op).
+
+- [ ] **Step 1: XAML — replace the install button with a combo**
+
+In `src/Winpepper.App/Views/ModelsPage.xaml`, inside the streaming card (locate the comment `<!-- Streaming model card -->`):
+
+(a) Immediately AFTER the closing `</StackPanel>` of the horizontal icon row that contains `StreamingInstalledIcon` / `StreamingNotInstalledIcon` / `StreamingInstalledText`, and BEFORE the `<ListView ItemsSource="{x:Bind ViewModel.StreamingCard.ProgressByFile, Mode=OneWay}" ...>` element, insert (this mirrors the other cards' icons-row → combo → progress-list order):
+
+```xml
+                    <ComboBox x:Name="StreamingCombo"
+                              AutomationProperties.AutomationId="ModelsStreamingCombo"
+                              Header="Active model"
+                              HorizontalAlignment="Stretch"
+                              ItemsSource="{x:Bind ViewModel.StreamingCard.Available, Mode=OneWay}"
+                              DisplayMemberPath="DisplayName"
+                              SelectionChanged="OnStreamingChanged" />
+```
+
+(b) DELETE the entire `StreamingModelInstallButton` block (the last child of the card's StackPanel):
+
+```xml
+                    <Button x:Name="StreamingModelInstallButton"
+                            Click="OnInstallStreamingModel"
+                            AutomationProperties.AutomationId="StreamingModelInstallButton"
+                            HorizontalAlignment="Left">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <FontIcon Glyph="&#xE896;" FontSize="16" />
+                            <TextBlock Text="Install streaming model" />
+                        </StackPanel>
+                    </Button>
+```
+
+- [ ] **Step 2: Code-behind — selection handler, seeding, label rework, handler deletion**
+
+In `src/Winpepper.App/Views/ModelsPage.xaml.cs`:
+
+(a) Add next to `OnCleanupChanged` (~:117-125):
+
+```csharp
+    private void OnStreamingChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (StreamingCombo.SelectedItem is ModelDescriptor d)
+        {
+            // Streaming has no selection slot and no setting: the registry
+            // pins the active streaming model, so the card's promote callback
+            // is a deliberate no-op. The combo exists so future registry
+            // entries appear automatically and feed the download button.
+            ViewModel.StreamingCard.SelectedName = d.Name;
+            ViewModel.StreamingCard.CommitSelection();
+            UpdateInstalledLabels();
+        }
+    }
+```
+
+(b) In `OnNavigatedTo`, directly after the line that seeds `CleanupCombo.SelectedItem` (search for `CleanupCombo.SelectedItem =`), add:
+
+```csharp
+        StreamingCombo.SelectedItem = ViewModel.StreamingCard.SelectedDescriptor;
+```
+
+(c) DELETE the whole `OnInstallStreamingModel` method (~:331-359) and the `private bool _streamingDownloadInProgress;` field declaration.
+
+(d) In `UpdateInstalledLabels` (~:361-389), replace the streaming block. OLD (keep the multi-line comment about the shared operation gate that sits inside it — it still applies to bottom-button downloads):
+
+```csharp
+        var models = App.Shell!.ModelsServices;
+        var streamingInstalled = models.Registry.Find(ModelRegistry.StreamingAsrName)!
+            .IsFullyInstalled(models.ModelsRoot);
+```
+NEW (selection-aware — the label follows the dropdown):
+
+```csharp
+        var models = App.Shell!.ModelsServices;
+        var streamingInstalled = ViewModel.StreamingCard.SelectedDescriptor
+            ?.IsFullyInstalled(models.ModelsRoot) ?? false;
+```
+
+And replace the busy/label lines. OLD:
+
+```csharp
+        var streamingBusy = _streamingDownloadInProgress
+            || autoStatus == StreamingAutoInstallStatus.Installing;
+        StreamingInstalledText.Text = streamingInstalled ? "Installed"
+            : streamingBusy ? "Installing…"
+            : autoStatus == StreamingAutoInstallStatus.Failed ? "Install failed — use Install to retry"
+            : "Not downloaded";
+```
+NEW:
+
+```csharp
+        var streamingBusy = autoStatus == StreamingAutoInstallStatus.Installing;
+        StreamingInstalledText.Text = streamingInstalled ? "Installed"
+            : streamingBusy ? "Installing…"
+            : autoStatus == StreamingAutoInstallStatus.Failed ? "Install failed — use the download button to retry"
+            : "Not downloaded";
+```
+(Task 4 extends `streamingBusy` to cover bottom-button runs that include streaming.)
+
+- [ ] **Step 3: Register the AutomationId**
+
+In `docs/automation-ids.md`, in the Models page section (~lines 69-77, listing `ModelsAsrCombo`, `ModelsCleanupCombo`, `ModelsDownloadButton`, ...), add a row/line following the file's existing format:
+
+```
+ModelsStreamingCombo — Models page, streaming model ComboBox (streaming card)
+```
+Match the surrounding entries' exact formatting (table row vs list item — copy the neighbors' style).
+
+- [ ] **Step 4: Linux suite (unchanged projects must stay green)**
+
+```bash
+cd /home/dan/code/winpepper/.worktrees/models-page-ux
+./scripts/linux-tests.sh
+```
+Expected: `LINUX SUITE: GREEN`.
+
+- [ ] **Step 5: Windows gate (only compile check for `Winpepper.App`)**
+
+```bash
+./scripts/windows-gate.sh
+```
+Expected: `GATE: GREEN` (20–30 min timeout; retry on UNC MSB4025 / vsock interop flakes). If the XAML compiler reports an unknown member `OnInstallStreamingModel`, a stale reference remains in XAML — re-check Step 1(b).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/Winpepper.App/Views/ModelsPage.xaml src/Winpepper.App/Views/ModelsPage.xaml.cs docs/automation-ids.md
+git commit -m "feat(app): streaming model card becomes a registry-driven dropdown; dedicated install button removed
+
+The streaming card now matches the ASR/cleanup pattern: ComboBox over
+ModelKind.StreamingAsr registry entries with the same installed-state
+row. Installing a missing streaming model moves to the bottom download
+button (next commit). StreamingToggle and descriptive text unchanged;
+streaming selection is deliberately not persisted (registry pins it).
+
+Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
+```
+
+---
+
+### Task 4: Bottom button — "Download selected models" semantics + enable state + manual-install note (changes 1 & 3)
+
+**Files:**
+- Modify: `src/Winpepper.App/Views/ModelsPage.xaml` (bottom button ~:254-262: add `x:Name`, new label + tooltip; add `ManualInstallNote` TextBlock after it)
+- Modify: `src/Winpepper.App/Views/ModelsPage.xaml.cs` (replace `OnDownloadMissing` with `OnDownloadSelected`; add `CurrentSelection()`, `UpdateDownloadButtonState()`, fields `_cleanupEnabled`, `_downloadRunIncludesStreaming`; extend `UpdateInstalledLabels`)
+- Modify: `docs/automation-ids.md` (add `ModelsManualInstallNote`)
+
+**Interfaces:**
+- Consumes: `SelectedModelsPolicy` (Task 1 signatures), `ViewModel.DownloadSelectedAsync(IReadOnlyList<ModelDescriptor>, CancellationToken)` (Task 2), `StreamingCombo`/`ViewModel.StreamingCard.SelectedDescriptor` (Task 3), existing `_asrSelectedVerified`, `ViewModel.CleanupCard.IsSelectedInstalled`, `ModelsServices` (`Registry`, `ModelsRoot`, `VerifyAsrModelReady`), `shell.AsrModelSelection.Read()`, `shell.Pipeline.TryStart()`.
+- Produces: `DownloadSelectedButton` (`x:Name`; AutomationId stays `ModelsDownloadButton`), `ManualInstallNote` (`x:Name`, AutomationId `ModelsManualInstallNote`), `private IReadOnlyList<SelectedModelsPolicy.SelectedModel> CurrentSelection()`, `private void UpdateDownloadButtonState()`, `private async void OnDownloadSelected(object sender, RoutedEventArgs e)`, `private bool _cleanupEnabled = true;` (Task 5 wires it to the real gate), `private bool _downloadRunIncludesStreaming;`.
+- Enable-state liveness comes free: `UpdateDownloadButtonState()` is called at the end of `UpdateInstalledLabels()`, which already runs on navigation seed, every selection change (ASR/cleanup/streaming), ASR verify completion, auto-installer status change, and download completion.
+
+- [ ] **Step 1: XAML — button rename + manual-install note**
+
+In `src/Winpepper.App/Views/ModelsPage.xaml`, replace the bottom button block. OLD:
+
+```xml
+            <Button Click="OnDownloadMissing"
+                    AutomationProperties.AutomationId="ModelsDownloadButton"
+                    Style="{StaticResource AccentButtonStyle}"
+                    HorizontalAlignment="Left">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE896;" FontSize="16" />
+                    <TextBlock Text="Download missing models" />
+                </StackPanel>
+            </Button>
+```
+NEW (same position; note follows the button):
+
+```xml
+            <Button x:Name="DownloadSelectedButton"
+                    Click="OnDownloadSelected"
+                    AutomationProperties.AutomationId="ModelsDownloadButton"
+                    ToolTipService.ToolTip="Downloads the models chosen above that aren't installed yet."
+                    Style="{StaticResource AccentButtonStyle}"
+                    HorizontalAlignment="Left">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <FontIcon Glyph="&#xE896;" FontSize="16" />
+                    <TextBlock Text="Download selected models" />
+                </StackPanel>
+            </Button>
+            <TextBlock x:Name="ManualInstallNote"
+                       AutomationProperties.AutomationId="ModelsManualInstallNote"
+                       Style="{ThemeResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Visibility="Collapsed" />
+```
+
+- [ ] **Step 2: Code-behind — fields, selection snapshot, button state**
+
+In `src/Winpepper.App/Views/ModelsPage.xaml.cs`:
+
+(a) Next to the existing `private bool _downloadInProgress;` field, add:
+
+```csharp
+    // Seeded from the cleanup gate in OnNavigatedTo (Task 5 wires it to
+    // App.Shell.CleanupVm.Enabled); until then cleanup counts as enabled,
+    // which matches today's behavior.
+    private bool _cleanupEnabled = true;
+
+    // True while a bottom-button run that includes the streaming model is
+    // in flight, so the streaming state line can honestly say "Installing…".
+    private bool _downloadRunIncludesStreaming;
+```
+
+(b) Add these two methods near `UpdateInstalledLabels`:
+
+```csharp
+    /// <summary>
+    /// Snapshot of what the page's dropdowns currently choose, using the
+    /// SAME installed-state sources the page already renders: the
+    /// hash-verified flag for ASR, presence checks for cleanup/streaming.
+    /// </summary>
+    private IReadOnlyList<SelectedModelsPolicy.SelectedModel> CurrentSelection()
+    {
+        var models = App.Shell!.ModelsServices;
+
+        SelectedModelsPolicy.SelectedModel? asr = ViewModel.AsrCard.SelectedDescriptor is { } a
+            ? new(a.Name, _asrSelectedVerified, a.ManualInstallOnly) : null;
+        SelectedModelsPolicy.SelectedModel? streaming = ViewModel.StreamingCard.SelectedDescriptor is { } s
+            ? new(s.Name, s.IsFullyInstalled(models.ModelsRoot), s.ManualInstallOnly) : null;
+        SelectedModelsPolicy.SelectedModel? cleanup = ViewModel.CleanupCard.SelectedDescriptor is { } c
+            ? new(c.Name, ViewModel.CleanupCard.IsSelectedInstalled, c.ManualInstallOnly) : null;
+
+        return SelectedModelsPolicy.BuildSelection(asr, streaming, cleanup, _cleanupEnabled);
+    }
+
+    private void UpdateDownloadButtonState()
+    {
+        var selection = CurrentSelection();
+
+        // Disabled (grayed, not hidden) whenever its only effect is already
+        // satisfied — and always while a run is in flight.
+        DownloadSelectedButton.IsEnabled =
+            !_downloadInProgress && SelectedModelsPolicy.DownloadButtonEnabled(selection);
+
+        var manualNames = SelectedModelsPolicy.ManualOnlyMissingNames(selection);
+        if (manualNames.Count > 0)
+        {
+            var registry = App.Shell!.ModelsServices.Registry;
+            var displays = manualNames.Select(n => registry.Find(n)?.DisplayName ?? n);
+            ManualInstallNote.Text =
+                $"{string.Join(", ", displays)} is installed manually — see the docs. The download button won't fetch it.";
+            ManualInstallNote.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ManualInstallNote.Visibility = Visibility.Collapsed;
+        }
+    }
+```
+
+(c) At the very END of `UpdateInstalledLabels()` (after the streaming icon visibility lines), add:
+
+```csharp
+        UpdateDownloadButtonState();
+```
+
+(d) In the streaming block of `UpdateInstalledLabels`, extend the busy flag. OLD (from Task 3):
+
+```csharp
+        var streamingBusy = autoStatus == StreamingAutoInstallStatus.Installing;
+```
+NEW:
+
+```csharp
+        var streamingBusy = (_downloadInProgress && _downloadRunIncludesStreaming)
+            || autoStatus == StreamingAutoInstallStatus.Installing;
+```
+
+- [ ] **Step 3: Code-behind — replace the download handler**
+
+Replace the entire `OnDownloadMissing` method (~:287-329) with:
+
+```csharp
+    private async void OnDownloadSelected(object sender, RoutedEventArgs e)
+    {
+        if (_downloadInProgress) return;
+
+        var selection = CurrentSelection();
+        var names = SelectedModelsPolicy.DownloadableMissingNames(selection);
+        if (names.Count == 0) return; // button should already be disabled; belt-and-braces
+
+        var shell = App.Shell!;
+        var registry = shell.ModelsServices.Registry;
+        var descriptors = names.Select(n => registry.Find(n)!).ToList();
+
+        _downloadInProgress = true;
+        _downloadRunIncludesStreaming =
+            descriptors.Any(d => d.Kind == ModelKind.StreamingAsr);
+        UpdateInstalledLabels(); // disables the button + shows "Installing…" where honest
+
+        try
+        {
+            await ViewModel.DownloadSelectedAsync(descriptors, _lifetimeCts?.Token ?? CancellationToken.None);
+
+            // Refresh the verified ASR flag off-thread so the label and the
+            // button's enable state reflect the download that just finished
+            // (previously the verify result was discarded and the label went
+            // stale). This also primes ModelsServices' verified-readiness
+            // cache so the synchronous check inside TryStart() below is a
+            // cache hit, not a dispatcher-blocking re-hash.
+            var canonicalAsr = registry
+                .ResolveOrDefault(shell.AsrModelSelection.Read(), ModelKind.Asr).Name;
+            _asrSelectedVerified = await Task.Run(() => shell.ModelsServices.VerifyAsrModelReady(canonicalAsr));
+
+            // If the pipeline was left disabled at boot because models were
+            // missing (issue #6), bring it up now that the download finished.
+            shell.Pipeline.TryStart();
+        }
+        catch (OperationCanceledException)
+        {
+            // Navigation away cancels _lifetimeCts; cancellation must not
+            // surface as an application crash.
+        }
+        catch (Exception ex)
+        {
+            shell.LogFactory.CreateLogger<ModelsPage>()
+                .LogError(ex, "Model download failed");
+            shell.ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
+        }
+        finally
+        {
+            _downloadInProgress = false;
+            _downloadRunIncludesStreaming = false;
+            // Recompute rather than blindly re-enable: if everything the
+            // dropdowns choose is now installed, the button must gray out.
+            UpdateInstalledLabels();
+        }
+    }
+```
+
+Notes for the implementer:
+- `CurrentSelection`/`UpdateDownloadButtonState`/`OnDownloadSelected` use LINQ (`Select`, `Any`, `ToList`). If the Windows gate reports missing names, add `using System.Linq;` at the top of `ModelsPage.xaml.cs` (inside the `#if WINDOWS` region, with the other usings).
+- Behavior change vs old code is intentional and specified: the selected ASR model is no longer downloaded unconditionally — it is included only when `_asrSelectedVerified` is false. `_asrSelectedVerified` is hash-verified, so a corrupt-but-present install still reads as missing and gets repaired through the coordinator path.
+- Progress UI needs no change: `DownloadOneAsync` already routes per-file rows to the card matching each descriptor's kind, so rows appear under exactly the cards whose models are downloading (now including streaming).
+
+- [ ] **Step 4: Register the AutomationId**
+
+In `docs/automation-ids.md`, Models page section, add (matching neighbors' format):
+
+```
+ModelsManualInstallNote — Models page, inline note shown when a selected model is manual-install only
+```
+
+- [ ] **Step 5: Linux suite**
+
+```bash
+cd /home/dan/code/winpepper/.worktrees/models-page-ux
+./scripts/linux-tests.sh
+```
+Expected: `LINUX SUITE: GREEN`.
+
+- [ ] **Step 6: Windows gate**
+
+```bash
+./scripts/windows-gate.sh
+```
+Expected: `GATE: GREEN` (retry on known flakes).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/Winpepper.App/Views/ModelsPage.xaml src/Winpepper.App/Views/ModelsPage.xaml.cs docs/automation-ids.md
+git commit -m "feat(app): download button fetches only selected-and-missing models; disabled when satisfied
+
+'Download missing models' becomes 'Download selected models': it downloads
+exactly the models chosen in the page's dropdowns (ASR, streaming, cleanup
+while cleanup is enabled) that are not yet installed, via
+SelectedModelsPolicy + DownloadSelectedAsync. The button disables live when
+nothing it would fetch is missing. Manual-install-only selections (sotto)
+are never attempted and get an inline explanatory note. Also fixes the
+stale ASR 'Not downloaded' label after a bottom-button download.
+
+Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
+```
+
+---
+
+### Task 5: Cleanup card gated on CleanupEnabled (change 4)
+
+**Files:**
+- Modify: `src/Winpepper.App/Views/ModelsPage.xaml` (cleanup card ~:135-191: add `CleanupDisabledNote` after `CleanupCombo`)
+- Modify: `src/Winpepper.App/Views/ModelsPage.xaml.cs` (seed + subscribe in `OnNavigatedTo`, unsubscribe in `OnNavigatedFrom`, add `ApplyCleanupGate()`)
+- Modify: `docs/automation-ids.md` (add `ModelsCleanupDisabledNote`)
+
+**Interfaces:**
+- Consumes: `App.Shell.CleanupVm` (`Winpepper.Core.ViewModels.CleanupSettingsViewModel`, shell singleton: `Enabled : bool`, `PropertyChanged`) — the only live channel for `CleanupEnabled` (there is no settings-level event; verified). `SelectedModelsPolicy.CleanupCardEnabled` / `CleanupOffNoteVisible` (Task 1). `_cleanupEnabled` field and `UpdateDownloadButtonState()` (Task 4).
+- Produces: `CleanupDisabledNote` (`x:Name`, AutomationId `ModelsCleanupDisabledNote`), `private void ApplyCleanupGate()`, `private PropertyChangedEventHandler? _cleanupVmChanged;`.
+- Precedent to match: `CleanupPage.xaml.cs` `ApplyModelCapabilities` — set `IsEnabled` on the interactive control only (gray-out is the platform's disabled rendering; never `Opacity`, never hide, never clear the selection), note toggles `Visibility`, subscription re-wired with `-=`/`+=` in `OnNavigatedTo`.
+- Liveness: the page is rebuilt on every navigation (not cached), so re-seeding in `OnNavigatedTo` covers the "toggle in Cleanup tab, return to Models" flow; the `PropertyChanged` subscription additionally covers any flip while the page is open. Both paths are cheap.
+
+- [ ] **Step 1: XAML — the gated note**
+
+In `src/Winpepper.App/Views/ModelsPage.xaml`, inside the cleanup card, immediately AFTER the `CleanupCombo` element's closing `/>` and BEFORE the cleanup progress `<ListView ...>`, insert:
+
+```xml
+                    <TextBlock x:Name="CleanupDisabledNote"
+                               AutomationProperties.AutomationId="ModelsCleanupDisabledNote"
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed"
+                               Text="Cleanup is turned off — enable it in the Cleanup tab to choose a model." />
+```
+
+- [ ] **Step 2: Code-behind — gate application + live subscription**
+
+In `src/Winpepper.App/Views/ModelsPage.xaml.cs`:
+
+(a) Next to the existing `_autoInstallStatusChanged` field declaration, add:
+
+```csharp
+    private System.ComponentModel.PropertyChangedEventHandler? _cleanupVmChanged;
+```
+
+(b) Add this method near `UpdateDownloadButtonState`:
+
+```csharp
+    /// <summary>
+    /// Gray out (never hide, never clear) the cleanup model chooser while
+    /// cleanup is off — mirrors CleanupPage.ApplyModelCapabilities. The
+    /// selection is preserved; only the combo disables and the note shows.
+    /// </summary>
+    private void ApplyCleanupGate()
+    {
+        CleanupCombo.IsEnabled = SelectedModelsPolicy.CleanupCardEnabled(_cleanupEnabled);
+        CleanupDisabledNote.Visibility =
+            SelectedModelsPolicy.CleanupOffNoteVisible(_cleanupEnabled)
+                ? Visibility.Visible : Visibility.Collapsed;
+    }
+```
+
+(c) In `OnNavigatedTo`, after the combo seeding lines (`AsrCombo.SelectedItem = ...`, `CleanupCombo.SelectedItem = ...`, `StreamingCombo.SelectedItem = ...`) and before the final `UpdateInstalledLabels()` call, add:
+
+```csharp
+        // Cleanup gate: seed from the shell's live cleanup view-model (the
+        // page is rebuilt per navigation, so this re-seed alone covers the
+        // "toggled in the Cleanup tab, came back" flow), then subscribe for
+        // flips that happen while this page is open. There is no
+        // settings-level change event; CleanupVm is the one live channel.
+        var cleanupVm = App.Shell!.CleanupVm;
+        _cleanupEnabled = cleanupVm.Enabled;
+        ApplyCleanupGate();
+        if (_cleanupVmChanged is not null) cleanupVm.PropertyChanged -= _cleanupVmChanged;
+        _cleanupVmChanged = (_, args) =>
+        {
+            if (args.PropertyName == nameof(Winpepper.Core.ViewModels.CleanupSettingsViewModel.Enabled))
+            {
+                _cleanupEnabled = App.Shell!.CleanupVm.Enabled;
+                ApplyCleanupGate();
+                UpdateDownloadButtonState(); // gate changes what counts as "selected"
+            }
+        };
+        cleanupVm.PropertyChanged += _cleanupVmChanged;
+```
+
+(d) In `OnNavigatedFrom` (~:391-402), next to the existing `_autoInstallStatusChanged` unsubscribe, add:
+
+```csharp
+        if (_cleanupVmChanged is not null)
+        {
+            App.Shell!.CleanupVm.PropertyChanged -= _cleanupVmChanged;
+            _cleanupVmChanged = null;
+        }
+```
+
+- [ ] **Step 3: Register the AutomationId**
+
+In `docs/automation-ids.md`, Models page section, add (matching neighbors' format):
+
+```
+ModelsCleanupDisabledNote — Models page, note shown when cleanup is disabled and the cleanup model chooser is gated off
+```
+
+- [ ] **Step 4: Linux suite**
+
+```bash
+cd /home/dan/code/winpepper/.worktrees/models-page-ux
+./scripts/linux-tests.sh
+```
+Expected: `LINUX SUITE: GREEN`.
+
+- [ ] **Step 5: Windows gate**
+
+```bash
+./scripts/windows-gate.sh
+```
+Expected: `GATE: GREEN` (retry on known flakes).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/Winpepper.App/Views/ModelsPage.xaml src/Winpepper.App/Views/ModelsPage.xaml.cs docs/automation-ids.md
+git commit -m "feat(app): gate the Models page cleanup card on CleanupEnabled with a live note
+
+While cleanup is off, the cleanup model combo disables (grayed, value
+preserved) with the note 'Cleanup is turned off — enable it in the
+Cleanup tab to choose a model.', and the cleanup selection stops counting
+toward the download button. Seeded per navigation and updated live via
+App.Shell.CleanupVm.PropertyChanged, matching the CleanupPage
+ApplyModelCapabilities precedent.
+
+Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
+```
+
+---
+
+### Task 6: Remove superseded VM entry points, final gates, evidence + smoke checklist
+
+**Files:**
+- Modify: `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs` (delete `DownloadMissingAsync` ~:64-91 and `DownloadStreamingAsync` ~:93-116 — nothing calls them after Tasks 3–4; verified callers were only the page's two old handlers)
+- Modify: `tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs` (migrate calls)
+- Modify: `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` (remove tests of deleted semantics)
+- Modify: `docs/plans/2026-08-01-models-page-ux.md` (append evidence section)
+
+**Interfaces:**
+- Consumes: `DownloadSelectedAsync(IReadOnlyList<ModelDescriptor>, CancellationToken)` (Task 2) — the sole surviving download entry point on the VM (besides the auto-installer's own path, which is untouched).
+- Produces: nothing new. `MissingModelsResolver` stays (still used by `StreamingAutoInstaller`/other callers — do NOT delete it; verify with `grep -rn "MissingModelsResolver" src/` before touching anything beyond the two methods).
+
+- [ ] **Step 1: Delete the two methods**
+
+In `src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs`, delete the entire `DownloadMissingAsync` and `DownloadStreamingAsync` methods (locate by name; both are `public async Task ...(CancellationToken ct)`). Do not touch `DownloadOneAsync`, `SharedOperationGateFor`, or the cards.
+
+- [ ] **Step 2: Surface every broken caller**
+
+```bash
+cd /home/dan/code/winpepper/.worktrees/models-page-ux
+grep -rn "DownloadMissingAsync\|DownloadStreamingAsync" src/ tests/
+dotnet build tests/Winpepper.Models.Tests -c Release -f net9.0 -p:EnableWindowsTargeting=true
+```
+Expected: grep hits ONLY in the two test files below (if any hit remains under `src/`, STOP — a production caller was missed; re-check Tasks 3–4 landed). Build FAILS only in those test files.
+
+- [ ] **Step 3: Migrate the tests**
+
+Apply these rules exactly:
+
+(a) In `tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs` — these tests pin streaming download/extraction behavior worth keeping. Replace every call of the form:
+
+```csharp
+await vm.DownloadStreamingAsync(<token>);
+```
+with:
+
+```csharp
+await vm.DownloadSelectedAsync(
+    new[] { new ModelRegistry().Find(ModelRegistry.StreamingAsrName)! }, <token>);
+```
+keeping each test's arrangement and assertions unchanged (`DownloadSelectedAsync` routes the descriptor through the same `DownloadOneAsync` path the old method used, so download/progress/gate assertions still hold). If a test asserts that `RaiseIsSelectedInstalledChanged` fired ONLY on the streaming card, relax it to assert the streaming card fired (the new method raises on all three cards — covered by `Raises_IsSelectedInstalled_Changed_On_All_Three_Cards` in Task 2).
+
+(b) In `tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs` — tests that exercise `DownloadMissingAsync`'s OLD semantics (ASR downloaded unconditionally; cleanup filtered through `MissingModelsResolver`; streaming excluded) describe behavior that no longer exists anywhere: DELETE those test methods. The new semantics are covered by `SelectedModelsPolicyTests` (what to download) and `ModelsTabViewModelDownloadSelectedTests` (that exactly the given set downloads). Keep any test in the file that does not call `DownloadMissingAsync`.
+
+- [ ] **Step 4: Run the migrated tests, then the full Linux suite**
+
+```bash
+dotnet build tests/Winpepper.Models.Tests -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Models.Tests/bin/Release/net9.0/Winpepper.Models.Tests.dll
+./scripts/linux-tests.sh
+```
+Expected: 0 failures; `LINUX SUITE: GREEN`.
+
+- [ ] **Step 5: Commit the removal**
+
+```bash
+git add src/Winpepper.Models/ViewModels/ModelsTabViewModel.cs tests/Winpepper.Models.Tests/ModelsTabViewModelStreamingTests.cs tests/Winpepper.Models.Tests/ViewModels/ModelsTabViewModelTests.cs
+git commit -m "refactor(models): remove DownloadMissingAsync/DownloadStreamingAsync, superseded by DownloadSelectedAsync
+
+Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
+```
+
+- [ ] **Step 6: Full Windows gate**
+
+```bash
+./scripts/windows-gate.sh
+```
+Expected: `GATE: GREEN` (20–30 min timeout; retry on UNC MSB4025 / vsock interop flakes).
+
+- [ ] **Step 7: Evidence + smoke-checklist commit**
+
+Append to `docs/plans/2026-08-01-models-page-ux.md` an `## Evidence` section recording: date, `LINUX SUITE: GREEN` and `GATE: GREEN` confirmations (with retry notes if flakes occurred), and the commit SHAs of Tasks 1–6. Then commit with the owner's on-device smoke checklist in the message body (this is the FINAL commit — the checklist must be in ITS message):
+
+```bash
+git add docs/plans/2026-08-01-models-page-ux.md
+git commit -m "docs(plans): evidence — gates green for Models page UX overhaul
+
+On-device smoke checklist (owner's post-install verification):
+1. Streaming model installed: streaming card shows a dropdown with
+   'Nemotron Speech Streaming (0.6B, Q8_0 GGUF, English)' selected and
+   'Installed'; the old 'Install streaming model' button is gone.
+2. Select an uninstalled model in any dropdown: bottom button reads
+   'Download selected models' and enables.
+3. Everything selected is installed: bottom button is disabled
+   (grayed, still visible).
+4. Select the Sotto cleanup model while it is not installed: inline
+   manual-install note appears; the download button does not attempt it.
+5. Cleanup tab -> turn cleanup off -> back to Models: cleanup combo is
+   grayed with the note 'Cleanup is turned off — enable it in the
+   Cleanup tab to choose a model.'; selection preserved. Turn cleanup
+   on -> combo re-enables, note disappears.
+6. Download a missing model via the button: per-file progress rows
+   appear under the matching card; on completion the label flips to
+   'Installed' and the button grays out if nothing else is missing.
+
+Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
+```
+
+Do NOT push. The root session merges, gates, and installs.

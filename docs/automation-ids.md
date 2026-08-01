@@ -74,6 +74,7 @@ instance first (e.g. `RecordingHoldHotkeyBox`), then search its descendants.
 | `ModelsAsrInstalledLabel` | TextBlock | Installed ASR model status |
 | `ModelsCleanupCombo` | ComboBox | Cleanup model selection |
 | `ModelsCleanupInstalledLabel` | TextBlock | Installed cleanup model status |
+| `ModelsStreamingCombo` | ComboBox | Streaming model selection (streaming card) |
 | `ModelsDownloadButton` | Button | Download missing models |
 
 ## Corrections (`Views/CorrectionsPage.xaml`)

@@ -276,3 +276,70 @@ non-excluded timing lines in log order, from
 - NEW: `cpu_pegged=` on the dictation timing line (after `sys_cpu=`),
   mirroring the pill's pegged-meter decision (>=75% system CPU over the
   first ~400 ms of recording).
+
+## Start-cue gate mask — 2026-08-02 escape investigation summary (2026-08-02)
+
+- Investigation artifacts: `/tmp/gate-inv/` (exact Python replica of the
+  gate pinned to `7345ca1`, frozen 100-recording snapshot, two days of
+  app logs). Base for the fix branch: `main @ 7345ca1`.
+- The app's start cue (`src/Winpepper.App/Assets/start.wav`, 150 ms,
+  440->660 Hz at 22050 Hz) is picked up by the mic at ~592-861 ms into
+  every fully-seeded warm buffer — recording starts with a ~500 ms
+  retroactive warm pre-roll, and the cue becomes audible 92-144 ms
+  after the hotkey (measured over 98 archive recordings, two
+  independent detectors; the investigation's single ~20 ms latency
+  observation was falsified) — reaching frame RMS up to 0.05, above
+  the gate's 0.02 clear-speech tier.
+- CONFIRMED escape: one silent recording passed the clear-speech escape
+  hatch on the beep alone (2026-08-02 20:18:00, voiced=360 ms,
+  clear=120 ms — the 120 ms was entirely beep). Every silent drop logged
+  clear=60-160 ms, destroying the calibration margin that assumed
+  non-speech recordings have at most one frame >= 0.02; short
+  recordings also had their P90 statistic inflated.
+- Two other archive escapes are the documented accepted residuals —
+  sustained rustle >= 600 ms voiced
+  (`Trim_SustainedQuietTransient_IsKept_KnownResidual`) and a desk
+  thump through the escape hatch — NOT fixed by this change. Possible
+  future fix recorded: spectral/periodicity voicedness feature (out of
+  scope here).
+- The beep-contamination class IS fixed: `SilenceTrimmer.Trim` gained a
+  cue-mask parameter that excludes the head window from the gate
+  DECISION only (`src/Winpepper.Audio/SilenceTrimmer.cs`); trimming
+  offsets and the transcribed audio are bit-identical by construction.
+  Window = 500 pre-roll + 200 start-latency + runtime-measured cue +
+  150 decay (`src/Winpepper.Audio/StartCueGateMask.cs`), and it is
+  preroll-aware: the pre-roll the recorder ACTUALLY seeded
+  (`IWarmAudioRecorder.StartSession`'s return) replaces the 500 when
+  shorter (0 in cold mode => ~500 ms window). The cue length is read
+  from the shipped WAV header at startup
+  (`src/Winpepper.Audio/WavDuration.cs`, measured by
+  `src/Winpepper.App/Audio/WinUiSoundEffectPlayer.cs`) — NEVER
+  hardcoded. PlaySounds off or unmeasurable asset => mask 0 (fail
+  open). New accepted residual, tested + intentional: an utterance
+  ENTIRELY inside the mask window (~1000 ms warm, shrinking with the
+  actual pre-roll to ~500 ms cold) is classified silent
+  (`Trim_UtteranceEntirelyInsideMask_IsSilent_KnownResidual`).
+- Gate constants UNCHANGED (P90 0.004, 600 ms voiced, 100 ms @ 0.02
+  hatch): the measured tuning cost of raising them was 23-41% of real
+  dictations. Masking instead was re-validated with the plan's EXACT
+  dual-threshold semantics over the frozen 100-recording archive
+  (2026-08-02/03): 0/91 real pass->drop and 0/6 drop->pass at the
+  1000 ms warm window (tightest passer margin 140 ms); cold-mode
+  simulation: the preroll-aware mask flips 0/91 vs 4/91 for a fixed
+  worst-case window.
+- Load-bearing validation evidence (cue acoustics, exact-semantics
+  replica runs, recorder API inspection):
+  `/home/dan/code/winpepper/.worktrees/.the-usual-logs/start-cue-gate-mask/`
+  (`load-bearing-ledger.md` + `reports/`).
+- Observability: the silent-drop line now ends with `cue mask NNN ms`
+  and its voiced/clear/max-RMS fields are post-mask counts
+  (`PipelineHost.cs`, TrimForTranscription); startup logs one INF with
+  the measured cue duration, the margin constants, and the WORST-CASE
+  warm mask — the per-dictation mask uses the actually-seeded pre-roll
+  (WRN fail-open line when the asset is unmeasurable).
+- Gates: `scripts/linux-tests.sh` GREEN (1643 tests, 9/9 projects);
+  `scripts/windows-gate.sh` GATE: GREEN in one full run (App build OK,
+  12/12 test project/TFM runs OK, 2379 tests), no MSB4025/vsock
+  transient retries; one earlier invocation was killed ~30 s in by the
+  driving harness's own timeout before producing any verdict (not a
+  gate failure).

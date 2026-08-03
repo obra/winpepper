@@ -817,6 +817,15 @@ public sealed class PipelineHost : IDisposable
                     && Winpepper.Cleanup.CleanupRunner.Preflight(final, cleanupOptions, skipLlm);
                 _engine.Apply(llmWillRun ? SessionEvent.CleanupStarted : SessionEvent.TranscriptReady);
 
+                // Load corrections REGARDLESS of whether a cleanup runner is
+                // live: deterministic corrections must apply even when the
+                // cleanup LLM backend is unavailable (boot pre-warm race,
+                // model missing, hash-verify failure) or the runner throws.
+                var correctionsSw = System.Diagnostics.Stopwatch.StartNew();
+                var correctionsData = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
+                correctionsSw.Stop();
+                timing.CorrectionsMs = (int)correctionsSw.ElapsedMilliseconds;
+
                 if (!string.IsNullOrWhiteSpace(final) && cleanupRunner is not null)
                 {
                     // Plan 2's CleanupRunner.RunAsync expects a Task<string?>? for the
@@ -832,13 +841,6 @@ public sealed class PipelineHost : IDisposable
                             TaskContinuationOptions.ExecuteSynchronously,
                             TaskScheduler.Default);
                     }
-
-                    var correctionsSw = System.Diagnostics.Stopwatch.StartNew();
-                    var correctionsData = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
-                    correctionsSw.Stop();
-                    // PipelineHost-side corrections LOAD only; corrections
-                    // APPLICATION happens inside CleanupRunner.RunAsync.
-                    timing.CorrectionsMs = (int)correctionsSw.ElapsedMilliseconds;
 
                     cleanupSw.Start();
                     try
@@ -877,11 +879,22 @@ public sealed class PipelineHost : IDisposable
                         timing.CleanupPath = "exception";
                         _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
                         _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Cleanup, ex, _currentSessionId);
+                        // A thrown cleanup run must still yield corrected raw
+                        // text — corrections are deterministic and independent
+                        // of the LLM.
+                        final = Winpepper.Cleanup.CleanupRunner.ApplyCorrectionsOnly(final, correctionsData);
                     }
 
                     // Exit CleaningUp whether the runner succeeded or threw — the
                     // engine must reach Injecting either way.
                     if (llmWillRun) _engine.Apply(SessionEvent.CleanupCompleted);
+                }
+                else if (!string.IsNullOrWhiteSpace(final))
+                {
+                    // No cleanup runner is live (boot pre-warm race, model
+                    // missing, hash-verify failure): the LLM cannot run, but
+                    // deterministic corrections still must.
+                    final = Winpepper.Cleanup.CleanupRunner.ApplyCorrectionsOnly(final, correctionsData);
                 }
 
                 // injectSw is WALL time: it includes CaptureTarget() and up to
@@ -1389,6 +1402,15 @@ public sealed class PipelineHost : IDisposable
                         && Winpepper.Cleanup.CleanupRunner.Preflight(final2, cleanupOptions2, skipLlm2);
                     _engine.Apply(llmWillRun2 ? SessionEvent.CleanupStarted : SessionEvent.TranscriptReady);
 
+                    // Load corrections REGARDLESS of whether a cleanup runner is
+                    // live: deterministic corrections must apply even when the
+                    // cleanup LLM backend is unavailable (boot pre-warm race,
+                    // model missing, hash-verify failure) or the runner throws.
+                    var correctionsSw2 = System.Diagnostics.Stopwatch.StartNew();
+                    var correctionsData2 = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
+                    correctionsSw2.Stop();
+                    timing2.CorrectionsMs = (int)correctionsSw2.ElapsedMilliseconds;
+
                     if (!string.IsNullOrWhiteSpace(final2) && cleanupRunner2 is not null)
                     {
                         // Plan 2's CleanupRunner.RunAsync expects a Task<string?>? for the
@@ -1404,13 +1426,6 @@ public sealed class PipelineHost : IDisposable
                                 TaskContinuationOptions.ExecuteSynchronously,
                                 TaskScheduler.Default);
                         }
-
-                        var correctionsSw2 = System.Diagnostics.Stopwatch.StartNew();
-                        var correctionsData2 = _corrections?.Load() ?? Winpepper.Corrections.CorrectionsData.Empty;
-                        correctionsSw2.Stop();
-                        // PipelineHost-side corrections LOAD only; corrections
-                        // APPLICATION happens inside CleanupRunner.RunAsync.
-                        timing2.CorrectionsMs = (int)correctionsSw2.ElapsedMilliseconds;
 
                         cleanupSw2.Start();
                         try
@@ -1449,11 +1464,22 @@ public sealed class PipelineHost : IDisposable
                             timing2.CleanupPath = "exception";
                             _log.LogWarning(ex, "cleanup failed; falling back to raw transcript");
                             _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Cleanup, ex, _currentSessionId);
+                            // A thrown cleanup run must still yield corrected raw
+                            // text — corrections are deterministic and independent
+                            // of the LLM.
+                            final2 = Winpepper.Cleanup.CleanupRunner.ApplyCorrectionsOnly(final2, correctionsData2);
                         }
 
                         // Exit CleaningUp whether the runner succeeded or threw — the
                         // engine must reach Injecting either way.
                         if (llmWillRun2) _engine.Apply(SessionEvent.CleanupCompleted);
+                    }
+                    else if (!string.IsNullOrWhiteSpace(final2))
+                    {
+                        // No cleanup runner is live (boot pre-warm race, model
+                        // missing, hash-verify failure): the LLM cannot run, but
+                        // deterministic corrections still must.
+                        final2 = Winpepper.Cleanup.CleanupRunner.ApplyCorrectionsOnly(final2, correctionsData2);
                     }
 
                     // injectSw2 is WALL time: it includes CaptureTarget() and up to

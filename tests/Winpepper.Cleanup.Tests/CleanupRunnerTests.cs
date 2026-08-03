@@ -607,4 +607,23 @@ public class CleanupRunnerTests
         result.Path.ShouldBe(CleanupPath.BypassShort);
         result.ConsumedWindowContext.ShouldBeNull();
     }
+
+    [Fact]
+    public void ApplyCorrectionsOnly_NoBackend_AppliesMixedCaseCorrections()
+    {
+        // Regression: when PipelineHost has no live cleanup runner (boot
+        // pre-warm race, model missing, verify failure) it calls this helper
+        // directly — corrections must apply with no LLM backend involved,
+        // case-insensitively.
+        var corrections = new CorrectionsData
+        {
+            Replacements = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["freshl"] = "Freshel",
+            },
+        };
+
+        CleanupRunner.ApplyCorrectionsOnly("It said FreshL again.", corrections)
+            .ShouldBe("It said Freshel again.");
+    }
 }

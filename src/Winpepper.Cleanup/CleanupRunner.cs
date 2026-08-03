@@ -286,15 +286,28 @@ public sealed class CleanupRunner
         return false;
     }
 
+    /// <summary>
+    /// Deterministic corrections-only pass (corrections.json Replacements) with
+    /// no LLM involvement. This is the single home for corrections application:
+    /// <see cref="RunAsync"/> uses it on every path (LLM success, bypasses,
+    /// fallbacks), and PipelineHost calls it directly when no cleanup runner is
+    /// live (boot pre-warm race, model missing, verify failure) or the runner
+    /// threw — the injected text must always benefit from corrections.
+    /// </summary>
+    public static string ApplyCorrectionsOnly(string text, CorrectionsData? corrections)
+    {
+        if (string.IsNullOrEmpty(text) || corrections is null || corrections.Replacements.Count == 0)
+            return text;
+        return CaseAwareReplacer.Apply(text, corrections.Replacements);
+    }
+
     // Deterministic post-pass shared by the LLM-success and fallback paths:
     // apply the user-configured corrections (corrections.json Replacements).
     // Applied on every path so injected text always benefits. There is no
     // built-in app-name correction: users add their own via the Corrections
     // page if they want it.
-    private static string ApplyDeterministicPostPass(string text, CorrectionsData corrections)
-    {
-        return CaseAwareReplacer.Apply(text, corrections.Replacements);
-    }
+    private static string ApplyDeterministicPostPass(string text, CorrectionsData corrections) =>
+        ApplyCorrectionsOnly(text, corrections);
 
     private static CleanupResult Finalize(
         string rawTranscript,

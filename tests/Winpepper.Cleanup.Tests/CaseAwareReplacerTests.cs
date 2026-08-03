@@ -1,3 +1,4 @@
+using System.Globalization;
 using Shouldly;
 using Winpepper.Cleanup;
 using Xunit;
@@ -74,5 +75,48 @@ public class CaseAwareReplacerTests
     {
         CaseAwareReplacer.Apply("(chat gbt), and chat gbt.", Dict(("chat gbt", "ChatGPT")))
             .ShouldBe("(ChatGPT), and ChatGPT.");
+    }
+
+    [Fact]
+    public void Apply_MixedCaseToken_Replaced()
+    {
+        // Regression: ASR emitted "FreshL" and the lowercase rule must still hit.
+        CaseAwareReplacer.Apply("It said FreshL again.", Dict(("freshl", "Freshel")))
+            .ShouldBe("It said Freshel again.");
+    }
+
+    [Fact]
+    public void Apply_AllCasings_Replaced()
+    {
+        CaseAwareReplacer.Apply("FRESHL, FreshL and freshl.", Dict(("freshl", "Freshel")))
+            .ShouldBe("Freshel, Freshel and Freshel.");
+    }
+
+    [Fact]
+    public void Apply_MixedCaseKey_LowercaseTranscript()
+    {
+        // Users may configure the key in canonical casing; matching must still
+        // be case-insensitive in the other direction too.
+        CaseAwareReplacer.Apply("freshl", Dict(("FreshL", "Freshel")))
+            .ShouldBe("Freshel");
+    }
+
+    [Fact]
+    public void Apply_IgnoreCase_IsCultureInvariant()
+    {
+        // In tr-TR, 'I' lowercases to dotless 'ı', so a culture-sensitive
+        // IgnoreCase regex would NOT match "INSIGHT" against "insight".
+        // RegexOptions.CultureInvariant must make this locale-proof.
+        var original = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("tr-TR");
+            CaseAwareReplacer.Apply("INSIGHT", Dict(("insight", "Insight")))
+                .ShouldBe("Insight");
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = original;
+        }
     }
 }

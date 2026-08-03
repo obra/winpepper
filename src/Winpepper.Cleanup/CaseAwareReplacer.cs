@@ -30,7 +30,7 @@ public static class CaseAwareReplacer
         // Build a single regex: \b(?:k1|k2|k3)\b, case-insensitive.
         // \b ensures whole-word matching.
         var pattern = @"\b(?:" + string.Join("|", keys.Select(Regex.Escape)) + @")\b";
-        var rx = new Regex(pattern, RegexOptions.IgnoreCase);
+        var rx = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         var sb = new StringBuilder(text.Length + 64);
         var lastIndex = 0;

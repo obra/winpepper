@@ -46,7 +46,12 @@ public static class CaseAwareReplacer
             {
                 if (m.Index + k.Length > text.Length) continue;
                 var slice = text.AsSpan(m.Index, k.Length);
-                if (slice.Equals(k.AsSpan(), StringComparison.OrdinalIgnoreCase))
+                // Leading boundary is guaranteed: candidates start at m.Index,
+                // where the regex already enforced \b. The trailing side must be
+                // checked here because a candidate longer than the regex match can
+                // otherwise end mid-word (e.g. "fresh light" inside "Fresh lighting").
+                if (slice.Equals(k.AsSpan(), StringComparison.OrdinalIgnoreCase)
+                    && HasTrailingWordBoundary(text, m.Index + k.Length))
                 {
                     bestKey = k; // keys are sorted longest-first
                     break;
@@ -71,4 +76,16 @@ public static class CaseAwareReplacer
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// True when a match ending at <paramref name="end"/> (exclusive) sits on a
+    /// \b-style word boundary: end of string, or not a word-char→word-char run.
+    /// </summary>
+    private static bool HasTrailingWordBoundary(string text, int end)
+    {
+        if (end >= text.Length) return true;
+        return !IsWordChar(text[end - 1]) || !IsWordChar(text[end]);
+    }
+
+    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 }

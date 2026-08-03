@@ -102,6 +102,38 @@ public class CaseAwareReplacerTests
     }
 
     [Fact]
+    public void Apply_RescanRespectsTrailingBoundary()
+    {
+        // Regression: the longest-first re-scan matched "fresh light" inside
+        // "Fresh lighting", corrupting output. The candidate must end on a
+        // word boundary, so only the whole-word "fresh" may match.
+        CaseAwareReplacer.Apply("Fresh lighting", Dict(
+            ("fresh light", "Freshlight"),
+            ("fresh", "Freshel")))
+            .ShouldBe("Freshel lighting");
+    }
+
+    [Fact]
+    public void Apply_RescanLongestKeyStillWins_OnGenuineWholeWordMatch()
+    {
+        // Positive control for the boundary fix: on a genuine whole-word
+        // match, the longer key must still take precedence.
+        CaseAwareReplacer.Apply("fresh light bulb", Dict(
+            ("fresh light", "Freshlight"),
+            ("fresh", "Freshel")))
+            .ShouldBe("Freshlight bulb");
+    }
+
+    [Fact]
+    public void Apply_LeadingBoundary_KeyDoesNotMatchInsideWord()
+    {
+        // "resh" must not match inside "fresh" (leading \b enforced by the
+        // primary regex; re-scan candidates start at the same index).
+        CaseAwareReplacer.Apply("fresh resh", Dict(("resh", "RESH")))
+            .ShouldBe("fresh RESH");
+    }
+
+    [Fact]
     public void Apply_IgnoreCase_IsCultureInvariant()
     {
         // In tr-TR, 'I' lowercases to dotless 'ı', so a culture-sensitive

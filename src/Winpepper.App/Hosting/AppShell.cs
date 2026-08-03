@@ -184,21 +184,12 @@ public sealed class AppShell : IDisposable
                 Winpepper.Cleanup.PromptFormatCapabilities.CarriesSystemPrompt(
                     resolveCleanupTarget(cleanupSelection.Read()).PromptFormat));
 
-        // Plan 2 normally provides initial corrections; until then, empty.
-        var correctionsVm = new CorrectionsViewModel(
-            Array.Empty<string>(),
-            new Dictionary<string, string>(),
-            (_, _) => { /* Plan 2 wires CorrectionStore.Save() here */ });
-
-        var autostart = new AutostartRegistry();
-        var sounds = new WinUiSoundEffectPlayer(AppPaths.AssetsDir) { Enabled = settings.PlaySounds };
-
-        // PLAN2-TYPE — Plan 2 owns these types; constructing them here so Plan 3's
-        // pipeline can invoke real cleanup + window context. Each one is optional —
-        // if the model or registry isn't present yet, we fall back to raw transcript.
+        // Corrections: the store must exist before the VM so the VM can seed
+        // from disk and persist back through it (the dictation pipeline reads
+        // the same file). Store construction stays optional: if it fails, the
+        // UI still works in-memory for this session and cleanup runs with
+        // empty corrections.
         Winpepper.Corrections.CorrectionStore? correctionStore = null;
-        Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null;
-
         try
         {
             correctionStore = new Winpepper.Corrections.CorrectionStore(AppPaths.CorrectionsJson);
@@ -208,6 +199,28 @@ public sealed class AppShell : IDisposable
             factory.CreateLogger("Winpepper.App").LogWarning(ex,
                 "CorrectionStore unavailable; cleanup will run with empty corrections.");
         }
+
+        var correctionsVm = correctionStore is not null
+            ? Winpepper.Corrections.CorrectionsWiring.CreateViewModel(
+                correctionStore,
+                onError: ex =>
+                {
+                    factory.CreateLogger("Winpepper.App").LogWarning(ex,
+                        "Corrections persistence failed; edits are kept in memory for this session.");
+                    errorBus.Report(Winpepper.Core.Errors.ErrorStage.Learning, ex, Guid.Empty);
+                })
+            : new CorrectionsViewModel(
+                Array.Empty<string>(),
+                new Dictionary<string, string>(),
+                (_, _) => { /* no store: in-memory only for this session */ });
+
+        var autostart = new AutostartRegistry();
+        var sounds = new WinUiSoundEffectPlayer(AppPaths.AssetsDir) { Enabled = settings.PlaySounds };
+
+        // PLAN2-TYPE — Plan 2 owns these types; constructing them here so Plan 3's
+        // pipeline can invoke real cleanup + window context. Each one is optional —
+        // if the model or registry isn't present yet, we fall back to raw transcript.
+        Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null;
 
         // Live cleanup-model swap (mirror of the ASR slot + seam): the holder
         // owns backend+runner construction, hash-verified readiness, pre-warm,

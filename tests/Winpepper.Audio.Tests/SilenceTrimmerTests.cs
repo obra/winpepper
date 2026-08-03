@@ -379,4 +379,197 @@ public class SilenceTrimmerTests
         result.IsSilent.ShouldBeTrue();
         result.ClearVoicedMs.ShouldBe(300);
     }
+
+    // ------------------------------------------------------------------
+    // Start-cue mask (2026-08-02): maskMs excludes the head window from the
+    // gate DECISION only. 1000 ms below = 500 preroll + 200 latency +
+    // 150 cue + 150 decay for the shipped asset on a fully-seeded warm
+    // session — a representative value, computed in production by
+    // StartCueGateMask from the actual seeded pre-roll and the
+    // runtime-measured cue.
+    // ------------------------------------------------------------------
+
+    [Fact]
+    public void Trim_MaskZero_IsIdenticalToUnmasked()
+    {
+        // Characterization pin: maskMs = 0 must be byte-identical to the
+        // one-argument call on a kept, clear-tier recording.
+        var buf = Join(Dc(0.001, 840), Dc(0.05, 300), Dc(0.001, 860));
+
+        var r0 = SilenceTrimmer.Trim(buf);
+        var rm = SilenceTrimmer.Trim(buf, 0);
+
+        rm.IsSilent.ShouldBe(r0.IsSilent);
+        rm.VoicedMs.ShouldBe(r0.VoicedMs);
+        rm.ClearVoicedMs.ShouldBe(r0.ClearVoicedMs);
+        rm.MaxFrameRms.ShouldBe(r0.MaxFrameRms);
+        rm.RemovedMs.ShouldBe(r0.RemovedMs);
+        rm.RunsTrimmed.ShouldBe(r0.RunsTrimmed);
+        rm.Trimmed.SequenceEqual(r0.Trimmed).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Trim_NegativeMask_TreatedAsZero()
+    {
+        var buf = Join(Dc(0.001, 840), Dc(0.05, 300), Dc(0.001, 860));
+
+        var r0 = SilenceTrimmer.Trim(buf, 0);
+        var rn = SilenceTrimmer.Trim(buf, -100);
+
+        rn.IsSilent.ShouldBe(r0.IsSilent);
+        rn.VoicedMs.ShouldBe(r0.VoicedMs);
+        rn.ClearVoicedMs.ShouldBe(r0.ClearVoicedMs);
+        rn.RemovedMs.ShouldBe(r0.RemovedMs);
+        rn.Trimmed.SequenceEqual(r0.Trimmed).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Trim_CueBeepAloneInsideMask_NoLongerPassesEscapeHatch()
+    {
+        // THE fixed bug (confirmed escape 2026-08-02 20:18:00): a silent
+        // recording where the only energy is the start cue's mic pickup.
+        // 1500 ms buffer = 75 frames; a 240 ms 0.05-RMS "beep" at 520-760 ms
+        // (frames 26-37, inside the 1000 ms mask). Unmasked: P90 idx
+        // floor(0.9*74)=66 lands in the 12 loud frames -> P90=0.05 passes the
+        // 0.004 gate; threshold max(3*0.001,0.002)=0.003; voiced 240 < 600
+        // but clear 240 >= 100 -> the escape hatch PASSES a silent recording.
+        var buf = Join(Dc(0.001, 520), Dc(0.05, 240), Dc(0.001, 740));
+
+        SilenceTrimmer.Trim(buf, 0).IsSilent.ShouldBeFalse(); // the escape, pinned
+
+        var masked = SilenceTrimmer.Trim(buf, 1000);
+        // Masked decision set = frames 50-74, all 0.001 -> P90-silent path.
+        masked.IsSilent.ShouldBeTrue();
+        masked.VoicedMs.ShouldBe(0);
+        masked.ClearVoicedMs.ShouldBe(0);           // beep no longer counted
+        masked.MaxFrameRms.ShouldBe(0.001, 0.0005); // post-mask max, not 0.05
+        masked.Trimmed.Length.ShouldBe(0);
+        masked.RemovedMs.ShouldBe(0);
+        masked.RunsTrimmed.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Trim_VoicedSpeechAfterMask_StillPasses_TrimmingUnchanged()
+    {
+        // 2000 ms = 100 frames: 1000 ms room tone | 700 ms speech | 300 ms tone.
+        // Masked decision set = 50 frames (35 loud): P90 idx floor(0.9*49)=44
+        // -> 0.05; threshold 0.003; voiced 700 >= 600 -> kept. Trimming runs
+        // on ALL frames: leading 50-frame silence run keeps 30, removes 20
+        // (400 ms); trailing 15 <= 30 kept whole.
+        var buf = Join(Dc(0.001, 1000), Dc(0.05, 700), Dc(0.001, 300));
+
+        var masked = SilenceTrimmer.Trim(buf, 1000);
+        var unmasked = SilenceTrimmer.Trim(buf, 0);
+
+        masked.IsSilent.ShouldBeFalse();
+        masked.VoicedMs.ShouldBe(700);
+        masked.ClearVoicedMs.ShouldBe(700);
+        masked.RemovedMs.ShouldBe(400);
+        masked.RunsTrimmed.ShouldBe(1);
+        masked.Trimmed.Length.ShouldBe(80 * 320); // (100 - 20 removed) frames
+        masked.Trimmed.SequenceEqual(unmasked.Trimmed).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Trim_SpeechStartingInsideMask_PassesOnPostMaskRemainder()
+    {
+        // Speech spans 700-2100 ms — it STARTS inside the 1000 ms mask window.
+        // 3000 ms = 150 frames: 35 tone | 70 speech (frames 35-104) | 45 tone.
+        // Post-mask decision set = 100 frames with 55 speech frames: voiced
+        // 1100 >= 600 -> kept. The 300 ms of speech inside the mask is
+        // excluded from the COUNT (honest post-mask observability), not from
+        // the transcribed audio.
+        var buf = Join(Dc(0.001, 700), Dc(0.05, 1400), Dc(0.001, 900));
+
+        var masked = SilenceTrimmer.Trim(buf, 1000);
+        var unmasked = SilenceTrimmer.Trim(buf, 0);
+
+        masked.IsSilent.ShouldBeFalse();
+        masked.VoicedMs.ShouldBe(1100);      // 1400 total minus 300 in-mask
+        masked.ClearVoicedMs.ShouldBe(1100);
+        // Trimming identical to unmasked: leading 35-frame run removes 5
+        // (100 ms), trailing 45-frame run removes 15 (300 ms).
+        masked.RemovedMs.ShouldBe(400);
+        masked.RunsTrimmed.ShouldBe(2);
+        masked.Trimmed.SequenceEqual(unmasked.Trimmed).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Trim_MaskDoesNotChangeTrimOffsets_InteriorGap()
+    {
+        // Trim-invariance headline: an interior-gap shape whose trimming must
+        // be bit-identical with and without the mask. 5000 ms = 250 frames:
+        // 50 tone | 30 speech | 145 tone | 25 speech. Trimming (all frames):
+        // leading run removes 20 (400 ms), interior 145-frame run keeps
+        // 2*30 and removes 85 (1700 ms) -> RemovedMs 2100, runs 2.
+        var buf = Join(Dc(0.001, 1000), Dc(0.05, 600), Dc(0.001, 2900), Dc(0.05, 500));
+
+        var masked = SilenceTrimmer.Trim(buf, 1000);
+        var unmasked = SilenceTrimmer.Trim(buf, 0);
+
+        masked.IsSilent.ShouldBeFalse();
+        masked.VoicedMs.ShouldBe(1100); // both speech blocks sit after the mask
+        masked.RemovedMs.ShouldBe(2100);
+        masked.RunsTrimmed.ShouldBe(2);
+        unmasked.RemovedMs.ShouldBe(2100);
+        unmasked.RunsTrimmed.ShouldBe(2);
+        masked.Trimmed.SequenceEqual(unmasked.Trimmed).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Trim_RecordingShorterThanMask_IsSilent_DoesNotThrow()
+    {
+        // 800 ms buffer (40 frames) vs a 1000 ms mask: every frame is masked.
+        // The naive implementation would run percentiles over an empty array
+        // and throw on sorted[^1] — this pins the guard. Unmasked, the same
+        // buffer passes via the clear tier (voiced 400 < 600, clear 400 >= 100).
+        var buf = Join(Dc(0.001, 200), Dc(0.05, 400), Dc(0.001, 200));
+
+        SilenceTrimmer.Trim(buf, 0).IsSilent.ShouldBeFalse();
+
+        var masked = SilenceTrimmer.Trim(buf, 1000);
+        masked.IsSilent.ShouldBeTrue();
+        masked.VoicedMs.ShouldBe(0);
+        masked.ClearVoicedMs.ShouldBe(0);
+        masked.MaxFrameRms.ShouldBe(0.0);
+        masked.Trimmed.Length.ShouldBe(0);
+        masked.RemovedMs.ShouldBe(0);
+        masked.RunsTrimmed.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Trim_UtteranceEntirelyInsideMask_IsSilent_KnownResidual()
+    {
+        // ACCEPTED RESIDUAL (intentional, decided 2026-08-02): a genuine
+        // 500 ms utterance at 100-600 ms — entirely inside the ~1000 ms warm
+        // mask window (the window shrinks with the actual pre-roll, to
+        // ~500 ms cold) — is now classified silent. The mask window is
+        // dominated by pre-hotkey pre-roll audio; the exact-semantics
+        // validation over the frozen archive showed 0/91 real gate-passing
+        // dictations flip pass->drop (and 0/6 drop->pass) at 1000 ms. Drops
+        // remain non-destructive (the original audio is archived).
+        // 1500 ms = 75 frames: 5 tone | 25 speech (frames 5-29) | 45 tone.
+        var buf = Join(Dc(0.001, 100), Dc(0.05, 500), Dc(0.001, 900));
+
+        SilenceTrimmer.Trim(buf, 0).IsSilent.ShouldBeFalse(); // passes unmasked
+
+        var masked = SilenceTrimmer.Trim(buf, 1000);
+        masked.IsSilent.ShouldBeTrue();
+        masked.VoicedMs.ShouldBe(0);
+        masked.ClearVoicedMs.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Trim_MaskRoundsUpToWholeFrames()
+    {
+        // ceil semantics: a 890 ms mask must cover frame 44 (880-900 ms) —
+        // a mask's job is exclusion, so a partially covered frame is fully
+        // excluded. 2000 ms = 100 frames with ONE loud frame at index 44.
+        // Both runs take the P90-silent path (1 loud frame of 100); the
+        // difference is whether that frame is counted as clear.
+        var buf = Join(Dc(0.001, 880), Dc(0.05, 20), Dc(0.001, 1100));
+
+        SilenceTrimmer.Trim(buf, 0).ClearVoicedMs.ShouldBe(20);   // counted today
+        SilenceTrimmer.Trim(buf, 890).ClearVoicedMs.ShouldBe(0);  // ceil -> masked
+    }
 }

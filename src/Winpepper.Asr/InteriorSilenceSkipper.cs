@@ -151,7 +151,7 @@ public sealed class InteriorSilenceSkipper
             if (_rmsFloor > SpeechCapFactor * _maxFrameRms)
             {
                 // Quiet-recording guard (streaming analogue of SilenceTrimmer's
-                // speech-level cap, SilenceTrimmer.cs:172-177): the loudest frame
+                // speech-level cap, SilenceTrimmer.cs:225-230): the loudest frame
                 // seen so far is so low that 0.002 cannot be trusted to separate
                 // silence from quiet speech. Keep the frame — pass it straight
                 // through (order-preserving; equivalent to resolving the run as
@@ -181,9 +181,9 @@ public sealed class InteriorSilenceSkipper
         if (_runFrames > 0)
         {
             // Run <= 2*keepEdge: everything still buffered is the un-emitted
-            // remainder of the whole run (kept whole, SilenceTrimmer.cs:249-254).
+            // remainder of the whole run (kept whole, SilenceTrimmer.cs:318-323).
             // Run > 2*keepEdge: the buffer is exactly the rolling trailing
-            // keepEdge window; the middle was dropped (SilenceTrimmer.cs:242-248).
+            // keepEdge window; the middle was dropped (SilenceTrimmer.cs:311-317).
             foreach (var f in _runBuffer) _emit(f);
             if (_runFrames > 2 * _keepFrames)
             {

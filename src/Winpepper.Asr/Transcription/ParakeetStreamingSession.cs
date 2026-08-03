@@ -80,6 +80,9 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
     /// because the batch verdict still governs. A minimum-voiced-duration
     /// has no natural counterpart in a one-shot start latch; do not unify.
     /// Mirrors the documentation precedent in InteriorSilenceSkipper.
+    /// A second divergence since 2026-08-02: the batch gate additionally masks
+    /// the start-cue window out of its decision (SilenceTrimmer.Trim maskMs);
+    /// streaming has no gate and therefore no mask.
     /// </summary>
     private const double LeadingSilenceRmsFloor = 0.002;
 

@@ -124,7 +124,7 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
         }
     }
 
-    public void StartSession(int includePrerollMs)
+    public int StartSession(int includePrerollMs)
     {
         // Follow the default input device: if it drifted since the warm stream
         // was built, rebuild on the new endpoint (clears the ring too).
@@ -145,6 +145,12 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
         // would be missing the dictation's first ~500 ms. The level meter also
         // subscribes; one larger frame at session start is harmless.
         if (preroll.Length > 0) FramesAvailable?.Invoke(preroll);
+        // Report the pre-roll ACTUALLY seeded: prewarm-off yields 0, a
+        // drained/cleared ring yields less than requested (the mask window
+        // shrinks with it — see StartCueGateMask). Integer division floors
+        // (the ring count is not frame-aligned), under-reporting by <1 ms,
+        // which SilenceTrimmer's ceil frame rounding absorbs.
+        return preroll.Length / (SampleRate16k / 1000);
     }
 
     /// <summary>

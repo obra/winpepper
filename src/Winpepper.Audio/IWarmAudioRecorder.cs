@@ -26,8 +26,11 @@ public interface IWarmAudioRecorder : IDisposable
     event Action? CaptureRecovered;
 
     /// <summary>Begin a session, seeding up to <paramref name="includePrerollMs"/>
-    /// milliseconds of already-captured audio.</summary>
-    void StartSession(int includePrerollMs);
+    /// milliseconds of already-captured audio. Returns the pre-roll milliseconds
+    /// ACTUALLY seeded (0 when prewarm is off; less than requested when the ring
+    /// was drained or cleared) — the silence-gate cue mask is sized from this
+    /// value, never from the request (see StartCueGateMask).</summary>
+    int StartSession(int includePrerollMs);
 
     /// <summary>End the session and return pre-roll + live audio (mono 16 kHz).</summary>
     float[] StopSession();

@@ -13,15 +13,17 @@ shipped `start.wav` at startup, never hardcoded.
 **Architecture:** Three pure, Linux-tested pieces in `Winpepper.Audio`
 (a header-only WAV duration probe `WavDuration`; mask-window arithmetic
 `StartCueGateMask`, which becomes the single source of the 500 ms warm
-pre-roll number; a new optional `maskMs` parameter on
+pre-roll REQUEST; a new optional `maskMs` parameter on
 `SilenceTrimmer.Trim` that excludes head frames from the gate DECISION
 statistics only — trim thresholds, offsets, and the output buffer are
 computed over all frames exactly as before). Thin Windows-side wiring:
 `WinUiSoundEffectPlayer` measures its own asset once at construction and
-exposes it via `ISoundEffectPlayer.StartCueMs`; `PipelineHost` computes
-the mask per-dictation (gated on the player's actual `Enabled` state) and
-adds `cue mask` observability to the silent-drop log line plus one
-startup INF line.
+exposes it via `ISoundEffectPlayer.StartCueMs`;
+`IWarmAudioRecorder.StartSession` returns the pre-roll milliseconds it
+ACTUALLY seeded (so the mask shrinks when prewarm is off or the ring is
+short); `PipelineHost` computes the preroll-aware mask per-dictation
+(gated on the player's actual `Enabled` state) and adds `cue mask`
+observability to the silent-drop log line plus one startup INF line.
 
 **Tech Stack:** C# / .NET 9 (dual-TFM `Winpepper.Audio`, Windows-only
 `Winpepper.App`), xUnit v3 1.0.0 + Shouldly 4.2.1 (run via
@@ -41,9 +43,14 @@ Microsoft.Extensions.Logging.
   UNC MSB4025 + vsock interop flakes are known transients — retry up to 3 times.
 - Never mix Linux- and Windows-side builds in the same `bin/`/`obj/` (the scripts clean for you).
 - Do NOT push. Leave the branch local — the root session merges, gates, and installs.
-- **Owner requirement — never hardcode the cue duration** (no `150`, `240`, `320`, or a
-  combined `900`/`1000` anywhere in mask math). The only literals allowed are the
-  pre-roll (`500`, single-sourced) and the two named margins (`50`, `200`).
+- **Owner requirement — never hardcode the cue duration**: cue-duration literals
+  (`150`, `240`, `320`) and combined-window literals (`900`, `1000`) remain banned in
+  mask math. The only literals allowed are the pre-roll (`500`, single-sourced via
+  `StartCueGateMask.WarmPrerollMs`) and the two named margin constants
+  (`CueStartLatencyMarginMs = 200`, `CueDecayMarginMs = 150`). Note: `150` as the
+  DECAY MARGIN value is a margin constant, not a hardcoded cue length — the cue
+  length is always the runtime-measured value. The combined window must remain a
+  computed sum, never a literal.
 - Gate constants UNCHANGED: `SilentSpeechLevel 0.004`, `MinVoicedDurationMs 600`,
   `ClearSpeechRmsFloor 0.02`, `MinClearVoicedDurationMs 100`. Trimming constants unchanged.
 - `maskMs = 0` must be byte-identical to today's behavior; the mask must NEVER change
@@ -72,13 +79,23 @@ The measured problem (investigation 2026-08-02, artifacts `/tmp/gate-inv/`):
   pre-roll (`_warmRecorder!.StartSession(includePrerollMs: 500)` at `:543` / `:1119`).
   So **buffer t=0 is ~500 ms BEFORE the hotkey**, and the 150 ms cue
   (`src/Winpepper.App/Assets/start.wav`, 22050 Hz mono 16-bit, 440→660 Hz) lands at
-  ~520–860 ms into every buffer at frame RMS up to 0.05 — above the gate's 0.02
-  clear-speech tier. With `MinClearVoicedDurationMs = 100` and a ~150–320 ms pickup,
-  the cue alone can satisfy the clear-speech escape hatch (confirmed escape
-  2026-08-02 20:18:00: voiced=360 ms, clear=120 ms — the 120 ms was entirely beep),
-  and every silent drop logs clear=60–160 ms, destroying the recalibration margin.
-- Masking the first ~1000 ms out of the gate's counting was measured against the full
-  100-recording archive: it affects **0 of 91** real gate-passing dictations.
+  ~592–861 ms into every fully-seeded warm buffer at frame RMS up to 0.05 — above
+  the gate's 0.02 clear-speech tier. With `MinClearVoicedDurationMs = 100` and a
+  pickup of up to ~230 ms (150 ms emission + a measured tail of at most 81 ms),
+  the cue alone can satisfy the clear-speech escape hatch
+  (confirmed escape 2026-08-02 20:18:00: voiced=360 ms, clear=120 ms — the 120 ms
+  was entirely beep), and every silent drop logs clear=60–160 ms, destroying the
+  recalibration margin.
+- The plan's EXACT dual-threshold mask semantics (decision stats post-mask, trim
+  math over all frames — Task 3) were re-implemented and run over the frozen
+  100-recording archive (validation 2026-08-02/03, 98 usable recordings): at the
+  1000 ms warm window, **0 of 91** real gate-passing dictations flip pass→drop and
+  **0 of 6** true-silent drops flip drop→pass; the confirmed beep-only escape
+  correctly flips to drop; the tightest passer keeps a 140 ms margin. This
+  exact-semantics result supersedes the investigation's earlier counting-only
+  "~1000 ms ⇒ 0 of 91" measurement. Evidence:
+  `/home/dan/code/winpepper/.worktrees/.the-usual-logs/start-cue-gate-mask/`
+  (`load-bearing-ledger.md` + `reports/`).
 
 Two structural facts that dictate the design (found by code inspection):
 
@@ -96,26 +113,43 @@ Two structural facts that dictate the design (found by code inspection):
    `Enabled` (`WinUiSoundEffectPlayer.cs:21`). So the mask must be gated on
    **`_sounds.Enabled`** (what the player actually did), not on a settings snapshot.
 
-Mask window: `[0, WarmPrerollMs + CueStartLatencyMarginMs + measuredCueMs + CueDecayMarginMs]`.
-Margin justification (recorded here, referenced by the constants' XML docs):
+Mask window: `[0, actualPrerollMs + CueStartLatencyMarginMs + measuredCueMs + CueDecayMarginMs]`,
+where `actualPrerollMs` is the pre-roll the recorder ACTUALLY seeded this session
+(`IWarmAudioRecorder.StartSession`'s return value, ≤ the requested `WarmPrerollMs`).
+Margin justification (validation 2026-08-02/03 over the frozen 100-recording
+archive, 98 usable; recorded here, referenced by the constants' XML docs):
 
-- `CueStartLatencyMarginMs = 50`: `SoundPlayer.Play()` is async fire-and-forget;
-  the investigation observed cue onset at ~520 ms = 500 pre-roll + ~20 ms dispatch/
-  render latency. 50 ms gives 2.5× headroom without eating meaningful speech.
-- `CueDecayMarginMs = 200`: the mic picks up a ~240–320 ms tone from a 150 ms
-  emission (room decay + WASAPI capture smearing); the investigation observed
-  pickup ending by ~860 ms = 500 pre-roll + ~360 ms. 500 + 50 + 150 + 200 = 900 ms
-  covers the observed 860 ms end with margin, and stays inside the archive-measured
-  safe envelope (~1000 ms ⇒ 0 of 91 real dictations affected).
+- `CueStartLatencyMarginMs = 200`: `SoundPlayer.Play()` is async fire-and-forget;
+  measured cue start latency after the hotkey (two independent detectors, 98
+  recordings) is min 92 / p50 115 / p90 131 / max 144 ms — the investigation's
+  earlier single "~20 ms dispatch latency" observation was FALSIFIED (0/98
+  recordings started within 50 ms); cpu-pegged starts (N=3) sat at 130–144 ms.
+  Measured onset is therefore 592–644 ms into a fully-seeded warm buffer
+  (= 500 pre-roll + 92–144 ms latency). Margin 200 leaves 56 ms of headroom over
+  the observed maximum.
+- `CueDecayMarginMs = 150`: room decay + WASAPI capture smearing extend the mic
+  pickup at most 81 ms beyond the 150 ms emission (22 overlap-free recordings);
+  pickup ends by 861 ms into the buffer at the latest. Margin 150 leaves 69 ms of
+  headroom over the observed maximum. (The VALUE 150 coincides with the current
+  asset's length by accident — it is a margin constant, never a cue length.)
+- Warm window with the shipped asset: 500 + 200 + 150 (cue) + 150 = 1000 ms —
+  always a computed sum, never a literal. Safety re-validated with the plan's
+  EXACT dual-threshold semantics over the archive: 0/91 real pass→drop and 0/6
+  drop→pass at 1000 ms; the beep-only escape correctly flips to drop; tightest
+  passer margin 140 ms (see the Background bullet above for the evidence dir).
 - The pre-roll is best-effort (`min(500 ms, ring contents)`, zero when prewarm is
-  off) — a *shorter* actual pre-roll only moves the cue EARLIER in the buffer, still
-  inside the `[0, 900]` window, so sizing for the maximum is safe (conservative:
-  over-masking cost is bounded by the measured 0-of-91 result).
+  off) — which is exactly why the mask uses the ACTUAL per-session pre-roll, not
+  the worst-case constant: a cold-mode simulation showed a fixed worst-case mask
+  flips 4/91 real dictations at 1000 ms while the preroll-aware mask flips 0/91 —
+  and the fixed-window cold cost grows with every margin correction (1→4 flips
+  going 900→1000). `StartSession` returns the actually-seeded pre-roll ms so the
+  window shrinks with it (~500 ms in cold mode).
 
 Accepted residual (documented + pinned by test): an utterance spoken ENTIRELY inside
 the mask window (i.e. the user spoke only before/at the hotkey and stopped within
-~900 ms of buffer start) is now classified silent. Real speech that *starts* inside
-the window still passes when enough voiced audio remains after it.
+~1000 ms of warm buffer start — the window shrinks with the actual pre-roll, to
+~500 ms cold) is now classified silent. Real speech that *starts* inside the window
+still passes when enough voiced audio remains after it.
 
 ---
 
@@ -124,23 +158,29 @@ the window still passes when enough voiced audio remains after it.
 | File | Action | Responsibility |
 |---|---|---|
 | `src/Winpepper.Audio/WavDuration.cs` | Create | Header-only, non-throwing WAV duration probe (`TryMeasureMs`). Fifth RIFF reader in the repo by design: unlike the four existing throwing readers, this one must fail open on truncated/corrupt/non-PCM input. |
-| `src/Winpepper.Audio/StartCueGateMask.cs` | Create | Mask-window arithmetic + `WarmPrerollMs = 500` (single source of the pre-roll number). |
+| `src/Winpepper.Audio/StartCueGateMask.cs` | Create | Mask-window arithmetic + `WarmPrerollMs = 500` (single source of the pre-roll REQUEST). |
 | `src/Winpepper.Audio/SilenceTrimmer.cs` | Modify | `Trim(samples, int maskMs = 0)`: decision stats over post-mask frames; trim math over all frames, unchanged. |
+| `src/Winpepper.Audio/IWarmAudioRecorder.cs` | Modify | `StartSession` returns `int` — the pre-roll ms ACTUALLY seeded (was `void`). |
+| `src/Winpepper.Audio/WarmWasapiRecorder.cs` | Modify | (`#if WINDOWS`) `StartSession` returns `preroll.Length / (SampleRate16k / 1000)` from the seeded ring samples. |
 | `src/Winpepper.Core/Audio/ISoundEffectPlayer.cs` | Modify | Add `int StartCueMs { get; }`. |
 | `src/Winpepper.Core/Audio/NoopSoundEffectPlayer.cs` | Modify | `StartCueMs => 0`. |
 | `src/Winpepper.App/Audio/WinUiSoundEffectPlayer.cs` | Modify | Measure `start.wav` duration once in ctor via `WavDuration`. |
-| `src/Winpepper.App/Hosting/PipelineHost.cs` | Modify | Use `StartCueGateMask.WarmPrerollMs` at both `StartSession` sites; compute mask per-dictation; startup INF/WRN; `cue mask` on the silent-drop line. |
+| `src/Winpepper.App/Hosting/PipelineHost.cs` | Modify | Use `StartCueGateMask.WarmPrerollMs` at both `StartSession` sites and capture the returned actual pre-roll into `_lastSessionPrerollMs` in BOTH arms; compute the preroll-aware mask per-dictation; startup INF/WRN; `cue mask` on the silent-drop line. |
 | `src/Winpepper.Asr/InteriorSilenceSkipper.cs` | Modify (comments only) | Refresh the three `SilenceTrimmer.cs:NN` line-range citations that shift with the edit. |
 | `src/Winpepper.Asr/Transcription/ParakeetStreamingSession.cs` | Modify (comments only) | Note the new batch-vs-streaming divergence (streaming has no cue mask). |
 | `tests/Winpepper.Audio.Tests/WavDurationTests.cs` | Create | Parser tests: valid/truncated/corrupt/zero-length/non-PCM/odd-chunk/missing-file. |
-| `tests/Winpepper.Audio.Tests/StartCueGateMaskTests.cs` | Create | Mask arithmetic tests incl. disabled-cue ⇒ 0 and unmeasured-cue ⇒ 0. |
+| `tests/Winpepper.Audio.Tests/StartCueGateMaskTests.cs` | Create | Mask arithmetic tests incl. disabled ⇒ 0, unmeasured cue ⇒ 0, and preroll-aware sizing (warm 500 ⇒ 1000, cold 0 ⇒ 500, partial 300 ⇒ 800, negative preroll clamps). |
 | `tests/Winpepper.Audio.Tests/SilenceTrimmerTests.cs` | Modify (append only) | 9 new mask tests. The existing 23 tests are NOT touched — they are the mask=0 characterization suite. |
 | `tests/Winpepper.Core.Tests/Audio/NoopSoundEffectPlayerTests.cs` | Modify | Pin `StartCueMs == 0`. |
 | `docs/plans/2026-07-29-cleanup-asr-contention-evidence.md` | Modify (append section) | 08-02 escape-investigation summary + gates record. |
 
 Everything testable is `net9.0`-pure (`Winpepper.Audio`, `Winpepper.Core`) and runs on
 the Linux gate. `Winpepper.App` changes are compile-verified by the Windows gate
-(no test project references `Winpepper.App` — established house pattern).
+(no test project references `Winpepper.App` — established house pattern). The
+`IWarmAudioRecorder` interface change compiles in `Winpepper.Audio`'s Linux-built
+`net9.0` TFM, but its sole implementor `WarmWasapiRecorder` is `#if WINDOWS` (no
+Linux-compiled implementor or test fake exists), so the recorder change is
+compile-verified by the Windows gate alongside `PipelineHost`.
 
 ---
 
@@ -530,7 +570,7 @@ EOF
 
 ---
 
-### Task 2: `StartCueGateMask` — mask arithmetic + single source of the 500 ms pre-roll
+### Task 2: `StartCueGateMask` — mask arithmetic + single source of the 500 ms pre-roll request
 
 **Files:**
 - Create: `src/Winpepper.Audio/StartCueGateMask.cs`
@@ -539,12 +579,14 @@ EOF
 **Interfaces:**
 - Consumes: nothing.
 - Produces (Task 5 consumes all of these from `PipelineHost`):
-  - `public const int StartCueGateMask.WarmPrerollMs = 500`
-  - `public const int StartCueGateMask.CueStartLatencyMarginMs = 50`
-  - `public const int StartCueGateMask.CueDecayMarginMs = 200`
-  - `public static int StartCueGateMask.ComputeMaskMs(int measuredCueDurationMs, bool cueEnabled)`
-    — returns `0` when `cueEnabled` is false or `measuredCueDurationMs <= 0`,
-    else `WarmPrerollMs + CueStartLatencyMarginMs + measuredCueDurationMs + CueDecayMarginMs`.
+  - `public const int StartCueGateMask.WarmPrerollMs = 500` — the pre-roll REQUEST
+    `PipelineHost` passes to `StartSession` (the mask itself uses the ACTUAL
+    seeded pre-roll `StartSession` returns).
+  - `public const int StartCueGateMask.CueStartLatencyMarginMs = 200`
+  - `public const int StartCueGateMask.CueDecayMarginMs = 150`
+  - `public static int StartCueGateMask.ComputeMaskMs(int actualPrerollMs, int cueMs, bool soundsEnabled)`
+    — returns `0` when `soundsEnabled` is false or `cueMs <= 0`,
+    else `Math.Max(actualPrerollMs, 0) + CueStartLatencyMarginMs + cueMs + CueDecayMarginMs`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -560,15 +602,17 @@ namespace Winpepper.Audio.Tests;
 public class StartCueGateMaskTests
 {
     [Fact]
-    public void ComputeMaskMs_MeasuredCue_AddsPrerollAndBothMargins()
+    public void ComputeMaskMs_WarmFullPreroll_AddsPrerollAndBothMargins()
     {
-        // With the shipped 150 ms cue: 500 + 50 + 150 + 200 = 900 ms, which
-        // covers the investigation's observed pickup end (~860 ms) and sits
-        // inside the archive-measured safe envelope (masking ~1000 ms affects
-        // 0 of 91 real gate-passing dictations). The 150 here is a TEST input,
-        // not a production constant — production measures the WAV at runtime.
-        StartCueGateMask.ComputeMaskMs(150, cueEnabled: true).ShouldBe(900);
-        StartCueGateMask.ComputeMaskMs(150, cueEnabled: true).ShouldBe(
+        // With the shipped 150 ms cue and a fully-seeded warm pre-roll:
+        // 500 + 200 + 150 + 150 = 1000 ms. Re-validated 2026-08-02/03 with
+        // the plan's exact dual-threshold semantics over the frozen
+        // 100-recording archive: 0/91 real pass->drop, 0/6 drop->pass at
+        // this window; tightest passer margin 140 ms. The 500/150 here are
+        // TEST inputs, not production constants — production feeds the
+        // recorder's actually-seeded pre-roll and the runtime-measured WAV.
+        StartCueGateMask.ComputeMaskMs(500, 150, soundsEnabled: true).ShouldBe(1000);
+        StartCueGateMask.ComputeMaskMs(500, 150, soundsEnabled: true).ShouldBe(
             StartCueGateMask.WarmPrerollMs
             + StartCueGateMask.CueStartLatencyMarginMs
             + 150
@@ -576,10 +620,37 @@ public class StartCueGateMaskTests
     }
 
     [Fact]
-    public void ComputeMaskMs_CueDisabled_ReturnsZero()
+    public void ComputeMaskMs_ColdZeroPreroll_ShrinksToMarginsPlusCue()
+    {
+        // Prewarm off (or fully drained ring): buffer t=0 IS the hotkey, so
+        // only latency + cue + decay need masking: 0 + 200 + 150 + 150 = 500.
+        // Cold-mode simulation over the archive: this preroll-aware mask
+        // flips 0/91 real dictations where a fixed worst-case 1000 ms mask
+        // flips 4/91 — the reason the pre-roll is plumbed per-session.
+        StartCueGateMask.ComputeMaskMs(0, 150, soundsEnabled: true).ShouldBe(500);
+    }
+
+    [Fact]
+    public void ComputeMaskMs_PartialPreroll_ShrinksWithTheActualSeed()
+    {
+        // Partially drained ring: only 300 ms actually seeded ->
+        // 300 + 200 + 150 + 150 = 800. The window follows the recorder's
+        // honest report, never the request.
+        StartCueGateMask.ComputeMaskMs(300, 150, soundsEnabled: true).ShouldBe(800);
+    }
+
+    [Fact]
+    public void ComputeMaskMs_NegativePreroll_ClampsToZeroPreroll()
+    {
+        StartCueGateMask.ComputeMaskMs(-50, 150, soundsEnabled: true).ShouldBe(
+            StartCueGateMask.ComputeMaskMs(0, 150, soundsEnabled: true));
+    }
+
+    [Fact]
+    public void ComputeMaskMs_SoundsDisabled_ReturnsZero()
     {
         // PlaySounds off ⇒ the player never emits the cue ⇒ nothing to mask.
-        StartCueGateMask.ComputeMaskMs(150, cueEnabled: false).ShouldBe(0);
+        StartCueGateMask.ComputeMaskMs(500, 150, soundsEnabled: false).ShouldBe(0);
     }
 
     [Fact]
@@ -587,21 +658,22 @@ public class StartCueGateMaskTests
     {
         // WavDuration failed (missing/corrupt start.wav) ⇒ FAIL OPEN: the
         // gate behaves exactly as it did before the mask existed.
-        StartCueGateMask.ComputeMaskMs(0, cueEnabled: true).ShouldBe(0);
+        StartCueGateMask.ComputeMaskMs(500, 0, soundsEnabled: true).ShouldBe(0);
     }
 
     [Fact]
-    public void ComputeMaskMs_NegativeDuration_ReturnsZero()
+    public void ComputeMaskMs_NegativeCueDuration_ReturnsZero()
     {
-        StartCueGateMask.ComputeMaskMs(-5, cueEnabled: true).ShouldBe(0);
+        StartCueGateMask.ComputeMaskMs(500, -5, soundsEnabled: true).ShouldBe(0);
     }
 
     [Fact]
     public void WarmPrerollMs_IsThePipelinesPrerollRequest()
     {
         // Pin the single-source contract: PipelineHost passes THIS constant to
-        // StartSession(includePrerollMs:) at both hotkey arms. If this value
-        // changes, the mask window follows automatically — that is the point.
+        // StartSession(includePrerollMs:) at both hotkey arms and feeds the
+        // RETURNED actual pre-roll back into ComputeMaskMs. If this value
+        // changes, the request follows automatically — that is the point.
         StartCueGateMask.WarmPrerollMs.ShouldBe(500);
     }
 }
@@ -626,60 +698,76 @@ namespace Winpepper.Audio;
 /// <summary>
 /// Computes the head-of-buffer window that <see cref="SilenceTrimmer"/>
 /// excludes from its silence-gate DECISION because the app's own start cue
-/// contaminates it (measured 2026-08-02: the 150 ms cue is picked up by the
-/// mic at ~520-860 ms into every buffer at frame RMS up to 0.05 — above the
-/// 0.02 clear-speech tier — because recording starts with a retroactive warm
+/// contaminates it (validated 2026-08-02/03 over the frozen 100-recording
+/// archive: the 150 ms cue is picked up by the mic at ~592-861 ms into every
+/// fully-seeded warm buffer at frame RMS up to 0.05 — above the 0.02
+/// clear-speech tier — because recording starts with a retroactive warm
 /// pre-roll, so buffer t=0 is ~<see cref="WarmPrerollMs"/> before the hotkey
-/// and the cue plays AT the hotkey).
+/// and the cue becomes audible 92-144 ms after it).
 ///
-/// Window = WarmPrerollMs + CueStartLatencyMarginMs + measured cue duration
-/// + CueDecayMarginMs. The cue duration is measured at runtime from the
-/// shipped WAV (<see cref="WavDuration"/>) — NEVER hardcoded (owner
-/// requirement: the asset may change or become user-configurable).
+/// Window = actual seeded pre-roll + CueStartLatencyMarginMs + measured cue
+/// duration + CueDecayMarginMs. The cue duration is measured at runtime from
+/// the shipped WAV (<see cref="WavDuration"/>) — NEVER hardcoded (owner
+/// requirement: the asset may change or become user-configurable). The
+/// pre-roll is what the recorder ACTUALLY seeded this session
+/// (IWarmAudioRecorder.StartSession's return), not the requested worst case:
+/// a shorter/zero pre-roll (prewarm off, drained ring) moves the cue EARLIER
+/// and the window shrinks with it. Cold-mode validation: a fixed worst-case
+/// window flips 4/91 real dictations at 1000 ms; the preroll-aware window
+/// flips 0/91.
 ///
-/// Sizing evidence: with the current 150 ms asset the window is 900 ms;
-/// masking ~1000 ms was measured against the full 100-recording archive and
-/// affects 0 of 91 real gate-passing dictations. The pre-roll is best-effort
-/// (min(500 ms, warm-ring contents); zero in cold mode) — a shorter actual
-/// pre-roll only moves the cue EARLIER in the buffer, still inside the
-/// window, so sizing for the maximum is safe.
+/// Sizing evidence (exact plan semantics over the archive): with the current
+/// 150 ms asset the warm window is 1000 ms; 0/91 real gate-passing
+/// dictations flip pass->drop, 0/6 true-silent drops flip drop->pass, the
+/// confirmed beep-only escape correctly flips to drop, and the tightest
+/// passer keeps a 140 ms margin.
 /// </summary>
 public static class StartCueGateMask
 {
     /// <summary>
-    /// Warm pre-roll the pipeline requests at session start. THE single
+    /// Warm pre-roll the pipeline REQUESTS at session start. THE single
     /// source of this number: PipelineHost passes it to
-    /// StartSession(includePrerollMs:) at both hotkey arms and the mask
-    /// window builds on the same value — do not duplicate the literal.
+    /// StartSession(includePrerollMs:) at both hotkey arms — do not
+    /// duplicate the literal. The mask itself is built from the ACTUAL
+    /// seeded pre-roll StartSession returns (&lt;= this request).
     /// </summary>
     public const int WarmPrerollMs = 500;
 
     /// <summary>
     /// Dispatch + render latency between PlayStart() returning and the cue
-    /// being audible (SoundPlayer.Play is async fire-and-forget). Observed
-    /// onset ~20 ms after the hotkey (cue starts ~520 ms into the buffer =
-    /// 500 pre-roll + ~20); 50 ms gives 2.5x headroom.
+    /// being audible (SoundPlayer.Play is async fire-and-forget). Measured
+    /// over the frozen archive (98 recordings, two independent detectors):
+    /// min 92 / p50 115 / p90 131 / max 144 ms; cpu-pegged starts (N=3) at
+    /// 130-144 ms. 200 ms leaves 56 ms of headroom over the observed max
+    /// (an earlier single ~20 ms observation was falsified — 0/98 within
+    /// 50 ms).
     /// </summary>
-    public const int CueStartLatencyMarginMs = 50;
+    public const int CueStartLatencyMarginMs = 200;
 
     /// <summary>
     /// Room decay/reverb + capture smearing after the cue's emission ends:
-    /// the mic picks up ~240-320 ms from a 150 ms emission, ending by
-    /// ~860 ms = 500 pre-roll + ~360 (investigation 2026-08-02). 200 ms on
-    /// top of the measured emission length covers that with margin.
+    /// measured pickup tail beyond the 150 ms emission is at most 81 ms
+    /// (22 overlap-free recordings); pickup ends by 861 ms into the warm
+    /// buffer. 150 ms leaves 69 ms of headroom over the observed max. NOTE:
+    /// this margin VALUE coincides with the current asset's 150 ms length —
+    /// it is a margin constant, not a hardcoded cue duration (the cue
+    /// length is always the measured cueMs argument).
     /// </summary>
-    public const int CueDecayMarginMs = 200;
+    public const int CueDecayMarginMs = 150;
 
     /// <summary>
     /// The mask duration SilenceTrimmer should exclude from its decision.
-    /// 0 when the cue is disabled (nothing played ⇒ nothing to mask) or its
-    /// duration could not be measured (FAIL OPEN: gate behaves as before
-    /// the mask existed).
+    /// <paramref name="actualPrerollMs"/> is the pre-roll the recorder
+    /// ACTUALLY seeded this session (StartSession's return; 0 in cold mode,
+    /// negative clamps to 0), so the window shrinks when less pre-hotkey
+    /// audio exists. 0 when the cue is disabled (nothing played ⇒ nothing
+    /// to mask) or its duration could not be measured (FAIL OPEN: gate
+    /// behaves as before the mask existed).
     /// </summary>
-    public static int ComputeMaskMs(int measuredCueDurationMs, bool cueEnabled)
+    public static int ComputeMaskMs(int actualPrerollMs, int cueMs, bool soundsEnabled)
     {
-        if (!cueEnabled || measuredCueDurationMs <= 0) return 0;
-        return WarmPrerollMs + CueStartLatencyMarginMs + measuredCueDurationMs + CueDecayMarginMs;
+        if (!soundsEnabled || cueMs <= 0) return 0;
+        return Math.Max(actualPrerollMs, 0) + CueStartLatencyMarginMs + cueMs + CueDecayMarginMs;
     }
 }
 ```
@@ -698,11 +786,14 @@ Expected: PASS — exit 0, all projects `Failed: 0` / `Errors: 0`.
 cd /home/dan/code/winpepper/.worktrees/start-cue-gate-mask
 git add src/Winpepper.Audio/StartCueGateMask.cs tests/Winpepper.Audio.Tests/StartCueGateMaskTests.cs
 git commit -m "$(cat <<'EOF'
-feat(audio): add StartCueGateMask — cue-mask window arithmetic and single source of the 500 ms warm pre-roll
+feat(audio): add StartCueGateMask — cue-mask window arithmetic and single source of the 500 ms warm pre-roll request
 
-mask = preroll + 50 ms start-latency + runtime-measured cue + 200 ms
-decay; 0 when the cue is disabled or unmeasured (fail open). Margins
-justified from the 2026-08-02 investigation (cue pickup 520-860 ms).
+mask = actual seeded preroll + 200 ms start-latency + runtime-measured
+cue + 150 ms decay; 0 when the cue is disabled or unmeasured (fail
+open). Margins measured over the frozen 100-recording archive
+(2026-08-02/03: cue start latency 92-144 ms, pickup end <= 861 ms);
+preroll-aware sizing flips 0/91 real dictations in the cold simulation
+vs 4/91 for a fixed worst-case window.
 
 🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
 
@@ -748,9 +839,11 @@ brace), exactly:
 ```csharp
     // ------------------------------------------------------------------
     // Start-cue mask (2026-08-02): maskMs excludes the head window from the
-    // gate DECISION only. 900 ms below = 500 preroll + 50 latency + 150 cue
-    // + 200 decay for the shipped asset — a representative value, computed
-    // in production by StartCueGateMask from the runtime-measured cue.
+    // gate DECISION only. 1000 ms below = 500 preroll + 200 latency +
+    // 150 cue + 150 decay for the shipped asset on a fully-seeded warm
+    // session — a representative value, computed in production by
+    // StartCueGateMask from the actual seeded pre-roll and the
+    // runtime-measured cue.
     // ------------------------------------------------------------------
 
     [Fact]
@@ -793,7 +886,7 @@ brace), exactly:
         // THE fixed bug (confirmed escape 2026-08-02 20:18:00): a silent
         // recording where the only energy is the start cue's mic pickup.
         // 1500 ms buffer = 75 frames; a 240 ms 0.05-RMS "beep" at 520-760 ms
-        // (frames 26-37, inside the 900 ms mask). Unmasked: P90 idx
+        // (frames 26-37, inside the 1000 ms mask). Unmasked: P90 idx
         // floor(0.9*74)=66 lands in the 12 loud frames -> P90=0.05 passes the
         // 0.004 gate; threshold max(3*0.001,0.002)=0.003; voiced 240 < 600
         // but clear 240 >= 100 -> the escape hatch PASSES a silent recording.
@@ -801,8 +894,8 @@ brace), exactly:
 
         SilenceTrimmer.Trim(buf, 0).IsSilent.ShouldBeFalse(); // the escape, pinned
 
-        var masked = SilenceTrimmer.Trim(buf, 900);
-        // Masked decision set = frames 45-74, all 0.001 -> P90-silent path.
+        var masked = SilenceTrimmer.Trim(buf, 1000);
+        // Masked decision set = frames 50-74, all 0.001 -> P90-silent path.
         masked.IsSilent.ShouldBeTrue();
         masked.VoicedMs.ShouldBe(0);
         masked.ClearVoicedMs.ShouldBe(0);           // beep no longer counted
@@ -815,42 +908,42 @@ brace), exactly:
     [Fact]
     public void Trim_VoicedSpeechAfterMask_StillPasses_TrimmingUnchanged()
     {
-        // 2000 ms = 100 frames: 900 ms room tone | 700 ms speech | 400 ms tone.
-        // Masked decision set = 55 frames (35 loud): P90 idx floor(0.9*54)=48
+        // 2000 ms = 100 frames: 1000 ms room tone | 700 ms speech | 300 ms tone.
+        // Masked decision set = 50 frames (35 loud): P90 idx floor(0.9*49)=44
         // -> 0.05; threshold 0.003; voiced 700 >= 600 -> kept. Trimming runs
-        // on ALL frames: leading 45-frame silence run keeps 30, removes 15
-        // (300 ms); trailing 20 <= 30 kept whole.
-        var buf = Join(Dc(0.001, 900), Dc(0.05, 700), Dc(0.001, 400));
+        // on ALL frames: leading 50-frame silence run keeps 30, removes 20
+        // (400 ms); trailing 15 <= 30 kept whole.
+        var buf = Join(Dc(0.001, 1000), Dc(0.05, 700), Dc(0.001, 300));
 
-        var masked = SilenceTrimmer.Trim(buf, 900);
+        var masked = SilenceTrimmer.Trim(buf, 1000);
         var unmasked = SilenceTrimmer.Trim(buf, 0);
 
         masked.IsSilent.ShouldBeFalse();
         masked.VoicedMs.ShouldBe(700);
         masked.ClearVoicedMs.ShouldBe(700);
-        masked.RemovedMs.ShouldBe(300);
+        masked.RemovedMs.ShouldBe(400);
         masked.RunsTrimmed.ShouldBe(1);
-        masked.Trimmed.Length.ShouldBe(85 * 320); // (100 - 15 removed) frames
+        masked.Trimmed.Length.ShouldBe(80 * 320); // (100 - 20 removed) frames
         masked.Trimmed.SequenceEqual(unmasked.Trimmed).ShouldBeTrue();
     }
 
     [Fact]
     public void Trim_SpeechStartingInsideMask_PassesOnPostMaskRemainder()
     {
-        // Speech spans 700-2100 ms — it STARTS inside the 900 ms mask window.
+        // Speech spans 700-2100 ms — it STARTS inside the 1000 ms mask window.
         // 3000 ms = 150 frames: 35 tone | 70 speech (frames 35-104) | 45 tone.
-        // Post-mask decision set = 105 frames with 60 speech frames: voiced
-        // 1200 >= 600 -> kept. The 200 ms of speech inside the mask is
+        // Post-mask decision set = 100 frames with 55 speech frames: voiced
+        // 1100 >= 600 -> kept. The 300 ms of speech inside the mask is
         // excluded from the COUNT (honest post-mask observability), not from
         // the transcribed audio.
         var buf = Join(Dc(0.001, 700), Dc(0.05, 1400), Dc(0.001, 900));
 
-        var masked = SilenceTrimmer.Trim(buf, 900);
+        var masked = SilenceTrimmer.Trim(buf, 1000);
         var unmasked = SilenceTrimmer.Trim(buf, 0);
 
         masked.IsSilent.ShouldBeFalse();
-        masked.VoicedMs.ShouldBe(1200);      // 1400 total minus 200 in-mask
-        masked.ClearVoicedMs.ShouldBe(1200);
+        masked.VoicedMs.ShouldBe(1100);      // 1400 total minus 300 in-mask
+        masked.ClearVoicedMs.ShouldBe(1100);
         // Trimming identical to unmasked: leading 35-frame run removes 5
         // (100 ms), trailing 45-frame run removes 15 (300 ms).
         masked.RemovedMs.ShouldBe(400);
@@ -863,12 +956,12 @@ brace), exactly:
     {
         // Trim-invariance headline: an interior-gap shape whose trimming must
         // be bit-identical with and without the mask. 5000 ms = 250 frames:
-        // 45 tone | 30 speech | 150 tone | 25 speech. Trimming (all frames):
-        // leading run removes 15 (300 ms), interior 150-frame run keeps
-        // 2*30 and removes 90 (1800 ms) -> RemovedMs 2100, runs 2.
-        var buf = Join(Dc(0.001, 900), Dc(0.05, 600), Dc(0.001, 3000), Dc(0.05, 500));
+        // 50 tone | 30 speech | 145 tone | 25 speech. Trimming (all frames):
+        // leading run removes 20 (400 ms), interior 145-frame run keeps
+        // 2*30 and removes 85 (1700 ms) -> RemovedMs 2100, runs 2.
+        var buf = Join(Dc(0.001, 1000), Dc(0.05, 600), Dc(0.001, 2900), Dc(0.05, 500));
 
-        var masked = SilenceTrimmer.Trim(buf, 900);
+        var masked = SilenceTrimmer.Trim(buf, 1000);
         var unmasked = SilenceTrimmer.Trim(buf, 0);
 
         masked.IsSilent.ShouldBeFalse();
@@ -883,7 +976,7 @@ brace), exactly:
     [Fact]
     public void Trim_RecordingShorterThanMask_IsSilent_DoesNotThrow()
     {
-        // 800 ms buffer (40 frames) vs a 900 ms mask: every frame is masked.
+        // 800 ms buffer (40 frames) vs a 1000 ms mask: every frame is masked.
         // The naive implementation would run percentiles over an empty array
         // and throw on sorted[^1] — this pins the guard. Unmasked, the same
         // buffer passes via the clear tier (voiced 400 < 600, clear 400 >= 100).
@@ -891,7 +984,7 @@ brace), exactly:
 
         SilenceTrimmer.Trim(buf, 0).IsSilent.ShouldBeFalse();
 
-        var masked = SilenceTrimmer.Trim(buf, 900);
+        var masked = SilenceTrimmer.Trim(buf, 1000);
         masked.IsSilent.ShouldBeTrue();
         masked.VoicedMs.ShouldBe(0);
         masked.ClearVoicedMs.ShouldBe(0);
@@ -905,17 +998,19 @@ brace), exactly:
     public void Trim_UtteranceEntirelyInsideMask_IsSilent_KnownResidual()
     {
         // ACCEPTED RESIDUAL (intentional, decided 2026-08-02): a genuine
-        // 500 ms utterance at 100-600 ms — entirely inside the 900 ms mask
-        // window — is now classified silent. The mask window is dominated by
-        // pre-hotkey pre-roll audio; the archive measurement showed 0 of 91
-        // real gate-passing dictations lose their pass to the mask. Drops
+        // 500 ms utterance at 100-600 ms — entirely inside the ~1000 ms warm
+        // mask window (the window shrinks with the actual pre-roll, to
+        // ~500 ms cold) — is now classified silent. The mask window is
+        // dominated by pre-hotkey pre-roll audio; the exact-semantics
+        // validation over the frozen archive showed 0/91 real gate-passing
+        // dictations flip pass->drop (and 0/6 drop->pass) at 1000 ms. Drops
         // remain non-destructive (the original audio is archived).
         // 1500 ms = 75 frames: 5 tone | 25 speech (frames 5-29) | 45 tone.
         var buf = Join(Dc(0.001, 100), Dc(0.05, 500), Dc(0.001, 900));
 
         SilenceTrimmer.Trim(buf, 0).IsSilent.ShouldBeFalse(); // passes unmasked
 
-        var masked = SilenceTrimmer.Trim(buf, 900);
+        var masked = SilenceTrimmer.Trim(buf, 1000);
         masked.IsSilent.ShouldBeTrue();
         masked.VoicedMs.ShouldBe(0);
         masked.ClearVoicedMs.ShouldBe(0);
@@ -966,8 +1061,8 @@ constant and the `AppendKeep` helper) with exactly:
     /// over ALL frames exactly as before, so the transcribed audio and the
     /// trim accounting are mask-independent. maskMs = 0 (the default) is
     /// byte-identical to the pre-mask behavior. The caller computes maskMs
-    /// from the warm pre-roll plus the runtime-measured cue duration — see
-    /// <see cref="StartCueGateMask"/>. Partial mask frames round UP
+    /// from the actually-seeded pre-roll plus the runtime-measured cue
+    /// duration — see <see cref="StartCueGateMask"/>. Partial mask frames round UP
     /// (a mask's job is exclusion). A mask covering every frame classifies
     /// the recording silent (accepted residual: an utterance entirely inside
     /// the mask window is dropped; drops stay non-destructive — the caller
@@ -1397,26 +1492,86 @@ EOF
 
 ---
 
-### Task 5: `PipelineHost` wiring — mask the gate, log honestly
+### Task 5: recorder pre-roll return + `PipelineHost` wiring — mask the gate, log honestly
 
 **Files:**
+- Modify: `src/Winpepper.Audio/IWarmAudioRecorder.cs` (`StartSession` returns `int`)
+- Modify: `src/Winpepper.Audio/WarmWasapiRecorder.cs` (`#if WINDOWS`; return the
+  actually-seeded pre-roll ms)
 - Modify: `src/Winpepper.App/Hosting/PipelineHost.cs`
   (lines cited below are pre-change positions at `7345ca1`)
 
 **Interfaces:**
-- Consumes: `StartCueGateMask.WarmPrerollMs` / `.ComputeMaskMs(int, bool)` (Task 2),
-  `SilenceTrimmer.Trim(samples, maskMs)` (Task 3), `_sounds.StartCueMs` +
+- Consumes: `StartCueGateMask.WarmPrerollMs` / `.ComputeMaskMs(int, int, bool)`
+  (Task 2), `SilenceTrimmer.Trim(samples, maskMs)` (Task 3), `_sounds.StartCueMs` +
   `_sounds.Enabled` (Task 4; `_sounds` is the existing `ISoundEffectPlayer` field).
-- Produces: the production behavior — masked gate decisions, `cue mask NNN ms` on the
-  silent-drop log line, one startup INF (or fail-open WRN) line. No test project
-  references `Winpepper.App`; this task is compile-verified by the Windows gate
-  (Task 6) per the established house pattern ("pure decision logic in net9.0
-  projects with Linux tests; PipelineHost gets thin, compile-verified wiring").
+- Produces: `int IWarmAudioRecorder.StartSession(int includePrerollMs)` — returns
+  the pre-roll milliseconds ACTUALLY seeded from the warm ring (0 cold/prewarm-off,
+  less than requested when the ring is drained) — plus the production behavior:
+  preroll-aware masked gate decisions, `cue mask NNN ms` on the silent-drop log
+  line, one startup INF (or fail-open WRN) line. No test project references
+  `Winpepper.App`; the `IWarmAudioRecorder` interface change compiles in
+  `Winpepper.Audio`'s Linux-built `net9.0` TFM (proven by the Step 5 Linux run),
+  while `WarmWasapiRecorder` (`#if WINDOWS`, the sole implementor — no test fakes
+  exist) and `PipelineHost` are compile-verified by the Windows gate (Task 6) per
+  the established house pattern ("pure decision logic in net9.0 projects with
+  Linux tests; PipelineHost gets thin, compile-verified wiring").
 
 Note: `PipelineHost.cs:4` already has `using Winpepper.Audio;` — the unqualified
 names below resolve.
 
-- [ ] **Step 1: Single-source the pre-roll literal (both hotkey arms)**
+- [ ] **Step 1: Return the actually-seeded pre-roll from the recorder**
+
+In `src/Winpepper.Audio/IWarmAudioRecorder.cs`, replace the `StartSession` member
+(`:28-30`) with:
+
+```csharp
+    /// <summary>Begin a session, seeding up to <paramref name="includePrerollMs"/>
+    /// milliseconds of already-captured audio. Returns the pre-roll milliseconds
+    /// ACTUALLY seeded (0 when prewarm is off; less than requested when the ring
+    /// was drained or cleared) — the silence-gate cue mask is sized from this
+    /// value, never from the request (see StartCueGateMask).</summary>
+    int StartSession(int includePrerollMs);
+```
+
+In `src/Winpepper.Audio/WarmWasapiRecorder.cs`, change the implementation's
+signature (`:127`) from `public void StartSession(int includePrerollMs)` to
+`public int StartSession(int includePrerollMs)` and add a return at the END of the
+method body (after the existing `if (preroll.Length > 0) FramesAvailable?.Invoke(preroll);`
+at `:147` — the method body is otherwise unchanged):
+
+```csharp
+        // Report the pre-roll ACTUALLY seeded: prewarm-off yields 0, a
+        // drained/cleared ring yields less than requested (the mask window
+        // shrinks with it — see StartCueGateMask). Integer division floors
+        // (the ring count is not frame-aligned), under-reporting by <1 ms,
+        // which SilenceTrimmer's ceil frame rounding absorbs.
+        return preroll.Length / (SampleRate16k / 1000);
+```
+
+Then run `grep -rn "IWarmAudioRecorder" --include="*.cs" src tests scripts` — the
+only implementor is `WarmWasapiRecorder` and the only consumer field is
+`PipelineHost.cs:42`; if the grep reveals any new implementor or fake, update it
+in this same step (the return-type change breaks it at compile time).
+
+- [ ] **Step 2: Single-source the pre-roll literal and capture the return (both hotkey arms)**
+
+Add a private field next to the `_warmRecorder` field (`PipelineHost.cs:42`):
+
+```csharp
+    /// <summary>
+    /// Pre-roll milliseconds the recorder ACTUALLY seeded into the current
+    /// session (StartSession's return): 0 when prewarm is off, less than the
+    /// WarmPrerollMs request when the ring was drained/cleared. Sizes the
+    /// per-dictation silence-gate cue mask (StartCueGateMask.ComputeMaskMs).
+    /// Sessions are serialized by the engine state machine, so one field
+    /// suffices — but BOTH hotkey arms (hold + toggle) MUST assign it;
+    /// missing one arm silently reuses the other arm's stale value (no
+    /// compile error catches it). The cancel path leaves it stale, which is
+    /// benign: the next StartSession overwrites it before any trim reads it.
+    /// </summary>
+    private int _lastSessionPrerollMs;
+```
 
 At `PipelineHost.cs:543` (hold arm) and `:1119` (toggle arm), replace
 
@@ -1427,15 +1582,17 @@ At `PipelineHost.cs:543` (hold arm) and `:1119` (toggle arm), replace
 with
 
 ```csharp
-                _warmRecorder!.StartSession(includePrerollMs: StartCueGateMask.WarmPrerollMs);
+                _lastSessionPrerollMs = _warmRecorder!.StartSession(includePrerollMs: StartCueGateMask.WarmPrerollMs);
 ```
 
-(Preserve each site's exact leading indentation.) Then check the nearby prose
-comments at `:502` and `:1084` that say "the 500 ms pre-roll" — reword each to
-"the StartCueGateMask.WarmPrerollMs (500 ms) pre-roll" so the constant is
+(Preserve each site's exact leading indentation, and make sure BOTH arms assign
+the field — see the field's doc comment.) Then check the nearby prose comments at
+`:502` and `:1084` that reference the pre-roll (the `:502` one names the
+500 ms figure; the `:1084` one describes the pre-roll behavior) — reword each to
+"the StartCueGateMask.WarmPrerollMs (500 ms) pre-roll request" so the constant is
 discoverable from the call sites.
 
-- [ ] **Step 2: Add the startup observability lines**
+- [ ] **Step 3: Add the startup observability lines**
 
 At the END of the `PipelineHost` constructor body (after all existing field
 assignments — `_log` and `_sounds` are assigned by then; the ctor signature starts
@@ -1443,14 +1600,17 @@ at `PipelineHost.cs:99`), add:
 
 ```csharp
         // Startup observability for the silence-gate cue mask (2026-08-02):
-        // one honest line stating what was measured and what will be masked,
-        // so recalibration reads of the drop log know the counting basis.
+        // one honest line stating what was measured and the WORST-CASE warm
+        // mask, so recalibration reads of the drop log know the counting
+        // basis. The mask itself varies per-dictation with the pre-roll the
+        // recorder actually seeded (see TrimForTranscription); the actual
+        // value is logged on each silent-drop line.
         var startCueMs = sounds.StartCueMs;
         if (startCueMs > 0)
             _log.LogInformation(
-                "start cue measured {CueMs} ms; silence-gate cue mask {CueMaskMs} ms (preroll {PrerollMs} + start latency {LatencyMs} + cue + decay {DecayMs}; sounds enabled {Enabled})",
+                "start cue measured {CueMs} ms; worst-case warm silence-gate cue mask {WorstCaseMaskMs} ms (preroll request {PrerollMs} + start latency {LatencyMs} + cue + decay {DecayMs}; per-dictation mask uses the actually-seeded preroll; sounds enabled {Enabled})",
                 startCueMs,
-                StartCueGateMask.ComputeMaskMs(startCueMs, sounds.Enabled),
+                StartCueGateMask.ComputeMaskMs(StartCueGateMask.WarmPrerollMs, startCueMs, sounds.Enabled),
                 StartCueGateMask.WarmPrerollMs,
                 StartCueGateMask.CueStartLatencyMarginMs,
                 StartCueGateMask.CueDecayMarginMs,
@@ -1463,7 +1623,7 @@ at `PipelineHost.cs:99`), add:
 (If the ctor assigns the parameter to `_sounds`, using `sounds` or `_sounds` here is
 equivalent; keep whichever reads consistently with the surrounding code.)
 
-- [ ] **Step 3: Mask the gate decision and extend the drop line**
+- [ ] **Step 4: Mask the gate decision and extend the drop line**
 
 In `TrimForTranscription` (`PipelineHost.cs:1668-1690`), replace the method body's
 first line and the drop-log statement. The method currently reads:
@@ -1494,9 +1654,12 @@ Change it to:
         // Mask the app's own start cue out of the gate DECISION. Gated on the
         // player's actual Enabled state (NOT a settings snapshot: PlaySounds
         // is applied to the player once at boot, so the player is the single
-        // honest source of whether a cue was emitted). Trimming offsets and
+        // honest source of whether a cue was emitted) and sized from the
+        // pre-roll the recorder ACTUALLY seeded this session (NOT the
+        // worst-case request: prewarm-off/drained-ring sessions shrink the
+        // window instead of eating post-hotkey speech). Trimming offsets and
         // the transcribed audio are unaffected by the mask by construction.
-        var cueMaskMs = StartCueGateMask.ComputeMaskMs(_sounds.StartCueMs, _sounds.Enabled);
+        var cueMaskMs = StartCueGateMask.ComputeMaskMs(_lastSessionPrerollMs, _sounds.StartCueMs, _sounds.Enabled);
         var result = Winpepper.Audio.SilenceTrimmer.Trim(samples, cueMaskMs);
         removedMs = result.RemovedMs;
         if (result.IsSilent)
@@ -1519,30 +1682,40 @@ unchanged. Also extend the method's `<summary>` doc comment with one sentence:
 `/// The silence-gate decision masks the start-cue window (StartCueGateMask);`
 `/// the drop line's voiced/clear/max-RMS are post-mask counts.`
 
-- [ ] **Step 4: Run the Linux suite (proves the shared projects still build/pass)**
+- [ ] **Step 5: Run the Linux suite (proves the shared projects still build/pass)**
 
 Run:
 ```bash
 cd /home/dan/code/winpepper/.worktrees/start-cue-gate-mask && ./scripts/linux-tests.sh
 ```
-Expected: PASS — exit 0. (`PipelineHost` itself compiles only in the Windows gate;
-this run proves nothing shared broke, per AGENTS.md.)
+Expected: PASS — exit 0. This run also compiles the changed
+`IWarmAudioRecorder.cs` in `Winpepper.Audio`'s `net9.0` TFM (the interface has no
+Linux-compiled implementor, so no behavior test exists on Linux).
+(`WarmWasapiRecorder` and `PipelineHost` are `#if WINDOWS`/Windows-only and
+compile only in the Windows gate; this run proves nothing shared broke, per
+AGENTS.md.)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/start-cue-gate-mask
-git add src/Winpepper.App/Hosting/PipelineHost.cs
+git add src/Winpepper.Audio/IWarmAudioRecorder.cs src/Winpepper.Audio/WarmWasapiRecorder.cs \
+        src/Winpepper.App/Hosting/PipelineHost.cs
 git commit -m "$(cat <<'EOF'
-feat(app): mask the start cue out of the silence-gate decision in PipelineHost
+feat(app): mask the start cue out of the silence-gate decision with a preroll-aware window
 
-Per-dictation mask = StartCueGateMask.ComputeMaskMs(player's measured
-cue, player's actual Enabled state) — never a hardcoded duration, zero
-when sounds are off or the asset is unmeasurable (fail open). Both
-StartSession sites now reference StartCueGateMask.WarmPrerollMs instead
-of a duplicated 500 literal. Drop line gains "cue mask NNN ms" because
-its voiced/clear/max-RMS recalibration fields are now post-mask counts;
-startup logs the measured cue + computed mask (WRN when unmeasurable).
+Per-dictation mask = StartCueGateMask.ComputeMaskMs(preroll the recorder
+ACTUALLY seeded, player's measured cue, player's actual Enabled state) —
+never a hardcoded duration, zero when sounds are off or the asset is
+unmeasurable (fail open). IWarmAudioRecorder.StartSession now returns
+the actually-seeded preroll ms so prewarm-off/drained-ring sessions
+shrink the window (cold simulation: preroll-aware flips 0/91 real
+dictations vs 4/91 for a fixed worst-case window). Both StartSession
+sites reference StartCueGateMask.WarmPrerollMs instead of a duplicated
+500 literal and BOTH capture the return. Drop line gains "cue mask NNN
+ms" because its voiced/clear/max-RMS recalibration fields are now
+post-mask counts; startup logs the measured cue + worst-case warm mask
+(WRN when unmeasurable).
 
 🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
 
@@ -1559,9 +1732,10 @@ EOF
 - Modify: `docs/plans/2026-07-29-cleanup-asr-contention-evidence.md` (append one section)
 
 **Interfaces:**
-- Consumes: the completed Tasks 1–5 (the gate compiles `Winpepper.App`, i.e. the
-  Task 4 `WinUiSoundEffectPlayer` and Task 5 `PipelineHost` changes, for the first
-  time) and both gate scripts.
+- Consumes: the completed Tasks 1–5 (the gate compiles `Winpepper.App` and the
+  `#if WINDOWS` half of `Winpepper.Audio`, i.e. the Task 4 `WinUiSoundEffectPlayer`
+  and Task 5 `WarmWasapiRecorder` + `PipelineHost` changes, for the first time)
+  and both gate scripts.
 - Produces: the recorded gate results + the spec-mandated investigation summary in
   the evidence doc.
 
@@ -1595,10 +1769,13 @@ markers themselves:
   gate pinned to `7345ca1`, frozen 100-recording snapshot, two days of
   app logs). Base for the fix branch: `main @ 7345ca1`.
 - The app's start cue (`src/Winpepper.App/Assets/start.wav`, 150 ms,
-  440->660 Hz at 22050 Hz) is picked up by the mic at ~520-860 ms into
-  every recorded buffer — recording starts with a ~500 ms retroactive
-  warm pre-roll, the cue plays AT the hotkey — reaching frame RMS up to
-  0.05, above the gate's 0.02 clear-speech tier.
+  440->660 Hz at 22050 Hz) is picked up by the mic at ~592-861 ms into
+  every fully-seeded warm buffer — recording starts with a ~500 ms
+  retroactive warm pre-roll, and the cue becomes audible 92-144 ms
+  after the hotkey (measured over 98 archive recordings, two
+  independent detectors; the investigation's single ~20 ms latency
+  observation was falsified) — reaching frame RMS up to 0.05, above
+  the gate's 0.02 clear-speech tier.
 - CONFIRMED escape: one silent recording passed the clear-speech escape
   hatch on the beep alone (2026-08-02 20:18:00, voiced=360 ms,
   clear=120 ms — the 120 ms was entirely beep). Every silent drop logged
@@ -1615,25 +1792,37 @@ markers themselves:
   cue-mask parameter that excludes the head window from the gate
   DECISION only (`src/Winpepper.Audio/SilenceTrimmer.cs`); trimming
   offsets and the transcribed audio are bit-identical by construction.
-  Window = 500 pre-roll + 50 start-latency + runtime-measured cue +
-  200 decay (`src/Winpepper.Audio/StartCueGateMask.cs`); the cue length
-  is read from the shipped WAV header at startup
+  Window = 500 pre-roll + 200 start-latency + runtime-measured cue +
+  150 decay (`src/Winpepper.Audio/StartCueGateMask.cs`), and it is
+  preroll-aware: the pre-roll the recorder ACTUALLY seeded
+  (`IWarmAudioRecorder.StartSession`'s return) replaces the 500 when
+  shorter (0 in cold mode => ~500 ms window). The cue length is read
+  from the shipped WAV header at startup
   (`src/Winpepper.Audio/WavDuration.cs`, measured by
   `src/Winpepper.App/Audio/WinUiSoundEffectPlayer.cs`) — NEVER
   hardcoded. PlaySounds off or unmeasurable asset => mask 0 (fail
   open). New accepted residual, tested + intentional: an utterance
-  ENTIRELY inside the mask window is classified silent
+  ENTIRELY inside the mask window (~1000 ms warm, shrinking with the
+  actual pre-roll to ~500 ms cold) is classified silent
   (`Trim_UtteranceEntirelyInsideMask_IsSilent_KnownResidual`).
 - Gate constants UNCHANGED (P90 0.004, 600 ms voiced, 100 ms @ 0.02
   hatch): the measured tuning cost of raising them was 23-41% of real
-  dictations. Masking instead was measured against the full
-  100-recording archive: it affects 0 of 91 real gate-passing
-  dictations.
+  dictations. Masking instead was re-validated with the plan's EXACT
+  dual-threshold semantics over the frozen 100-recording archive
+  (2026-08-02/03): 0/91 real pass->drop and 0/6 drop->pass at the
+  1000 ms warm window (tightest passer margin 140 ms); cold-mode
+  simulation: the preroll-aware mask flips 0/91 vs 4/91 for a fixed
+  worst-case window.
+- Load-bearing validation evidence (cue acoustics, exact-semantics
+  replica runs, recorder API inspection):
+  `/home/dan/code/winpepper/.worktrees/.the-usual-logs/start-cue-gate-mask/`
+  (`load-bearing-ledger.md` + `reports/`).
 - Observability: the silent-drop line now ends with `cue mask NNN ms`
   and its voiced/clear/max-RMS fields are post-mask counts
   (`PipelineHost.cs`, TrimForTranscription); startup logs one INF with
-  the measured cue duration + computed mask (WRN fail-open line when
-  the asset is unmeasurable).
+  the measured cue duration, the margin constants, and the WORST-CASE
+  warm mask — the per-dictation mask uses the actually-seeded pre-roll
+  (WRN fail-open line when the asset is unmeasurable).
 - Gates: `scripts/linux-tests.sh` GREEN (<record exact total test
   count>, 9/9 projects); `scripts/windows-gate.sh` <record GATE: GREEN
   and how many attempts, noting any MSB4025/vsock transient retries>.

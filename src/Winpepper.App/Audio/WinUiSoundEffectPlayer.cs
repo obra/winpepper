@@ -11,11 +11,20 @@ public sealed class WinUiSoundEffectPlayer : ISoundEffectPlayer, IDisposable
 
     public bool Enabled { get; set; } = true;
 
+    /// <summary>
+    /// Measured once at construction from the SAME file handed to
+    /// SoundPlayer, so the mask math can never disagree with what actually
+    /// plays. 0 when the header is unreadable (WavDuration fails open).
+    /// </summary>
+    public int StartCueMs { get; }
+
     public WinUiSoundEffectPlayer(string assetsDir)
     {
-        _start = new SoundPlayer(Path.Combine(assetsDir, "start.wav"));
+        var startPath = Path.Combine(assetsDir, "start.wav");
+        _start = new SoundPlayer(startPath);
         _stop  = new SoundPlayer(Path.Combine(assetsDir, "stop.wav"));
         _start.Load(); _stop.Load();
+        StartCueMs = Winpepper.Audio.WavDuration.TryMeasureMs(startPath, out var cueMs) ? cueMs : 0;
     }
 
     public void PlayStart() { if (Enabled) try { _start.Play(); } catch { } }

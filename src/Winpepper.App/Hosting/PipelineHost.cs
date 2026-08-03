@@ -40,6 +40,18 @@ public sealed class PipelineHost : IDisposable
     private readonly SessionViewModel _vm;
     private readonly ISoundEffectPlayer _sounds;
     private IWarmAudioRecorder? _warmRecorder;
+    /// <summary>
+    /// Pre-roll milliseconds the recorder ACTUALLY seeded into the current
+    /// session (StartSession's return): 0 when prewarm is off, less than the
+    /// WarmPrerollMs request when the ring was drained/cleared. Sizes the
+    /// per-dictation silence-gate cue mask (StartCueGateMask.ComputeMaskMs).
+    /// Sessions are serialized by the engine state machine, so one field
+    /// suffices — but BOTH hotkey arms (hold + toggle) MUST assign it;
+    /// missing one arm silently reuses the other arm's stale value (no
+    /// compile error catches it). The cancel path leaves it stale, which is
+    /// benign: the next StartSession overwrites it before any trim reads it.
+    /// </summary>
+    private int _lastSessionPrerollMs;
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
     private readonly object _startGate = new();
@@ -153,6 +165,25 @@ public sealed class PipelineHost : IDisposable
         _focusedCapturer = focusedCapturer;
         _postPasteLearningEnabled = postPasteLearningEnabled;
         _prewarmMicEnabled = prewarmMicEnabled;
+        // Startup observability for the silence-gate cue mask (2026-08-02):
+        // one honest line stating what was measured and the WORST-CASE warm
+        // mask, so recalibration reads of the drop log know the counting
+        // basis. The mask itself varies per-dictation with the pre-roll the
+        // recorder actually seeded (see TrimForTranscription); the actual
+        // value is logged on each silent-drop line.
+        var startCueMs = sounds.StartCueMs;
+        if (startCueMs > 0)
+            _log.LogInformation(
+                "start cue measured {CueMs} ms; worst-case warm silence-gate cue mask {WorstCaseMaskMs} ms (preroll request {PrerollMs} + start latency {LatencyMs} + cue + decay {DecayMs}; per-dictation mask uses the actually-seeded preroll; sounds enabled {Enabled})",
+                startCueMs,
+                StartCueGateMask.ComputeMaskMs(StartCueGateMask.WarmPrerollMs, startCueMs, sounds.Enabled),
+                StartCueGateMask.WarmPrerollMs,
+                StartCueGateMask.CueStartLatencyMarginMs,
+                StartCueGateMask.CueDecayMarginMs,
+                sounds.Enabled);
+        else
+            _log.LogWarning(
+                "start cue duration unavailable (missing or unparseable start.wav); silence-gate cue mask disabled — gate behaves as before (fail open)");
     }
 
     /// <summary>True once the ASR model is loaded and the hotkey pipeline is running.</summary>
@@ -499,7 +530,8 @@ public sealed class PipelineHost : IDisposable
                     _currentSessionId, (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds);
                 _sounds.PlayStart();
                 // Start the streaming dictation session BEFORE StartSession —
-                // StartSession raises the 500 ms pre-roll synchronously through
+                // StartSession raises the StartCueGateMask.WarmPrerollMs
+                // (500 ms) pre-roll request synchronously through
                 // FramesAvailable, so the session must already exist (frames
                 // queue in the coordinator until the factory completes) or the
                 // cloud stream permanently loses the first ~500 ms. The factory
@@ -540,7 +572,7 @@ public sealed class PipelineHost : IDisposable
                 {
                     _log.LogDebug("streaming disabled by settings; batch transcription will run at stop");
                 }
-                _warmRecorder!.StartSession(includePrerollMs: 500);
+                _lastSessionPrerollMs = _warmRecorder!.StartSession(includePrerollMs: StartCueGateMask.WarmPrerollMs);
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 _dictStartTicks = Environment.TickCount64;
                 _gcGen0AtStart = GC.CollectionCount(0);
@@ -1094,7 +1126,8 @@ public sealed class PipelineHost : IDisposable
                         _currentSessionId, (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds);
                     _sounds.PlayStart();
                     // (same comment as the HoldDown arm: create BEFORE StartSession
-                    // so the synchronously-raised pre-roll is not dropped)
+                    // so the synchronously-raised StartCueGateMask.WarmPrerollMs
+                    // (500 ms) pre-roll request is not dropped)
                     var settingsForStream2 = _settingsProvider();
                     if (settingsForStream2.StreamingEnabled)
                     {
@@ -1129,7 +1162,7 @@ public sealed class PipelineHost : IDisposable
                     {
                         _log.LogDebug("streaming disabled by settings; batch transcription will run at stop");
                     }
-                    _warmRecorder!.StartSession(includePrerollMs: 500);
+                    _lastSessionPrerollMs = _warmRecorder!.StartSession(includePrerollMs: StartCueGateMask.WarmPrerollMs);
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                     _dictStartTicks = Environment.TickCount64;
                     _gcGen0AtStart = GC.CollectionCount(0);
@@ -1690,10 +1723,21 @@ public sealed class PipelineHost : IDisposable
     /// Runs AFTER WarnIfSessionSilent, so a dead-mic session has already toasted
     /// (actionable); the quiet drop below adds no toast (consumer policy: a
     /// live-mic-nobody-spoke drop is not actionable).
+    /// The silence-gate decision masks the start-cue window (StartCueGateMask);
+    /// the drop line's voiced/clear/max-RMS are post-mask counts.
     /// </summary>
     private float[]? TrimForTranscription(float[] samples, Guid sessionId, out int removedMs)
     {
-        var result = Winpepper.Audio.SilenceTrimmer.Trim(samples);
+        // Mask the app's own start cue out of the gate DECISION. Gated on the
+        // player's actual Enabled state (NOT a settings snapshot: PlaySounds
+        // is applied to the player once at boot, so the player is the single
+        // honest source of whether a cue was emitted) and sized from the
+        // pre-roll the recorder ACTUALLY seeded this session (NOT the
+        // worst-case request: prewarm-off/drained-ring sessions shrink the
+        // window instead of eating post-hotkey speech). Trimming offsets and
+        // the transcribed audio are unaffected by the mask by construction.
+        var cueMaskMs = StartCueGateMask.ComputeMaskMs(_lastSessionPrerollMs, _sounds.StartCueMs, _sounds.Enabled);
+        var result = Winpepper.Audio.SilenceTrimmer.Trim(samples, cueMaskMs);
         removedMs = result.RemovedMs;
         if (result.IsSilent)
         {
@@ -1701,9 +1745,11 @@ public sealed class PipelineHost : IDisposable
             // voiced/clear/max-RMS make the provisional gate constants
             // recalibratable from logs and a dropped short utterance
             // diagnosable after the fact. Content-free: numbers only.
+            // Since 2026-08-02 these are POST-MASK counts — cue mask is
+            // logged alongside so recalibration reads stay honest.
             _log.LogInformation(
-                "dropped silent recording, {Ms} ms (voiced {VoicedMs} ms, clear {ClearVoicedMs} ms, max frame rms {MaxFrameRms:0.0000})",
-                ms, result.VoicedMs, result.ClearVoicedMs, result.MaxFrameRms);
+                "dropped silent recording, {Ms} ms (voiced {VoicedMs} ms, clear {ClearVoicedMs} ms, max frame rms {MaxFrameRms:0.0000}, cue mask {CueMaskMs} ms)",
+                ms, result.VoicedMs, result.ClearVoicedMs, result.MaxFrameRms, cueMaskMs);
             return null;
         }
 

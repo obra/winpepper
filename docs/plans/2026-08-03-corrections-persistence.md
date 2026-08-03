@@ -50,7 +50,7 @@ Single subsystem (corrections wiring between one ViewModel and one store, plus o
 | `tests/Winpepper.Corrections.Tests/Winpepper.Corrections.Tests.csproj` | Modify | Add explicit `Winpepper.Core` ProjectReference (house style: list every directly-used project; the tests use `Winpepper.Core.ViewModels` types directly). |
 | `src/Winpepper.App/Hosting/AppShell.cs:187-210` | Modify | Hoist `correctionStore` construction above the VM; replace empty-seeded/no-op VM construction with a `CorrectionsWiring.CreateViewModel` call; report persist failures via logger + `ErrorBus`. |
 
-Known interaction, deliberately unchanged (do not "fix" it — out of scope): the post-paste learning path (`CorrectionStoreWriter`, wired at `AppShell.cs:287-292`) does read-modify-write `Add*` on the same file, while the VM's persist is a whole-document `Save` (last-writer-wins). A background-learned entry added after the VM seeded will be overwritten by the next explicit UI edit. This trade-off is documented in the factory's XML doc comment (Task 1).
+Known interaction, deliberately unchanged (do not "fix" it — out of scope): the post-paste learning path (`CorrectionStoreWriter`, wired at `AppShell.cs:287-292`) does read-modify-write `Add*` on the same file, while the VM's persist is a whole-document `Save` (last-writer-wins). A background-learned entry added after the VM seeded will be overwritten by the next explicit UI edit. This trade-off is documented in the factory's XML doc comment (Task 1). Sized during load-bearing validation (2026-08-03): post-paste learning is OFF by default (`AppSettings.cs:83`), so the window exists only for opt-in users and lost entries are machine-relearnable. If product later rejects the trade-off, `CorrectionStore` already exposes a complete locked `Add*`/`Remove*` read-modify-write surface, so a follow-up can adopt snapshot-diff mutator replay (the `2026-07-26-settings-lost-update` fix shape) without touching the store.
 
 ---
 
@@ -294,9 +294,9 @@ EOF
 
 **Interfaces:**
 - Consumes: Task 1's `CorrectionsWiring.CreateViewModel(CorrectionStore)`.
-- Produces (final signature, consumed by Task 3): `public static CorrectionsViewModel CreateViewModel(CorrectionStore store, Action<Exception>? onError = null)` in `Winpepper.Corrections.CorrectionsWiring`. `onError` fires on a failed boot `Load()` (VM falls back to empty seed) and on every failed `Save()` (in-memory edit kept, exception contained). Additive optional parameter — Task 1 tests remain valid unchanged.
+- Produces (final signature, consumed by Task 3): `public static CorrectionsViewModel CreateViewModel(CorrectionStore store, Action<Exception>? onError = null)` in `Winpepper.Corrections.CorrectionsWiring`. `onError` fires on a failed boot `Load()` (VM falls back to empty seed and persistence is disabled for the session — every subsequent persist attempt reports instead of saving) and on every failed `Save()` (in-memory edit kept, exception contained). Additive optional parameter — Task 1 tests remain valid unchanged.
 
-**Why:** `CorrectionStore.Save()` deliberately rethrows I/O failures (`AtomicFile.WriteAllText` deletes its temp then `throw;`), and `CorrectionsViewModel.Persist()` has NO try/catch — an escape reaches the WinUI click handler and crashes the app. `Load()` swallows only `JsonException`; a locked/permission-denied file throws out of it and would crash `AppShell.Create` at boot. Both must be contained *inside the factory's lambdas* without touching `CorrectionStore` or the VM.
+**Why:** `CorrectionStore.Save()` deliberately rethrows I/O failures (`AtomicFile.WriteAllText` deletes its temp then `throw;`), and `CorrectionsViewModel.Persist()` has NO try/catch — an escape reaches the WinUI click handler and crashes the app. `Load()` swallows only `JsonException`; a locked/permission-denied file throws out of it and would crash `AppShell.Create` at boot. Both must be contained *inside the factory's lambdas* without touching `CorrectionStore` or the VM. Containment alone is not enough on the load side: a validation harness run against the real store (2026-08-03) proved that seeding empty after a failed `Load()` while leaving persist armed lets the user's next UI edit whole-document-`Save()` a near-empty document over an intact corrections.json — a user-data wipe. House precedent (`docs/plans/2026-07-26-settings-lost-update.md`) forbids exactly this: a degraded load can never become the base of a full-file rewrite. So a failed boot `Load()` also disables persistence for the session; every subsequent persist attempt reports through `onError` instead of saving. (Residual, accepted: if `File.Exists` returns false because the parent directory is unreadable, `Load()` returns `Empty` without throwing and the guard does not arm — but in that state `Save()`'s own directory/file I/O fails and is contained; a persist-time existence check was rejected because it would break the legitimate first-run flow.)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -369,6 +369,30 @@ Append inside the `CorrectionsWiringTests` class in `tests/Winpepper.Corrections
         vm.Replacements.ShouldBeEmpty();
         seen.ShouldNotBeNull();
     }
+
+    [Fact]
+    public void Failed_Seed_Disables_Persistence_And_Never_Wipes_The_File()
+    {
+        File.WriteAllText(_path, """{"schema":1,"preferred":["ChatGPT"],"replacements":{}}""");
+        Exception? seen = null;
+        CorrectionsViewModel vm = null!;
+        using (new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            vm = CorrectionsWiring.CreateViewModel(new CorrectionStore(_path), onError: ex => seen = ex);
+        }
+
+        // The lock is gone, so a Save here WOULD succeed — but the disk
+        // still holds data this VM never saw. The factory must refuse:
+        // a degraded load can never become the base of a full-file
+        // rewrite (docs/plans/2026-07-26-settings-lost-update.md).
+        seen = null;
+        Should.NotThrow(() => vm.AddPreferred("Anthropic"));
+        seen.ShouldNotBeNull();                                            // refusal is reported
+        vm.Preferred.Select(p => p.Text).ShouldBe(new[] { "Anthropic" }); // in-memory edit kept
+
+        var loaded = new CorrectionStore(_path).Load();
+        loaded.Preferred.ShouldBe(new[] { "ChatGPT" });                   // file untouched
+    }
 ```
 
 - [ ] **Step 2: Run to verify the new tests fail**
@@ -393,6 +417,7 @@ Replace the entire `CreateViewModel` method in `src/Winpepper.Corrections/Correc
         Action<Exception>? onError = null)
     {
         CorrectionsData initial;
+        var seedFailed = false;
         try
         {
             initial = store.Load();
@@ -403,6 +428,7 @@ Replace the entire `CreateViewModel` method in `src/Winpepper.Corrections/Correc
             // permissions) escape it and must not crash app boot. Degrade to
             // an empty seed — the UI stays usable in-memory.
             initial = CorrectionsData.Empty;
+            seedFailed = true;
             onError?.Invoke(ex);
         }
 
@@ -411,6 +437,20 @@ Replace the entire `CreateViewModel` method in `src/Winpepper.Corrections/Correc
             initial.Replacements,
             (preferred, replacements) =>
             {
+                if (seedFailed)
+                {
+                    // The disk file may still hold healthy data this VM never
+                    // saw (transient boot failure): a whole-document Save
+                    // would replace it with this near-empty view — a
+                    // user-data wipe. Precedent
+                    // (docs/plans/2026-07-26-settings-lost-update.md): a
+                    // degraded load can never become the base of a full-file
+                    // rewrite. Keep the edit in memory; report every attempt.
+                    onError?.Invoke(new InvalidOperationException(
+                        "Corrections were not loaded at startup; refusing to overwrite corrections.json with a partial view. Restart the app to re-enable persistence."));
+                    return;
+                }
+
                 try
                 {
                     store.Save(new CorrectionsData
@@ -444,7 +484,7 @@ dotnet exec tests/Winpepper.Corrections.Tests/bin/Release/net9.0/Winpepper.Corre
   -notrait "Platform=Windows"
 ```
 
-Expected: build succeeds; summary ends with `Errors: 0, Failed: 0` (3 more tests than after Task 1 — all 6 `CorrectionsWiringTests` green).
+Expected: build succeeds; summary ends with `Errors: 0, Failed: 0` (4 more tests than after Task 1 — all 7 `CorrectionsWiringTests` green).
 
 - [ ] **Step 5: Full Linux suite**
 
@@ -466,15 +506,22 @@ fix(corrections): contain load/persist failures in CorrectionsWiring behind onEr
 CorrectionStore.Save() deliberately rethrows I/O failures and
 CorrectionsViewModel.Persist() has no try/catch, so a failed save would
 escape into the WinUI click handler and crash the app. Load() swallows
-only JsonException, so a locked corrections.json would crash boot.
+only JsonException, so a locked corrections.json would crash boot. And
+an empty seed after a failed load with persistence still armed would
+let one UI edit whole-document-save a near-empty view over an intact
+corrections.json (validated against the real store; the
+settings-lost-update precedent forbids a degraded load becoming the
+base of a full-file rewrite).
 
 - CorrectionsWiring: optional Action<Exception>? onError parameter;
-  boot Load() failure degrades to an empty seed, Save() failure keeps
-  the in-memory edit and reports instead of throwing. Store semantics
-  untouched.
+  boot Load() failure degrades to an empty seed AND disables
+  persistence for the session (every attempt reports via onError);
+  Save() failure keeps the in-memory edit and reports instead of
+  throwing. Store semantics untouched.
 - Tests: persist failure does not throw out of add/remove (with and
   without onError) and keeps in-memory state; seed-load failure falls
-  back to empty and reports.
+  back to empty and reports; a failed seed never overwrites the file
+  even after the fault clears.
 
 Verified: linux-tests.sh GREEN; windows-gate.sh to run before push.
 
@@ -501,7 +548,7 @@ EOF
   - `ErrorBus.Report(ErrorStage stage, Exception ex, Guid sessionId)` — `Guid.Empty` = "no session"; `Report` cannot throw (subscriber exceptions are swallowed internally), so it is safe inside the persist error path.
 - Produces: nothing new for later tasks (final task). `AppShell.CorrectionsVm` behavior changes: seeded from disk, persists to disk.
 
-**Caution:** `AppShell.cs` is wrapped in `#if WINDOWS` and `Winpepper.App` is not compiled by the Linux suite, so this edit gets NO compile check until the Windows gate runs (after this workflow, before push). Copy the code below exactly; then re-read the edited region verifying every identifier against the Interfaces block above. House style in this file: fully-qualified names for cross-assembly types (`Winpepper.Corrections.*`, `Winpepper.Core.Errors.*`) — do NOT add new `using` directives.
+**Caution:** `AppShell.cs` is wrapped in `#if WINDOWS` and `Winpepper.App` is not compiled by the Linux suite. Load-bearing validation (2026-08-03) established that `dotnet build src/Winpepper.App/Winpepper.App.csproj -p:EnableWindowsTargeting=true` runs the full C# compile of `Winpepper.App` on Linux (TFM `net9.0-windows10.0.19041.0`, `#if WINDOWS` bodies included) before failing at one known, pre-existing XAML wall (`error WMC0621`: GenXbf.dll is Windows-native). Step 2 uses that as a mandatory compile probe, so this edit is NOT compile-blind for C# errors; only XAML/codegen changes remain Windows-gate-only (this task makes none). Copy the code below exactly; then run the probe and the checklist. House style in this file: fully-qualified names for cross-assembly types (`Winpepper.Corrections.*`, `Winpepper.Core.Errors.*`) — do NOT add new `using` directives.
 
 - [ ] **Step 1: Replace the wiring block**
 
@@ -578,7 +625,18 @@ and replace it with exactly:
 
 Nothing else in the file changes. Note the later consumers of `correctionStore` (`CorrectionStoreWriter` wiring at ~line 287 and the `PipelineHost` args at ~line 341) still see the same nullable local — only its declaration moved earlier.
 
-- [ ] **Step 2: Manual verification checklist (no Linux compile exists for this file)**
+- [ ] **Step 2: Linux compile probe (C# type-check of the edited file)**
+
+```bash
+cd /home/dan/code/winpepper/.worktrees/corrections-persistence
+export DOTNET_ROOT="${DOTNET_ROOT:-/home/dan/code/winpepper/.dotnet}"
+export PATH="$DOTNET_ROOT:$PATH"
+dotnet build src/Winpepper.App/Winpepper.App.csproj -p:EnableWindowsTargeting=true
+```
+
+(Use a 900s timeout; do not run it concurrently with any other build of this worktree.) Expected: the build FAILS with exactly ONE error — the pre-existing XAML wall `error WMC0621` (`GenXbf.dll`, the Windows-native XBF generator, unresolvable on Linux; baseline-verified at HEAD `da60350`). Pass criterion: **zero `error CS` lines** in the output (the C# compile of `Winpepper.App`, including the `#if WINDOWS` body of `AppShell.cs`, completes before that wall). ANY `error CS` line means the replacement block has a C# error — fix it before proceeding. (If a future SDK changes the wall's error code, the criterion stays the same: no `error CS` lines.)
+
+- [ ] **Step 3: Manual verification checklist (belt-and-braces on top of the probe)**
 
 Re-read the edited region and confirm each item:
 - `correctionStore` is declared exactly once in `Create()` (the old declaration at the former line 199 is gone; the `windowContext` declaration remains, now alone under the PLAN2-TYPE comment).
@@ -588,7 +646,7 @@ Re-read the edited region and confirm each item:
 - The fallback branch still compiles against the unchanged `CorrectionsViewModel` ctor: `Array.Empty<string>()`, `new Dictionary<string, string>()`, `(_, _) => { ... }`.
 - `git -C /home/dan/code/winpepper/.worktrees/corrections-persistence diff --stat` shows exactly one modified file: `src/Winpepper.App/Hosting/AppShell.cs`.
 
-- [ ] **Step 3: Full Linux suite (required before every commit, even for Windows-only edits)**
+- [ ] **Step 4: Full Linux suite (required before every commit, even for Windows-only edits)**
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/corrections-persistence && ./scripts/linux-tests.sh
@@ -596,7 +654,7 @@ cd /home/dan/code/winpepper/.worktrees/corrections-persistence && ./scripts/linu
 
 (1200s timeout.) Expected: `LINUX SUITE: GREEN` (proves nothing shared broke; `Winpepper.App` itself is compile-verified by the Windows gate before push).
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/corrections-persistence
@@ -635,6 +693,7 @@ EOF
 | VM constructed after store, seeded from `Load()` (Preferred + Replacements) | Task 3 Step 1 (hoist + factory call); seeding proven Linux-side by Task 1 test `Vm_Seeds_From_Existing_Store` |
 | Persist callback calls `Save(...)` with current preferred/replacements | Task 1 Step 4; proven by `Vm_Add_RoundTrips_To_Disk` |
 | Persist failure: no crash, log warning, surface via ErrorBus (established pattern) | Task 2 (containment + tests), Task 3 (LogWarning + `ErrorBus.Report(ErrorStage.Learning, ...)` — the repo's established log+Report idiom) |
+| Failed boot load can never become the base of a full-file rewrite (house precedent `2026-07-26-settings-lost-update`) | Task 2 `seedFailed` persist-disable; proven by `Failed_Seed_Disables_Persistence_And_Never_Wipes_The_File` |
 | Testable, Linux-runnable factory in a non-WinUI project, correct dependency direction | Task 1 (`Winpepper.Corrections`, the only shared project seeing both types; Corrections → Core verified) |
 | Regression test (a): VM add round-trips to fresh `CorrectionStore(path).Load()` | Task 1 `Vm_Add_RoundTrips_To_Disk` |
 | Regression test (b): VM seeds from existing store | Task 1 `Vm_Seeds_From_Existing_Store` |
@@ -643,4 +702,4 @@ EOF
 | AGENTS.md testing rules; green Linux suite before each commit; no push | Every task's build/exec/`linux-tests.sh` steps; no push step exists in this plan |
 | No changes to `CorrectionStore` atomics / `CaseAwareReplacer`; minimal change | File Structure (neither file touched); three focused commits |
 
-No stubs, mocks, or fake providers stand in for required behavior anywhere: tests exercise the production factory against the real `CorrectionStore` on real temp files, and the only no-op persist remaining is the pre-existing degraded null-store fallback (store construction failure), which preserves today's behavior for that edge and is outside the spec's required path. No unresolved coverage gaps.
+No stubs, mocks, or fake providers stand in for required behavior anywhere: tests exercise the production factory against the real `CorrectionStore` on real temp files, and the only non-persisting paths remaining are the pre-existing degraded null-store fallback (store construction failure), which preserves today's behavior for that edge and is outside the spec's required path, and Task 2's deliberate persist refusal after a failed boot load — required wipe-guard behavior proven by its own test. No unresolved coverage gaps.

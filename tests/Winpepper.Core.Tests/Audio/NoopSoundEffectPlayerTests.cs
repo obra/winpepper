@@ -16,4 +16,11 @@ public class NoopSoundEffectPlayerTests
         p.StartPlays.ShouldBe(2);
         p.StopPlays.ShouldBe(1);
     }
+
+    [Fact]
+    public void StartCueMs_IsZero()
+    {
+        // The no-op player emits no cue, so there is never anything to mask.
+        new NoopSoundEffectPlayer().StartCueMs.ShouldBe(0);
+    }
 }

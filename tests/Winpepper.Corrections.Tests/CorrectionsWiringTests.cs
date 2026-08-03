@@ -76,4 +76,95 @@ public class CorrectionsWiringTests : IDisposable
         loaded.Preferred.ShouldBe(new[] { "Anthropic" });
         loaded.Replacements.ShouldBeEmpty();
     }
+
+    [Fact]
+    public void Persist_Failure_Does_Not_Throw_Out_Of_Add_Or_Remove()
+    {
+        // The store path's PARENT is a regular file, so AtomicFile's
+        // Directory.CreateDirectory throws IOException on every Save —
+        // deterministic on both Linux and Windows.
+        var blocker = Path.Combine(Path.GetTempPath(), $"corrections-blocker-{Guid.NewGuid():N}");
+        File.WriteAllText(blocker, "");
+        try
+        {
+            var store = new CorrectionStore(Path.Combine(blocker, "corrections.json"));
+            Exception? seen = null;
+            var vm = CorrectionsWiring.CreateViewModel(store, onError: ex => seen = ex);
+
+            Should.NotThrow(() => vm.AddPreferred("ChatGPT"));
+            seen.ShouldNotBeNull();
+            vm.Preferred.Count.ShouldBe(1); // in-memory edit is kept
+
+            seen = null;
+            Should.NotThrow(() => vm.RemovePreferred(vm.Preferred[0]));
+            seen.ShouldNotBeNull();
+            vm.Preferred.ShouldBeEmpty();
+        }
+        finally
+        {
+            File.Delete(blocker);
+        }
+    }
+
+    [Fact]
+    public void Persist_Failure_Without_OnError_Is_Still_Contained()
+    {
+        var blocker = Path.Combine(Path.GetTempPath(), $"corrections-blocker-{Guid.NewGuid():N}");
+        File.WriteAllText(blocker, "");
+        try
+        {
+            var store = new CorrectionStore(Path.Combine(blocker, "corrections.json"));
+            var vm = CorrectionsWiring.CreateViewModel(store);
+
+            Should.NotThrow(() => vm.AddPreferred("ChatGPT"));
+        }
+        finally
+        {
+            File.Delete(blocker);
+        }
+    }
+
+    [Fact]
+    public void Seed_Load_Failure_Falls_Back_To_Empty_And_Reports()
+    {
+        File.WriteAllText(_path, """{"schema":1,"preferred":["ChatGPT"],"replacements":{}}""");
+        // Hold the file with FileShare.None: CorrectionStore.Load()'s
+        // File.ReadAllText then throws IOException (native sharing on
+        // Windows; flock-based FileShare emulation between FileStreams on
+        // Linux). Load() only swallows JsonException, so this escapes it.
+        using var locker = new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        Exception? seen = null;
+        CorrectionsViewModel vm = null!;
+        Should.NotThrow(() =>
+            vm = CorrectionsWiring.CreateViewModel(new CorrectionStore(_path), onError: ex => seen = ex));
+
+        vm.Preferred.ShouldBeEmpty();
+        vm.Replacements.ShouldBeEmpty();
+        seen.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public void Failed_Seed_Disables_Persistence_And_Never_Wipes_The_File()
+    {
+        File.WriteAllText(_path, """{"schema":1,"preferred":["ChatGPT"],"replacements":{}}""");
+        Exception? seen = null;
+        CorrectionsViewModel vm = null!;
+        using (new FileStream(_path, FileMode.Open, FileAccess.Read, FileShare.None))
+        {
+            vm = CorrectionsWiring.CreateViewModel(new CorrectionStore(_path), onError: ex => seen = ex);
+        }
+
+        // The lock is gone, so a Save here WOULD succeed — but the disk
+        // still holds data this VM never saw. The factory must refuse:
+        // a degraded load can never become the base of a full-file
+        // rewrite (docs/plans/2026-07-26-settings-lost-update.md).
+        seen = null;
+        Should.NotThrow(() => vm.AddPreferred("Anthropic"));
+        seen.ShouldNotBeNull();                                            // refusal is reported
+        vm.Preferred.Select(p => p.Text).ShouldBe(new[] { "Anthropic" }); // in-memory edit kept
+
+        var loaded = new CorrectionStore(_path).Load();
+        loaded.Preferred.ShouldBe(new[] { "ChatGPT" });                   // file untouched
+    }
 }

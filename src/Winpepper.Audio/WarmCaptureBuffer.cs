@@ -5,7 +5,7 @@ namespace Winpepper.Audio;
 /// continuously <see cref="Ingest"/>s frames; the ring always holds the last
 /// <c>ringCapacitySamples</c> samples. On <see cref="StartSession"/> the session
 /// buffer is seeded from the ring (the pre-roll) and thereafter live frames are
-/// appended too, so the returned buffer includes the ~500 ms spoken just before
+/// appended too, so the returned buffer includes the ~1 s spoken just before
 /// the hotkey press. Thread-safe: the WASAPI callback and the hotkey thread call
 /// in concurrently.
 /// </summary>

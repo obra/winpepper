@@ -162,7 +162,7 @@ public static class SilenceTrimmer
 
         // Start-cue budget DEDUCTION (2026-08-03, replacing the 2026-08-02
         // window EXCLUSION). The exclusion blinded the gate to the first
-        // ~500 ms of post-hotkey time (buffer t=0 sits the seeded pre-roll
+        // ~1 s of post-hotkey time (buffer t=0 sits the seeded pre-roll
         // BEFORE the hotkey), so a prompt short reply could not reach the
         // 600/100 ms floors and the WHOLE dictation dropped: 4/10 owner
         // dictations on 2026-08-04 (archive WAVs 173b20b3, 525f0643,

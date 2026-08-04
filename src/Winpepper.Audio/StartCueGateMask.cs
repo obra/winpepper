@@ -24,10 +24,13 @@ namespace Winpepper.Audio;
 /// flips 0/91.
 ///
 /// Sizing evidence (exact plan semantics over the archive): with the current
-/// 150 ms asset the warm window is 1000 ms; 0/91 real gate-passing
+/// 150 ms asset the warm window is 1500 ms; 0/91 real gate-passing
 /// dictations flip pass->drop, 0/6 true-silent drops flip drop->pass, the
 /// confirmed beep-only escape correctly flips to drop, and the tightest
-/// passer keeps a 140 ms margin.
+/// passer keeps a 140 ms margin. Re-validated 2026-08-04 for the 1000 ms
+/// pre-roll by padded-archive replication (+500 ms silence prefixed,
+/// mask 1000->1500, both frozen corpora): 0 real pass->drop, 0 silent
+/// drop->pass — evidence doc, 2026-08-04 section.
 /// </summary>
 public static class StartCueGateMask
 {
@@ -36,9 +39,13 @@ public static class StartCueGateMask
     /// source of this number: PipelineHost passes it to
     /// StartSession(includePrerollMs:) at both hotkey arms — do not
     /// duplicate the literal. The mask itself is built from the ACTUAL
-    /// seeded pre-roll StartSession returns (&lt;= this request).
+    /// seeded pre-roll StartSession returns (<= this request). Raised 2026-08-04
+    /// from 500: speech begun >500 ms before the hotkey was never recorded (head-loss
+    /// investigation, confirmed instance 8ec9e52c). PipelineHost may request MORE than
+    /// this per session (hotkey-lag compensation, see PrerollRequest); this constant
+    /// remains the base and the mask still scales from the ACTUAL seed.
     /// </summary>
-    public const int WarmPrerollMs = 500;
+    public const int WarmPrerollMs = 1000;
 
     /// <summary>
     /// Dispatch + render latency between PlayStart() returning and the cue

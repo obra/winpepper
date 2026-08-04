@@ -82,7 +82,7 @@ public record AppSettings
     // opt-in behavior (spec Task 5).
     public bool PostPasteLearningEnabled { get; init; } = false;
 
-    // Warm-mic pre-roll: keep one capture stream running so the first ~500 ms
+    // Warm-mic pre-roll: keep one capture stream running so the first ~1 s
     // of speech is not clipped (Bug 2). On by default; turning it off restores
     // cold-start capture (the mic-in-use indicator then only lights while
     // dictating — a privacy trade-off).

@@ -1724,20 +1724,23 @@ public sealed class PipelineHost : IDisposable
     /// (actionable); the quiet drop below adds no toast (consumer policy: a
     /// live-mic-nobody-spoke drop is not actionable).
     /// The silence-gate decision masks the start-cue window (StartCueGateMask);
-    /// the drop line's voiced/clear/max-RMS are post-mask counts.
+    /// the drop line's voiced/clear are cue-budget-deducted counts and max-RMS is the post-window max.
     /// </summary>
     private float[]? TrimForTranscription(float[] samples, Guid sessionId, out int removedMs)
     {
-        // Mask the app's own start cue out of the gate DECISION. Gated on the
-        // player's actual Enabled state (NOT a settings snapshot: PlaySounds
-        // is applied to the player once at boot, so the player is the single
-        // honest source of whether a cue was emitted) and sized from the
-        // pre-roll the recorder ACTUALLY seeded this session (NOT the
-        // worst-case request: prewarm-off/drained-ring sessions shrink the
-        // window instead of eating post-hotkey speech). Trimming offsets and
-        // the transcribed audio are unaffected by the mask by construction.
+        // Give the gate the cue window AND the cue's deductible budget
+        // (cue-budget deduction, 2026-08-03: in-window frames count, up to the
+        // budget of them is deducted -- the old window EXCLUSION dropped prompt
+        // short replies). Gated on the player's actual Enabled state (NOT a
+        // settings snapshot: PlaySounds is applied to the player once at boot, so
+        // the player is the single honest source of whether a cue was emitted) and
+        // sized from the pre-roll the recorder ACTUALLY seeded this session (NOT
+        // the worst-case request: prewarm-off/drained-ring sessions shrink the
+        // window instead of eating post-hotkey speech). Trimming offsets and the
+        // transcribed audio are unaffected by the mask by construction.
         var cueMaskMs = StartCueGateMask.ComputeMaskMs(_lastSessionPrerollMs, _sounds.StartCueMs, _sounds.Enabled);
-        var result = Winpepper.Audio.SilenceTrimmer.Trim(samples, cueMaskMs);
+        var cueBudgetMs = StartCueGateMask.ComputeCueBudgetMs(_sounds.StartCueMs, _sounds.Enabled);
+        var result = Winpepper.Audio.SilenceTrimmer.Trim(samples, cueMaskMs, cueBudgetMs);
         removedMs = result.RemovedMs;
         if (result.IsSilent)
         {
@@ -1745,11 +1748,11 @@ public sealed class PipelineHost : IDisposable
             // voiced/clear/max-RMS make the provisional gate constants
             // recalibratable from logs and a dropped short utterance
             // diagnosable after the fact. Content-free: numbers only.
-            // Since 2026-08-02 these are POST-MASK counts — cue mask is
-            // logged alongside so recalibration reads stay honest.
+            // Since 2026-08-03 these are cue-budget-DEDUCTED counts — cue mask
+            // and budget are logged alongside so recalibration reads stay honest.
             _log.LogInformation(
-                "dropped silent recording, {Ms} ms (voiced {VoicedMs} ms, clear {ClearVoicedMs} ms, max frame rms {MaxFrameRms:0.0000}, cue mask {CueMaskMs} ms)",
-                ms, result.VoicedMs, result.ClearVoicedMs, result.MaxFrameRms, cueMaskMs);
+                "dropped silent recording, {Ms} ms (voiced {VoicedMs} ms, clear {ClearVoicedMs} ms, max frame rms {MaxFrameRms:0.0000}, cue mask {CueMaskMs} ms, cue budget {CueBudgetMs} ms)",
+                ms, result.VoicedMs, result.ClearVoicedMs, result.MaxFrameRms, cueMaskMs, cueBudgetMs);
             return null;
         }
 

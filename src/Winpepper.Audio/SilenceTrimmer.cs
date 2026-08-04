@@ -20,8 +20,9 @@ public readonly struct TrimResult
     public required bool IsSilent { get; init; }
 
     /// <summary>
-    /// Milliseconds of voiced (above-adaptive-threshold) audio detected,
-    /// counted over post-cue-mask frames only when a mask is supplied.
+    /// Milliseconds of voiced (above-adaptive-threshold) audio detected.
+    /// Cue-budget-deducted count (in-window frames count, then up to the cue
+    /// budget of them is subtracted).
     /// 0 when the P90 gate fired (the adaptive threshold is derived from a
     /// speech level that does not exist there) and for sub-frame buffers.
     /// Observability only -- lets the drop log say WHY.
@@ -29,8 +30,9 @@ public readonly struct TrimResult
     public required int VoicedMs { get; init; }
 
     /// <summary>
-    /// Milliseconds of frames at or above ClearSpeechRmsFloor (0.02),
-    /// counted over post-cue-mask frames only when a mask is supplied.
+    /// Milliseconds of frames at or above ClearSpeechRmsFloor (0.02).
+    /// Cue-budget-deducted count (in-window frames count, then up to the cue
+    /// budget of them is subtracted).
     /// Absolute, so it is reported on BOTH silent paths (0 only for
     /// sub-frame buffers). Together with MaxFrameRms this makes the gate
     /// constants recalibratable from production logs (they were measured
@@ -39,8 +41,9 @@ public readonly struct TrimResult
     public required int ClearVoicedMs { get; init; }
 
     /// <summary>
-    /// Loudest 20 ms frame RMS observed outside the cue mask (0 for
-    /// sub-frame and fully-masked buffers).
+    /// Max frame RMS over the frames AFTER the cue window (recalibration
+    /// field; the cue must not inflate it; 0 when the window covers every
+    /// frame).
     /// Observability only -- a dropped short utterance is diagnosable from
     /// the log by how close it came to the 0.02 clear tier.
     /// </summary>
@@ -119,23 +122,21 @@ public static class SilenceTrimmer
     private const int MinClearVoicedDurationMs = 100;
 
     /// <summary>
-    /// Trims silence and decides voice-presence for a finished session buffer.
-    /// <paramref name="maskMs"/> excludes the leading start-cue window from the
-    /// gate DECISION (the P90-silent gate, the decision threshold's P10/P90
-    /// percentiles, and the VoicedMs/ClearVoicedMs/MaxFrameRms counting)
-    /// WITHOUT touching the trim math: the trim threshold, isSilence[], the
-    /// run walker, RemovedMs/RunsTrimmed, and the output buffer are computed
-    /// over ALL frames exactly as before, so the transcribed audio and the
-    /// trim accounting are mask-independent. maskMs = 0 (the default) is
-    /// byte-identical to the pre-mask behavior. The caller computes maskMs
-    /// from the actually-seeded pre-roll plus the runtime-measured cue
-    /// duration — see <see cref="StartCueGateMask"/>. Partial mask frames round UP
-    /// (a mask's job is exclusion). A mask covering every frame classifies
-    /// the recording silent (accepted residual: an utterance entirely inside
-    /// the mask window is dropped; drops stay non-destructive — the caller
-    /// archives the original audio).
+    /// Trim interior/edge silence and decide whether the recording is
+    /// silent. <paramref name="maskMs"/> is the head-of-buffer window in
+    /// which the app's own start cue can appear
+    /// (StartCueGateMask.ComputeMaskMs); <paramref name="cueBudgetMs"/> is
+    /// the cue's own deductible worth
+    /// (StartCueGateMask.ComputeCueBudgetMs). Frames in the window COUNT
+    /// toward every decision statistic and tally, and up to the budget of
+    /// in-window frames is then DEDUCTED from the voiced and clear tallies
+    /// (cue-budget deduction, 2026-08-03 -- replaces the window EXCLUSION
+    /// that dropped prompt short replies). maskMs &lt;= 0 or
+    /// cueBudgetMs &lt;= 0 deducts nothing; both default to 0 = pre-mask
+    /// behavior, byte-identical. Trimming offsets and the output buffer
+    /// are unaffected by mask and budget by construction.
     /// </summary>
-    public static TrimResult Trim(ReadOnlySpan<float> samples, int maskMs = 0)
+    public static TrimResult Trim(ReadOnlySpan<float> samples, int maskMs = 0, int cueBudgetMs = 0)
     {
         var n = samples.Length;
         var frameCount = n / FrameSamples;
@@ -159,52 +160,66 @@ public static class SilenceTrimmer
         for (var f = 0; f < frameCount; f++)
             rms[f] = AudioEnergy.Rms(samples.Slice(f * FrameSamples, FrameSamples));
 
-        // Start-cue mask: frames [0, maskFrames) are excluded from every
-        // DECISION statistic below but stay in the buffer and in the trim
-        // threshold. Ceil, so a partially covered frame is fully excluded.
+        // Start-cue budget DEDUCTION (2026-08-03, replacing the 2026-08-02
+        // window EXCLUSION). The exclusion blinded the gate to the first
+        // ~500 ms of post-hotkey time (buffer t=0 sits the seeded pre-roll
+        // BEFORE the hotkey), so a prompt short reply could not reach the
+        // 600/100 ms floors and the WHOLE dictation dropped: 4/10 owner
+        // dictations on 2026-08-04 (archive WAVs 173b20b3, 525f0643,
+        // 003777a1, 4bf32da1 -- all real speech at 820-1180 ms). Now the
+        // window's frames COUNT normally and the gate deducts up to
+        // cueBudgetMs (the cue's own worth, derived from the measured cue
+        // duration -- StartCueGateMask.ComputeCueBudgetMs) of in-window
+        // frames from each tally. A beep-only recording's in-window tally
+        // IS the cue (measured 120-140 ms clear pickup), so it deducts to
+        // below the floors and still drops; prompt real speech keeps its
+        // surplus and passes. Ceil on both conversions: a partially
+        // covered frame is fully eligible, a partial budget frame deducts
+        // whole.
         var maskFrames = maskMs <= 0 ? 0 : Math.Min((maskMs + FrameMs - 1) / FrameMs, frameCount);
-        var decisionFrameCount = frameCount - maskFrames;
+        var budgetFrames = cueBudgetMs <= 0 ? 0 : (cueBudgetMs + FrameMs - 1) / FrameMs;
 
-        if (decisionFrameCount == 0)
-        {
-            // Every frame sits inside the cue mask: no decision evidence
-            // exists, so the recording is silent by definition. ACCEPTED
-            // RESIDUAL: an utterance spoken entirely inside the mask window
-            // is dropped (see Trim_UtteranceEntirelyInsideMask_IsSilent_
-            // KnownResidual). This branch is also the guard that keeps the
-            // percentile math off an empty array (sorted[^1] would throw).
-            return new TrimResult
-            {
-                Trimmed = Array.Empty<float>(),
-                RemovedMs = 0,
-                RunsTrimmed = 0,
-                IsSilent = true,
-                VoicedMs = 0,
-                ClearVoicedMs = 0,
-                MaxFrameRms = 0,
-            };
-        }
+        // DECISION statistics run over ALL frames again -- the 2026-08-02
+        // post-mask stats exclusion is deliberately REMOVED, not kept.
+        // Measured why (2026-08-03 archive, see the cue-budget section of
+        // docs/plans/2026-07-29-cleanup-asr-contention-evidence.md): with
+        // a prompt short reply the post-mask remainder is statistically
+        // starved (clip 173b20b3, 1070 ms: 3 frames left for the
+        // percentiles), and the P90-silent gate misfires on real speech
+        // (clip 4bf32da1: post-mask P90 0.0012 < 0.004 despite 620 ms of
+        // deducted voiced audio -- unfixable by any budget while the
+        // exclusion stands). The exclusion's anti-cue duty moves to the
+        // budget deduction below; MaxFrameRms stays post-window so the cue
+        // still cannot inflate the recalibration fields. Side benefit: the
+        // decision threshold IS the trim threshold again (one percentile
+        // pass over all frames), so trimming is bit-identical by
+        // construction.
+        var sorted = (double[])rms.Clone();
+        Array.Sort(sorted);
+        var speechLevel = Percentile(sorted, SpeechLevelPercentile);
 
-        // DECISION statistics run over post-mask frames only. With maskMs = 0
-        // this is all frames and everything below matches the pre-mask code.
-        var decisionSorted = new double[decisionFrameCount];
-        Array.Copy(rms, maskFrames, decisionSorted, 0, decisionFrameCount);
-        Array.Sort(decisionSorted);
-        var speechLevel = Percentile(decisionSorted, SpeechLevelPercentile);
+        // Post-window max: drop-log recalibration field; the cue window
+        // must not inflate it (0 when the window covers every frame).
+        var postWindowMax = 0.0;
+        for (var f = maskFrames; f < frameCount; f++)
+            if (rms[f] > postWindowMax) postWindowMax = rms[f];
 
         if (speechLevel < SilentSpeechLevel)
         {
-            // P90-silent: the adaptive threshold is undefined (it is derived
-            // from a speech level that does not exist), so VoicedMs reports
-            // 0. Clear/max fields are absolute and still meaningful -- they
-            // keep long-recording transient near-misses diagnosable from the
-            // drop log (the gate constants are recalibrated from these
-            // fields). Counted post-mask, so the start cue can no longer
-            // inflate the recalibration fields (pre-mask logs showed
-            // clear=60-160 ms of pure beep on every silent drop).
-            var clearMsAtP90 = 0;
-            for (var f = maskFrames; f < frameCount; f++)
-                if (rms[f] >= ClearSpeechRmsFloor) clearMsAtP90 += FrameMs;
+            // P90-silent: the adaptive threshold is undefined (it is
+            // derived from a speech level that does not exist), so
+            // VoicedMs reports 0. The clear count is reported
+            // budget-deducted so the cue cannot inflate the recalibration
+            // fields (pre-mask logs showed clear = 60-160 ms of pure beep
+            // on every silent drop).
+            var clearAll = 0;
+            var clearInWindow = 0;
+            for (var f = 0; f < frameCount; f++)
+            {
+                if (rms[f] < ClearSpeechRmsFloor) continue;
+                clearAll++;
+                if (f < maskFrames) clearInWindow++;
+            }
             return new TrimResult
             {
                 Trimmed = Array.Empty<float>(),
@@ -212,39 +227,47 @@ public static class SilenceTrimmer
                 RunsTrimmed = 0,
                 IsSilent = true,
                 VoicedMs = 0,
-                ClearVoicedMs = clearMsAtP90,
-                MaxFrameRms = decisionSorted[^1],
+                ClearVoicedMs = (clearAll - Math.Min(budgetFrames, clearInWindow)) * FrameMs,
+                MaxFrameRms = postWindowMax,
             };
         }
 
-        var noiseFloor = Percentile(decisionSorted, NoiseFloorPercentile);
+        var noiseFloor = Percentile(sorted, NoiseFloorPercentile);
 
-        // Adaptive DECISION threshold based on the post-mask noise floor and
-        // speech level (same formula as always; identical to the trim
-        // threshold when maskMs = 0).
+        // Adaptive DECISION threshold -- same formula as always, over all
+        // frames (identical to the trim threshold below).
         var threshold = Math.Max(ThresholdNoiseMultiplier * noiseFloor, ThresholdAbsFloor);
-        // Fail-safe: when the noise floor is high relative to speech, silence
-        // cannot be confidently separated. Capping the threshold at a fraction
-        // of speechLevel keeps genuine silence-vs-speech separable and makes
-        // low-SNR recordings a no-op instead of eating real audio.
+        // Fail-safe: when the noise floor is high relative to speech,
+        // silence cannot be confidently separated. Capping the threshold
+        // at a fraction of speechLevel keeps genuine silence-vs-speech
+        // separable and makes low-SNR recordings a no-op instead of eating
+        // real audio.
         threshold = Math.Min(threshold, SpeechCapFactor * speechLevel);
 
-        // Minimum-voiced-duration gate (2026-07-28 transient-rejection fix;
-        // AND semantics -- the owner-fixed P90 parameters above are not
-        // re-derived, and this gate can only make the verdict MORE silent).
-        // Counts post-mask frames only, so the start cue can no longer supply
-        // voiced/clear milliseconds (2026-08-02: an unmasked cue alone could
-        // satisfy the 100 ms clear tier and unlock a silent recording).
-        var voicedMs = 0;
-        var clearVoicedMs = 0;
-        var maxFrameRms = 0.0;
-        for (var f = maskFrames; f < frameCount; f++)
+        // Minimum-voiced-duration gate (2026-07-28 transient-rejection
+        // fix; AND semantics -- this gate can only make the verdict MORE
+        // silent). Tally ALL frames, tracking the in-window share, then
+        // deduct up to the cue budget of the loudest in-window frames from
+        // each tally. The tallies are frame COUNTS, so "loudest first"
+        // reduces to capping the deduction at the in-window share.
+        var voicedFrames = 0;
+        var clearFrames = 0;
+        var voicedFramesInWindow = 0;
+        var clearFramesInWindow = 0;
+        for (var f = 0; f < frameCount; f++)
         {
-            if (rms[f] > maxFrameRms) maxFrameRms = rms[f];
             if (rms[f] < threshold) continue;
-            voicedMs += FrameMs;
-            if (rms[f] >= ClearSpeechRmsFloor) clearVoicedMs += FrameMs;
+            voicedFrames++;
+            if (f < maskFrames) voicedFramesInWindow++;
+            if (rms[f] >= ClearSpeechRmsFloor)
+            {
+                clearFrames++;
+                if (f < maskFrames) clearFramesInWindow++;
+            }
         }
+        var voicedMs = (voicedFrames - Math.Min(budgetFrames, voicedFramesInWindow)) * FrameMs;
+        var clearVoicedMs = (clearFrames - Math.Min(budgetFrames, clearFramesInWindow)) * FrameMs;
+        var maxFrameRms = postWindowMax;
 
         if (voicedMs < MinVoicedDurationMs && clearVoicedMs < MinClearVoicedDurationMs)
         {
@@ -260,22 +283,11 @@ public static class SilenceTrimmer
             };
         }
 
-        // TRIM threshold: ALL frames, exactly the pre-mask computation, so
-        // the mask can never move trimming offsets or change the output
-        // buffer. (Masking the percentile sample would shift the threshold
-        // and with it isSilence[] -- the walker's sole input.) When
-        // maskFrames == 0 the decision threshold IS the all-frames threshold,
-        // so the extra sort is skipped.
+        // TRIM threshold == the decision threshold: both are derived over
+        // ALL frames now, so the mask/budget can never move trimming
+        // offsets or change the output buffer (the walker's sole input is
+        // isSilence[]).
         var trimThreshold = threshold;
-        if (maskFrames > 0)
-        {
-            var trimSorted = (double[])rms.Clone();
-            Array.Sort(trimSorted);
-            var trimSpeechLevel = Percentile(trimSorted, SpeechLevelPercentile);
-            var trimNoiseFloor = Percentile(trimSorted, NoiseFloorPercentile);
-            trimThreshold = Math.Max(ThresholdNoiseMultiplier * trimNoiseFloor, ThresholdAbsFloor);
-            trimThreshold = Math.Min(trimThreshold, SpeechCapFactor * trimSpeechLevel);
-        }
 
         var isSilence = new bool[frameCount];
         for (var f = 0; f < frameCount; f++)

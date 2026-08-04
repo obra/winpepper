@@ -81,4 +81,51 @@ public class StartCueGateMaskTests
         // changes, the request follows automatically — that is the point.
         StartCueGateMask.WarmPrerollMs.ShouldBe(500);
     }
+
+    [Fact]
+    public void ComputeCueBudgetMs_MeasuredCue_DeductsCueWorthMinusMargin()
+    {
+        // Budget = measured cue - CueBudgetMarginMs = 150 - 50 = 100 ms.
+        // Archive sweep 2026-08-03 (two frozen corpora, budget 0..400 ms in
+        // 20 ms steps): the window satisfying ALL criteria (4/4 regression
+        // WAVs pass, 0 real-dictation flips, 0 drop->pass, both beep/cue
+        // escapes drop) is 100..120 ms; 100 maximizes the regression-side
+        // margin (binding clip 003777a1: clear 120 vs the 100 ms floor).
+        StartCueGateMask.ComputeCueBudgetMs(150, soundsEnabled: true).ShouldBe(100);
+        StartCueGateMask.ComputeCueBudgetMs(150, true)
+            .ShouldBe(150 - StartCueGateMask.CueBudgetMarginMs);
+    }
+
+    [Fact]
+    public void ComputeCueBudgetMs_LongerCueAsset_ScalesWithMeasuredDuration()
+    {
+        // The asset may change or become user-configurable (owner
+        // requirement): the budget must track the MEASURED duration, never
+        // a constant. 300 ms asset => 300 - 50 = 250.
+        StartCueGateMask.ComputeCueBudgetMs(300, soundsEnabled: true).ShouldBe(250);
+    }
+
+    [Fact]
+    public void ComputeCueBudgetMs_SoundsDisabled_ReturnsZero()
+    {
+        // No cue was emitted => nothing to deduct (mirrors ComputeMaskMs).
+        StartCueGateMask.ComputeCueBudgetMs(150, soundsEnabled: false).ShouldBe(0);
+    }
+
+    [Fact]
+    public void ComputeCueBudgetMs_UnmeasuredCue_ReturnsZero()
+    {
+        // FAIL OPEN like the mask: unmeasured (0) or nonsense (negative)
+        // cue duration => no deduction, gate behaves as before the mask.
+        StartCueGateMask.ComputeCueBudgetMs(0, soundsEnabled: true).ShouldBe(0);
+        StartCueGateMask.ComputeCueBudgetMs(-5, soundsEnabled: true).ShouldBe(0);
+    }
+
+    [Fact]
+    public void ComputeCueBudgetMs_TinyCue_ClampsToZero()
+    {
+        // A cue shorter than the margin deducts nothing: max(40 - 50, 0).
+        // Safe: a <=40 ms beep can never reach the 100 ms clear floor.
+        StartCueGateMask.ComputeCueBudgetMs(40, soundsEnabled: true).ShouldBe(0);
+    }
 }

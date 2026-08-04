@@ -43,8 +43,10 @@ public sealed class PipelineHost : IDisposable
     /// <summary>
     /// Pre-roll milliseconds the recorder ACTUALLY seeded into the current
     /// session (StartSession's return): 0 when prewarm is off, less than the
-    /// WarmPrerollMs request when the ring was drained/cleared. Sizes the
-    /// per-dictation silence-gate cue mask (StartCueGateMask.ComputeMaskMs).
+    /// PrerollRequest.ComputeRequestMs request (WarmPrerollMs + clamped
+    /// hotkey lag, bounded by the previous stop hotkey) when the ring was
+    /// drained/cleared. Sizes the per-dictation silence-gate cue mask
+    /// (StartCueGateMask.ComputeMaskMs).
     /// Sessions are serialized by the engine state machine, so one field
     /// suffices — but BOTH hotkey arms (hold + toggle) MUST assign it;
     /// missing one arm silently reuses the other arm's stale value (no
@@ -52,6 +54,14 @@ public sealed class PipelineHost : IDisposable
     /// benign: the next StartSession overwrites it before any trim reads it.
     /// </summary>
     private int _lastSessionPrerollMs;
+    /// <summary>Hook timestamp of the most recent stop-initiating hotkey
+    /// (HoldUp / toggle-stop / Cancel); null until the first stop this
+    /// process. Bounds the pre-roll request (PrerollRequest.ComputeRequestMs
+    /// — the seed must never reach back past the previous stop + stop-cue
+    /// guard) and is the source for retrigger_gap= (Task 7) — hook
+    /// timestamps at both ends, so the gap measures USER behavior, not
+    /// pipeline latency.</summary>
+    private DateTimeOffset? _lastStopHotkeyUtc;
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
     private readonly object _startGate = new();
@@ -174,10 +184,10 @@ public sealed class PipelineHost : IDisposable
         var startCueMs = sounds.StartCueMs;
         if (startCueMs > 0)
             _log.LogInformation(
-                "start cue measured {CueMs} ms; worst-case warm silence-gate cue mask {WorstCaseMaskMs} ms (preroll request {PrerollMs} + start latency {LatencyMs} + cue + decay {DecayMs}; per-dictation mask uses the actually-seeded preroll; sounds enabled {Enabled})",
+                "start cue measured {CueMs} ms; worst-case warm silence-gate cue mask {WorstCaseMaskMs} ms (max preroll request {PrerollMs} incl. hotkey-lag compensation + start latency {LatencyMs} + cue + decay {DecayMs}; per-dictation mask uses the actually-seeded preroll; sounds enabled {Enabled})",
                 startCueMs,
-                StartCueGateMask.ComputeMaskMs(StartCueGateMask.WarmPrerollMs, startCueMs, sounds.Enabled),
-                StartCueGateMask.WarmPrerollMs,
+                StartCueGateMask.ComputeMaskMs(Winpepper.Audio.PrerollRequest.MaxRequestMs, startCueMs, sounds.Enabled),
+                Winpepper.Audio.PrerollRequest.MaxRequestMs,
                 StartCueGateMask.CueStartLatencyMarginMs,
                 StartCueGateMask.CueDecayMarginMs,
                 sounds.Enabled);
@@ -526,15 +536,22 @@ public sealed class PipelineHost : IDisposable
                         _vm.PendingPasteText.Length);
                 _engine.Apply(SessionEvent.StartRequested);
                 _currentSessionId = Guid.NewGuid();
+                // Hoisted keydown→handling lag: feeds ONLY the 'Session
+                // started' log line (semantics unchanged — stays comparable
+                // with the historical lag survey). The pre-roll request and
+                // arm_latency= use seedLagMs, measured immediately before
+                // StartSession below (blocking work sits in between).
+                var hotkeyLagMs = (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds;
                 _log.LogInformation("Session started (hold) {SessionId} (hotkey observed {LagMs} ms before handling)",
-                    _currentSessionId, (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds);
+                    _currentSessionId, hotkeyLagMs);
                 _sounds.PlayStart();
                 // Start the streaming dictation session BEFORE StartSession —
-                // StartSession raises the StartCueGateMask.WarmPrerollMs
-                // (500 ms) pre-roll request synchronously through
+                // StartSession raises the lag-compensated pre-roll request
+                // (PrerollRequest.ComputeRequestMs: WarmPrerollMs 1000 ms +
+                // observed hotkey lag, clamped) synchronously through
                 // FramesAvailable, so the session must already exist (frames
                 // queue in the coordinator until the factory completes) or the
-                // cloud stream permanently loses the first ~500 ms. The factory
+                // cloud stream permanently loses the first ~1-2 s. The factory
                 // runs on a background pump so recording start stays instant;
                 // model ensure is silent here (reportErrors: false) — the stop
                 // arm's late path re-runs the check with today's exact error UX.
@@ -572,7 +589,28 @@ public sealed class PipelineHost : IDisposable
                 {
                     _log.LogDebug("streaming disabled by settings; batch transcription will run at stop");
                 }
-                _lastSessionPrerollMs = _warmRecorder!.StartSession(includePrerollMs: StartCueGateMask.WarmPrerollMs);
+                // Measured adjacent to the seed, NOT reused from the arm top:
+                // blocking work sits between the two (synchronous settings-
+                // file Load with a documented 15 ms×2 collision-sleep path,
+                // SettingsStore.cs:24-63, plus 1-2 sync Serilog file-sink
+                // writes, WinpepperLogging.cs:46-64 — falsified 2026-08-04,
+                // load-bearing validation). The REQUEST and arm_latency= use
+                // seedLagMs so compensation covers the whole keydown→seed
+                // delay 1:1.
+                var seedLagMs = (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds;
+                // Bound the reach-back at the previous stop hotkey: the ring
+                // is continuous across sessions, so an unbounded request
+                // would hand this session the previous dictation's tail
+                // (already transcribed) and its stop-beep pickup (A1/A6,
+                // 2026-08-04). Negative msSinceStop (clock skew) is fine:
+                // Math.Max(0, …) in the helper clamps the clean span to 0,
+                // which is the conservative direction.
+                int? msSinceStop = _lastStopHotkeyUtc is DateTimeOffset prevStop
+                    ? (int)(DateTimeOffset.UtcNow - prevStop).TotalMilliseconds
+                    : null;
+                _lastSessionPrerollMs = _warmRecorder!.StartSession(
+                    includePrerollMs: PrerollRequest.ComputeRequestMs(
+                        seedLagMs, msSinceStop, _sounds.Enabled));
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 _dictStartTicks = Environment.TickCount64;
                 _gcGen0AtStart = GC.CollectionCount(0);
@@ -608,6 +646,7 @@ public sealed class PipelineHost : IDisposable
                 var procCpuAtStop = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
 
                 var releaseAt = evt.Timestamp;
+                _lastStopHotkeyUtc = evt.Timestamp;
                 var timing = new Winpepper.Core.Diagnostics.DictationTimingSummary
                 {
                     SessionId = _currentSessionId,
@@ -1095,6 +1134,7 @@ public sealed class PipelineHost : IDisposable
                 _recordStopwatch = null;
                 break;
             case HotkeyEventKind.Cancel:
+                _lastStopHotkeyUtc = evt.Timestamp;
                 _engine.Apply(SessionEvent.CancelRequested);
                 _ctxCoordinator?.CancelAndClear();
                 _log.LogInformation("Session cancelled {SessionId}", _currentSessionId);
@@ -1122,12 +1162,19 @@ public sealed class PipelineHost : IDisposable
                             _vm.PendingPasteText.Length);
                     _engine.Apply(SessionEvent.StartRequested);
                     _currentSessionId = Guid.NewGuid();
+                    // Hoisted keydown→handling lag: feeds ONLY the 'Session
+                    // started' log line (semantics unchanged — stays comparable
+                    // with the historical lag survey). The pre-roll request and
+                    // arm_latency= use seedLagMs2, measured immediately before
+                    // StartSession below (blocking work sits in between).
+                    var hotkeyLagMs2 = (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds;
                     _log.LogInformation("Session started (toggle) {SessionId} (hotkey observed {LagMs} ms before handling)",
-                        _currentSessionId, (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds);
+                        _currentSessionId, hotkeyLagMs2);
                     _sounds.PlayStart();
                     // (same comment as the HoldDown arm: create BEFORE StartSession
-                    // so the synchronously-raised StartCueGateMask.WarmPrerollMs
-                    // (500 ms) pre-roll request is not dropped)
+                    // so the synchronously-raised lag-compensated pre-roll request
+                    // (PrerollRequest.ComputeRequestMs: WarmPrerollMs 1000 ms +
+                    // observed hotkey lag, clamped) is not dropped)
                     var settingsForStream2 = _settingsProvider();
                     if (settingsForStream2.StreamingEnabled)
                     {
@@ -1162,7 +1209,28 @@ public sealed class PipelineHost : IDisposable
                     {
                         _log.LogDebug("streaming disabled by settings; batch transcription will run at stop");
                     }
-                    _lastSessionPrerollMs = _warmRecorder!.StartSession(includePrerollMs: StartCueGateMask.WarmPrerollMs);
+                    // Measured adjacent to the seed, NOT reused from the arm top:
+                    // blocking work sits between the two (synchronous settings-
+                    // file Load with a documented 15 ms×2 collision-sleep path,
+                    // SettingsStore.cs:24-63, plus 1-2 sync Serilog file-sink
+                    // writes, WinpepperLogging.cs:46-64 — falsified 2026-08-04,
+                    // load-bearing validation). The REQUEST and arm_latency= use
+                    // seedLagMs2 so compensation covers the whole keydown→seed
+                    // delay 1:1.
+                    var seedLagMs2 = (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds;
+                    // Bound the reach-back at the previous stop hotkey: the ring
+                    // is continuous across sessions, so an unbounded request
+                    // would hand this session the previous dictation's tail
+                    // (already transcribed) and its stop-beep pickup (A1/A6,
+                    // 2026-08-04). Negative msSinceStop2 (clock skew) is fine:
+                    // Math.Max(0, …) in the helper clamps the clean span to 0,
+                    // which is the conservative direction.
+                    int? msSinceStop2 = _lastStopHotkeyUtc is DateTimeOffset prevStop2
+                        ? (int)(DateTimeOffset.UtcNow - prevStop2).TotalMilliseconds
+                        : null;
+                    _lastSessionPrerollMs = _warmRecorder!.StartSession(
+                        includePrerollMs: PrerollRequest.ComputeRequestMs(
+                            seedLagMs2, msSinceStop2, _sounds.Enabled));
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                     _dictStartTicks = Environment.TickCount64;
                     _gcGen0AtStart = GC.CollectionCount(0);
@@ -1198,6 +1266,7 @@ public sealed class PipelineHost : IDisposable
                     var procCpuAtStop2 = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
 
                     var releaseAt2 = evt.Timestamp;
+                    _lastStopHotkeyUtc = evt.Timestamp;
                     var timing2 = new Winpepper.Core.Diagnostics.DictationTimingSummary
                     {
                         SessionId = _currentSessionId,

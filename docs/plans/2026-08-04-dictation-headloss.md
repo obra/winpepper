@@ -28,10 +28,11 @@
 
 ## Background (from the completed root-cause investigation)
 
-- **M1 pre-roll limit:** the warm WASAPI capture runs continuously with a ring holding exactly 1 s (`WarmWasapiRecorder.cs:35`); each session seeds a 500 ms pre-roll slice (`StartCueGateMask.WarmPrerollMs`, requested from `PipelineHost.cs:575`/`:1165` via `WarmCaptureBuffer.cs:62-75`). Speech begun >500 ms before the hotkey is never recorded (confirmed instance `8ec9e52c`).
-- **M2 hotkey→capture latency:** hotkey handling is serialized behind the previous dictation's stop path (`PipelineHost.RunAsync:400-422`, `await HandleHotkey` at `:411`); observed lag p99 = 30 ms but max 1145 ms, >100 ms in 6/755 sessions. The pre-roll counts back from the DELAYED `StartSession`, so lag eats pre-keydown coverage 1:1 (confirmed instance `2b2e4384`: 617 ms lag + retrigger → 240 ms unrecorded hole).
+- **M1 pre-roll limit:** the warm WASAPI capture runs continuously with a ring holding exactly 1 s (`WarmWasapiRecorder.cs:35`); each session seeds a 500 ms pre-roll slice (`StartCueGateMask.WarmPrerollMs`, requested from `PipelineHost.cs:575`/`:1165` via `WarmCaptureBuffer.cs:62-75`). Speech begun >500 ms before the hotkey is never recorded (confirmed instance `8ec9e52c` — an archive-side id from the evaporated investigation's namespace, not a log session id; the mechanism itself is code-verified).
+- **M2 hotkey→capture latency:** hotkey handling is serialized behind the previous dictation's stop path (`PipelineHost.RunAsync:400-422`, `await HandleHotkey` at `:411`); annotated-log population n=1340 sessions (2026-07-29→08-04): p50=0 ms, p99≈37 ms, max=3241 ms, >100 ms in 12 (0.90%), >1000 ms in 5 (0.37%). (The original 755-session sub-window reported p99 30 / max 1145; the 2026-08-04 full-population re-survey found a longer tail — the 1145 ms event is log session `da1c19d1`.) The pre-roll counts back from the DELAYED `StartSession`, so lag eats pre-keydown coverage 1:1 (confirmed: 617 ms lag event, log session `c9a80f2b`, 2026-08-03 — 617 ms lag + retrigger → 240 ms unrecorded hole).
 - **M3 hold-key release blips** split dictations — OUT OF SCOPE this run (parked, recorded above).
 - **Verified interactions (2026-08-04, do not re-derive):** the mask arithmetic scales automatically (`PipelineHost.cs:1741` feeds the ACTUAL seed); the full untrimmed buffer (pre-roll head included) is archived on all four archive paths (`PipelineHost.cs:673/1075/1262/1659` set `Samples16k = samples`; `HistoryArchiver.cs:45` → `WavWriter.WriteMono16kInt16`); `rec=` measures post-hotkey wall time only (`_recordStopwatch` starts AFTER `StartSession` returns at `:576/:1166`); AssemblyAI streaming chunks oversized frames to ≤ 16000 samples per send (`AssemblyAiStreamingTranscriber.cs:176-182`, pinned by `AssemblyAiStreamingTests.cs:59` `Push_SplitsAnOversizedBufferIntoAtMost1000MsMessages` at 40 000 samples — larger than this plan's 32 000-sample worst case).
+- **Falsified-and-fixed (load-bearing validation 2026-08-04, A1/A6):** the warm capture ring is CONTINUOUS across sessions — `Ingest` feeds it unconditionally, `StopSession` clears only the session buffer (never the ring), and `StartSession` seeds a pure count-back-from-now slice (`WarmCaptureBuffer.cs:42-53`, `:77-87`, `:62-75`) — so an UNBOUNDED lag-compensated request reaches back into the previous dictation's tail audio (sample-identical to what was already transcribed; stop→start gaps <1000 ms in 38/1333 production pairs, 2.9%) and its stop-cue mic pickup (gaps <1400 ms in 79/1333, 5.9%; stop.wav is byte-equivalent to start.wav, whose 0.02–0.05-RMS mic pickup is archive-proven), and the seed reaches streaming ASR untrimmed; the worst lags co-occur with the shortest gaps. Fix: `PrerollRequest.ComputeRequestMs` bounds every request at the previous stop hotkey (+ `StopCueGuardMs` when sounds are on), closing both the transcript-duplication path and the head-band stop-cue contamination (Tasks 3/4).
 - **One genuine interaction found during planning (Task 8):** `ParakeetStreamingSession`'s leading-silence latch tests the **whole pushed buffer's** RMS (`ParakeetStreamingSession.cs:121`, `Rms:253-259`). The speech duration needed to unlatch scales linearly with buffer length, so a 4× longer pre-roll makes quiet onsets 4× harder to detect; a miss discards the entire pre-roll INCLUDING its onset — a new head-loss path for the local streamed transcript that would partially undo Change 1. Task 8 converts the latch to per-20 ms-frame granularity and feeds from the onset frame.
 
 ## File Structure
@@ -41,11 +42,11 @@
 | `src/Winpepper.Audio/StartCueGateMask.cs` | Modify: `WarmPrerollMs` 500 → 1000; refresh stale evidence prose |
 | `src/Winpepper.Audio/WarmWasapiRecorder.cs` | Modify: ring capacity 1 s → 2 s; refresh "~500 ms" prose |
 | `src/Winpepper.Audio/WarmCaptureBuffer.cs` | Modify: doc prose only |
-| `src/Winpepper.Audio/PrerollRequest.cs` | **Create:** pure lag-compensation request math (the `StartCueGateMask` idiom) |
+| `src/Winpepper.Audio/PrerollRequest.cs` | **Create:** pure lag-compensation request math, bounded by the previous stop hotkey (the `StartCueGateMask` idiom) |
 | `src/Winpepper.Audio/SilenceTrimmer.cs` | Modify: `Trim` gains `prerollMs` param; head-speech scan; `TrimResult.HeadSpeechAtMs`/`HeadClipped` |
 | `src/Winpepper.Core/Diagnostics/DictationTimingSummary.cs` | Modify: 5 new nullable fields + `FormatLine` emission |
 | `src/Winpepper.Core/Settings/AppSettings.cs` | Modify: comment prose only (`:85`) |
-| `src/Winpepper.App/Hosting/PipelineHost.cs` | Modify: lag-compensated request at both arms; worst-case startup log; host fields; stamping funnel; comment prose |
+| `src/Winpepper.App/Hosting/PipelineHost.cs` | Modify: lag-compensated, previous-stop-bounded request at both arms (seed-adjacent lag measurement); stop-hotkey timestamp field + stamping; worst-case startup log; host fields; stamping funnel; comment prose |
 | `src/Winpepper.Asr/Transcription/ParakeetStreamingSession.cs` | Modify: per-frame leading-silence latch + onset-frame feed; stale comment |
 | `tests/Winpepper.Audio.Tests/StartCueGateMaskTests.cs` | Modify: re-pin constants (500→1000, 1000→1500) |
 | `tests/Winpepper.Audio.Tests/PrerollRequestTests.cs` | **Create:** pins the request math |
@@ -173,9 +174,12 @@ replica at /home/dan/code/winpepper/.worktrees/.the-usual-logs/cue-budget-deduct
 /home/dan/code/winpepper/.worktrees/.the-usual-logs/dictation-headloss/preroll-pad-check.py.
 
 Mechanisms (from the completed investigation, inlined in the plan): M1 — 500 ms pre-roll
-request vs speech begun earlier (confirmed instance 8ec9e52c); M2 — hotkey lag p99 30 ms /
-max 1145 ms, >100 ms in 6/755 sessions, eats pre-keydown coverage 1:1 (confirmed instance
-2b2e4384: 617 ms lag + retrigger -> 240 ms hole); M3 — release blips, PARKED this run
+request vs speech begun earlier (confirmed instance 8ec9e52c, archive-side id); M2 — hotkey
+lag over the complete annotated-log population n=1340 (2026-07-29 -> 08-04): p50=0 ms,
+p99~37 ms, max=3241 ms, >100 ms in 12 (0.90%), >1000 ms in 5 (0.37%) (the original
+755-session sub-window reported p99 30 / max 1145; the full-population re-survey found a
+longer tail); lag eats pre-keydown coverage 1:1 (617 ms lag event, log session c9a80f2b,
+2026-08-03: 617 ms lag + retrigger -> 240 ms hole); M3 — release blips, PARKED this run
 (continuation-window merge taxes every dictation to rescue ~0.5%).
 
 ### Padded-archive gate replication (pre-change validation gate)
@@ -192,6 +196,11 @@ Acceptance (plan Task 1): zero real pass->drop and zero silent drop->pass on bot
 
 - Residual risks ACCEPTED (this subsection): the pad is digital zeros, not room tone — real
   extra pre-roll carries room tone that lowers P10 (and thr), which zeros cannot model;
+  cross-checked 2026-08-04 (load-bearing validation): room-tone pads (clip's own
+  quietest-decile frames; real 500 ms head pre-roll; P10-level synthesized noise) produced
+  0 flips on both corpora, and all 200 clips verified fully-seeded (durationMs-recordMs
+  492-513 ms, 0 missing WAVs) — .the-usual-logs/dictation-headloss/reports/validator-A3-A5.md;
+  louder-than-P10 ambience remains unmodeled;
   frozen-0of91 is a single-user corpus (standing residual recorded at :400-409 of this file).
 ```
 
@@ -291,8 +300,9 @@ In `src/Winpepper.Audio/WarmWasapiRecorder.cs:35`:
 ```csharp
     private const int RingCapacitySamples = SampleRate16k * 2; // ~2 s of history: the 1000 ms
     // request plus up to 1000 ms of hotkey-lag compensation (PrerollRequest) must never race
-    // the ring edge. Cost: ~128 KB float backing store; the per-callback RemoveRange shift
-    // (~800 floats per 50 ms WASAPI callback) doubles — accepted, measured region is O(n) List.
+    // the ring edge. Cost: ~128 KB float backing store; the per-callback head-trim RemoveRange
+    // memmoves the retained ~32 000 floats (~128 KB) every ~50 ms; measured 2026-08-04 (.NET 9
+    // Release micro-bench): mean ~2.3 µs, p99 ~7.7 µs vs the 50 ms budget — accepted.
 ```
 
 - [ ] **Step 4: Refresh the stale evidence prose (same files, load-bearing claims)**
@@ -335,8 +345,8 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 - Test: `tests/Winpepper.Audio.Tests/PrerollRequestTests.cs` (create)
 
 **Interfaces:**
-- Consumes: `StartCueGateMask.WarmPrerollMs` (== 1000 after Task 2).
-- Produces: `Winpepper.Audio.PrerollRequest` — `public const int LagCompensationCapMs = 1000`, `public const int MaxRequestMs` (= 2000), `public static int ComputeRequestMs(int observedLagMs)`. Task 4 calls `ComputeRequestMs` at both hotkey arms and `MaxRequestMs` in the startup log.
+- Consumes: `StartCueGateMask.WarmPrerollMs` (== 1000 after Task 2); `StartCueGateMask.CueStartLatencyMarginMs`/`CueDecayMarginMs` (cited in the StopCueGuardMs doc comment; not referenced in code).
+- Produces: `Winpepper.Audio.PrerollRequest` — `public const int LagCompensationCapMs = 1000`, `public const int MaxRequestMs` (= 2000), `public const int StopCueGuardMs = 500`, `public static int ComputeRequestMs(int observedLagMs, int? msSinceStopHotkey, bool soundsEnabled)`. Task 4 calls `ComputeRequestMs` at both hotkey arms (passing the seed-adjacent lag, the ms since the previous stop hotkey, and the arm's sounds-enabled flag) and `MaxRequestMs` in the startup log.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -354,27 +364,34 @@ public class PrerollRequestTests
     [Fact]
     public void ComputeRequestMs_ZeroLag_RequestsBasePreroll()
     {
-        // No lag: the request is exactly the single-source base constant.
-        PrerollRequest.ComputeRequestMs(0).ShouldBe(StartCueGateMask.WarmPrerollMs);
-        PrerollRequest.ComputeRequestMs(0).ShouldBe(1000);
+        // No lag, no previous stop this process: the request is exactly the
+        // single-source base constant.
+        PrerollRequest.ComputeRequestMs(0, msSinceStopHotkey: null, soundsEnabled: true)
+            .ShouldBe(StartCueGateMask.WarmPrerollMs);
+        PrerollRequest.ComputeRequestMs(0, msSinceStopHotkey: null, soundsEnabled: true).ShouldBe(1000);
     }
 
     [Fact]
     public void ComputeRequestMs_TypicalLag_AddsLagOneToOne()
     {
-        // M2: lag eats pre-keydown coverage 1:1 (2b2e4384: 617 ms lag ->
-        // 240 ms unrecorded hole), so every observed ms is requested back.
-        PrerollRequest.ComputeRequestMs(30).ShouldBe(1030);
-        PrerollRequest.ComputeRequestMs(617).ShouldBe(1617);
+        // M2: lag eats pre-keydown coverage 1:1 (617 ms lag event, log
+        // session c9a80f2b, 2026-08-03: 617 ms lag + retrigger -> 240 ms
+        // unrecorded hole), so every observed ms is requested back.
+        PrerollRequest.ComputeRequestMs(30, msSinceStopHotkey: null, soundsEnabled: true).ShouldBe(1030);
+        PrerollRequest.ComputeRequestMs(617, msSinceStopHotkey: null, soundsEnabled: true).ShouldBe(1617);
     }
 
     [Fact]
     public void ComputeRequestMs_HugeLag_ClampsToWhatTheRingCanServe()
     {
-        // Observed max lag 1145 ms (755-session survey); the 2 s ring can
-        // serve at most base 1000 + 1000, so the lag contribution clamps.
-        PrerollRequest.ComputeRequestMs(1145).ShouldBe(PrerollRequest.MaxRequestMs);
-        PrerollRequest.ComputeRequestMs(5000).ShouldBe(2000);
+        // Observed max lag 3241 ms (annotated-log population n=1340,
+        // 2026-07-29 -> 08-04); the 2 s ring can serve at most base 1000 +
+        // 1000, so the lag contribution clamps. cap=1000 covers all but
+        // 5/1340 sessions (0.37%); the worst event leaves up to ~2.2 s
+        // uncompensated — accepted residual (see the class doc).
+        PrerollRequest.ComputeRequestMs(3241, msSinceStopHotkey: null, soundsEnabled: true)
+            .ShouldBe(PrerollRequest.MaxRequestMs);
+        PrerollRequest.ComputeRequestMs(5000, msSinceStopHotkey: null, soundsEnabled: true).ShouldBe(2000);
     }
 
     [Fact]
@@ -382,7 +399,57 @@ public class PrerollRequestTests
     {
         // Clock skew can make hook->handler deltas negative; never shrink
         // the base request because of it.
-        PrerollRequest.ComputeRequestMs(-50).ShouldBe(1000);
+        PrerollRequest.ComputeRequestMs(-50, msSinceStopHotkey: null, soundsEnabled: true).ShouldBe(1000);
+    }
+
+    [Fact]
+    public void ComputeRequestMs_RecentStop_BoundsTheReachBack()
+    {
+        // A1/A6 fix (2026-08-04): the ring is continuous across sessions, so
+        // the request must never reach past the previous stop hotkey + the
+        // stop-cue guard. min(1000 + 617, 900 - 500) = min(1617, 400) = 400.
+        PrerollRequest.ComputeRequestMs(617, msSinceStopHotkey: 900, soundsEnabled: true).ShouldBe(400);
+    }
+
+    [Fact]
+    public void ComputeRequestMs_TightRetrigger_RequestsNothing()
+    {
+        // Tight retrigger: min(1617, max(0, 300 - 500)) = 0 — everything
+        // before prevStop + guard is the previous dictation or its beep.
+        PrerollRequest.ComputeRequestMs(617, msSinceStopHotkey: 300, soundsEnabled: true).ShouldBe(0);
+    }
+
+    [Fact]
+    public void ComputeRequestMs_SoundsOff_BoundsAtTheStopHotkeyItself()
+    {
+        // No cue when sounds are off — no guard, the bound is the stop
+        // hotkey itself: min(1000 + 0, 700 - 0) = 700.
+        PrerollRequest.ComputeRequestMs(0, msSinceStopHotkey: 700, soundsEnabled: false).ShouldBe(700);
+    }
+
+    [Fact]
+    public void ComputeRequestMs_NoPreviousStop_IsUnbounded()
+    {
+        // null = no previous stop this process: nothing in the ring belongs
+        // to an earlier dictation -> no bound. 1000 + 30 = 1030.
+        PrerollRequest.ComputeRequestMs(30, msSinceStopHotkey: null, soundsEnabled: true).ShouldBe(1030);
+    }
+
+    [Fact]
+    public void ComputeRequestMs_StaleStop_HasNoEffect()
+    {
+        // A stop 60 s ago: min(1030, 60000 - 500) = 1030 — the bound is
+        // inert for any non-retrigger start.
+        PrerollRequest.ComputeRequestMs(30, msSinceStopHotkey: 60000, soundsEnabled: true).ShouldBe(1030);
+    }
+
+    [Fact]
+    public void StopCueGuardMs_IsLatencyPlusCuePlusDecay()
+    {
+        // 200 (CueStartLatencyMarginMs) + ~150 (stop cue — stop.wav is
+        // byte-equivalent to start.wav, measured 2026-08-04) + 150
+        // (CueDecayMarginMs) = 500.
+        PrerollRequest.StopCueGuardMs.ShouldBe(500);
     }
 
     [Fact]
@@ -415,16 +482,25 @@ namespace Winpepper.Audio;
 /// <summary>
 /// Composes the warm pre-roll REQUEST for a dictation session: the base
 /// <see cref="StartCueGateMask.WarmPrerollMs"/> plus compensation for the
-/// hotkey-observation lag (hook timestamp -> pipeline handler; hotkey events
+/// hotkey-observation lag (hook timestamp -> pre-roll seed; hotkey events
 /// are handled serially behind the previous dictation's stop path). The
 /// pre-roll counts back from the DELAYED StartSession, so every ms of lag
-/// eats pre-keydown coverage 1:1 (2026-08-03/04 head-loss investigation, M2:
-/// lag p99 30 ms, max 1145 ms; confirmed instance 2b2e4384 — 617 ms lag +
-/// retrigger = 240 ms unrecorded hole). The lag contribution is clamped to
-/// <see cref="LagCompensationCapMs"/> so the request never exceeds what the
-/// capture ring can serve; the recorder still reports the ACTUAL seeded
-/// pre-roll, so the silence-gate mask (StartCueGateMask.ComputeMaskMs) keeps
-/// scaling with reality, not with this request.
+/// eats pre-keydown coverage 1:1 (head-loss investigation, M2; annotated-log
+/// population n=1340, 2026-07-29 -> 08-04: lag p50=0 ms, p99~37 ms,
+/// max=3241 ms, >100 ms in 12 (0.90%); 617 ms lag event, log session
+/// c9a80f2b, 2026-08-03 — 617 ms lag + retrigger = 240 ms unrecorded hole).
+/// The lag contribution is clamped to <see cref="LagCompensationCapMs"/> so
+/// the request never exceeds what the capture ring can serve, and the WHOLE
+/// request is bounded so the seed window never reaches back past the
+/// previous stop hotkey (plus <see cref="StopCueGuardMs"/> when sounds are
+/// on): the ring is NEVER cleared at session boundaries
+/// (WarmCaptureBuffer.cs:42-53/:62-75/:77-87), so an unbounded request hands
+/// the new session the previous dictation's tail words (already transcribed)
+/// and its stop-beep pickup — production retrigger gaps &lt;1000 ms in
+/// 38/1333 pairs (2.9%); falsified-and-fixed 2026-08-04, load-bearing
+/// validation. The recorder still reports the ACTUAL seeded pre-roll, so the
+/// silence-gate mask (StartCueGateMask.ComputeMaskMs) keeps scaling with
+/// reality, not with this request.
 /// </summary>
 public static class PrerollRequest
 {
@@ -432,24 +508,47 @@ public static class PrerollRequest
     /// Maximum ms of observed hotkey lag the request may add on top of
     /// WarmPrerollMs. Equals ring capacity (2 s, WarmWasapiRecorder.
     /// RingCapacitySamples) minus the 1000 ms base — keep the two in
-    /// lockstep when either changes.
+    /// lockstep when either changes. cap=1000 covers all but 5/1340 surveyed
+    /// sessions (0.37%, lag &gt;1000 ms) — and those lags co-occur with
+    /// quick retriggers where the previous-stop bound forbids further
+    /// reach-back anyway; the residual (worst observed 3241 ms =&gt; up to
+    /// ~2.2 s uncompensated) is explicitly accepted.
     /// </summary>
     public const int LagCompensationCapMs = 1000;
 
     /// <summary>
-    /// Worst-case request (fully clamped lag). Feeds the startup worst-case
-    /// mask observability line, which must remain a ceiling now that
-    /// per-session requests vary with lag.
+    /// Worst-case request (fully clamped lag; the previous-stop bound only
+    /// ever SHRINKS a request). Feeds the startup worst-case mask
+    /// observability line, which must remain a ceiling now that per-session
+    /// requests vary with lag.
     /// </summary>
     public const int MaxRequestMs = StartCueGateMask.WarmPrerollMs + LagCompensationCapMs;
 
     /// <summary>
+    /// The window (ms) after a stop hotkey in which the PREVIOUS session's
+    /// stop-cue mic pickup can still land in the capture ring:
+    /// CueStartLatencyMarginMs 200 + stop cue ~150 ms (stop.wav is
+    /// byte-equivalent to start.wav, measured 2026-08-04) +
+    /// CueDecayMarginMs 150. Applied only when sounds are enabled.
+    /// </summary>
+    public const int StopCueGuardMs = 500;
+
+    /// <summary>
     /// The includePrerollMs to pass to IWarmAudioRecorder.StartSession.
     /// Negative lag (clock skew across the hook/handler timestamps)
-    /// contributes 0 — never shrink the base request.
+    /// contributes 0 — never shrink the base request because of it.
+    /// msSinceStopHotkey null = no previous stop this process; otherwise the
+    /// request is bounded at the previous stop hotkey (+ StopCueGuardMs when
+    /// sounds are on). A negative msSinceStopHotkey (clock skew) clamps the
+    /// clean span to 0 via Math.Max — the conservative direction.
     /// </summary>
-    public static int ComputeRequestMs(int observedLagMs)
-        => StartCueGateMask.WarmPrerollMs + Math.Clamp(observedLagMs, 0, LagCompensationCapMs);
+    public static int ComputeRequestMs(int observedLagMs, int? msSinceStopHotkey, bool soundsEnabled)
+    {
+        var request = StartCueGateMask.WarmPrerollMs + Math.Clamp(observedLagMs, 0, LagCompensationCapMs);
+        if (msSinceStopHotkey is int sinceStop)
+            request = Math.Min(request, Math.Max(0, sinceStop - (soundsEnabled ? StopCueGuardMs : 0)));
+        return request;
+    }
 }
 ```
 
@@ -467,10 +566,13 @@ Run: `./scripts/linux-tests.sh` → `LINUX SUITE: GREEN`.
 
 ```bash
 git add src/Winpepper.Audio/PrerollRequest.cs tests/Winpepper.Audio.Tests/PrerollRequestTests.cs
-git commit -m "feat(audio): PrerollRequest — lag-compensated pre-roll request math
+git commit -m "feat(audio): PrerollRequest — lag-compensated, previous-stop-bounded pre-roll request math
 
 Pure decision math per the StartCueGateMask idiom: base 1000 ms + observed
-hotkey lag, lag contribution clamped to the 2 s ring's headroom (1000 ms).
+hotkey lag (clamped to the 2 s ring's headroom), the whole request bounded
+by the previous stop hotkey (+ 500 ms stop-cue guard when sounds are on) so
+the seed never reaches into the previous dictation's tail or its stop-beep
+pickup (load-bearing validation 2026-08-04).
 
 🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
 
@@ -482,15 +584,37 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 ### Task 4: Wire Lag Compensation at Both Hotkey Arms (PipelineHost)
 
 **Files:**
-- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` — hold arm `:529-530` (log) and `:575` (request); toggle arm `:1125-1126` (log) and `:1165` (request); startup worst-case log `:176-187`; stale comments `:533-538` and `:1129-1130`.
+- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` — hold arm `:529-530` (log) and `:575` (seed-adjacent lag + bounded request); toggle arm `:1125-1126` (log) and `:1165` (same); host-field block (`:43-109` region: new `_lastStopHotkeyUtc`); stop-initiating hotkey sites (HoldUp `releaseAt` binding at `:610`; toggle-stop `releaseAt2` at `:1200`; Cancel case `:1097-1115`); startup worst-case log `:176-187`; stale comments `:533-538` and `:1129-1130`.
 
 `PipelineHost.cs` is `#if WINDOWS` — it cannot be compile-checked on Linux. The Linux suite still gates the commit (pure projects); Windows compilation is verified by Task 9's `./scripts/windows-gate.sh`. Follow the code below exactly; it uses only symbols proven above.
 
 **Interfaces:**
-- Consumes: `PrerollRequest.ComputeRequestMs(int)`, `PrerollRequest.MaxRequestMs` (Task 3); `HotkeyEvent.Timestamp` (`DateTimeOffset`, stamped in the hook callback — `HotkeyHook.cs:320` HoldDown, `:307` Toggle).
-- Produces: hoisted locals `hotkeyLagMs` (hold arm) / `hotkeyLagMs2` (toggle arm) holding the keydown→handler lag in ms — Task 7 reads these into a host field. The `Session started` log template is UNCHANGED (same fields, same text); only the inline expression is hoisted.
+- Consumes: `PrerollRequest.ComputeRequestMs(int observedLagMs, int? msSinceStopHotkey, bool soundsEnabled)`, `PrerollRequest.StopCueGuardMs` (applied inside the helper; named here so the field doc can cite it), `PrerollRequest.MaxRequestMs` (Task 3); `HotkeyEvent.Timestamp` (`DateTimeOffset`, stamped in the hook callback — `HotkeyHook.cs:320` HoldDown, `:307` Toggle); the sounds-enabled flag the host already uses for the mask/cue plumbing at each arm.
+- Produces: hoisted locals `hotkeyLagMs`/`hotkeyLagMs2` (arm-top keydown→handling lag — feeds ONLY the unchanged `Session started` log) and `seedLagMs`/`seedLagMs2` (keydown→pre-roll-seed lag measured immediately before `StartSession` — feeds the bounded request here and, via Task 7, `arm_latency=`); the `_lastStopHotkeyUtc` host field, stamped at all three stop-initiating sites — Task 7 reads it for `retrigger_gap=`. The `Session started` log template is UNCHANGED (same fields, same text); only the inline expression is hoisted.
 
-- [ ] **Step 1: Hoist the lag and compensate the request — hold arm**
+- [ ] **Step 1: Add the stop-hotkey timestamp field and stamp it at the three stop sites**
+
+(Moved into this task from Task 7 by the 2026-08-04 load-bearing validation: the pre-roll bound needs the previous stop time BEFORE the request math exists, not merely for `retrigger_gap=`.)
+
+Next to `_lastSessionPrerollMs` (`:54`) add (the run loop is serial — one dictation fully processed before the next — so a plain host field suffices, same argument as the existing baseline fields at `:80-88`):
+
+```csharp
+    /// <summary>Hook timestamp of the most recent stop-initiating hotkey
+    /// (HoldUp / toggle-stop / Cancel); null until the first stop this
+    /// process. Bounds the pre-roll request (PrerollRequest.ComputeRequestMs
+    /// — the seed must never reach back past the previous stop + stop-cue
+    /// guard) and is the source for retrigger_gap= (Task 7) — hook
+    /// timestamps at both ends, so the gap measures USER behavior, not
+    /// pipeline latency.</summary>
+    private DateTimeOffset? _lastStopHotkeyUtc;
+```
+
+At each stop-initiating arm add `_lastStopHotkeyUtc = evt.Timestamp;`:
+- HoldUp arm: adjacent to the existing `releaseAt` binding from `evt.Timestamp` (`:610`).
+- Toggle-stop arm: adjacent to `releaseAt2` (`:1200`).
+- Cancel case (`:1097-1115`): at the top of the case body. A cancel followed by a quick re-press is exactly the blip pattern `retrigger_gap=` exists to expose, and its ring content is just as much the previous dictation's audio — cancels count as stops. This is the deliberate answer to the open design question; record nothing else.
+
+- [ ] **Step 2: Hoist the lags and bound the request — hold arm**
 
 At `:529-530` the hold arm currently logs the lag inline:
 
@@ -502,32 +626,52 @@ At `:529-530` the hold arm currently logs the lag inline:
 Replace with:
 
 ```csharp
-                // Hoisted so the SAME lag value drives the log line, the
-                // lag-compensated pre-roll request below, and the timing
-                // line's arm_latency= (M2: the pre-roll counts back from this
-                // DELAYED handling moment, so lag eats pre-keydown coverage
-                // 1:1 — request it back, clamped to the ring's headroom).
+                // Hoisted keydown→handling lag: feeds ONLY the 'Session
+                // started' log line (semantics unchanged — stays comparable
+                // with the historical lag survey). The pre-roll request and
+                // arm_latency= use seedLagMs, measured immediately before
+                // StartSession below (blocking work sits in between).
                 var hotkeyLagMs = (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds;
                 _log.LogInformation("Session started (hold) {SessionId} (hotkey observed {LagMs} ms before handling)",
                     _currentSessionId, hotkeyLagMs);
 ```
 
-At `:575` change the request:
+At `:575`, immediately BEFORE the `StartSession` call, insert the seed-adjacent lag and the previous-stop bound, then change the request:
 
 ```csharp
+                // Measured adjacent to the seed, NOT reused from the arm top:
+                // blocking work sits between the two (synchronous settings-
+                // file Load with a documented 15 ms×2 collision-sleep path,
+                // SettingsStore.cs:24-63, plus 1-2 sync Serilog file-sink
+                // writes, WinpepperLogging.cs:46-64 — falsified 2026-08-04,
+                // load-bearing validation). The REQUEST and arm_latency= use
+                // seedLagMs so compensation covers the whole keydown→seed
+                // delay 1:1.
+                var seedLagMs = (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds;
+                // Bound the reach-back at the previous stop hotkey: the ring
+                // is continuous across sessions, so an unbounded request
+                // would hand this session the previous dictation's tail
+                // (already transcribed) and its stop-beep pickup (A1/A6,
+                // 2026-08-04). Negative msSinceStop (clock skew) is fine:
+                // Math.Max(0, …) in the helper clamps the clean span to 0,
+                // which is the conservative direction.
+                int? msSinceStop = _lastStopHotkeyUtc is DateTimeOffset prevStop
+                    ? (int)(DateTimeOffset.UtcNow - prevStop).TotalMilliseconds
+                    : null;
                 _lastSessionPrerollMs = _warmRecorder!.StartSession(
-                    includePrerollMs: Winpepper.Audio.PrerollRequest.ComputeRequestMs(hotkeyLagMs));
+                    includePrerollMs: Winpepper.Audio.PrerollRequest.ComputeRequestMs(
+                        seedLagMs, msSinceStop, soundsEnabled));
 ```
 
-(Match the file's existing qualification style: `TrimForTranscription` at `:1739-1742` uses unqualified `StartCueGateMask` — if `Winpepper.Audio` is already imported/resolvable there, write `PrerollRequest.ComputeRequestMs(hotkeyLagMs)` unqualified for consistency.)
+(For `soundsEnabled`, pass the SAME sounds-enabled value the host already uses for the mask/cue plumbing at this arm — the flag that reaches `StartCueGateMask.ComputeMaskMs(…, soundsEnabled)` / gates the cue playback; per the plan's mismatch rule, locate it by symbol if the stated line has moved. Do NOT introduce a new settings read. Match the file's existing qualification style: `TrimForTranscription` at `:1739-1742` uses unqualified `StartCueGateMask` — if `Winpepper.Audio` is already imported/resolvable there, write `PrerollRequest.ComputeRequestMs(…)` unqualified for consistency.)
 
 Update the stale comment at `:533-538`: it says "raises the StartCueGateMask.WarmPrerollMs (500 ms) pre-roll request" and "permanently loses the first ~500 ms" — reword to "raises the lag-compensated pre-roll request (PrerollRequest.ComputeRequestMs: WarmPrerollMs 1000 ms + observed hotkey lag, clamped)" and "permanently loses the first ~1-2 s".
 
-- [ ] **Step 2: Same at the toggle arm**
+- [ ] **Step 3: Same at the toggle arm**
 
-At `:1125-1126` (log) and `:1165` (request) apply the identical transformation with the local named `hotkeyLagMs2` (the toggle arm's locals carry the `2` suffix by house convention — see `settingsForStream2`, `routeBlockReason2`). Update the twin comment at `:1129-1130` ("(500 ms) pre-roll request is not dropped") the same way.
+At `:1125-1126` (log) and `:1165` (seed-adjacent lag + bounded request) apply the identical transformation with the locals named `hotkeyLagMs2`, `seedLagMs2`, `msSinceStop2` and a `prevStop2` pattern variable (the toggle arm's locals carry the `2` suffix by house convention — see `settingsForStream2`, `routeBlockReason2`). Update the twin comment at `:1129-1130` ("(500 ms) pre-roll request is not dropped") the same way.
 
-- [ ] **Step 3: Keep the startup worst-case log an honest ceiling**
+- [ ] **Step 4: Keep the startup worst-case log an honest ceiling**
 
 At `:176-187` the ctor logs the worst-case mask from `StartCueGateMask.WarmPrerollMs`. Per-session requests can now exceed that (lag compensation), so the "worst case" would silently become a floor. Change the call and args (template text edits shown inline):
 
@@ -544,20 +688,23 @@ At `:176-187` the ctor logs the worst-case mask from `StartCueGateMask.WarmPrero
                 sounds.Enabled);
 ```
 
-(The `else` warning branch at `:186-187` is untouched. `_lastSessionPrerollMs`'s field doc at `:43-54` mentions "the WarmPrerollMs request" — extend it to "the PrerollRequest.ComputeRequestMs request (WarmPrerollMs + clamped hotkey lag)". The mask consumption at `:1741` needs NO change: it already uses the ACTUAL seed, which now honestly includes any lag-compensated extra the ring could serve.)
+(The `else` warning branch at `:186-187` is untouched. The previous-stop bound only ever SHRINKS a request, so `MaxRequestMs` remains an honest ceiling. `_lastSessionPrerollMs`'s field doc at `:43-54` mentions "the WarmPrerollMs request" — extend it to "the PrerollRequest.ComputeRequestMs request (WarmPrerollMs + clamped hotkey lag, bounded by the previous stop hotkey)". The mask consumption at `:1741` needs NO change: it already uses the ACTUAL seed, which now honestly includes any lag-compensated extra the ring could serve.)
 
-- [ ] **Step 4: Full Linux suite, then commit**
+- [ ] **Step 5: Full Linux suite, then commit**
 
 Run: `./scripts/linux-tests.sh` → `LINUX SUITE: GREEN` (PipelineHost is Windows-only; the suite proves the pure projects are unaffected — Windows compile lands in Task 9's gate).
 
 ```bash
 git add src/Winpepper.App/Hosting/PipelineHost.cs
-git commit -m "feat(app): request lag-compensated pre-roll at both hotkey arms
+git commit -m "feat(app): lag-compensated, previous-stop-bounded pre-roll at both hotkey arms
 
-Hoists the already-measured hotkey lag into a local at each arm and requests
-WarmPrerollMs + lag (clamped to the ring headroom) so serialized/delayed
-handling no longer eats pre-keydown coverage (M2). Startup worst-case mask
-line now uses MaxRequestMs so it stays a ceiling.
+Measures the keydown->seed lag immediately before StartSession (blocking
+settings Load + sync log sinks sit in the arm) and requests WarmPrerollMs +
+lag (clamped to the ring headroom), bounded by the previous stop hotkey
+(+ stop-cue guard when sounds are on) so the seed never reaches into the
+previous dictation's tail or its stop beep (M2 + A1/A6; full-population lag
+survey n=1340, 2026-07-29->08-04: p50=0 ms, p99~37 ms, max=3241 ms). Startup
+worst-case mask line now uses MaxRequestMs so it stays a ceiling.
 
 🤖 Generated with [Amplifier](https://github.com/microsoft/amplifier)
 
@@ -576,7 +723,7 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 - Consumes: existing internals — `rms[]` per-20 ms-frame array, `maskFrames = ceil(maskMs/20)` (`:179`), `ClearSpeechRmsFloor = 0.02` (`:111`), `FrameMs = 20` (`:71`).
 - Produces: `public static TrimResult Trim(ReadOnlySpan<float> samples, int maskMs = 0, int cueBudgetMs = 0, int prerollMs = 0)` — existing 2- and 3-arg callers compile unchanged. `TrimResult.HeadSpeechAtMs` (`required int?`): ms offset from buffer t=0 of the first frame ≥ the clear-speech floor OUTSIDE the cue-pickup window, null when none. `TrimResult.HeadClipped` (`bool?`, computed): `HeadSpeechAtMs < 40` when set, null otherwise. Task 7 passes `_lastSessionPrerollMs` as `prerollMs` and stamps both onto the timing line.
 
-**Semantics being implemented (the design decision, resolved here):** buffer t=0 sits `prerollMs` BEFORE the hotkey; the app's own start cue can only be picked up AFTER the hotkey (measured onset `prerollMs+92..144` ms, pickup ending by `prerollMs+~361` ms — `StartCueGateMask` class doc). So the *cue-pickup window* is the band `[prerollMs, maskMs)` — the post-hotkey part of the mask — and the pre-roll head `[0, prerollMs)` plus everything at/after `maskMs` is scannable. This keeps `head_clipped` reachable (frames 0–1 are pre-hotkey audio the cue cannot contaminate) while never mistaking the cue for user speech, and uses only existing constants via `maskMs`. When `maskMs == 0` (cue disabled/unmeasured) nothing was played — scan everything. Known consequence, accepted: in cold mode (`prerollMs == 0`) with sounds on, the exclusion covers `[0, maskMs)`, so `head_speech_at ≥ maskMs` and `head_clipped` never fires — cold mode has no pre-hotkey audio, so head-clip detection is meaningless there anyway. The fields are pure diagnostics: they must not influence the gate verdict, trimming offsets, or the transcribed audio.
+**Semantics being implemented (the design decision, resolved here):** buffer t=0 sits `prerollMs` BEFORE the hotkey; the app's own start cue can only be picked up AFTER the hotkey (measured onset `prerollMs+92..144` ms, pickup ending by `prerollMs+~361` ms — `StartCueGateMask` class doc). So the *cue-pickup window* is the band `[prerollMs, maskMs)` — the post-hotkey part of the mask — and the pre-roll head `[0, prerollMs)` plus everything at/after `maskMs` is scannable. This keeps `head_clipped` reachable (frames 0–1 are pre-hotkey audio the cue cannot contaminate) while never mistaking the cue for user speech, and uses only existing constants via `maskMs`. On retriggers the head band `[0, prerollMs)` is only cue-free because Tasks 3/4 bound the request at prevStop + `StopCueGuardMs` — the seed can never reach back into the previous session's stop-cue pickup or tail audio (falsified-and-fixed 2026-08-04, load-bearing validation). When `maskMs == 0` (cue disabled/unmeasured) nothing was played — scan everything. Known consequence, accepted: in cold mode (`prerollMs == 0`) with sounds on, the exclusion covers `[0, maskMs)`, so `head_speech_at ≥ maskMs` and `head_clipped` never fires — cold mode has no pre-hotkey audio, so head-clip detection is meaningless there anyway. The fields are pure diagnostics: they must not influence the gate verdict, trimming offsets, or the transcribed audio.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -861,8 +1008,9 @@ Expected: BUILD FAIL — the five properties do not exist.
     /// (StartSession's return; 0 in cold mode). Head-loss diagnostics, 2026-08-04.</summary>
     public int? PrerollMs { get; set; }
 
-    /// <summary>Hotkey-keydown (hook timestamp) to StartSession-handling lag in ms
-    /// — the same value logged on the 'Session started' line. Uncompensated, this
+    /// <summary>Hotkey-keydown (hook timestamp) -> pre-roll-seed lag in ms,
+    /// measured immediately before StartSession; >= the 'Session started' line's
+    /// LagMs (blocking in-arm work sits between the two). Uncompensated, this
     /// eats pre-keydown coverage 1:1 (M2); see PrerollRequest.</summary>
     public int? ArmLatencyMs { get; set; }
 
@@ -919,12 +1067,12 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 ### Task 7: Stamp the Diagnostics in `PipelineHost`
 
 **Files:**
-- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` — host-field block (`:43-109` region), both start arms (`:566-580`, `:1156-1172` regions), stop-initiating hotkey sites (HoldUp `releaseAt` binding at `:610`; toggle-stop `releaseAt2` at `:1200`; Cancel case `:1097-1115`), `TrimForTranscription` (`:1739-1742`), `EmitTimingSummary` (`:1777-1799`).
+- Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` — host-field block (`:43-109` region), both start arms (`:566-580`, `:1156-1172` regions), `TrimForTranscription` (`:1739-1742`), `EmitTimingSummary` (`:1777-1799`). (The stop-hotkey stamping sites were edited in Task 4, which introduced `_lastStopHotkeyUtc` — this task only READS that field.)
 
 Windows-only file — same verification posture as Task 4 (Linux suite per commit; Windows compile in Task 9's gate).
 
 **Interfaces:**
-- Consumes: `hotkeyLagMs`/`hotkeyLagMs2` locals (Task 4); `SilenceTrimmer.Trim(samples, maskMs, cueBudgetMs, prerollMs)` + `TrimResult.HeadSpeechAtMs`/`HeadClipped` (Task 5); `DictationTimingSummary.{PrerollMs,ArmLatencyMs,RetriggerGapMs,HeadSpeechAtMs,HeadClipped}` (Task 6); `evt.Timestamp` (`DateTimeOffset`, hook-stamped); existing fields `_lastSessionPrerollMs`, `_dictStartTicks`.
+- Consumes: `seedLagMs`/`seedLagMs2` locals and the `_lastStopHotkeyUtc` host field (Task 4); `SilenceTrimmer.Trim(samples, maskMs, cueBudgetMs, prerollMs)` + `TrimResult.HeadSpeechAtMs`/`HeadClipped` (Task 5); `DictationTimingSummary.{PrerollMs,ArmLatencyMs,RetriggerGapMs,HeadSpeechAtMs,HeadClipped}` (Task 6); `evt.Timestamp` (`DateTimeOffset`, hook-stamped); existing fields `_lastSessionPrerollMs`, `_dictStartTicks`.
 - Produces: every emitted `dictation timing` line (all 6 `EmitTimingSummary` call sites — `:709, :804, :1067, :1298, :1393, :1651` — funnel through the one method being edited) carries `preroll=` and `arm_latency=` always, `retrigger_gap=` when a previous stop happened <3 s before this start, and `head_speech_at=`/`head_clipped=` when this session's trim found head speech.
 
 - [ ] **Step 1: Add the host fields**
@@ -932,20 +1080,19 @@ Windows-only file — same verification posture as Task 4 (Linux suite per commi
 Next to `_lastSessionPrerollMs` (`:54`) add (the run loop is serial — one dictation fully processed before the next — so plain host fields suffice, same argument as the existing baseline fields at `:80-88`):
 
 ```csharp
-    /// <summary>Hotkey-keydown→handling lag (ms) of the CURRENT session — the
-    /// hoisted 'Session started' value; feeds arm_latency= on the timing line.
-    /// Like _lastSessionPrerollMs: BOTH arms must assign it.</summary>
+    /// <summary>Keydown→pre-roll-seed lag (ms) of the CURRENT session — Task
+    /// 4's seedLagMs, measured immediately before StartSession; &gt;= the
+    /// 'Session started' line's LagMs (blocking in-arm work sits between the
+    /// two). Feeds arm_latency= on the timing line. Like
+    /// _lastSessionPrerollMs: BOTH arms must assign it.</summary>
     private int _lastArmLatencyMs;
-
-    /// <summary>Hook timestamp of the most recent stop-initiating hotkey
-    /// (HoldUp / toggle-stop / Cancel); null until the first stop. Source for
-    /// retrigger_gap= — hook timestamps at both ends, so the gap measures USER
-    /// behavior, not pipeline latency.</summary>
-    private DateTimeOffset? _lastStopHotkeyUtc;
 
     /// <summary>ms between the previous stop hotkey and this session's start
     /// hotkey when 0 &lt;= gap &lt; 3000 (the retrigger signature), else null.
-    /// The filter lives HERE, not in FormatLine. BOTH arms must assign it.</summary>
+    /// Read from _lastStopHotkeyUtc (field + its three stamping sites landed
+    /// in Task 4 — the pre-roll bound needs the timestamp before the request
+    /// math). The filter lives HERE, not in FormatLine. BOTH arms must
+    /// assign it.</summary>
     private int? _retriggerGapMs;
 
     /// <summary>head_speech_at/head_clipped from this session's
@@ -958,17 +1105,16 @@ Next to `_lastSessionPrerollMs` (`:54`) add (the run loop is serial — one dict
 
 - [ ] **Step 2: Assign at both start arms**
 
-Hold arm — directly after the hoisted `hotkeyLagMs` from Task 4 (before `PlayStart()`), add:
+Hold arm — directly after the hoisted `hotkeyLagMs` from Task 4 (before `PlayStart()`), add (the retrigger_gap computation is unchanged in substance — it reads the Task 4 field; the pattern variable is `prevStopAt`, not `prevStop`, because Task 4's request bound already declares `prevStop` in this same arm scope):
 
 ```csharp
-                _lastArmLatencyMs = hotkeyLagMs;
                 _retriggerGapMs = null;
-                if (_lastStopHotkeyUtc is DateTimeOffset prevStop)
+                if (_lastStopHotkeyUtc is DateTimeOffset prevStopAt)
                 {
                     // Hook-time to hook-time: immune to handler serialization.
                     // Negative (wall-clock skew) or >= 3 s gaps are not
                     // retriggers — omit the field entirely.
-                    var gapMs = (int)(evt.Timestamp - prevStop).TotalMilliseconds;
+                    var gapMs = (int)(evt.Timestamp - prevStopAt).TotalMilliseconds;
                     if (gapMs is >= 0 and < 3000) _retriggerGapMs = gapMs;
                 }
 ```
@@ -976,18 +1122,16 @@ Hold arm — directly after the hoisted `hotkeyLagMs` from Task 4 (before `PlayS
 and directly after the `_lastSessionPrerollMs = _warmRecorder!.StartSession(…)` line:
 
 ```csharp
+                _lastArmLatencyMs = seedLagMs; // Task 4's seed-adjacent lag, NOT the arm-top hotkeyLagMs
                 _lastHeadSpeechAtMs = null;
                 _lastHeadClipped = null;
 ```
 
-Toggle arm — identical block using `hotkeyLagMs2` (and a `prevStop2` pattern-variable name to avoid any scope collision), inserted at the equivalent points around `:1165`.
+Toggle arm — identical blocks using `seedLagMs2` (and a `prevStopAt2` pattern-variable name to avoid any scope collision), inserted at the equivalent points around `:1165`.
 
-- [ ] **Step 3: Record stop-hotkey timestamps**
+- [ ] **Step 3: Stop-hotkey timestamps — already landed in Task 4**
 
-At each stop-initiating arm add `_lastStopHotkeyUtc = evt.Timestamp;`:
-- HoldUp arm: adjacent to the existing `releaseAt` binding from `evt.Timestamp` (`:610`).
-- Toggle-stop arm: adjacent to `releaseAt2` (`:1200`).
-- Cancel case (`:1097-1115`): at the top of the case body. A cancel followed by a quick re-press is exactly the blip pattern the field exists to expose, so cancels count as stops — this is the deliberate answer to the open design question, record nothing else.
+The `_lastStopHotkeyUtc` stamping at all three stop-initiating sites (HoldUp `releaseAt` at `:610`, toggle-stop `releaseAt2` at `:1200`, top of the Cancel case `:1097-1115`) landed in Task 4, because the pre-roll bound needs the timestamp before the request math. Verify the three sites exist; add nothing here.
 
 - [ ] **Step 4: Feed the trimmer and stash its head fields**
 
@@ -1041,7 +1185,7 @@ Co-Authored-By: Amplifier <240397093+microsoft-amplifier@users.noreply.github.co
 - Modify: `src/Winpepper.Asr/Transcription/ParakeetStreamingSession.cs` — latch in `PushAsync` (`:113-121`), latch doc comment (`:59-87`, incl. the stale "500 ms pre-roll" at `:67`), new private helper next to `Rms` (`:253-259`)
 - Test: `tests/Winpepper.Asr.Tests/ParakeetStreamingSessionTests.cs` (append 2 facts; the existing three latch facts at `:94/:109/:125` must stay green)
 
-**Why this is in scope:** the latch gates the whole pushed buffer on its **whole-buffer** RMS (`if (Rms(mono16k.Span) < LeadingSilenceRmsFloor) return;` at `:121`, before `_skipper.Push` at `:131`). Required onset duration to unlatch scales linearly with buffer length — 4× harder at a 2000 ms pre-roll than at today's 500 ms (a 0.01-amplitude onset needs 80 ms instead of 20 ms). On a miss the ENTIRE pre-roll — including the onset words this whole plan exists to capture — is silently discarded from the streamed transcript, and `FinishAsync` has no guard for a head-truncated stream. Fix: test per-20 ms frame (mirroring the batch trimmer's granularity, which the doc comment already names as the deliberate divergence) and feed from the first voiced frame. This also stops ~2 s of pre-roll silence flooding the running mel normalizer and closes the new blank-collapse surface. The latch keeps NO drop authority — unchanged contract.
+**Why this is in scope:** the latch gates the whole pushed buffer on its **whole-buffer** RMS (`if (Rms(mono16k.Span) < LeadingSilenceRmsFloor) return;` at `:121`, before `_skipper.Push` at `:131`). Required onset duration to unlatch scales linearly with buffer length — 4× harder at a 2000 ms pre-roll than at today's 500 ms (a 0.01-amplitude onset needs 80 ms instead of 20 ms). On a miss the ENTIRE pre-roll — including the onset words this whole plan exists to capture — is silently discarded from the streamed transcript, and `FinishAsync` has no guard for a head-truncated stream. Fix: test per-20 ms frame (mirroring the batch trimmer's granularity, which the doc comment already names as the deliberate divergence) and feed from the first voiced frame. This also stops ~2 s of pre-roll silence flooding the running mel normalizer and closes the new blank-collapse surface. Verified analytically 2026-08-04 (load-bearing validation): buffer RMS² = the mean of per-frame RMS², so the per-frame latch can never unlatch LATER than the whole-buffer check — clean onsets behave byte-identically and only sub-floor near-silence is dropped. The latch keeps NO drop authority — unchanged contract.
 
 **Interfaces:**
 - Consumes: existing `LeadingSilenceRmsFloor = 0.002` (`:87`), existing `private static double Rms(ReadOnlySpan<float>)` (`:253-259`), `_speechSeen` latch flag.
@@ -1196,10 +1340,14 @@ from values the pipeline already computed (zero-cost discipline — no new
 threads/timers). The 'Session started' line keeps its existing fields.
 
 - `preroll=<n>ms` — pre-roll the recorder ACTUALLY seeded (StartSession's
-  return; 0 in cold mode). Base request is now 1000 ms + observed hotkey lag
-  clamped to 1000 ms (PrerollRequest), served by a 2 s ring.
-- `arm_latency=<n>ms` — hotkey-keydown (hook timestamp) -> handling lag; the
-  same value as the Session-started line's LagMs. Hook-callback delays
+  return; 0 in cold mode). Base request is now 1000 ms + the keydown->seed
+  lag clamped to 1000 ms, bounded by the previous stop hotkey + 500 ms
+  stop-cue guard when sounds are on
+  (PrerollRequest.ComputeRequestMs(seedLagMs, msSinceStop, soundsEnabled)),
+  served by a 2 s ring.
+- `arm_latency=<n>ms` — hotkey-keydown (hook timestamp) -> pre-roll-seed lag,
+  measured immediately before StartSession; >= the Session-started line's
+  LagMs (blocking in-arm work sits between the two). Hook-callback delays
   (Windows LowLevelHooksTimeout) are invisible to it, as before.
 - `retrigger_gap=<n>ms` — start hotkey minus previous stop hotkey (HoldUp /
   toggle-stop / Cancel all count as stops), emitted only when 0 <= gap < 3000.
@@ -1226,17 +1374,45 @@ threads/timers). The 'Session started' line keeps its existing fields.
 - Parakeet streaming: whole-buffer leading-silence latch WOULD have diluted
   quiet onsets 4x at a 2 s pre-roll and discarded them silently — converted
   to per-frame with feed-from-onset (Task 8), pinned by two new facts.
+- Warm ring continuity across sessions (A1/A6, falsified-and-fixed
+  2026-08-04): the ring is never cleared at session boundaries
+  (WarmCaptureBuffer.cs:42-53/:62-75/:77-87), so every pre-roll request is
+  bounded by the previous stop hotkey (+ 500 ms stop-cue guard when sounds
+  are on) — closes both the transcript-duplication path and the head-band
+  stop-cue contamination; production retrigger gaps <1000 ms in 38/1333
+  pairs (2.9%), <1400 ms in 79 (5.9%) (reports/validator-A1-A6.md).
 
 - Residual risks ACCEPTED: digital-zero pad in the replication is not room
-  tone; single-user frozen corpora (standing residual at :400-409); up to
-  ~2 s of pre-roll now arrives at AssemblyAI as an initial burst against its
-  ~1.25x-realtime ingest throttle (previously ~0.5 s; size-legal, rate
-  unpinned by tests); the 2 s ring doubles the per-callback RemoveRange
-  shift on the WASAPI thread (~800 floats moved in a 32000-float list per
-  50 ms — O(n) List, accepted); arm_latency measures hook->handler only,
-  physical-keypress->hook latency remains invisible; M3 release-blip
-  merge/debounce PARKED (retrigger_gap= now measures its true frequency for
-  a future decision).
+  tone (cross-checked 2026-08-04: room-tone pads — clip's own
+  quietest-decile frames, real 500 ms head pre-roll, P10-level synthesized
+  noise — produced 0 flips on both corpora, and all 200 clips verified
+  fully-seeded; louder-than-P10 ambience remains unmodeled —
+  reports/validator-A3-A5.md); single-user frozen corpora (standing residual
+  at :400-409); up to ~2 s of pre-roll now arrives at AssemblyAI as an
+  initial burst — size-legal (two 1000 ms messages) AND rate-validated
+  2026-08-04: error 3007's faster-than-realtime check is a
+  cumulative-backlog check (observed trip "Received 314.9 sec. audio in
+  1.31 s" ~ 300 s backlog; official docs: "Audio sent faster than
+  real-time"; the official quickstart itself bursts faster than realtime) —
+  a 2 s burst is ~150x under the observed trip point
+  (reports/validator-A4.md); residual: the threshold is unpublished and
+  could tighten; the 2 s ring's per-callback head-trim RemoveRange memmoves
+  the retained ~32 000 floats (~128 KB) every ~50 ms — measured 2026-08-04
+  (.NET 9 Release micro-bench): mean ~2.3 us, p99 ~7.7 us vs the 50 ms
+  budget, zero steady-state allocation, one-time 256 KB LOH backing-array
+  growth — accepted; lag compensation clamps at 1000 ms — covers all but
+  5/1340 surveyed sessions (0.37%); lags >1000 ms co-occur with quick
+  retriggers where the previous-stop bound forbids further reach-back
+  anyway; worst observed 3241 ms => up to ~2.2 s uncompensated, explicitly
+  accepted; Nemotron streaming (third tee consumer, no silence latch)
+  leading-silence accuracy at up to 2 s is UNVERIFIED — research
+  inconclusive (family evidence non-monotonic: FluidAudio#746 saw 0.4-0.6 s
+  leading silence break Parakeet-family decoding while 1.0/2.0 s were
+  fine); accepted 2026-08-04 with a recommended follow-up: one Windows-side
+  bench run with silence-prefixed fixtures (reports/validator-A7-A8.md);
+  arm_latency measures hook->seed only, physical-keypress->hook latency
+  remains invisible; M3 release-blip merge/debounce PARKED (retrigger_gap=
+  now measures its true frequency for a future decision).
 ```
 
 - [ ] **Step 2: Run the full gates**
@@ -1278,8 +1454,9 @@ Do NOT push. Done.
 | Change 1: pre-roll 500 → 1000 ms, ring → 2 s, single-source constant preserved | 2 |
 | Change 1 required validation: padded frozen-archive gate replication, numbers recorded in the evidence doc | 1 (+ numbers cited in 2, gates in 9) |
 | Change 1 verify: archiving includes longer head; rec= unaffected | Verified during planning (file:line in Background); recorded in 9 |
-| Change 2: lag-compensated request at BOTH arms, clamped to ring; actual seed still drives mask; pure helper in the StartCueGateMask idiom | 3, 4 |
+| Change 2: lag-compensated request at BOTH arms, clamped to ring AND bounded by the previous stop hotkey (+ stop-cue guard); actual seed still drives mask; pure helper in the StartCueGateMask idiom | 3, 4 |
 | Change 3: `preroll=`, `arm_latency=`, `retrigger_gap=` (<3000 only), `head_speech_at=` (clear floor outside cue window), `head_clipped=` (≤ first 2 frames); zero-cost; schema documented in evidence file; Session-started line unchanged | 5, 6, 7, 9 |
 | Repo conventions: linux suite per commit, windows gate before done, no push, Amplifier attribution | every task; 9 |
 | Out of scope: M3, trim margins, gate constants, streaming feed, cue playback, models-page-ux | honored throughout (M3 explicitly parked; retrigger_gap only measures it) |
 | Change-1 side-effect found in planning: Parakeet latch dilution (new head-loss path) | 8 |
+| Load-bearing validation fixes (2026-08-04): request bounded by previous stop (A1/A6), fresh M2 survey numbers (A2), seed-adjacent lag timestamp (A9), ring-cost prose corrected (A10) | 3, 4, 7 (+ 2 for prose) |

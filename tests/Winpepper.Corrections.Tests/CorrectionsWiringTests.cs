@@ -167,4 +167,43 @@ public class CorrectionsWiringTests : IDisposable
         var loaded = new CorrectionStore(_path).Load();
         loaded.Preferred.ShouldBe(new[] { "ChatGPT" });                   // file untouched
     }
+
+    [Fact]
+    public void Replacements_Display_NewestFirst_While_Disk_Stays_OldestFirst()
+    {
+        // Seed the store the way an existing user's corrections.json looks:
+        // oldest-first, append-at-end.
+        new CorrectionStore(_path).Save(new CorrectionsData
+        {
+            Replacements = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["chat gbt"] = "ChatGPT",
+                ["ann thropic"] = "Anthropic",
+            },
+        });
+
+        var vm = CorrectionsWiring.CreateViewModel(new CorrectionStore(_path));
+
+        // Display order: newest (last on disk) first.
+        vm.Replacements.Select(r => r.Wrong)
+            .ShouldBe(new[] { "ann thropic", "chat gbt" });
+
+        // A UI add lands at the TOP of the display...
+        vm.AddReplacement("open ai", "OpenAI").ShouldBeNull();
+        vm.Replacements.Select(r => r.Wrong)
+            .ShouldBe(new[] { "open ai", "ann thropic", "chat gbt" });
+
+        // ...but is APPENDED at the END of the persisted file, keeping the
+        // disk contract identical to today's and to the post-paste learning
+        // writer. Proven with a FRESH store over the same path, exactly like
+        // the dictation pipeline reads it.
+        var loaded = new CorrectionStore(_path).Load();
+        loaded.Replacements.Keys.ShouldBe(new[] { "chat gbt", "ann thropic", "open ai" });
+
+        // And a fresh VM seeded from that file renders newest-first again —
+        // the "relaunch shows newest-first" guarantee.
+        var reseeded = CorrectionsWiring.CreateViewModel(new CorrectionStore(_path));
+        reseeded.Replacements.Select(r => r.Wrong)
+            .ShouldBe(new[] { "open ai", "ann thropic", "chat gbt" });
+    }
 }

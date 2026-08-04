@@ -411,3 +411,9 @@ non-excluded timing lines in log order, from
   `/home/dan/code/winpepper/.worktrees/.the-usual-logs/cue-budget-deduction/`
   (`reports/dedu-sweep.md` budget sweep, `reports/source-code.md`,
   `dedu.py`, frozen `fixtures/`).
+- Gates: `scripts/linux-tests.sh` GREEN (1667 tests, 9/9
+  projects; Winpepper.Audio.Tests 111 with the 9 new deduction/budget
+  facts); `scripts/windows-gate.sh` GATE: GREEN (App build OK — compiles
+  the PipelineHost budget plumbing — 12/12 test project/TFM runs OK,
+  2420 tests, no transient retries). Branch left local per workflow;
+  root session merges, gates, installs.

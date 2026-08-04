@@ -1748,8 +1748,8 @@ public sealed class PipelineHost : IDisposable
             // voiced/clear/max-RMS make the provisional gate constants
             // recalibratable from logs and a dropped short utterance
             // diagnosable after the fact. Content-free: numbers only.
-            // Since 2026-08-02 these are POST-MASK counts — cue mask is
-            // logged alongside so recalibration reads stay honest.
+            // Since 2026-08-03 these are cue-budget-DEDUCTED counts — cue mask
+            // and budget are logged alongside so recalibration reads stay honest.
             _log.LogInformation(
                 "dropped silent recording, {Ms} ms (voiced {VoicedMs} ms, clear {ClearVoicedMs} ms, max frame rms {MaxFrameRms:0.0000}, cue mask {CueMaskMs} ms, cue budget {CueBudgetMs} ms)",
                 ms, result.VoicedMs, result.ClearVoicedMs, result.MaxFrameRms, cueMaskMs, cueBudgetMs);

@@ -381,11 +381,14 @@ public class SilenceTrimmerTests
     }
 
     // ------------------------------------------------------------------
-    // Start-cue mask (2026-08-02): maskMs excludes the head window from the
-    // gate DECISION only. 1000 ms below = 500 preroll + 200 latency +
-    // 150 cue + 150 decay for the shipped asset on a fully-seeded warm
-    // session — a representative value, computed in production by
-    // StartCueGateMask from the actual seeded pre-roll and the
+    // Start-cue mask (2026-08-03): maskMs marks the head-of-buffer cue window
+    // whose frames still COUNT toward the decision statistics and tallies; up to
+    // cueBudgetMs of in-window frames is deducted from the voiced/clear tallies
+    // (cue-budget deduction, replacing 2026-08-02 window exclusion); trimming
+    // offsets and output are unaffected by mask and budget. 1000 ms below =
+    // 500 preroll + 200 latency + 150 cue + 150 decay for the shipped asset on
+    // a fully-seeded warm session — a representative value, computed in
+    // production by StartCueGateMask from the actual seeded pre-roll and the
     // runtime-measured cue.
     // ------------------------------------------------------------------
 
@@ -457,7 +460,7 @@ public class SilenceTrimmerTests
     public void Trim_VoicedSpeechAfterMask_StillPasses_TrimmingUnchanged()
     {
         // 2000 ms = 100 frames: 1000 ms room tone | 700 ms speech | 300 ms tone.
-        // Masked decision set = 50 frames (35 loud): P90 idx floor(0.9*49)=44
+        // All-frames decision set = 100 frames: P90 idx floor(0.9*99)=89
         // -> 0.05; threshold 0.003; voiced 700 >= 600 -> kept. Trimming runs
         // on ALL frames: leading 50-frame silence run keeps 30, removes 20
         // (400 ms); trailing 15 <= 30 kept whole.

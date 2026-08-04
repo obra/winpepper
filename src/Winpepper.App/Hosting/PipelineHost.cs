@@ -54,6 +54,28 @@ public sealed class PipelineHost : IDisposable
     /// benign: the next StartSession overwrites it before any trim reads it.
     /// </summary>
     private int _lastSessionPrerollMs;
+
+    /// <summary>Keydown→pre-roll-seed lag (ms) of the CURRENT session — Task
+    /// 4's seedLagMs, measured immediately before StartSession; &gt;= the
+    /// 'Session started' line's LagMs (blocking in-arm work sits between the
+    /// two). Feeds arm_latency= on the timing line. Like
+    /// _lastSessionPrerollMs: BOTH arms must assign it.</summary>
+    private int _lastArmLatencyMs;
+
+    /// <summary>ms between the previous stop hotkey and this session's start
+    /// hotkey when 0 &lt;= gap &lt; 3000 (the retrigger signature), else null.
+    /// Read from _lastStopHotkeyUtc (field + its three stamping sites landed
+    /// in Task 4 — the pre-roll bound needs the timestamp before the request
+    /// math). The filter lives HERE, not in FormatLine. BOTH arms must
+    /// assign it.</summary>
+    private int? _retriggerGapMs;
+
+    /// <summary>head_speech_at/head_clipped from this session's
+    /// TrimForTranscription; null when trim did not run or found no clear
+    /// frame outside the cue window. Reset at BOTH arms (a failed/silent
+    /// session must not leak the previous session's values).</summary>
+    private int? _lastHeadSpeechAtMs;
+    private bool? _lastHeadClipped;
     /// <summary>Hook timestamp of the most recent stop-initiating hotkey
     /// (HoldUp / toggle-stop / Cancel); null until the first stop this
     /// process. Bounds the pre-roll request (PrerollRequest.ComputeRequestMs
@@ -544,6 +566,15 @@ public sealed class PipelineHost : IDisposable
                 var hotkeyLagMs = (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds;
                 _log.LogInformation("Session started (hold) {SessionId} (hotkey observed {LagMs} ms before handling)",
                     _currentSessionId, hotkeyLagMs);
+                _retriggerGapMs = null;
+                if (_lastStopHotkeyUtc is DateTimeOffset prevStopAt)
+                {
+                    // Hook-time to hook-time: immune to handler serialization.
+                    // Negative (wall-clock skew) or >= 3 s gaps are not
+                    // retriggers — omit the field entirely.
+                    var gapMs = (int)(evt.Timestamp - prevStopAt).TotalMilliseconds;
+                    if (gapMs is >= 0 and < 3000) _retriggerGapMs = gapMs;
+                }
                 _sounds.PlayStart();
                 // Start the streaming dictation session BEFORE StartSession —
                 // StartSession raises the lag-compensated pre-roll request
@@ -611,6 +642,9 @@ public sealed class PipelineHost : IDisposable
                 _lastSessionPrerollMs = _warmRecorder!.StartSession(
                     includePrerollMs: PrerollRequest.ComputeRequestMs(
                         seedLagMs, msSinceStop, _sounds.Enabled));
+                _lastArmLatencyMs = seedLagMs; // Task 4's seed-adjacent lag, NOT the arm-top hotkeyLagMs
+                _lastHeadSpeechAtMs = null;
+                _lastHeadClipped = null;
                 _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 _dictStartTicks = Environment.TickCount64;
                 _gcGen0AtStart = GC.CollectionCount(0);
@@ -1170,6 +1204,15 @@ public sealed class PipelineHost : IDisposable
                     var hotkeyLagMs2 = (int)(DateTimeOffset.UtcNow - evt.Timestamp).TotalMilliseconds;
                     _log.LogInformation("Session started (toggle) {SessionId} (hotkey observed {LagMs} ms before handling)",
                         _currentSessionId, hotkeyLagMs2);
+                    _retriggerGapMs = null;
+                    if (_lastStopHotkeyUtc is DateTimeOffset prevStopAt2)
+                    {
+                        // Hook-time to hook-time: immune to handler serialization.
+                        // Negative (wall-clock skew) or >= 3 s gaps are not
+                        // retriggers — omit the field entirely.
+                        var gapMs2 = (int)(evt.Timestamp - prevStopAt2).TotalMilliseconds;
+                        if (gapMs2 is >= 0 and < 3000) _retriggerGapMs = gapMs2;
+                    }
                     _sounds.PlayStart();
                     // (same comment as the HoldDown arm: create BEFORE StartSession
                     // so the synchronously-raised lag-compensated pre-roll request
@@ -1231,6 +1274,9 @@ public sealed class PipelineHost : IDisposable
                     _lastSessionPrerollMs = _warmRecorder!.StartSession(
                         includePrerollMs: PrerollRequest.ComputeRequestMs(
                             seedLagMs2, msSinceStop2, _sounds.Enabled));
+                    _lastArmLatencyMs = seedLagMs2; // Task 4's seed-adjacent lag, NOT the arm-top hotkeyLagMs2
+                    _lastHeadSpeechAtMs = null;
+                    _lastHeadClipped = null;
                     _recordStopwatch = System.Diagnostics.Stopwatch.StartNew();
                     _dictStartTicks = Environment.TickCount64;
                     _gcGen0AtStart = GC.CollectionCount(0);
@@ -1809,7 +1855,9 @@ public sealed class PipelineHost : IDisposable
         // transcribed audio are unaffected by the mask by construction.
         var cueMaskMs = StartCueGateMask.ComputeMaskMs(_lastSessionPrerollMs, _sounds.StartCueMs, _sounds.Enabled);
         var cueBudgetMs = StartCueGateMask.ComputeCueBudgetMs(_sounds.StartCueMs, _sounds.Enabled);
-        var result = Winpepper.Audio.SilenceTrimmer.Trim(samples, cueMaskMs, cueBudgetMs);
+        var result = Winpepper.Audio.SilenceTrimmer.Trim(samples, cueMaskMs, cueBudgetMs, _lastSessionPrerollMs);
+        _lastHeadSpeechAtMs = result.HeadSpeechAtMs;
+        _lastHeadClipped = result.HeadClipped;
         removedMs = result.RemovedMs;
         if (result.IsSilent)
         {
@@ -1858,6 +1906,13 @@ public sealed class PipelineHost : IDisposable
         timing.GcPauseMs = (int)(GC.GetTotalPauseDuration() - _gcPauseAtStart).TotalMilliseconds;
         timing.PrewarmActive = _cleanupHolder.WasPrewarmActiveSince(_dictStartTicks);
         timing.CpuPegged = _vm.CpuPegged; // same value that drove the pill's pegged meter
+        // Head-loss diagnostics (2026-08-04): zero-cost reads of values the
+        // pipeline already computed this session.
+        timing.PrerollMs = _lastSessionPrerollMs;
+        timing.ArmLatencyMs = _lastArmLatencyMs;
+        timing.RetriggerGapMs = _retriggerGapMs;
+        timing.HeadSpeechAtMs = _lastHeadSpeechAtMs;
+        timing.HeadClipped = _lastHeadClipped;
         _log.LogInformation("dictation timing {Summary}", timing.FormatLine());
         foreach (var o in timing.Overruns())
         {

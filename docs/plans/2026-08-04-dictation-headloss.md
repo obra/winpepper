@@ -17,7 +17,7 @@
 
 - Linux suite green before **every** commit: `./scripts/linux-tests.sh` (NEVER `dotnet test`). Expect all 9 test projects green and `LINUX SUITE: GREEN` (currently 1667 tests at base).
 - Full Windows gate before done: `./scripts/windows-gate.sh` → `GATE: GREEN` (12/12 project/TFM runs). UNC MSB4025 + vsock interop flakes are known transients — retry; the `ModelCardViewModelDispatchTests` LateByteReport test is a known flaky — retry once before treating as real.
-- Never mix Linux- and Windows-side builds in the same bin/obj (use the scripts; the per-project commands in this plan replicate exactly what `linux-tests.sh` does).
+- Never mix Linux- and Windows-side builds in the same bin/obj (use the scripts; the per-project commands in this plan replicate what `linux-tests.sh` does, INCLUDING its environment preamble). `dotnet` is NOT on PATH in this environment: every raw-dotnet block in this plan therefore starts with the same two exports `linux-tests.sh:10-11` uses (`export DOTNET_ROOT="${DOTNET_ROOT:-/home/dan/code/winpepper/.dotnet}"` then `export PATH="$DOTNET_ROOT:$PATH"`). Never run a bare `dotnet` command without that preamble — it fails with *command not found*, which would satisfy an `Expected: FAIL` TDD gate for the wrong reason (repo precedent: commit 2ea2556 fixed exactly this defect in the predecessor plan). Every `Expected: FAIL` in this plan means the NAMED assertion/build failure, never a command/environment error.
 - Every commit carries Amplifier co-author attribution (footer shown in each commit step, copied verbatim from repo precedent).
 - Do NOT push; leave the branch local — the root session merges, gates, and installs.
 - OUT OF SCOPE: M3 retrigger merge/debounce (parked deliberately: a continuation-window merge taxes every dictation to rescue ~0.5%). Trim margins. Gate constants (other than `WarmPrerollMs`). Streaming feed architecture. Cue playback and its runtime measurement. The `models-page-ux` branch — do not touch it.
@@ -280,6 +280,8 @@ And at `:82` change `StartCueGateMask.WarmPrerollMs.ShouldBe(500);` to `StartCue
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/dictation-headloss
+export DOTNET_ROOT="${DOTNET_ROOT:-/home/dan/code/winpepper/.dotnet}"
+export PATH="$DOTNET_ROOT:$PATH"
 dotnet build tests/Winpepper.Audio.Tests/Winpepper.Audio.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 dotnet exec tests/Winpepper.Audio.Tests/bin/Release/net9.0/Winpepper.Audio.Tests.dll -notrait "Platform=Windows"
 ```
@@ -468,6 +470,8 @@ public class PrerollRequestTests
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/dictation-headloss
+export DOTNET_ROOT="${DOTNET_ROOT:-/home/dan/code/winpepper/.dotnet}"
+export PATH="$DOTNET_ROOT:$PATH"
 dotnet build tests/Winpepper.Audio.Tests/Winpepper.Audio.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 ```
 Expected: BUILD FAIL — `PrerollRequest` does not exist.
@@ -554,8 +558,11 @@ public static class PrerollRequest
 
 - [ ] **Step 4: Run to verify they pass**
 
-Same build command, then:
 ```bash
+cd /home/dan/code/winpepper/.worktrees/dictation-headloss
+export DOTNET_ROOT="${DOTNET_ROOT:-/home/dan/code/winpepper/.dotnet}"
+export PATH="$DOTNET_ROOT:$PATH"
+dotnet build tests/Winpepper.Audio.Tests/Winpepper.Audio.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 dotnet exec tests/Winpepper.Audio.Tests/bin/Release/net9.0/Winpepper.Audio.Tests.dll -notrait "Platform=Windows"
 ```
 Expected: PASS, project green.
@@ -824,6 +831,9 @@ Append to `tests/Winpepper.Audio.Tests/SilenceTrimmerTests.cs` (uses the file's 
 - [ ] **Step 2: Run to verify they fail**
 
 ```bash
+cd /home/dan/code/winpepper/.worktrees/dictation-headloss
+export DOTNET_ROOT="${DOTNET_ROOT:-/home/dan/code/winpepper/.dotnet}"
+export PATH="$DOTNET_ROOT:$PATH"
 dotnet build tests/Winpepper.Audio.Tests/Winpepper.Audio.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 ```
 Expected: BUILD FAIL — `Trim` has no 4th parameter and `TrimResult` has no `HeadSpeechAtMs`.
@@ -995,6 +1005,9 @@ preroll=1000ms arm_latency=17ms retrigger_gap=812ms head_speech_at=120ms head_cl
 - [ ] **Step 2: Run to verify they fail**
 
 ```bash
+cd /home/dan/code/winpepper/.worktrees/dictation-headloss
+export DOTNET_ROOT="${DOTNET_ROOT:-/home/dan/code/winpepper/.dotnet}"
+export PATH="$DOTNET_ROOT:$PATH"
 dotnet build tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 ```
 Expected: BUILD FAIL — the five properties do not exist.
@@ -1044,7 +1057,7 @@ Expected: BUILD FAIL — the five properties do not exist.
 
 - [ ] **Step 4: Run to verify they pass**
 
-Build + `dotnet exec tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll -notrait "Platform=Windows"`. Expected: PASS — 3 new facts plus all pre-existing (golden line updated in Step 1 keeps `FormatLine_FullDictation_IsOneParseableKeyValueLine` green).
+Same preamble + build command as Step 2, then `dotnet exec tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll -notrait "Platform=Windows"`. Expected: PASS — 3 new facts plus all pre-existing (golden line updated in Step 1 keeps `FormatLine_FullDictation_IsOneParseableKeyValueLine` green).
 
 - [ ] **Step 5: Full Linux suite, then commit**
 
@@ -1205,10 +1218,17 @@ Append to `tests/Winpepper.Asr.Tests/ParakeetStreamingSessionTests.cs` (reuse th
         // 0.0007 < 0.002 (the old latch discards the WHOLE buffer, onset
         // included), while the onset's own 20 ms frames sit at 0.005 >= 0.002.
         // Per-frame latch must unlatch AND feed from the onset frame: fed
-        // audio = 640 (onset) + 9600 (speech push) = 10240 samples ->
-        // floor((10240-256)/160)+1 = 63 mel frames -> exactly ONE 50-frame
-        // encode (chunk: 50). Feeding the whole first buffer instead would
-        // give 41600 samples -> 259 mel frames -> 5 encodes.
+        // audio = 640 (onset) + 8000 (speech push) = 8640 samples ->
+        // floor((8640-256)/160)+1 = 53 mel frames -> exactly ONE 50-frame
+        // encode (chunk: 50). The 8000-sample speech push is the
+        // DISCRIMINATOR: under the old whole-buffer latch, push 1 is
+        // discarded whole (onset lost) and push 2 unlatches on its own
+        // (RMS 0.02 >= 0.002) but feeds only its own 8000 samples ->
+        // floor((8000-256)/160)+1 = 49 mel frames, one short of the
+        // 50-frame chunk -> ZERO encodes. Old code = 0 encodes, new code =
+        // 1 encode: this assertion can only pass when the onset frames were
+        // actually fed. (Feeding the whole first buffer instead would give
+        // 40000 samples -> 249 mel frames -> 4 encodes.)
         var backend = new FakeParakeetBackend();
         var session = NewSession(backend, chunk: 50, context: 20);
 
@@ -1216,7 +1236,7 @@ Append to `tests/Winpepper.Asr.Tests/ParakeetStreamingSessionTests.cs` (reuse th
         Array.Fill(preroll, 0.005f, 16000 * 2 - 640, 640);     // ...ending in a 40 ms quiet onset
         await session.PushAsync(preroll, TestContext.Current.CancellationToken);
 
-        var speech = new float[9600];                          // 600 ms of clear speech
+        var speech = new float[8000];                          // 500 ms of clear speech
         Array.Fill(speech, 0.02f);
         await session.PushAsync(speech, TestContext.Current.CancellationToken);
 
@@ -1244,10 +1264,13 @@ Append to `tests/Winpepper.Asr.Tests/ParakeetStreamingSessionTests.cs` (reuse th
 - [ ] **Step 2: Run to verify the first fact fails**
 
 ```bash
+cd /home/dan/code/winpepper/.worktrees/dictation-headloss
+export DOTNET_ROOT="${DOTNET_ROOT:-/home/dan/code/winpepper/.dotnet}"
+export PATH="$DOTNET_ROOT:$PATH"
 dotnet build tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 dotnet exec tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll -notrait "Platform=Windows"
 ```
-Expected: `LeadingSilence_QuietOnsetDilutedInLongPreroll_Unlatches_AndFeedsFromOnset` FAILS (0 encodes — the diluted buffer is discarded whole); `…StaysGated_EvenWhenLong` passes (both implementations gate it).
+Expected: `LeadingSilence_QuietOnsetDilutedInLongPreroll_Unlatches_AndFeedsFromOnset` FAILS with `Count` 0 where 1 is expected — the old whole-buffer latch discards the diluted pre-roll whole (onset included), then unlatches on the speech push and feeds only its 8000 samples = 49 mel frames, one short of the 50-frame chunk, so ZERO encodes happen. The RED must be THIS assertion failure — a build error or `dotnet: command not found` does NOT satisfy this gate (fix the environment per Global Constraints and re-run). `…StaysGated_EvenWhenLong` passes (both implementations gate it).
 
 - [ ] **Step 3: Implement the per-frame latch**
 

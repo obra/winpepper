@@ -1,9 +1,11 @@
 namespace Winpepper.Audio;
 
 /// <summary>
-/// Computes the head-of-buffer window that <see cref="SilenceTrimmer"/>
-/// excludes from its silence-gate DECISION because the app's own start cue
-/// contaminates it (validated 2026-08-02/03 over the frozen 100-recording
+/// Computes (a) the head-of-buffer window in which the app's own start cue
+/// can contaminate the mic capture and (b) the cue-budget the silence gate
+/// deducts from that window's voiced/clear tallies (cue-budget DEDUCTION,
+/// 2026-08-03, replacing the window EXCLUSION that regressed prompt short
+/// replies) (validated 2026-08-02/03 over the frozen 100-recording
 /// archive: the 150 ms cue is picked up by the mic at ~592-861 ms into every
 /// fully-seeded warm buffer at frame RMS up to 0.05 — above the 0.02
 /// clear-speech tier — because recording starts with a retroactive warm
@@ -61,7 +63,8 @@ public static class StartCueGateMask
     public const int CueDecayMarginMs = 150;
 
     /// <summary>
-    /// The mask duration SilenceTrimmer should exclude from its decision.
+    /// The window within which SilenceTrimmer's tallies are cue-budget-deductible
+    /// (it no longer excludes these frames).
     /// <paramref name="actualPrerollMs"/> is the pre-roll the recorder
     /// ACTUALLY seeded this session (StartSession's return; 0 in cold mode,
     /// negative clamps to 0), so the window shrinks when less pre-hotkey
@@ -73,5 +76,43 @@ public static class StartCueGateMask
     {
         if (!soundsEnabled || cueMs <= 0) return 0;
         return Math.Max(actualPrerollMs, 0) + CueStartLatencyMarginMs + cueMs + CueDecayMarginMs;
+    }
+
+    /// <summary>
+    /// Deliberate under-deduction margin for <see cref="ComputeCueBudgetMs"/>:
+    /// the budget deducts this many ms LESS than the measured cue emission.
+    /// The cue's clear-tier (>= 0.02 RMS) mic pickup is 120-140 ms of the
+    /// 150 ms emission (2026-08-03 archive measurement), so a 50 ms
+    /// under-deduction leaves a &lt;= 40 ms beep residue in a beep-only
+    /// tally -- safely under the 100 ms clear floor -- while every ms NOT
+    /// deducted is a ms of the user's prompt speech preserved. Archive
+    /// sweep (two frozen 100-clip corpora, budgets 0-400 ms): the window
+    /// satisfying all regression/escape criteria is 100-120 ms; cueMs - 50
+    /// = 100 sits at maximum regression margin. NOTE: the 50 ms margin is
+    /// validated ONLY at the 150 ms shipped asset; if the cue asset
+    /// materially changes, re-run the archive sweep before trusting the
+    /// derived budget. Evidence:
+    /// docs/plans/2026-07-29-cleanup-asr-contention-evidence.md
+    /// (cue-budget deduction section).
+    /// </summary>
+    public const int CueBudgetMarginMs = 50;
+
+    /// <summary>
+    /// The cue's own deductible worth: how many ms of in-window voiced and
+    /// clear tally SilenceTrimmer may subtract as "that was probably the
+    /// cue, not the user". Derived from the runtime-MEASURED cue duration
+    /// (never hardcoded -- the asset may change), 0 when the cue is
+    /// disabled or unmeasured (FAIL OPEN: nothing was played, nothing is
+    /// deducted, the gate behaves as before the mask existed). NOTE the
+    /// asymmetry with <see cref="ComputeMaskMs"/>: the mask WINDOW is
+    /// sized generously (over-masking a window that merely marks frames as
+    /// deduction-eligible is safe), but the BUDGET is sized tightly --
+    /// over-deducting eats the user's own prompt speech, which is exactly
+    /// the 2026-08-03 regression this replaces.
+    /// </summary>
+    public static int ComputeCueBudgetMs(int cueMs, bool soundsEnabled)
+    {
+        if (!soundsEnabled || cueMs <= 0) return 0;
+        return Math.Max(cueMs - CueBudgetMarginMs, 0);
     }
 }

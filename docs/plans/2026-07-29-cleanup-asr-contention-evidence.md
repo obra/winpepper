@@ -456,3 +456,88 @@ Acceptance (plan Task 1): zero real pass->drop and zero silent drop->pass on bot
   492-513 ms, 0 missing WAVs) — .the-usual-logs/dictation-headloss/reports/validator-A3-A5.md;
   louder-than-P10 ambience remains unmodeled;
   frozen-0of91 is a single-user corpus (standing residual recorded at :400-409 of this file).
+
+### Timing-line schema additions (2026-08-04)
+
+Emitted immediately after `rec=`, all optional, stamped in EmitTimingSummary
+from values the pipeline already computed (zero-cost discipline — no new
+threads/timers). The 'Session started' line keeps its existing fields.
+
+- `preroll=<n>ms` — pre-roll the recorder ACTUALLY seeded (StartSession's
+  return; 0 in cold mode). Base request is now 1000 ms + the keydown->seed
+  lag clamped to 1000 ms, bounded by the previous stop hotkey + 500 ms
+  stop-cue guard when sounds are on
+  (PrerollRequest.ComputeRequestMs(seedLagMs, msSinceStop, soundsEnabled)),
+  served by a 2 s ring.
+- `arm_latency=<n>ms` — hotkey-keydown (hook timestamp) -> pre-roll-seed lag,
+  measured immediately before StartSession; >= the Session-started line's
+  LagMs (blocking in-arm work sits between the two). Hook-callback delays
+  (Windows LowLevelHooksTimeout) are invisible to it, as before.
+- `retrigger_gap=<n>ms` — start hotkey minus previous stop hotkey (HoldUp /
+  toggle-stop / Cancel all count as stops), emitted only when 0 <= gap < 3000.
+- `head_speech_at=<n>ms` — first 20 ms frame at/above the 0.02 clear-speech
+  floor OUTSIDE the cue-pickup band [seeded-preroll, mask); omitted when none.
+- `head_clipped=true|false` — head_speech_at within the first two frames
+  (< 40 ms): speech predating the recording window. Omitted when
+  head_speech_at is.
+
+### Interactions verified rather than assumed (2026-08-04)
+
+- Mask auto-scaling: PipelineHost.cs:1741 feeds the ACTUAL seed into
+  ComputeMaskMs — lag compensation needed no mask change. The startup
+  worst-case line now uses PrerollRequest.MaxRequestMs so it stays a ceiling.
+- Archiving: the FULL untrimmed buffer (pre-roll head included) is archived
+  on all four paths (PipelineHost.cs:673/1075/1262/1659 -> HistoryArchiver.cs:45);
+  the longer head simply rides along.
+- rec= accounting: _recordStopwatch starts AFTER StartSession returns
+  (PipelineHost.cs:576/1166) — pre-roll excluded, field meaning unchanged.
+- AssemblyAI streaming: oversized pre-roll frames are chunked to <= 16000
+  samples/send (AssemblyAiStreamingTranscriber.cs:176-182), pinned by
+  Push_SplitsAnOversizedBufferIntoAtMost1000MsMessages at 40 000 samples
+  (> the 32 000 worst case).
+- Parakeet streaming: whole-buffer leading-silence latch WOULD have diluted
+  quiet onsets 4x at a 2 s pre-roll and discarded them silently — converted
+  to per-frame with feed-from-onset (Task 8), pinned by two new facts.
+- Warm ring continuity across sessions (A1/A6, falsified-and-fixed
+  2026-08-04): the ring is never cleared at session boundaries
+  (WarmCaptureBuffer.cs:42-53/:62-75/:77-87), so every pre-roll request is
+  bounded by the previous stop hotkey (+ 500 ms stop-cue guard when sounds
+  are on) — closes both the transcript-duplication path and the head-band
+  stop-cue contamination; production retrigger gaps <1000 ms in 38/1333
+  pairs (2.9%), <1400 ms in 79 (5.9%) (reports/validator-A1-A6.md).
+
+- Residual risks ACCEPTED: digital-zero pad in the replication is not room
+  tone (cross-checked 2026-08-04: room-tone pads — clip's own
+  quietest-decile frames, real 500 ms head pre-roll, P10-level synthesized
+  noise — produced 0 flips on both corpora, and all 200 clips verified
+  fully-seeded; louder-than-P10 ambience remains unmodeled —
+  reports/validator-A3-A5.md); single-user frozen corpora (standing residual
+  at :400-409); up to ~2 s of pre-roll now arrives at AssemblyAI as an
+  initial burst — size-legal (two 1000 ms messages) AND rate-validated
+  2026-08-04: error 3007's faster-than-realtime check is a
+  cumulative-backlog check (observed trip "Received 314.9 sec. audio in
+  1.31 s" ~ 300 s backlog; official docs: "Audio sent faster than
+  real-time"; the official quickstart itself bursts faster than realtime) —
+  a 2 s burst is ~150x under the observed trip point
+  (reports/validator-A4.md); residual: the threshold is unpublished and
+  could tighten; the 2 s ring's per-callback head-trim RemoveRange memmoves
+  the retained ~32 000 floats (~128 KB) every ~50 ms — measured 2026-08-04
+  (.NET 9 Release micro-bench): mean ~2.3 us, p99 ~7.7 us vs the 50 ms
+  budget, zero steady-state allocation, one-time 256 KB LOH backing-array
+  growth — accepted; lag compensation clamps at 1000 ms — covers all but
+  5/1340 surveyed sessions (0.37%); lags >1000 ms co-occur with quick
+  retriggers where the previous-stop bound forbids further reach-back
+  anyway; worst observed 3241 ms => up to ~2.2 s uncompensated, explicitly
+  accepted; Nemotron streaming (third tee consumer, no silence latch)
+  leading-silence accuracy at up to 2 s is UNVERIFIED — research
+  inconclusive (family evidence non-monotonic: FluidAudio#746 saw 0.4-0.6 s
+  leading silence break Parakeet-family decoding while 1.0/2.0 s were
+  fine); accepted 2026-08-04 with a recommended follow-up: one Windows-side
+  bench run with silence-prefixed fixtures (reports/validator-A7-A8.md);
+  arm_latency measures hook->seed only, physical-keypress->hook latency
+  remains invisible; M3 release-blip merge/debounce PARKED (retrigger_gap=
+  now measures its true frequency for a future decision).
+
+- Gates: scripts/linux-tests.sh GREEN (1689 tests, 9/9 projects); scripts/windows-gate.sh
+  GATE: GREEN (12/12 test project/TFM runs, 2459 tests, transient retries: none).
+  Branch fix/dictation-headloss left local per workflow; root session merges, gates, installs.

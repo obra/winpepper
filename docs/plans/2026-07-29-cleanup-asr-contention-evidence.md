@@ -343,3 +343,71 @@ non-excluded timing lines in log order, from
   transient retries; one earlier invocation was killed ~30 s in by the
   driving harness's own timeout before producing any verdict (not a
   gate failure).
+
+## Start-cue gate mask — cue-budget deduction regression fix (2026-08-03)
+
+- REGRESSION (introduced by the 2026-08-02 mask merge, `5f80e96`): the
+  warm mask (1000 ms) starts at buffer t=0, which is 500 ms of pre-roll
+  BEFORE the hotkey, so the window EXCLUSION blinded the gate to the
+  first ~500 ms of post-hotkey time. Prompt short replies could not
+  reach the 600 ms voiced / 100 ms clear floors and dropped whole.
+  Owner-measured: 4/10 dictations dropped in the first 30 minutes on the
+  build (pre-install baseline 3.7-8%). The four drops all contain
+  spectrally-verified real speech (F0 ~92-95 Hz, matches transcribed
+  controls): runs at 810-1110 ms for `173b20b3`/`525f0643`/`003777a1`,
+  1730-1890 ms for `4bf32da1`. Production logs confirm all four dropped
+  under `cue mask 1000 ms`. Replica-CONFIRMED offline: pre-era pass,
+  mask-era drop (`voiced-floor` x3, `P90-silent` x1) for all four. The
+  2026-08-02 plan's accepted residual only covered utterances ENTIRELY
+  inside the mask; the field class is broader -- prompt short replies in
+  or straddling the window (x3) plus a long quiet clip P90-silenced by
+  post-mask stats starvation (x1) -- and the 0/91 corpus contained no
+  dictations of either shape (its A6 caveat fired).
+- FIX: cue-budget DEDUCTION replaces window exclusion
+  (`SilenceTrimmer.cs`, `StartCueGateMask.ComputeCueBudgetMs`). In-window
+  frames count normally; up to budget = measured cueMs -
+  `CueBudgetMarginMs`(50) = 100 ms of the loudest in-window frames is
+  deducted from the voiced and clear tallies. Beep-only recordings (in-
+  window tally == the cue's own 120-140 ms clear pickup) deduct to below
+  the floors and still drop; prompt speech keeps its surplus and passes.
+- Budget sizing FALSIFIED the task's suggested cueMs + decay (300 ms):
+  at 300 the deduction eats the user's own speech and 3/4 regression
+  WAVs still drop (173b20b3 clear 0, 525f0643 clear 80, 003777a1 clear
+  0). Sweep 0-400 ms in 20 ms steps over both frozen corpora: acceptance
+  window 100-120 ms; 100 chosen (binding passer 003777a1 clear 120 vs
+  the 100 floor; binding escape cade05cf voiced 580 vs the 600 floor —
+  it survives at budgets <= 80).
+- Stats exclusion REMOVED, not kept: post-mask percentiles starve on
+  short clips (173b20b3: 3 decision frames) and P90-silence real speech
+  (4bf32da1: post-mask P90 0.0012 < 0.004 — unfixable by any budget
+  while the exclusion stood). Decision stats revert to all frames;
+  decision threshold == trim threshold again, so trimming is
+  bit-identical by construction. MaxFrameRms stays post-window so the
+  cue cannot inflate the recalibration fields.
+- Validation (offline replica over the frozen corpora at
+  `/home/dan/code/winpepper/.worktrees/.the-usual-logs/cue-budget-deduction/fixtures/`,
+  mask 1000 / budget 100): 4/4 regression WAVs PASS; 0 drop->pass flips
+  on either corpus (all genuinely-silent drops UNCHANGED); cue-only
+  escapes still drop (live `cade05cf`, frozen beep escape `67518b61` of
+  the 2026-08-02 20:18 class; both spectrally verified noise-only, both
+  passed under the PRE-mask-era gate); 0 pass->drop flips among real
+  transcribed dictations on BOTH corpora (0/88 live, 0/93 frozen); trim
+  walker diffs 0/92 and 0/93 — trimming invariant HOLDS.
+- Unit pins: budget derivation from the MEASURED cue (150 -> 100, 300 ->
+  250, disabled/unmeasured -> 0); beep-only zero-out; prompt-short-reply
+  pass; fully-in-window utterance now passes (the old KnownResidual is
+  FIXED); mask=0 byte-identity and trim-offset invariance unchanged.
+- Residual risks ACCEPTED (2026-08-03 load-bearing pass; ledger +
+  decision records in the evidence dir): cross-config cue pickup (louder
+  speakers/reverb could push clear pickup >= 200 ms and reopen the
+  beep-only escape; zero-pickup headphone-shaped sessions exist in-corpus
+  with no near-floor passers), single-user corpus generalization (binding
+  margins are 1-2 frames, on the two empty-transcript boundary clips
+  only), budget linearity beyond the 150 ms asset (re-run the sweep on
+  asset change), cold-session escapes (no cold clip exists; the mask
+  construction keeps cue pickup in-window). Watch post-install drop log
+  lines (which now include the cue budget).
+- Evidence dir:
+  `/home/dan/code/winpepper/.worktrees/.the-usual-logs/cue-budget-deduction/`
+  (`reports/dedu-sweep.md` budget sweep, `reports/source-code.md`,
+  `dedu.py`, frozen `fixtures/`).

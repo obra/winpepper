@@ -417,3 +417,42 @@ non-excluded timing lines in log order, from
   the PipelineHost budget plumbing — 12/12 test project/TFM runs OK,
   2420 tests, no transient retries). Branch left local per workflow;
   root session merges, gates, installs.
+
+## Dictation head-loss — pre-roll extension + lag compensation + timing diagnostics (2026-08-04)
+
+Plan: docs/plans/2026-08-04-dictation-headloss.md. Base for the fix branch: main @ c71a40b.
+Investigation artifacts: /tmp/headloss-inv/ and /tmp/gate-inv3/ evaporated before execution
+(ephemeral /tmp, same fate as /tmp/gate-inv/); replication uses the preserved 2026-08-03
+replica at /home/dan/code/winpepper/.worktrees/.the-usual-logs/cue-budget-deduction/
+(dedu.py, two frozen 100-WAV corpora), script preserved at
+/home/dan/code/winpepper/.worktrees/.the-usual-logs/dictation-headloss/preroll-pad-check.py.
+
+Mechanisms (from the completed investigation, inlined in the plan): M1 — 500 ms pre-roll
+request vs speech begun earlier (confirmed instance 8ec9e52c, archive-side id); M2 — hotkey
+lag over the complete annotated-log population n=1340 (2026-07-29 -> 08-04): p50=0 ms,
+p99~37 ms, max=3241 ms, >100 ms in 12 (0.90%), >1000 ms in 5 (0.37%) (the original
+755-session sub-window reported p99 30 / max 1145; the full-population re-survey found a
+longer tail); lag eats pre-keydown coverage 1:1 (617 ms lag event, log session c9a80f2b,
+2026-08-03: 617 ms lag + retrigger -> 240 ms hole); M3 — release blips, PARKED this run
+(continuation-window merge taxes every dictation to rescue ~0.5%).
+
+### Padded-archive gate replication (pre-change validation gate)
+
+Baseline mask 1000 / budget 100 on original buffers vs mask 1500 / budget 100 with 500 ms
+digital silence prefixed (the honest simulation of a fully-seeded 1000 ms pre-roll):
+
+- frozen-0of91 (100 clips): real pass->drop 0/93, silent drop->pass 0/7,
+  real drop->pass 0, silent pass->drop 0
+- live-snapshot (100 clips): real pass->drop 0/88, silent drop->pass 0/12,
+  real drop->pass 0, silent pass->drop 0
+
+Acceptance (plan Task 1): zero real pass->drop and zero silent drop->pass on both corpora — PASS.
+
+- Residual risks ACCEPTED (this subsection): the pad is digital zeros, not room tone — real
+  extra pre-roll carries room tone that lowers P10 (and thr), which zeros cannot model;
+  cross-checked 2026-08-04 (load-bearing validation): room-tone pads (clip's own
+  quietest-decile frames; real 500 ms head pre-roll; P10-level synthesized noise) produced
+  0 flips on both corpora, and all 200 clips verified fully-seeded (durationMs-recordMs
+  492-513 ms, 0 missing WAVs) — .the-usual-logs/dictation-headloss/reports/validator-A3-A5.md;
+  louder-than-P10 ambience remains unmodeled;
+  frozen-0of91 is a single-user corpus (standing residual recorded at :400-409 of this file).

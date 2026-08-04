@@ -384,6 +384,8 @@ Leave `ComputeMaskMs`'s body, `WarmPrerollMs`, `CueStartLatencyMarginMs`,
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
+cd /home/dan/code/winpepper/.worktrees/cue-budget-deduction
+export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"
 dotnet build tests/Winpepper.Audio.Tests/Winpepper.Audio.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 dotnet exec tests/Winpepper.Audio.Tests/bin/Release/net9.0/Winpepper.Audio.Tests.dll \
   -class "Winpepper.Audio.Tests.StartCueGateMaskTests"
@@ -741,6 +743,7 @@ the window edge; synthetic twin of archive clip `003777a1`):
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/cue-budget-deduction
+export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"
 dotnet build tests/Winpepper.Audio.Tests/Winpepper.Audio.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 ```
 
@@ -932,6 +935,8 @@ deleted with the old block).
 - [ ] **Step 5: Build and run the SilenceTrimmer class tests**
 
 ```bash
+cd /home/dan/code/winpepper/.worktrees/cue-budget-deduction
+export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"
 dotnet build tests/Winpepper.Audio.Tests/Winpepper.Audio.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 dotnet exec tests/Winpepper.Audio.Tests/bin/Release/net9.0/Winpepper.Audio.Tests.dll \
   -class "Winpepper.Audio.Tests.SilenceTrimmerTests"
@@ -943,6 +948,8 @@ kept mask tests + 5 replacements + 4 new facts).
 - [ ] **Step 6: Whole Audio test project**
 
 ```bash
+cd /home/dan/code/winpepper/.worktrees/cue-budget-deduction
+export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"
 dotnet exec tests/Winpepper.Audio.Tests/bin/Release/net9.0/Winpepper.Audio.Tests.dll -notrait "Platform=Windows"
 ```
 

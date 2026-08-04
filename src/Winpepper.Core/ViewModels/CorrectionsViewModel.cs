@@ -16,7 +16,10 @@ public sealed class CorrectionsViewModel
     {
         _persist = persist;
         foreach (var p in initialPreferred) Preferred.Add(new PreferredEntry(p));
-        foreach (var r in initialReplacements) Replacements.Add(new ReplacementEntry(r.Key, r.Value));
+        // Newest-first display: initialReplacements arrives oldest-first
+        // (corrections.json document order), so inserting each at the front
+        // leaves the most recently added entry at index 0.
+        foreach (var r in initialReplacements) Replacements.Insert(0, new ReplacementEntry(r.Key, r.Value));
     }
 
     public string? AddPreferred(string text)
@@ -32,7 +35,7 @@ public sealed class CorrectionsViewModel
     {
         var err = ValidateReplacement(wrong, right, ignoreSelf: null);
         if (err is not null) return err;
-        Replacements.Add(new ReplacementEntry(wrong.Trim(), right.Trim()));
+        Replacements.Insert(0, new ReplacementEntry(wrong.Trim(), right.Trim()));
         Persist();
         return null;
     }
@@ -71,7 +74,11 @@ public sealed class CorrectionsViewModel
     public void Persist()
     {
         var p = Preferred.Select(x => x.Text).ToList();
-        var r = Replacements.ToDictionary(x => x.Wrong, x => x.Right, StringComparer.Ordinal);
+        // The collection is newest-first for display; reverse back to the
+        // canonical oldest-first/append-at-end order so corrections.json,
+        // its downstream consumers (prompt hints, custom_spelling), and the
+        // post-paste learning writer's append semantics are unchanged.
+        var r = Replacements.Reverse().ToDictionary(x => x.Wrong, x => x.Right, StringComparer.Ordinal);
         _persist(p, r);
     }
 }

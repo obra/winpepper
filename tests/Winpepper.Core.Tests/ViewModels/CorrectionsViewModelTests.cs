@@ -91,6 +91,75 @@ public class CorrectionsViewModelTests
         saves.ShouldBe(2);
     }
 
+    [Fact]
+    public void AddReplacement_Inserts_NewestFirst()
+    {
+        var vm = NewVm();
+        vm.AddReplacement("chat gbt", "ChatGPT").ShouldBeNull();
+        vm.AddReplacement("ann thropic", "Anthropic").ShouldBeNull();
+
+        vm.Replacements.Select(r => r.Wrong)
+            .ShouldBe(new[] { "ann thropic", "chat gbt" });
+    }
+
+    [Fact]
+    public void Ctor_Seeds_Replacements_NewestFirst()
+    {
+        // Disk order is oldest-first (new entries are appended at the END of
+        // corrections.json by both Persist() and the post-paste learning
+        // writer), so the LAST seeded pair is the newest and must render first.
+        var vm = new CorrectionsViewModel(
+            new List<string>(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["chat gbt"] = "ChatGPT",
+                ["ann thropic"] = "Anthropic",
+            },
+            (_, _) => { });
+
+        vm.Replacements.Select(r => r.Wrong)
+            .ShouldBe(new[] { "ann thropic", "chat gbt" });
+    }
+
+    [Fact]
+    public void RemoveReplacement_Preserves_NewestFirst_Order_Of_Survivors()
+    {
+        var vm = NewVm();
+        vm.AddReplacement("chat gbt", "ChatGPT").ShouldBeNull();
+        vm.AddReplacement("ann thropic", "Anthropic").ShouldBeNull();
+        vm.AddReplacement("open ai", "OpenAI").ShouldBeNull();
+
+        vm.RemoveReplacement(vm.Replacements[1]); // the middle entry ("ann thropic")
+
+        vm.Replacements.Select(r => r.Wrong)
+            .ShouldBe(new[] { "open ai", "chat gbt" });
+    }
+
+    [Fact]
+    public void Persist_Writes_Replacements_OldestFirst()
+    {
+        // The DISPLAY order is newest-first, but corrections.json stays
+        // canonical oldest-first/append-at-end so the file byte-order, the
+        // cleanup prompt hint order, the AssemblyAI custom_spelling order,
+        // and the post-paste learning writer's append semantics are all
+        // unchanged. This test pins that: it passes today and must STILL
+        // pass after the newest-first change (it fails a naive
+        // Insert(0)-only implementation that forgets to reverse in Persist).
+        IReadOnlyDictionary<string, string>? captured = null;
+        var vm = new CorrectionsViewModel(
+            new List<string>(),
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["chat gbt"] = "ChatGPT",
+            },
+            (_, r) => captured = r);
+
+        vm.AddReplacement("ann thropic", "Anthropic").ShouldBeNull();
+
+        captured.ShouldNotBeNull();
+        captured!.Keys.ShouldBe(new[] { "chat gbt", "ann thropic" });
+    }
+
     private static CorrectionsViewModel NewVm()
         => new(new List<string>(), new Dictionary<string, string>(), (_, _) => { });
 }

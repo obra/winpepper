@@ -667,4 +667,94 @@ public class SilenceTrimmerTests
         masked.RunsTrimmed.ShouldBe(0);
         masked.Trimmed.SequenceEqual(unmasked.Trimmed).ShouldBeTrue();
     }
+
+    [Fact]
+    public void Trim_SpeechAtBufferStart_ReportsHeadSpeechAtZero_AndClipped()
+    {
+        // Head-loss signature (M1): speech already in progress when the
+        // pre-roll ring was seeded. preroll=1000, mask=1500 (1000+200+150+150).
+        // Loud frames 0-1 (40 ms @ 0.05) sit in the pre-roll head [0,1000) —
+        // OUTSIDE the cue-pickup band [1000,1500) — so they are scannable.
+        // Gate: 125 frames, P90 idx floor(0.9*124)=111 -> 0.001 < 0.004 ->
+        // P90-silent DROP; head fields must be populated even on the drop path.
+        var buf = Join(Dc(0.05, 40), Dc(0.001, 2460));
+
+        var r = SilenceTrimmer.Trim(buf, 1500, 100, 1000);
+
+        r.IsSilent.ShouldBeTrue();
+        r.HeadSpeechAtMs.ShouldBe(0);
+        r.HeadClipped.ShouldBe(true);
+    }
+
+    [Fact]
+    public void Trim_SpeechOnlyInsideCuePickupWindow_OmitsHeadFields()
+    {
+        // The only clear-tier energy is where the cue lands: frames 50-56
+        // (1000-1140 ms), inside the excluded band [1000,1500) at
+        // preroll=1000/mask=1500. head_speech_at must NOT report the app's
+        // own beep as user speech.
+        var buf = Join(Dc(0.001, 1000), Dc(0.05, 140), Dc(0.001, 1360));
+
+        var r = SilenceTrimmer.Trim(buf, 1500, 100, 1000);
+
+        r.HeadSpeechAtMs.ShouldBeNull();
+        r.HeadClipped.ShouldBeNull();
+    }
+
+    [Fact]
+    public void Trim_SpeechAfterMask_ReportsPostMaskOffset_NotClipped()
+    {
+        // Speech starts exactly at the mask edge: frames 75-109 (1500-2200 ms,
+        // 700 ms @ 0.05). Exclusion [50,75) skipped; first scannable clear
+        // frame is 75 -> 1500 ms. Gate passes (voiced 700 >= 600).
+        var buf = Join(Dc(0.001, 1500), Dc(0.05, 700), Dc(0.001, 300));
+
+        var r = SilenceTrimmer.Trim(buf, 1500, 100, 1000);
+
+        r.IsSilent.ShouldBeFalse();
+        r.HeadSpeechAtMs.ShouldBe(1500);
+        r.HeadClipped.ShouldBe(false);
+    }
+
+    [Fact]
+    public void Trim_HeadSpeechAt20Ms_IsClipped()
+    {
+        // Onset in frame 1 (20 ms): still within the first two frames ->
+        // clipped. 20 quiet + 800 loud + 780 quiet; preroll=1000/mask=1500;
+        // deduction: 40 loud frames in-window minus budget 5 -> 700 ms
+        // voiced/clear, passes.
+        var buf = Join(Dc(0.001, 20), Dc(0.05, 800), Dc(0.001, 780));
+
+        var r = SilenceTrimmer.Trim(buf, 1500, 100, 1000);
+
+        r.HeadSpeechAtMs.ShouldBe(20);
+        r.HeadClipped.ShouldBe(true);
+    }
+
+    [Fact]
+    public void Trim_HeadSpeechAt40Ms_IsNotClipped()
+    {
+        // Onset in frame 2 (40 ms): first two frames are genuinely quiet, so
+        // the utterance onset was captured — not clipped. Pins the < 40 ms
+        // boundary (frames 0-1 only).
+        var buf = Join(Dc(0.001, 40), Dc(0.05, 800), Dc(0.001, 760));
+
+        var r = SilenceTrimmer.Trim(buf, 1500, 100, 1000);
+
+        r.HeadSpeechAtMs.ShouldBe(40);
+        r.HeadClipped.ShouldBe(false);
+    }
+
+    [Fact]
+    public void Trim_NoMask_ScansFromBufferStart()
+    {
+        // Cue disabled (maskMs=0): nothing was played, nothing to exclude —
+        // the scan covers the whole buffer from t=0.
+        var buf = Join(Dc(0.05, 700), Dc(0.001, 500));
+
+        var r = SilenceTrimmer.Trim(buf, 0, 0, 0);
+
+        r.HeadSpeechAtMs.ShouldBe(0);
+        r.HeadClipped.ShouldBe(true);
+    }
 }

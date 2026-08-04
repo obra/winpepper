@@ -532,3 +532,10 @@ Per the repo's humble-object rule, the rendered WinUI layout is verified by name
 | No collateral behavior change (prompt hints, custom_spelling, replacement engine, learning writer, file format) | Global Constraints + Task 1 `Persist_Writes_Replacements_OldestFirst` + Task 2 disk-order assertion | Full Linux suite green each task; disk order byte-identical |
 
 No stubs, mocks standing in for production behavior, or deferred requirements: all tests use the real `CorrectionsViewModel`, `CorrectionsWiring`, and `CorrectionStore` against real temp files; the only non-automated surface (WinUI rendering) follows the repo's standard named-smoke-item treatment and is compile-verified by the Windows gate. Type consistency checked: `ReplacementEntry.Wrong/.Right`, ctor signature, `CorrectionsData.Replacements` usage match across all tasks. No unresolved coverage gaps.
+
+---
+
+## Gate evidence
+
+- `./scripts/linux-tests.sh` — LINUX SUITE: GREEN (run before each of the 3 implementation commits)
+- `./scripts/windows-gate.sh` — GATE: GREEN on 2026-08-04 (compile-verifies CorrectionsPage.xaml + full 12 project/TFM runs)

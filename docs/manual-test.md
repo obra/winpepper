@@ -142,7 +142,7 @@ correction post-pass maps any surviving "chat gbt" to "ChatGPT").
    - Test dictation — tick "That worked." Click Finish.
 7. Window navigates to Recording tab. Toggle "Play start/stop sounds"; kill and relaunch — the toggle remembers.
 8. Cleanup tab: pick Custom profile, edit the prompt, change the Max-tokens slider. Restart — values persist.
-9. Corrections tab: add a preferred ("ChatGPT"), then a duplicate (see error). Add a replacement ("chat gbt" → "ChatGPT"). Reload — entries persist.
+9. Corrections tab: add a preferred ("ChatGPT"), then a duplicate (see error). In Misheard replacements the add fields sit ABOVE the list: add a replacement ("chat gbt" → "ChatGPT") — it appears at the TOP of the list; add another ("ann thropic" → "Anthropic") — it appears above "chat gbt". Reload — entries persist, still newest-first.
 10. Hold dictation hotkey while focused on `TestBox`, run `./scripts/say.sh "hello world"`. Release. Expected:
     - Status pill appears bottom-center, red dot, "Recording..."
     - Pill transitions to "Transcribing...", "Inserting..."

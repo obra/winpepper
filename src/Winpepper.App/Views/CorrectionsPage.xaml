@@ -53,6 +53,16 @@
                     <TextBlock Text="When the left text is heard, it is replaced with the right text."
                                Style="{ThemeResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Grid ColumnDefinitions="*,*,Auto" ColumnSpacing="8">
+                        <TextBox x:Name="NewWrongBox" AutomationProperties.AutomationId="CorrectionsNewWrongTextBox"  PlaceholderText="wrong (heard)" />
+                        <TextBox x:Name="NewRightBox" AutomationProperties.AutomationId="CorrectionsNewRightTextBox"  Grid.Column="1" PlaceholderText="right (correct)" />
+                        <Button x:Name="AddReplacementButton" AutomationProperties.AutomationId="CorrectionsAddReplacementButton" Grid.Column="2" Content="Add" Click="OnAddReplacement" Style="{StaticResource AccentButtonStyle}" />
+                    </Grid>
+                    <TextBlock x:Name="ReplacementsError"
+                               AutomationProperties.AutomationId="CorrectionsReplacementsErrorLabel"
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                               TextWrapping="Wrap" />
                     <ListView x:Name="ReplacementsList" AutomationProperties.AutomationId="CorrectionsReplacementsList" SelectionMode="None">
                         <ListView.ItemTemplate>
                             <DataTemplate>
@@ -64,16 +74,6 @@
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
-                    <Grid ColumnDefinitions="*,*,Auto" ColumnSpacing="8">
-                        <TextBox x:Name="NewWrongBox" AutomationProperties.AutomationId="CorrectionsNewWrongTextBox"  PlaceholderText="wrong (heard)" />
-                        <TextBox x:Name="NewRightBox" AutomationProperties.AutomationId="CorrectionsNewRightTextBox"  Grid.Column="1" PlaceholderText="right (correct)" />
-                        <Button x:Name="AddReplacementButton" AutomationProperties.AutomationId="CorrectionsAddReplacementButton" Grid.Column="2" Content="Add" Click="OnAddReplacement" Style="{StaticResource AccentButtonStyle}" />
-                    </Grid>
-                    <TextBlock x:Name="ReplacementsError"
-                               AutomationProperties.AutomationId="CorrectionsReplacementsErrorLabel"
-                               Style="{ThemeResource CaptionTextBlockStyle}"
-                               Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                               TextWrapping="Wrap" />
                 </StackPanel>
             </Border>
         </StackPanel>

@@ -89,6 +89,29 @@ public sealed class DictationTimingSummary
     public int? HandleCount { get; set; }  // B2: process handle count at recording start
     public int? SysCpuPct { get; set; }    // B3: system-wide CPU % over the recording window (GetSystemTimes delta)
     public bool? CpuPegged { get; set; }   // pegged decision near recording start (what the pill showed); null = no reading, field omitted
+    /// <summary>Warm pre-roll ms the recorder ACTUALLY seeded into this session
+    /// (StartSession's return; 0 in cold mode). Head-loss diagnostics, 2026-08-04.</summary>
+    public int? PrerollMs { get; set; }
+
+    /// <summary>Hotkey-keydown (hook timestamp) -> pre-roll-seed lag in ms,
+    /// measured immediately before StartSession; >= the 'Session started' line's
+    /// LagMs (blocking in-arm work sits between the two). Uncompensated, this
+    /// eats pre-keydown coverage 1:1 (M2); see PrerollRequest.</summary>
+    public int? ArmLatencyMs { get; set; }
+
+    /// <summary>ms between the previous session's stop hotkey and this session's
+    /// start hotkey; assigned only when 0 &lt;= gap &lt; 3000 (the retrigger
+    /// signature) — the filter lives at the assignment site.</summary>
+    public int? RetriggerGapMs { get; set; }
+
+    /// <summary>ms offset (buffer t=0) of the first clear-speech frame outside the
+    /// cue-pickup window (SilenceTrimmer TrimResult.HeadSpeechAtMs); null when none
+    /// or when trim never ran.</summary>
+    public int? HeadSpeechAtMs { get; set; }
+
+    /// <summary>True when head speech lands in the first two 20 ms frames — speech
+    /// predating the recording window. Null when HeadSpeechAtMs is null.</summary>
+    public bool? HeadClipped { get; set; }
     public int? TotalMs { get; set; }                   // hotkey-release -> emit, wall clock
 
     public string FormatLine()
@@ -98,6 +121,12 @@ public sealed class DictationTimingSummary
         sb.Append(" kind=").Append(Kind);
         sb.Append(" outcome=").Append(Outcome);
         AppendCoreMs(sb, "rec", RecordMs);
+        AppendOptMs(sb, "preroll", PrerollMs);
+        AppendOptMs(sb, "arm_latency", ArmLatencyMs);
+        AppendOptMs(sb, "retrigger_gap", RetriggerGapMs);
+        AppendOptMs(sb, "head_speech_at", HeadSpeechAtMs);
+        if (HeadClipped is bool clipped)
+            sb.Append(" head_clipped=").Append(clipped ? "true" : "false");
         AppendCoreMs(sb, "mic_stop", MicStopMs);
         AppendCoreMs(sb, "trim", TrimMs);
         AppendOptMs(sb, "trim_removed", TrimRemovedMs);

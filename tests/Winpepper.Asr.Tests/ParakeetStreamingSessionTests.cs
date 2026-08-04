@@ -336,6 +336,55 @@ public class ParakeetStreamingSessionTests
     }
 
     [Fact]
+    public async Task LeadingSilence_QuietOnsetDilutedInLongPreroll_Unlatches_AndFeedsFromOnset()
+    {
+        // 2026-08-04 head-loss guard: with a 2000 ms mostly-silent pre-roll,
+        // whole-buffer RMS dilutes a quiet onset below the 0.002 floor — 1960 ms
+        // zeros + 40 ms DC 0.005 gives RMS 0.005*sqrt(40/2000) = 0.0007 < 0.002
+        // (the old latch discards the WHOLE buffer, onset included), while the
+        // onset's own 20 ms frames sit at 0.005 >= 0.002. Per-frame latch must
+        // unlatch AND feed from the onset frame: fed audio = 640 (onset) + 8000
+        // (speech push) = 8640 samples -> floor((8640-256)/160)+1 = 53 mel frames
+        // -> exactly ONE 50-frame encode (chunk: 50). The 8000-sample speech
+        // push is the DISCRIMINATOR: under the old whole-buffer latch, push 1 is
+        // discarded whole (onset lost) and push 2 unlatches on its own (RMS 0.02
+        // >= 0.002) but feeds only its own 8000 samples -> floor((8000-256)/160)+1
+        // = 49 mel frames, one short of the 50-frame chunk -> ZERO encodes. Old
+        // code = 0 encodes, new code = 1 encode: this assertion can only pass
+        // when the onset frames were actually fed. (Feeding the whole first buffer
+        // instead would give 40000 samples -> 249 mel frames -> 4 encodes.)
+        var backend = new FakeParakeetBackend();
+        var session = NewSession(backend, chunk: 50, context: 20);
+
+        var preroll = new float[16000 * 2];                    // 2000 ms of zeros...
+        Array.Fill(preroll, 0.005f, 16000 * 2 - 640, 640);     // ...ending in a 40 ms quiet onset
+        await session.PushAsync(preroll, TestContext.Current.CancellationToken);
+
+        var speech = new float[8000];                          // 500 ms of clear speech
+        Array.Fill(speech, 0.02f);
+        await session.PushAsync(speech, TestContext.Current.CancellationToken);
+
+        backend.EncodeMelFrameCounts.Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task LeadingSilence_AllFramesBelowFloor_StaysGated_EvenWhenLong()
+    {
+        // Uniform 0.0019 DC: every 20 ms frame RMS = 0.0019 < 0.002, so the
+        // per-frame latch stays gated exactly like the whole-buffer one did
+        // (pins that granularity did not loosen the floor).
+        var backend = new FakeParakeetBackend();
+        var session = NewSession(backend, chunk: 50, context: 20);
+
+        var below = new float[16000 * 2];
+        Array.Fill(below, 0.0019f);
+        await session.PushAsync(below, TestContext.Current.CancellationToken);
+        await session.PushAsync(below, TestContext.Current.CancellationToken);
+
+        backend.EncodeMelFrameCounts.Count.ShouldBe(0);
+    }
+
+    [Fact]
     public async Task Transcriber_StartsAFreshSessionPerDictation()
     {
         var backend = new FakeParakeetBackend();

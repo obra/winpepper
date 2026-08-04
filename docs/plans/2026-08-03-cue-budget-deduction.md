@@ -83,9 +83,15 @@ see `reports/dedu-sweep.md`).
   after the press cannot reach the 600 ms voiced / 100 ms clear floors
   (`SilenceTrimmer.cs:249`) and the WHOLE dictation drops as silent.
 - Measured: pre-install drop rate 3.7–8%; post-install 4/10 (40%). The
-  four post-install drops all contain real speech (speech runs at
-  820–1180 ms — inside the mask window but past the cue): WAV ids
-  `173b20b3`, `525f0643`, `003777a1`, `4bf32da1`.
+  four post-install drops all contain spectrally-verified real speech
+  (harmonic stacks at F0 ~92–95 Hz with falling contours, matching
+  transcribed positive controls — `reports/V1-audio-content.md`): WAV ids
+  `173b20b3`, `525f0643`, `003777a1`, `4bf32da1`. Speech runs sit at
+  810–1110 ms (in or straddling the mask window, past the cue) for the
+  first three; `4bf32da1`'s run is at 1730–1890 ms — past the window; it
+  dropped because the post-mask STATS starved (P90-silent), not because
+  its tally was excluded. Production logs confirm all four dropped under
+  `cue mask 1000 ms` (`reports/V2-warm-mask-counterfactual.md`).
 - Offline replica reproduces all four deterministically:
   pre-mask-era verdict `pass`, mask-era verdict `DROP:voiced-floor` ×3 and
   `DROP:P90-silent` ×1 (`4bf32da1`).
@@ -158,6 +164,32 @@ clear<100`):
 | 4bf32da1 | 253 | 0.000638 | 720/240 | 260/140 | 620 | 160 | pass |
 | cade05cf | 147 | 0.000786 | 680/380 | 120/120 | 580 | 20 | DROP:voiced-floor |
 | 67518b61 | 97 | 0.000867 | 360/360 | 120/120 | 260 | 20 | DROP:voiced-floor |
+
+### Plan validation (2026-08-03 load-bearing pass — verified facts)
+
+An assumption-validation pass ran before execution; ledger + full evidence:
+`/home/dan/code/winpepper/.worktrees/.the-usual-logs/cue-budget-deduction/load-bearing-ledger.md`
+(+ `reports/V1..V4`). Facts the implementer may rely on:
+
+- All four regression WAVs are spectrally-verified real speech; both escape
+  clips are cue/noise-only (no voiced frames); both escapes passed under the
+  PRE-mask-era gate (V1, V2).
+- Production logs (`/mnt/c/.../winpepper/logs/winpepper-20260803.log`) show
+  `cue mask 1000 ms` for all four field drops, and the replica reproduces
+  the logged voiced/clear/max-RMS exactly. All 200 fixture clips are warm
+  (durationMs − recordMs ∈ [492, 513] ms), so the fixed mask-1000 replay is
+  faithful (V2).
+- Verdicts are robust at the knife edges: 0/200 clips flip under ±0.5-LSB
+  dither or ±0.5% amplitude perturbation in either era config; the budget
+  acceptance window is exactly 100–120 ms as stated above (V3).
+- `./scripts/windows-gate.sh` ran GREEN from THIS worktree (attempt 1,
+  ~9 min, 2402 tests, `PipelineHost.cs` compile diagnostics observed), and
+  `./scripts/linux-tests.sh` ran GREEN immediately after it (1658 tests) —
+  Task 5's exact sequence is pre-proven on this machine (V4).
+- Accepted residual risks (do NOT re-litigate during implementation; they are
+  recorded decisions): cross-config cue pickup, single-user corpus
+  generalization, budget linearity beyond the 150 ms asset, cold-session
+  escapes. Details in the ledger.
 
 ---
 
@@ -293,7 +325,10 @@ In `src/Winpepper.Audio/StartCueGateMask.cs`, append inside the class
     /// deducted is a ms of the user's prompt speech preserved. Archive
     /// sweep (two frozen 100-clip corpora, budgets 0-400 ms): the window
     /// satisfying all regression/escape criteria is 100-120 ms; cueMs - 50
-    /// = 100 sits at maximum regression margin. Evidence:
+    /// = 100 sits at maximum regression margin. NOTE: the 50 ms margin is
+    /// validated ONLY at the 150 ms shipped asset; if the cue asset
+    /// materially changes, re-run the archive sweep before trusting the
+    /// derived budget. Evidence:
     /// docs/plans/2026-07-29-cleanup-asr-contention-evidence.md
     /// (cue-budget deduction section).
     /// </summary>
@@ -1229,13 +1264,17 @@ actual counts printed by Step 1 — placeholders must NOT be committed):
   first ~500 ms of post-hotkey time. Prompt short replies could not
   reach the 600 ms voiced / 100 ms clear floors and dropped whole.
   Owner-measured: 4/10 dictations dropped in the first 30 minutes on the
-  build (pre-install baseline 3.7-8%). The four drops all contain real
-  speech at 820-1180 ms: WAVs `173b20b3`, `525f0643`, `003777a1`,
-  `4bf32da1`. Replica-CONFIRMED offline: pre-era pass, mask-era drop
-  (`voiced-floor` x3, `P90-silent` x1) for all four. The 2026-08-02
-  plan's accepted residual only covered utterances ENTIRELY inside the
-  mask; these extend past it, and the 0/91 corpus contained no
-  quick-short-reply dictations of this shape (its A6 caveat fired).
+  build (pre-install baseline 3.7-8%). The four drops all contain
+  spectrally-verified real speech (F0 ~92-95 Hz, matches transcribed
+  controls): runs at 810-1110 ms for `173b20b3`/`525f0643`/`003777a1`,
+  1730-1890 ms for `4bf32da1`. Production logs confirm all four dropped
+  under `cue mask 1000 ms`. Replica-CONFIRMED offline: pre-era pass,
+  mask-era drop (`voiced-floor` x3, `P90-silent` x1) for all four. The
+  2026-08-02 plan's accepted residual only covered utterances ENTIRELY
+  inside the mask; the field class is broader -- prompt short replies in
+  or straddling the window (x3) plus a long quiet clip P90-silenced by
+  post-mask stats starvation (x1) -- and the 0/91 corpus contained no
+  dictations of either shape (its A6 caveat fired).
 - FIX: cue-budget DEDUCTION replaces window exclusion
   (`SilenceTrimmer.cs`, `StartCueGateMask.ComputeCueBudgetMs`). In-window
   frames count normally; up to budget = measured cueMs -
@@ -1262,14 +1301,25 @@ actual counts printed by Step 1 — placeholders must NOT be committed):
   mask 1000 / budget 100): 4/4 regression WAVs PASS; 0 drop->pass flips
   on either corpus (all genuinely-silent drops UNCHANGED); cue-only
   escapes still drop (live `cade05cf`, frozen beep escape `67518b61` of
-  the 2026-08-02 20:18 class); 0 pass->drop flips among real
-  transcribed dictations on BOTH corpora (0/88 live, 0/91 frozen); trim
+  the 2026-08-02 20:18 class; both spectrally verified noise-only, both
+  passed under the PRE-mask-era gate); 0 pass->drop flips among real
+  transcribed dictations on BOTH corpora (0/88 live, 0/93 frozen); trim
   walker diffs 0/<live dual-passer count> and 0/<frozen dual-passer
   count> — trimming invariant HOLDS.
 - Unit pins: budget derivation from the MEASURED cue (150 -> 100, 300 ->
   250, disabled/unmeasured -> 0); beep-only zero-out; prompt-short-reply
   pass; fully-in-window utterance now passes (the old KnownResidual is
   FIXED); mask=0 byte-identity and trim-offset invariance unchanged.
+- Residual risks ACCEPTED (2026-08-03 load-bearing pass; ledger +
+  decision records in the evidence dir): cross-config cue pickup (louder
+  speakers/reverb could push clear pickup >= 200 ms and reopen the
+  beep-only escape; zero-pickup headphone-shaped sessions exist in-corpus
+  with no near-floor passers), single-user corpus generalization (binding
+  margins are 1-2 frames, on the two empty-transcript boundary clips
+  only), budget linearity beyond the 150 ms asset (re-run the sweep on
+  asset change), cold-session escapes (no cold clip exists; the mask
+  construction keeps cue pickup in-window). Watch post-install drop log
+  lines (which now include the cue budget).
 - Evidence dir:
   `/home/dan/code/winpepper/.worktrees/.the-usual-logs/cue-budget-deduction/`
   (`reports/dedu-sweep.md` budget sweep, `reports/source-code.md`,

@@ -1377,3 +1377,92 @@ Co-authored-by: Amplifier <amplifier@users.noreply.github.com>"
 ```
 
 Do NOT push. The root session merges, gates, and installs.
+
+---
+
+## Evidence
+
+**Run resumed:** 2026-08-04, on branch `feat/models-page-ux`, rebased onto
+`main @ 3ddbd90` (cleanup-honesty UI series merged: `CleanupSettingsViewModel`
+gained `PromptSettingsSupported`/`RefreshModelCapabilities`, `CleanupPage`
+gained `ApplyModelCapabilities`; both are keyed off `PromptSettingsSupported`,
+a different property than `Enabled`, so Task 5's gate composes without
+conflict — verified by reading the current `CleanupPage.xaml.cs` before
+wiring Task 5).
+
+**Starting state:** Tasks 1, 1b, 2, 3 were already committed. A WIP commit
+(`850d524`) contained Task 4's XAML + code-behind changes in full (verified
+by diffing it against this plan's Task 4 spec line-for-line — it matched
+exactly), left uncommitted-as-a-task-commit and mislabeled "partial Task
+5/6." Tasks 5 and 6 had not been started.
+
+**Linux suite results (this run):**
+- Before any change (baseline re-check): `LINUX SUITE: GREEN`, 1716 tests.
+- After rewording the WIP commit into the Task 4 commit (no code changes,
+  content already matched spec): not re-run (no diff); baseline above covers it.
+- After Task 5 (cleanup gate) changes: `LINUX SUITE: GREEN`, 1716 tests
+  (Task 5 only touches `#if WINDOWS`-gated files + docs, so the Linux-run
+  project set is unaffected).
+- After Task 6 (removed `DownloadMissingAsync`/`DownloadStreamingAsync`,
+  migrated 3 test files): `LINUX SUITE: GREEN`, 1713 tests (3 fewer than
+  1716 — exactly the three superseded-semantics tests the plan calls out
+  for deletion: `DownloadMissingAsync_ManualInstallOnlySelection_IsSkippedGracefully`,
+  `DownloadMissingAsync_OnlyEnqueuesMissingSelected`,
+  `DownloadMissingAsync_AlwaysRoutesSelectedAsrThroughAuthoritativeProvisioning`).
+- No flakes encountered.
+
+**Windows gate: NOT run in this session.** The orchestrating instructions
+for this run explicitly reserved `./scripts/windows-gate.sh` for the root
+session ("Do NOT run the Windows gate — root session handles it"), overriding
+this plan's per-task gate step. This is a deliberate, disclosed deviation, not
+an oversight: every `#if WINDOWS` change in Tasks 3–6 was instead verified by
+direct code review (full-file reads of `ModelsPage.xaml`/`ModelsPage.xaml.cs`
+before and after each edit, cross-checked line-for-line against this plan's
+specified XAML/C# blocks) rather than by compiling. **This is not a substitute
+for the gate** — the root session's Windows-gate run is the sole authority
+for "the WinUI XAML actually compiles." See "What the Windows gate must
+prove," below.
+
+**Commit SHAs (Tasks 1–6, current `feat/models-page-ux` head):**
+| Task | SHA | Subject |
+|---|---|---|
+| 1 | `1280cfc` | feat(models): SelectedModelsPolicy — pure decisions |
+| 1b | `0998a0b` | feat(models): ModelDescriptor.IsFullyInstalledAndExtracted |
+| 2 | `c2d8f13` | feat(models): ModelsTabViewModel.DownloadSelectedAsync |
+| 3 | `9958815` | feat(app): streaming model card becomes a registry-driven dropdown |
+| 4 | `921eb43` | feat(app): download button fetches only selected-and-missing models (reworded from WIP `850d524` in this run) |
+| 5 | `de675fa` | feat(app): gate the Models page cleanup card on CleanupEnabled |
+| 6 | `84b3833` | refactor(models): remove DownloadMissingAsync/DownloadStreamingAsync |
+
+**What the Windows gate must prove (owner/root-session checklist):**
+1. `Winpepper.App` builds Release with `-p:UseXamlCompilerExecutable=true` —
+   the XAML compiler resolves every new/changed binding and event handler:
+   `StreamingCombo` → `OnStreamingChanged`, `DownloadSelectedButton` →
+   `OnDownloadSelected`, `ManualInstallNote`, `CleanupDisabledNote`, and the
+   `x:Bind ViewModel.StreamingCard.Available` binding.
+2. No stale references to the deleted `OnInstallStreamingModel` /
+   `StreamingModelInstallButton` (old streaming install button) or the old
+   `OnDownloadMissing` handler name remain anywhere in XAML.
+3. All 9 test projects (12 project/TFM runs) still build and pass on the
+   Windows SDK, per `AGENTS.md`'s full-suite requirement — `Winpepper.Models.Tests`
+   in particular, since Task 6's migrated tests exercise real file I/O
+   (extraction markers, temp dirs) that only partially overlaps what the
+   Linux run above already proved.
+
+**On-device smoke checklist (owner's post-install verification):**
+1. Streaming model installed: streaming card shows a dropdown with
+   'Nemotron Speech Streaming (0.6B, Q8_0 GGUF, English)' selected and
+   'Installed'; the old 'Install streaming model' button is gone.
+2. Select an uninstalled model in any dropdown: bottom button reads
+   'Download selected models' and enables.
+3. Everything selected is installed: bottom button is disabled
+   (grayed, still visible).
+4. Select the Sotto cleanup model while it is not installed: inline
+   manual-install note appears; the download button does not attempt it.
+5. Cleanup tab -> turn cleanup off -> back to Models: cleanup combo is
+   grayed with the note 'Cleanup is turned off — enable it in the
+   Cleanup tab to choose a model.'; selection preserved. Turn cleanup
+   on -> combo re-enables, note disappears.
+6. Download a missing model via the button: per-file progress rows
+   appear under the matching card; on completion the label flips to
+   'Installed' and the button grays out if nothing else is missing.

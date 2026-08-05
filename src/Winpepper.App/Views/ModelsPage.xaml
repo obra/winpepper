@@ -158,6 +158,13 @@
                               ItemsSource="{x:Bind ViewModel.CleanupCard.Available, Mode=OneWay}"
                               DisplayMemberPath="DisplayName"
                               SelectionChanged="OnCleanupChanged" />
+                    <TextBlock x:Name="CleanupDisabledNote"
+                               AutomationProperties.AutomationId="ModelsCleanupDisabledNote"
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed"
+                               Text="Cleanup is turned off — enable it in the Cleanup tab to choose a model." />
                     <ListView ItemsSource="{x:Bind ViewModel.CleanupCard.ProgressByFile, Mode=OneWay}" SelectionMode="None">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem">

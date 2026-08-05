@@ -77,6 +77,7 @@ instance first (e.g. `RecordingHoldHotkeyBox`), then search its descendants.
 | `ModelsStreamingCombo` | ComboBox | Streaming model selection (streaming card) |
 | `ModelsDownloadButton` | Button | Download selected models |
 | `ModelsManualInstallNote` | TextBlock | Models page, inline note shown when a selected model is manual-install only |
+| `ModelsCleanupDisabledNote` | TextBlock | Models page, note shown when cleanup is disabled and the cleanup model chooser is gated off |
 
 ## Corrections (`Views/CorrectionsPage.xaml`)
 

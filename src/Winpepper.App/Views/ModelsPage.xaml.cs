@@ -23,6 +23,7 @@ public sealed partial class ModelsPage : Page
     private bool _asrSelectedVerified;
     private CancellationTokenSource? _lifetimeCts;
     private EventHandler<StreamingAutoInstallStatus>? _autoInstallStatusChanged;
+    private System.ComponentModel.PropertyChangedEventHandler? _cleanupVmChanged;
 
     public ModelsTabViewModel ViewModel { get; private set; } = null!;
 
@@ -68,6 +69,27 @@ public sealed partial class ModelsPage : Page
         AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
         StreamingCombo.SelectedItem = ViewModel.StreamingCard.SelectedDescriptor;
+
+        // Cleanup gate: seed from the shell's live cleanup view-model (the
+        // page is rebuilt per navigation, so this re-seed alone covers the
+        // "toggled in the Cleanup tab, came back" flow), then subscribe for
+        // flips that happen while this page is open. There is no
+        // settings-level change event; CleanupVm is the one live channel.
+        var cleanupVm = App.Shell!.CleanupVm;
+        _cleanupEnabled = cleanupVm.Enabled;
+        ApplyCleanupGate();
+        if (_cleanupVmChanged is not null) cleanupVm.PropertyChanged -= _cleanupVmChanged;
+        _cleanupVmChanged = (_, args) =>
+        {
+            if (args.PropertyName == nameof(Winpepper.Core.ViewModels.CleanupSettingsViewModel.Enabled))
+            {
+                _cleanupEnabled = App.Shell!.CleanupVm.Enabled;
+                ApplyCleanupGate();
+                UpdateDownloadButtonState(); // gate changes what counts as "selected"
+            }
+        };
+        cleanupVm.PropertyChanged += _cleanupVmChanged;
+
         // The background auto-install may finish (or fail) while this page is
         // open; refresh the streaming card's state line when it does.
         _autoInstallStatusChanged = (_, _) => DispatcherQueue.TryEnqueue(UpdateInstalledLabels);
@@ -382,6 +404,19 @@ public sealed partial class ModelsPage : Page
         return SelectedModelsPolicy.BuildSelection(asr, streaming, cleanup, _cleanupEnabled);
     }
 
+    /// <summary>
+    /// Gray out (never hide, never clear) the cleanup model chooser while
+    /// cleanup is off — mirrors CleanupPage.ApplyModelCapabilities. The
+    /// selection is preserved; only the combo disables and the note shows.
+    /// </summary>
+    private void ApplyCleanupGate()
+    {
+        CleanupCombo.IsEnabled = SelectedModelsPolicy.CleanupCardEnabled(_cleanupEnabled);
+        CleanupDisabledNote.Visibility =
+            SelectedModelsPolicy.CleanupOffNoteVisible(_cleanupEnabled)
+                ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     private void UpdateDownloadButtonState()
     {
         var selection = CurrentSelection();
@@ -444,6 +479,11 @@ public sealed partial class ModelsPage : Page
         {
             App.Shell!.StreamingAutoInstaller.StatusChanged -= _autoInstallStatusChanged;
             _autoInstallStatusChanged = null;
+        }
+        if (_cleanupVmChanged is not null)
+        {
+            App.Shell!.CleanupVm.PropertyChanged -= _cleanupVmChanged;
+            _cleanupVmChanged = null;
         }
         _lifetimeCts?.Cancel();
         _lifetimeCts?.Dispose();

@@ -43,7 +43,8 @@ public class ModelsTabViewModelStreamingTests : IDisposable
         var fake = new FakeDownloader();
         var vm = CreateVm(fake);
 
-        await vm.DownloadStreamingAsync(TestContext.Current.CancellationToken);
+        await vm.DownloadSelectedAsync(
+            new[] { new ModelRegistry().Find(ModelRegistry.StreamingAsrName)! }, TestContext.Current.CancellationToken);
 
         Assert.Equal(new[] { ModelRegistry.StreamingAsrName }, fake.DownloadedNames);
     }
@@ -73,7 +74,8 @@ public class ModelsTabViewModelStreamingTests : IDisposable
         var fake = new FakeDownloader();
         var vm = CreateVm(fake);
 
-        await vm.DownloadStreamingAsync(TestContext.Current.CancellationToken);
+        await vm.DownloadSelectedAsync(
+            new[] { new ModelRegistry().Find(ModelRegistry.StreamingAsrName)! }, TestContext.Current.CancellationToken);
 
         Assert.Equal(new[] { ModelRegistry.StreamingAsrName }, fake.DownloadedNames);
     }
@@ -109,7 +111,8 @@ public class ModelsTabViewModelStreamingTests : IDisposable
         var fake = new FakeDownloader();
         var vm = CreateVm(fake);
 
-        await vm.DownloadStreamingAsync(TestContext.Current.CancellationToken);
+        await vm.DownloadSelectedAsync(
+            new[] { new ModelRegistry().Find(ModelRegistry.StreamingAsrName)! }, TestContext.Current.CancellationToken);
 
         Assert.Equal(new[] { ModelRegistry.StreamingAsrName }, fake.DownloadedNames);
     }
@@ -120,7 +123,8 @@ public class ModelsTabViewModelStreamingTests : IDisposable
         var fake = new FakeDownloader();
         var vm = CreateVm(fake);
 
-        await vm.DownloadStreamingAsync(TestContext.Current.CancellationToken);
+        await vm.DownloadSelectedAsync(
+            new[] { new ModelRegistry().Find(ModelRegistry.StreamingAsrName)! }, TestContext.Current.CancellationToken);
 
         var progress = Assert.Single(vm.StreamingCard.ProgressByFile);
         Assert.Equal(ModelRegistry.StreamingAsrName, progress.DescriptorName);

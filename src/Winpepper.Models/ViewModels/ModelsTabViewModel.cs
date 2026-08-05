@@ -61,60 +61,6 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
     public ModelCardViewModel CleanupCard { get; }
     public ModelCardViewModel StreamingCard { get; }
 
-    public async Task DownloadMissingAsync(CancellationToken ct)
-    {
-        await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            var resolver = new MissingModelsResolver();
-            var selected = new List<ModelDescriptor>();
-            if (AsrCard.SelectedDescriptor is { } asr)
-            {
-                // ASR must always reach the authoritative provisioning path:
-                // presence-only checks cannot distinguish ready files from a
-                // corrupt or obsolete nonempty installation.
-                selected.Add(asr);
-            }
-            selected.AddRange(resolver.FindMissing(
-                _registry.All, _installRoot, [CleanupCard.SelectedName]));
-
-            foreach (var d in selected)
-                await DownloadOneAsync(d, ct).ConfigureAwait(false);
-
-            AsrCard.RaiseIsSelectedInstalledChanged();
-            CleanupCard.RaiseIsSelectedInstalledChanged();
-        }
-        finally
-        {
-            _downloadGate.Release();
-        }
-    }
-
-    public async Task DownloadStreamingAsync(CancellationToken ct)
-    {
-        await _downloadGate.WaitAsync(ct).ConfigureAwait(false);
-        try
-        {
-            // The streaming model is exactly the nemotron descriptor.
-            // No pre-filter on IsFullyInstalled: presence-only checks cannot
-            // distinguish ready files from a corrupt installation (e.g. the
-            // archive downloaded but extraction failed or the runtime tree was
-            // deleted). Always route through the downloader, whose verify
-            // short-circuit keeps a healthy install cheap and whose
-            // EnsureExtracted heal path repairs a broken one.
-            var selected = new[] { _registry.Find(ModelRegistry.StreamingAsrName)! };
-
-            foreach (var d in selected)
-                await DownloadOneAsync(d, ct).ConfigureAwait(false);
-
-            StreamingCard.RaiseIsSelectedInstalledChanged();
-        }
-        finally
-        {
-            _downloadGate.Release();
-        }
-    }
-
     /// <summary>
     /// Downloads exactly the given descriptors — the page computes the
     /// "selected and missing" set via SelectedModelsPolicy, so this method

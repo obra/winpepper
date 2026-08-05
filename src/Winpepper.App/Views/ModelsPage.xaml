@@ -158,6 +158,13 @@
                               ItemsSource="{x:Bind ViewModel.CleanupCard.Available, Mode=OneWay}"
                               DisplayMemberPath="DisplayName"
                               SelectionChanged="OnCleanupChanged" />
+                    <TextBlock x:Name="CleanupDisabledNote"
+                               AutomationProperties.AutomationId="ModelsCleanupDisabledNote"
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed"
+                               Text="Cleanup is turned off — enable it in the Cleanup tab to choose a model." />
                     <ListView ItemsSource="{x:Bind ViewModel.CleanupCard.ProgressByFile, Mode=OneWay}" SelectionMode="None">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem">
@@ -210,6 +217,13 @@
                         <FontIcon x:Name="StreamingNotInstalledIcon" Glyph="&#xE896;" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" Visibility="Collapsed" />
                         <TextBlock x:Name="StreamingInstalledText" AutomationProperties.AutomationId="ModelsStreamingInstalledLabel" VerticalAlignment="Center" />
                     </StackPanel>
+                    <ComboBox x:Name="StreamingCombo"
+                              AutomationProperties.AutomationId="ModelsStreamingCombo"
+                              Header="Active model"
+                              HorizontalAlignment="Stretch"
+                              ItemsSource="{x:Bind ViewModel.StreamingCard.Available, Mode=OneWay}"
+                              DisplayMemberPath="DisplayName"
+                              SelectionChanged="OnStreamingChanged" />
                     <ListView ItemsSource="{x:Bind ViewModel.StreamingCard.ProgressByFile, Mode=OneWay}" SelectionMode="None">
                         <ListView.ItemContainerStyle>
                             <Style TargetType="ListViewItem">
@@ -239,27 +253,26 @@
                             </DataTemplate>
                         </ListView.ItemTemplate>
                     </ListView>
-                    <Button x:Name="StreamingModelInstallButton"
-                            Click="OnInstallStreamingModel"
-                            AutomationProperties.AutomationId="StreamingModelInstallButton"
-                            HorizontalAlignment="Left">
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <FontIcon Glyph="&#xE896;" FontSize="16" />
-                            <TextBlock Text="Install streaming model" />
-                        </StackPanel>
-                    </Button>
                 </StackPanel>
             </Border>
 
-            <Button Click="OnDownloadMissing"
+            <Button x:Name="DownloadSelectedButton"
+                    Click="OnDownloadSelected"
                     AutomationProperties.AutomationId="ModelsDownloadButton"
+                    ToolTipService.ToolTip="Downloads the models chosen above that aren't installed yet."
                     Style="{StaticResource AccentButtonStyle}"
                     HorizontalAlignment="Left">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <FontIcon Glyph="&#xE896;" FontSize="16" />
-                    <TextBlock Text="Download missing models" />
+                    <TextBlock Text="Download selected models" />
                 </StackPanel>
             </Button>
+            <TextBlock x:Name="ManualInstallNote"
+                       AutomationProperties.AutomationId="ModelsManualInstallNote"
+                       Style="{ThemeResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Visibility="Collapsed" />
         </StackPanel>
     </ScrollViewer>
 </Page>

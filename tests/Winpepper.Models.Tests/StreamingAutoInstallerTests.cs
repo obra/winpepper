@@ -215,7 +215,9 @@ public class StreamingAutoInstallerTests : IDisposable
 
         var auto = installer.StartAsync(streamingEnabled: true, TestContext.Current.CancellationToken);
         await fake.Entered(1);
-        var card = vm.DownloadStreamingAsync(TestContext.Current.CancellationToken);
+        var card = vm.DownloadSelectedAsync(
+            new[] { new ModelRegistry().Find(ModelRegistry.StreamingAsrName)! },
+            TestContext.Current.CancellationToken);
 
         // If the gate were NOT shared, the card download would enter the
         // downloader while the auto-install is still inside it and the overlap

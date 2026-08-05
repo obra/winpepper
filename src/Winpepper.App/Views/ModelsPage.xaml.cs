@@ -11,10 +11,19 @@ namespace Winpepper.App.Views;
 public sealed partial class ModelsPage : Page
 {
     private bool _downloadInProgress;
-    private bool _streamingDownloadInProgress;
+
+    // Seeded from the cleanup gate in OnNavigatedTo (Task 5 wires it to
+    // App.Shell.CleanupVm.Enabled); until then cleanup counts as enabled,
+    // which matches today's behavior.
+    private bool _cleanupEnabled = true;
+
+    // True while a bottom-button run that includes the streaming model is
+    // in flight, so the streaming state line can honestly say "Installing…".
+    private bool _downloadRunIncludesStreaming;
     private bool _asrSelectedVerified;
     private CancellationTokenSource? _lifetimeCts;
     private EventHandler<StreamingAutoInstallStatus>? _autoInstallStatusChanged;
+    private System.ComponentModel.PropertyChangedEventHandler? _cleanupVmChanged;
 
     public ModelsTabViewModel ViewModel { get; private set; } = null!;
 
@@ -59,6 +68,28 @@ public sealed partial class ModelsPage : Page
 
         AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
+        StreamingCombo.SelectedItem = ViewModel.StreamingCard.SelectedDescriptor;
+
+        // Cleanup gate: seed from the shell's live cleanup view-model (the
+        // page is rebuilt per navigation, so this re-seed alone covers the
+        // "toggled in the Cleanup tab, came back" flow), then subscribe for
+        // flips that happen while this page is open. There is no
+        // settings-level change event; CleanupVm is the one live channel.
+        var cleanupVm = App.Shell!.CleanupVm;
+        _cleanupEnabled = cleanupVm.Enabled;
+        ApplyCleanupGate();
+        if (_cleanupVmChanged is not null) cleanupVm.PropertyChanged -= _cleanupVmChanged;
+        _cleanupVmChanged = (_, args) =>
+        {
+            if (args.PropertyName == nameof(Winpepper.Core.ViewModels.CleanupSettingsViewModel.Enabled))
+            {
+                _cleanupEnabled = App.Shell!.CleanupVm.Enabled;
+                ApplyCleanupGate();
+                UpdateDownloadButtonState(); // gate changes what counts as "selected"
+            }
+        };
+        cleanupVm.PropertyChanged += _cleanupVmChanged;
+
         // The background auto-install may finish (or fail) while this page is
         // open; refresh the streaming card's state line when it does.
         _autoInstallStatusChanged = (_, _) => DispatcherQueue.TryEnqueue(UpdateInstalledLabels);
@@ -120,6 +151,20 @@ public sealed partial class ModelsPage : Page
         {
             ViewModel.CleanupCard.SelectedName = d.Name;
             ViewModel.CleanupCard.CommitSelection();
+            UpdateInstalledLabels();
+        }
+    }
+
+    private void OnStreamingChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (StreamingCombo.SelectedItem is ModelDescriptor d)
+        {
+            // Streaming has no selection slot and no setting: the registry
+            // pins the active streaming model, so the card's promote callback
+            // is a deliberate no-op. The combo exists so future registry
+            // entries appear automatically and feed the download button.
+            ViewModel.StreamingCard.SelectedName = d.Name;
+            ViewModel.StreamingCard.CommitSelection();
             UpdateInstalledLabels();
         }
     }
@@ -284,77 +329,115 @@ public sealed partial class ModelsPage : Page
         };
     }
 
-    private async void OnDownloadMissing(object sender, RoutedEventArgs e)
+    private async void OnDownloadSelected(object sender, RoutedEventArgs e)
     {
         if (_downloadInProgress) return;
+
+        var selection = CurrentSelection();
+        var names = SelectedModelsPolicy.DownloadableMissingNames(selection);
+        if (names.Count == 0) return; // button should already be disabled; belt-and-braces
+
+        var shell = App.Shell!;
+        var registry = shell.ModelsServices.Registry;
+        var descriptors = names.Select(n => registry.Find(n)!).ToList();
+
         _downloadInProgress = true;
-        var button = sender as Button;
-        if (button is not null) button.IsEnabled = false;
+        _downloadRunIncludesStreaming =
+            descriptors.Any(d => d.Kind == ModelKind.StreamingAsr);
+        UpdateInstalledLabels(); // disables the button + shows "Installing…" where honest
 
         try
         {
-            await ViewModel.DownloadMissingAsync(_lifetimeCts?.Token ?? CancellationToken.None);
-            UpdateInstalledLabels();
+            await ViewModel.DownloadSelectedAsync(descriptors, _lifetimeCts?.Token ?? CancellationToken.None);
+
+            // Refresh the verified ASR flag off-thread so the label and the
+            // button's enable state reflect the download that just finished
+            // (previously the verify result was discarded and the label went
+            // stale). This also primes ModelsServices' verified-readiness
+            // cache so the synchronous check inside TryStart() below is a
+            // cache hit, not a dispatcher-blocking re-hash.
+            var canonicalAsr = registry
+                .ResolveOrDefault(shell.AsrModelSelection.Read(), ModelKind.Asr).Name;
+            _asrSelectedVerified = await Task.Run(() => shell.ModelsServices.VerifyAsrModelReady(canonicalAsr));
 
             // If the pipeline was left disabled at boot because models were
             // missing (issue #6), bring it up now that the download finished.
-            // The readiness check inside TryStart() does a full size + SHA-256
-            // (~1.1 GB) that must NOT run on the UI thread, so verify off-thread
-            // first — this primes ModelsServices' verified-readiness cache so the
-            // synchronous check inside TryStart() below is a cache hit, not a
-            // dispatcher-blocking re-hash.
-            var shell = App.Shell!;
-            var canonicalAsr = shell.ModelsServices.Registry
-                .ResolveOrDefault(shell.AsrModelSelection.Read(), ModelKind.Asr).Name;
-            await Task.Run(() => shell.ModelsServices.VerifyAsrModelReady(canonicalAsr));
             shell.Pipeline.TryStart();
         }
         catch (OperationCanceledException)
         {
-            // A future cancel button can use this path without surfacing a
-            // cancellation as an application crash.
+            // Navigation away cancels _lifetimeCts; cancellation must not
+            // surface as an application crash.
         }
         catch (Exception ex)
         {
-            var shell = App.Shell!;
             shell.LogFactory.CreateLogger<ModelsPage>()
                 .LogError(ex, "Model download failed");
             shell.ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
         }
         finally
         {
-            if (button is not null) button.IsEnabled = true;
             _downloadInProgress = false;
+            _downloadRunIncludesStreaming = false;
+            // Recompute rather than blindly re-enable: if everything the
+            // dropdowns choose is now installed, the button must gray out.
+            UpdateInstalledLabels();
         }
     }
 
-    private async void OnInstallStreamingModel(object sender, RoutedEventArgs e)
+    /// <summary>
+    /// Snapshot of what the page's dropdowns currently choose, using the
+    /// SAME installed-state sources the page already renders: the
+    /// hash-verified flag for ASR, presence checks for cleanup/streaming.
+    /// </summary>
+    private IReadOnlyList<SelectedModelsPolicy.SelectedModel> CurrentSelection()
     {
-        if (_streamingDownloadInProgress) return;
-        _streamingDownloadInProgress = true;
-        var button = sender as Button;
-        if (button is not null) button.IsEnabled = false;
+        var models = App.Shell!.ModelsServices;
 
-        try
+        SelectedModelsPolicy.SelectedModel? asr = ViewModel.AsrCard.SelectedDescriptor is { } a
+            ? new(a.Name, _asrSelectedVerified, a.ManualInstallOnly) : null;
+        SelectedModelsPolicy.SelectedModel? streaming = ViewModel.StreamingCard.SelectedDescriptor is { } s
+            ? new(s.Name, s.IsFullyInstalledAndExtracted(models.ModelsRoot), s.ManualInstallOnly) : null;
+        SelectedModelsPolicy.SelectedModel? cleanup = ViewModel.CleanupCard.SelectedDescriptor is { } c
+            ? new(c.Name, ViewModel.CleanupCard.IsSelectedInstalled, c.ManualInstallOnly) : null;
+
+        return SelectedModelsPolicy.BuildSelection(asr, streaming, cleanup, _cleanupEnabled);
+    }
+
+    /// <summary>
+    /// Gray out (never hide, never clear) the cleanup model chooser while
+    /// cleanup is off — mirrors CleanupPage.ApplyModelCapabilities. The
+    /// selection is preserved; only the combo disables and the note shows.
+    /// </summary>
+    private void ApplyCleanupGate()
+    {
+        CleanupCombo.IsEnabled = SelectedModelsPolicy.CleanupCardEnabled(_cleanupEnabled);
+        CleanupDisabledNote.Visibility =
+            SelectedModelsPolicy.CleanupOffNoteVisible(_cleanupEnabled)
+                ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void UpdateDownloadButtonState()
+    {
+        var selection = CurrentSelection();
+
+        // Disabled (grayed, not hidden) whenever its only effect is already
+        // satisfied — and always while a run is in flight.
+        DownloadSelectedButton.IsEnabled =
+            !_downloadInProgress && SelectedModelsPolicy.DownloadButtonEnabled(selection);
+
+        var manualNames = SelectedModelsPolicy.ManualOnlyMissingNames(selection);
+        if (manualNames.Count > 0)
         {
-            await ViewModel.DownloadStreamingAsync(_lifetimeCts?.Token ?? CancellationToken.None);
-            UpdateInstalledLabels();
+            var registry = App.Shell!.ModelsServices.Registry;
+            var displays = manualNames.Select(n => registry.Find(n)?.DisplayName ?? n);
+            ManualInstallNote.Text =
+                $"{string.Join(", ", displays)} must be installed manually — the download button can't fetch it.";
+            ManualInstallNote.Visibility = Visibility.Visible;
         }
-        catch (OperationCanceledException)
+        else
         {
-            // Mirrors OnDownloadMissing: cancellation must not surface as a crash.
-        }
-        catch (Exception ex)
-        {
-            var shell = App.Shell!;
-            shell.LogFactory.CreateLogger<ModelsPage>()
-                .LogError(ex, "Streaming model download failed");
-            shell.ErrorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
-        }
-        finally
-        {
-            if (button is not null) button.IsEnabled = true;
-            _streamingDownloadInProgress = false;
+            ManualInstallNote.Visibility = Visibility.Collapsed;
         }
     }
 
@@ -371,21 +454,23 @@ public sealed partial class ModelsPage : Page
         CleanupNotInstalledIcon.Visibility = cleanupInstalled ? Visibility.Collapsed : Visibility.Visible;
 
         var models = App.Shell!.ModelsServices;
-        var streamingInstalled = models.Registry.Find(ModelRegistry.StreamingAsrName)!
-            .IsFullyInstalled(models.ModelsRoot);
+        var streamingInstalled = ViewModel.StreamingCard.SelectedDescriptor
+            ?.IsFullyInstalledAndExtracted(models.ModelsRoot) ?? false;
         // The background auto-install (AppShell.StartAsync) shares the page's
         // operation gate, so an Install click during it simply waits its turn
         // and then verify-short-circuits — but the state line must be honest
         // about what is happening right now.
         var autoStatus = App.Shell!.StreamingAutoInstaller.Status;
-        var streamingBusy = _streamingDownloadInProgress
+        var streamingBusy = (_downloadInProgress && _downloadRunIncludesStreaming)
             || autoStatus == StreamingAutoInstallStatus.Installing;
         StreamingInstalledText.Text = streamingInstalled ? "Installed"
             : streamingBusy ? "Installing\u2026"
-            : autoStatus == StreamingAutoInstallStatus.Failed ? "Install failed \u2014 use Install to retry"
+            : autoStatus == StreamingAutoInstallStatus.Failed ? "Install failed \u2014 use the download button to retry"
             : "Not downloaded";
         StreamingInstalledIcon.Visibility = streamingInstalled ? Visibility.Visible : Visibility.Collapsed;
         StreamingNotInstalledIcon.Visibility = streamingInstalled ? Visibility.Collapsed : Visibility.Visible;
+
+        UpdateDownloadButtonState();
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -394,6 +479,11 @@ public sealed partial class ModelsPage : Page
         {
             App.Shell!.StreamingAutoInstaller.StatusChanged -= _autoInstallStatusChanged;
             _autoInstallStatusChanged = null;
+        }
+        if (_cleanupVmChanged is not null)
+        {
+            App.Shell!.CleanupVm.PropertyChanged -= _cleanupVmChanged;
+            _cleanupVmChanged = null;
         }
         _lifetimeCts?.Cancel();
         _lifetimeCts?.Dispose();

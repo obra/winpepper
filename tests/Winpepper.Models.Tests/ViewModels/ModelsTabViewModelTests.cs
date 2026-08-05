@@ -63,68 +63,17 @@ public class ModelsTabViewModelTests : IDisposable
     }
 
     [Fact]
-    public async Task DownloadMissingAsync_ManualInstallOnlySelection_IsSkippedGracefully()
+    public async Task DownloadSelectedAsync_DoesNotCaptureAmbientUiContextForEitherDescriptor()
     {
         var registry = new ModelRegistry();
-        var fake = new FakeDownloader();
-        var vm = new ModelsTabViewModel(registry, _root, fake,
-            currentAsrName: "parakeet-tdt-0.6b-v3",
-            currentCleanupName: "sotto-cleanup-lfm25-350m-q8_0",
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
-
-        await vm.DownloadMissingAsync(CancellationToken.None);
-
-        // ASR still routes through provisioning; the manual-only cleanup model
-        // never reaches the downloader (nothing to download).
-        fake.DownloadedNames.ShouldBe(["parakeet-tdt-0.6b-v3"]);
-    }
-
-    [Fact]
-    public async Task DownloadMissingAsync_OnlyEnqueuesMissingSelected()
-    {
-        var registry = new ModelRegistry();
-        var fake = new FakeDownloader();
-        var vm = new ModelsTabViewModel(registry, _root, fake,
-            currentAsrName: "parakeet-tdt-0.6b-v3",
-            currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
-
-        await vm.DownloadMissingAsync(CancellationToken.None);
-
-        fake.DownloadedNames.ShouldContain("parakeet-tdt-0.6b-v3");
-        fake.DownloadedNames.ShouldContain("qwen2.5-0.5b-instruct-q4_k_m");
-    }
-
-    [Fact]
-    public async Task DownloadMissingAsync_AlwaysRoutesSelectedAsrThroughAuthoritativeProvisioning()
-    {
-        var registry = new ModelRegistry();
-        foreach (var descriptor in registry.All)
+        var selected = new[]
         {
-            var modelDir = Path.Combine(_root, descriptor.InstallDirRelative);
-            Directory.CreateDirectory(modelDir);
-            foreach (var file in descriptor.Files)
-                await File.WriteAllTextAsync(
-                    Path.Combine(modelDir, file.RelativePath), "nonempty but unverified",
-                    TestContext.Current.CancellationToken);
-        }
-        var fake = new FakeDownloader();
-        var vm = new ModelsTabViewModel(registry, _root, fake,
-            currentAsrName: ModelRegistry.DefaultAsrName,
-            currentCleanupName: ModelRegistry.DefaultCleanupName,
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
-
-        await vm.DownloadMissingAsync(TestContext.Current.CancellationToken);
-
-        fake.DownloadedNames.ShouldBe([ModelRegistry.DefaultAsrName]);
-    }
-
-    [Fact]
-    public async Task DownloadMissingAsync_DoesNotCaptureAmbientUiContextForEitherDescriptor()
-    {
+            registry.Find("parakeet-tdt-0.6b-v3")!,
+            registry.Find("qwen2.5-0.5b-instruct-q4_k_m")!,
+        };
         var dispatcher = new ManualDispatcher();
         var context = new CountingSynchronizationContext();
-        var vm = new ModelsTabViewModel(new ModelRegistry(), _root, new FakeDownloader(),
+        var vm = new ModelsTabViewModel(registry, _root, new FakeDownloader(),
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
             promoteAsr: _ => { }, promoteCleanup: _ => { },
@@ -136,7 +85,7 @@ public class ModelsTabViewModelTests : IDisposable
         try
         {
             SynchronizationContext.SetSynchronizationContext(context);
-            download = vm.DownloadMissingAsync(CancellationToken.None);
+            download = vm.DownloadSelectedAsync(selected, CancellationToken.None);
         }
         finally
         {
@@ -150,18 +99,24 @@ public class ModelsTabViewModelTests : IDisposable
             "the progress bridge must not inherit Progress<T>'s ambient UI-context hop");
         // The bridge itself is single-flight. Completion then posts one
         // installed-state notification per card, so the whole tab's constant
-        // upper bound is two rather than scaling with download chunks.
-        dispatcher.MaxPendingCount.ShouldBeLessThanOrEqualTo(2);
+        // upper bound is three rather than scaling with download chunks.
+        dispatcher.MaxPendingCount.ShouldBeLessThanOrEqualTo(3);
         vm.AsrCard.ProgressByFile.Single().Phase.ShouldBe(DownloadPhase.Complete);
         vm.CleanupCard.ProgressByFile.Single().Phase.ShouldBe(DownloadPhase.Complete);
     }
 
     [Fact]
-    public async Task DownloadMissingAsync_ShowsIntermediateBurstProgressWithoutGrowingUiQueue()
+    public async Task DownloadSelectedAsync_ShowsIntermediateBurstProgressWithoutGrowingUiQueue()
     {
+        var registry = new ModelRegistry();
+        var selected = new[]
+        {
+            registry.Find("parakeet-tdt-0.6b-v3")!,
+            registry.Find("qwen2.5-0.5b-instruct-q4_k_m")!,
+        };
         var dispatcher = new ManualDispatcher();
         var downloader = new GatedBurstDownloader();
-        var vm = new ModelsTabViewModel(new ModelRegistry(), _root, downloader,
+        var vm = new ModelsTabViewModel(registry, _root, downloader,
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
             promoteAsr: _ => { }, promoteCleanup: _ => { },
@@ -173,7 +128,7 @@ public class ModelsTabViewModelTests : IDisposable
             if (e.NewItems?[0] is DownloadProgress progress) asrPhases.Add(progress.Phase);
         };
 
-        var download = vm.DownloadMissingAsync(CancellationToken.None);
+        var download = vm.DownloadSelectedAsync(selected, CancellationToken.None);
         await downloader.BurstReported;
 
         dispatcher.MaxPendingCount.ShouldBe(1);
@@ -196,25 +151,31 @@ public class ModelsTabViewModelTests : IDisposable
         asrPhases.ShouldContain(DownloadPhase.Verifying);
         asrPhases[^1].ShouldBe(DownloadPhase.Complete);
         vm.CleanupCard.ProgressByFile.ShouldAllBe(progress => progress.Phase == DownloadPhase.Complete);
-        dispatcher.MaxPendingCount.ShouldBeLessThanOrEqualTo(2);
+        dispatcher.MaxPendingCount.ShouldBeLessThanOrEqualTo(3);
     }
 
     [Fact]
-    public async Task DownloadMissingAsync_SerializesViewModelsSharingDownloader()
+    public async Task DownloadSelectedAsync_SerializesViewModelsSharingDownloader()
     {
+        var registry = new ModelRegistry();
+        var selected = new[]
+        {
+            registry.Find("parakeet-tdt-0.6b-v3")!,
+            registry.Find("qwen2.5-0.5b-instruct-q4_k_m")!,
+        };
         var downloader = new GatedBurstDownloader();
-        var firstVm = new ModelsTabViewModel(new ModelRegistry(), _root, downloader,
+        var firstVm = new ModelsTabViewModel(registry, _root, downloader,
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
             promoteAsr: _ => { }, promoteCleanup: _ => { });
-        var secondVm = new ModelsTabViewModel(new ModelRegistry(), _root, downloader,
+        var secondVm = new ModelsTabViewModel(registry, _root, downloader,
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
             promoteAsr: _ => { }, promoteCleanup: _ => { });
 
-        var first = firstVm.DownloadMissingAsync(CancellationToken.None);
+        var first = firstVm.DownloadSelectedAsync(selected, CancellationToken.None);
         await downloader.BurstReported;
-        var second = secondVm.DownloadMissingAsync(CancellationToken.None);
+        var second = secondVm.DownloadSelectedAsync(selected, CancellationToken.None);
 
         downloader.DownloadCount.ShouldBe(1);
         second.IsCompleted.ShouldBeFalse(
@@ -224,7 +185,7 @@ public class ModelsTabViewModelTests : IDisposable
         await Task.WhenAll(first, second);
 
         downloader.DownloadCount.ShouldBe(4,
-            "each request may re-check both models, but downloader calls must never overlap");
+            "each request downloads its two selected descriptors, but downloader calls must never overlap");
     }
 
     [Fact]

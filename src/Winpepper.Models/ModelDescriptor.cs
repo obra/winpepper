@@ -67,4 +67,32 @@ public sealed record ModelDescriptor
         }
         return true;
     }
+
+    /// <summary>
+    /// <see cref="IsFullyInstalled"/> plus extraction state: every file with
+    /// an ExtractToRelative must also have its extracted tree present
+    /// (extraction marker + directory, via TarGzExtractor.IsExtracted).
+    /// Presence-only checks cannot distinguish ready files from a corrupt
+    /// install whose archive landed but whose extraction failed or whose
+    /// extracted tree was deleted — those must read as NOT installed so the
+    /// downloader's verify-short-circuit + EnsureExtracted heal path runs.
+    /// Cheap: marker read + Directory.Exists, no hashing.
+    /// </summary>
+    public bool IsFullyInstalledAndExtracted(string installRoot)
+    {
+        if (!IsFullyInstalled(installRoot)) return false;
+        foreach (var f in Files)
+        {
+            if (f.ExtractToRelative is null) continue;
+            var dir = Path.Combine(installRoot, InstallDirRelative);
+            if (!TarGzExtractor.IsExtracted(
+                    Path.Combine(dir, f.RelativePath),
+                    Path.Combine(dir, f.ExtractToRelative),
+                    f.Sha256))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
 }

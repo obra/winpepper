@@ -15,13 +15,14 @@
 
 - Worktree root for ALL work: `/home/dan/code/winpepper/.worktrees/silence-gate-recalibration` — run every command from there.
 - Tests green before EVERY commit: full Linux run is `./scripts/linux-tests.sh` (all 9 test projects; pass = exit 0 + final line `LINUX SUITE: GREEN`). NEVER use `dotnet test` (VSTest host is unreliable in this repo); build with `-c Release -f net9.0 -p:EnableWindowsTargeting=true`, run with `dotnet exec <built dll> -notrait "Platform=Windows"`.
-- Full Windows suite before push/merge to main: `./scripts/windows-gate.sh` from WSL (~12+ min; use a 20–30 min timeout; pass = exit 0 + `GATE: GREEN`).
+- Full Windows suite before push/merge to main: `./scripts/windows-gate.sh` from WSL (~12+ min; use a 20–30 min timeout; pass = exit 0 + `GATE: GREEN`). VERIFIED 2026-08-05: the gate CANNOT run from this worktree — Nerdbank.GitVersioning 3.6.146 fails deterministically on the worktree gitfile when the Windows host builds over `\\wsl.localhost` UNC (MSB4018 `Path must be relative to WorkingTreePath` in GetBuildVersion, before any compile). Run it from the MAIN checkout per Task 4 Step 2. Do NOT hand-edit the worktree's `.git` gitfile to a Windows path (breaks WSL-side git).
 - Recalibrated verdict tiers (a recording is SPEECH when ANY fires): tier 1 `voiced >= 350 ms` (`MinVoicedDurationMs` 600 → **350**; normal path only), tier 2 `clear@0.02 >= 100 ms` (`ClearSpeechRmsFloor = 0.02`, `MinClearVoicedDurationMs = 100` — values UNCHANGED, now evaluated on BOTH paths), tier 3 `clear@0.010 >= 240 ms` (NEW `QuietSpeechRmsFloor = 0.010`, `MinQuietSpeechDurationMs = 240`; BOTH paths).
 - All clear-tier tallies cue-budget-deducted exactly like the existing voiced/clear tallies: count ALL frames ≥ floor, track the in-window share for the first `maskFrames`, deduct up to `budgetFrames` of in-window frames.
 - UNTOUCHED: `SilentSpeechLevel = 0.004`, the adaptive-threshold formula `min(max(3*P10, 0.002), 0.15*P90)`, the trim/keep-walk logic (`KeepMsPerEdge = 600` etc.), `TrimResult` field semantics (`VoicedMs` stays 0 on the P90-silent path), and the drop-log line format in `PipelineHost.cs:1870-1872`.
 - Constants' doc comments must carry the condensed 2026-08-05 measurement provenance (exact text supplied in Tasks 1–3), replacing the superseded rationale claims.
 - README.md is the only end-user markdown doc; this plan is a working/agent doc. Keep commits focused and atomic.
 - Out of scope (pre-existing debt, not touched): stale `SilenceTrimmer.cs` line-number citations in `src/Winpepper.Asr/InteriorSilenceSkipper.cs` comments (already stale before this change).
+- Accepted residuals (2026-08-05 load-bearing validation; see `.worktrees/.the-usual-logs/silence-gate-recalibration/load-bearing-ledger.md`): (1) the tier-2-on-P90-silent opening admits an unlabeled class seen ~1/day in 14 days of logs (voiced=0, clear 100–480 ms; WAVs purged — unknowable whether speech or noise); (2) the drop log has no quiet@0.010 tally, so tier-3 behavior is unmeasurable from future logs — follow-up work, the drop-log format is frozen in this change; (3) no downstream guard filters non-empty ASR output, so a false accept can inject short garbage text (measured: batch Parakeet transcribed the encoded admitted transient to empty; it hallucinated "Yeah." on 2/3 still-gated-out non-speech recordings).
 
 ---
 
@@ -33,11 +34,11 @@
 - `Trim(ReadOnlySpan<float> samples, int maskMs = 0, int cueBudgetMs = 0, int prerollMs = 0)` (L157) has 4 exit paths: (A) sub-frame pass-through L161–176; (B) **P90-silent early return L241–268** — `IsSilent=true` unconditionally, `VoicedMs=0`, `ClearVoicedMs` budget-deducted absolute count, fires BEFORE `noiseFloor` is computed at L270; (C) duration-floor drop `voicedMs < 600 && clearVoicedMs < 100` L307–320; (D) trim/keep-walk L322–398.
 - Mask/budget frame conversion (ceil) at L198–199; deduction arithmetic `(count - Math.Min(budgetFrames, inWindow)) * FrameMs` at L264 and L303–304.
 - `TrimResult` (L4–68): `Trimmed`, `RemovedMs`, `RunsTrimmed`, `IsSilent`, `VoicedMs`, `ClearVoicedMs`, `MaxFrameRms` (post-cue-window max), `HeadSpeechAtMs`, computed `HeadClipped`. All `required init`; construction sites at L165, L257, L309, L388.
-- Tests: `tests/Winpepper.Audio.Tests/SilenceTrimmerTests.cs` — 28 `[Fact]`s, one file. DC-constant fixtures: `Dc(rms, ms)` produces frames whose RMS is exactly `rms`; `Join(...)` splices. Sole production caller: `PipelineHost.cs:1858` (drop-log at 1870–1872 — format must not change).
+- Tests: `tests/Winpepper.Audio.Tests/SilenceTrimmerTests.cs` — 42 `[Fact]`s, one file. DC-constant fixtures: `Dc(rms, ms)` produces frames whose RMS is exactly `rms`; `Join(...)` splices. Sole production caller: `PipelineHost.cs:1858` (drop-log at 1870–1872 — format must not change).
 
 ### Why the trim walk is safe for rescued P90-silent recordings (decision, per spec)
 
-On the P90-silent path `speechLevel < SilentSpeechLevel = 0.004`, so the trim threshold `min(max(3*P10, 0.002), 0.15*speechLevel)` is capped at `0.15 * speechLevel < 0.0006` — far below both `QuietSpeechRmsFloor` (0.010) and `ClearSpeechRmsFloor` (0.02). Every frame that qualified a rescue tier is therefore ≥ 16x above the trim threshold and can never be classified as trim-silence; the keep-walk keeps all such frames plus 600 ms of adjacent silence per edge. **Decision: run the trim walk for any non-silent verdict; the UNTRIMMED fallback is unnecessary.** Task 3's `Trim_LongHoldTailSpeech_P90Silent_IsRescued_ByQuietTier_NoAudioLoss` test proves zero audio loss on the recalibration scenario (in the typical room-tone case the threshold sits below the room tone too, so nothing is trimmed at all: `RemovedMs = 0`). If that test cannot be made to pass without audio loss, STOP and escalate — do not silently switch to the fallback.
+On the P90-silent path `speechLevel < SilentSpeechLevel = 0.004`, so the trim threshold `min(max(3*P10, 0.002), 0.15*speechLevel)` is capped at `0.15 * speechLevel < 0.0006` — far below both `QuietSpeechRmsFloor` (0.010) and `ClearSpeechRmsFloor` (0.02). Every frame that qualified a rescue tier is therefore ≥ 16x above the trim threshold and can never be classified as trim-silence; the keep-walk keeps all such frames plus 600 ms of adjacent silence per edge. **Decision: run the trim walk for any non-silent verdict; the UNTRIMMED fallback is unnecessary.** Task 3's `Trim_LongHoldTailSpeech_P90Silent_IsRescued_ByQuietTier_NoAudioLoss` test proves zero audio loss on the recalibration scenario (in the typical room-tone case the threshold sits below the room tone too, so nothing is trimmed at all: `RemovedMs = 0`). If that test cannot be made to pass without audio loss, STOP and escalate — do not silently switch to the fallback. (Empirically verified 2026-08-05 on the real implementation: an engineered actual-trimming rescue shape removed 7140 ms of sub-threshold padding with the speech samples intact and exact 600 ms/edge + 1200 ms interior compression; the degenerate `speechLevel = 0` case gives threshold = 0 so nothing is trimmed — sample-identical output, zero audio loss.)
 
 ## File Structure
 
@@ -75,8 +76,11 @@ In `tests/Winpepper.Audio.Tests/SilenceTrimmerTests.cs`:
         // recording now passes via the 350 ms voiced floor (460 >= 350).
         // Accepted trade-off: cost is one wasted ASR call on an archived
         // recording vs 4 real dictations lost in 2 days under the old
-        // 600 ms floor. The P90 gate still covers LONG recordings unless
-        // the quiet tier fires (see the long-recording pins below).
+        // 600 ms floor (2026-08-05: batch Parakeet transcribed this
+        // encoded transient to empty; non-empty hallucinations would
+        // reach injection unguarded -- accepted residual). The P90 gate
+        // still covers LONG recordings unless the quiet tier fires (see
+        // the long-recording pins below).
         var buf = Join(Dc(0.001, 760), Dc(0.015, 460), Dc(0.001, 780));
 
         var result = SilenceTrimmer.Trim(buf);
@@ -152,7 +156,7 @@ In `tests/Winpepper.Audio.Tests/SilenceTrimmerTests.cs`:
     public void Trim_QuietShortUtterance_MidVoiced_IsKept_By350Floor()
     {
         // 2026-08-05 recalibration scenario: the two quiet real "you have"
-        // takes (voiced 360/500 ms, max frame RMS 0.0093-0.0275,
+        // takes (voiced 360/500 ms, max frame RMS 0.0093-0.0185,
         // clear@0.02 = 0) were false-rejected by the old 600 ms floor.
         // Encoded as 500 ms @ 0.015 in a 2 s capture: P90 = 0.015
         // (25/100 frames, idx 89), threshold = min(max(3*0.001, 0.002),
@@ -191,11 +195,12 @@ In `src/Winpepper.Audio/SilenceTrimmer.cs`, replace lines 104–115 (the whole d
     /// threshold has no speech level to anchor to and VoicedMs is 0.
     /// RECALIBRATED 2026-08-05: the gate was replicated bit-exactly over
     /// the retained 100-recording archive (computed voiced/clear/max-RMS
-    /// match the logged drop lines exactly) plus 87 enriched drop lines
-    /// from 14 days of logs; 8 drop-archived recordings were human-labeled.
+    /// match the logged drop lines exactly) plus 90 enriched drop lines
+    /// from 14 days of logs; 7 drop-archived recordings were human-labeled.
     /// Two quiet real "you have" takes (voiced 360/500 ms, max frame RMS
-    /// 0.0093-0.0275, clear@0.02 = 0) were false-rejected by the old
-    /// 600 ms floor; 350 admits both. All 93 kept real dictations remain
+    /// 0.0093-0.0185, clear@0.02 = 0) were false-rejected by the old
+    /// 600 ms floor; 350 admits both (the 360 ms take passes with ZERO
+    /// frame margin). All 93 kept real dictations remain
     /// kept (the rule only loosens). KNOWN SACRIFICE: the 2026-07-28
     /// confirmed ~450 ms transient class (-36..-45 dBFS) is no longer
     /// archived -- voiced >= 350 admits such a transient in a SHORT
@@ -247,9 +252,12 @@ Replace `Trim_QuietShortUtterance_IsDropped_KnownResidual` (test file lines 310�
     public void Trim_QuietShortUtterance_IsRescued_ByQuietTier()
     {
         // Formerly Trim_QuietShortUtterance_IsDropped_KnownResidual -- the
-        // 2026-08-05 recalibration flips the verdict. The two archived
-        // "Thank you." dictations (voiced 240/260 ms, max frame RMS
-        // 0.013-0.017) were REAL SPEECH false-rejects. Encoded as 260 ms
+        // 2026-08-05 recalibration flips the verdict. The two logged
+        // "Thank you." dictations (drop lines: voiced 240/260 ms,
+        // clear@0.02 = 60/80 ms; WAVs since purged, so their quiet@0.010
+        // content is unknowable) were REAL SPEECH false-rejects; this
+        // fixture encodes the CLASS -- the measured tier-3 anchors are the
+        // two archived long-holds (460/280 ms @ >= 0.010). Encoded as 260 ms
         // @ 0.015 in a 2 s capture: P90 = 0.015 passes, voiced = 260 < 350
         // (tier 1 misses), clear@0.02 = 0 (tier 2 misses), but 260 ms
         // >= 0.010 clears the 240 ms quiet tier -> KEPT.
@@ -282,20 +290,21 @@ In `src/Winpepper.Audio/SilenceTrimmer.cs`, insert directly after the `MinClearV
     /// <summary>
     /// Tier 3 level: frames at or above this RMS (~-40 dBFS) are plausibly
     /// QUIET speech. MEASURED (2026-08-05 recalibration: gate replicated
-    /// bit-exactly over the retained 100-recording archive + 87 enriched
-    /// drop lines from 14 days of logs; 8 drop-archived recordings
+    /// bit-exactly over the retained 100-recording archive + 90 enriched
+    /// drop lines from 14 days of logs; 7 drop-archived recordings
     /// human-labeled): the two real long-hold false-rejects carried
     /// 460 ms / 280 ms at or above 0.010 on the P90-silent path, while all
-    /// 4 labeled non-speech drops have max frame RMS &lt;= 0.0010 with at
-    /// most 80 ms of budget-deducted content at or above 0.010 (start-cue
-    /// leakage past the 100 ms cue budget).
+    /// 3 labeled non-speech drops have max frame RMS &lt;= 0.0010 with at
+    /// most 60 ms of budget-deducted content at or above 0.010 (start-cue
+    /// leakage past the 100 ms cue budget; raw in-window cue footprints at
+    /// this floor reach 160 ms).
     /// </summary>
     private const double QuietSpeechRmsFloor = 0.010;
 
     /// <summary>
     /// Tier 3 duration: quiet-speech audio (>= QuietSpeechRmsFloor,
-    /// cue-budget-deducted) needed to count as speech. 240 ms = 3x the
-    /// measured 80 ms worst-case start-cue-leakage noise floor (see
+    /// cue-budget-deducted) needed to count as speech. 240 ms = 4x the
+    /// measured 60 ms worst-case budget-deducted start-cue leakage (see
     /// QuietSpeechRmsFloor), and sits at or under both measured real
     /// rescues (460/280 ms). Evaluated on BOTH paths, including
     /// P90-silent.
@@ -567,9 +576,9 @@ In `tests/Winpepper.Audio.Tests/SilenceTrimmerTests.cs`:
     [Fact]
     public void Trim_QuietCueLeakage_InsideMask_StillDrops()
     {
-        // Beep-leakage guard (2026-08-05 measurement: all 4 human-labeled
-        // non-speech drops had <= 80 ms of budget-deducted quiet-floor
-        // content -- start-cue leakage). A recording whose ONLY >= 0.010
+        // Beep-leakage guard (2026-08-05 measurement: all 3 human-labeled
+        // non-speech drops had <= 60 ms of budget-deducted quiet-floor
+        // content -- start-cue leakage; raw cue footprints reach 160 ms). A recording whose ONLY >= 0.010
         // content is ~80 ms inside the cue window (mask 1500 / budget 100)
         // deducts to 0 quiet ms and stays dropped. 4 s capture ->
         // P90 = 0.001, P90-silent path.
@@ -604,7 +613,7 @@ In `tests/Winpepper.Audio.Tests/SilenceTrimmerTests.cs`:
     [Fact]
     public void Trim_TrueSilence_AtNoiseFloor_IsStillDropped()
     {
-        // 2026-08-05 non-speech class: all 4 human-labeled non-speech
+        // 2026-08-05 non-speech class: all 3 human-labeled non-speech
         // drops have max frame RMS <= 0.0010 -- essentially silence. A
         // 5 s capture at exactly 0.001 fires no tier -> dropped.
         var buf = Dc(0.001, 5000);
@@ -791,16 +800,20 @@ export PATH="$DOTNET_ROOT:$PATH"
 
 Expected: exit 0, final line `LINUX SUITE: GREEN`, all 9 projects `Failed: 0`.
 
-- [ ] **Step 2: Run the Windows gate (required before push/merge to main)**
+- [ ] **Step 2: Run the Windows gate FROM THE MAIN CHECKOUT (required before push/merge to main)**
 
-The change is pure managed code (Winpepper.Audio), so Linux covers its logic — but the repo rule requires the full Windows suite before landing on main. Run from WSL with a 20–30 minute timeout:
+The change is pure managed code (Winpepper.Audio), so Linux covers its logic — but the repo rule requires the full Windows suite before landing on main. FALSIFIED 2026-08-05: the gate cannot run from this worktree — Nerdbank.GitVersioning 3.6.146 fails on the worktree's gitfile when the Windows host builds over `\\wsl.localhost` UNC (`MSB4018: Path must be relative to WorkingTreePath` in `GetBuildVersion`, before any compile, for every csproj; verified by a single-variable replica probe, control build from a non-worktree dir succeeded — evidence in `.worktrees/.the-usual-logs/silence-gate-recalibration/reports/V-gate.md`). All prior recorded green gates ran from the main checkout (real `.git` directory). Therefore:
 
 ```bash
-cd /home/dan/code/winpepper/.worktrees/silence-gate-recalibration
+# 1. Merge the branch locally into the main checkout (NO push yet)
+cd /home/dan/code/winpepper
+git status --short   # expected: clean before merging
+git merge --no-ff fix/silence-gate-recalibration
+# 2. Run the gate from the main checkout (20–30 min timeout)
 ./scripts/windows-gate.sh
 ```
 
-Expected: exit 0 with `GATE: GREEN` (12 project/TFM runs, all `Failed: 0`). Note: the gate wipes cross-OS `bin/`/`obj/` — re-build on Linux afterwards if further Linux test runs are needed.
+Expected: exit 0 with `GATE: GREEN` (12 project/TFM runs, all `Failed: 0`). Push only after `GATE: GREEN`; if the gate is RED, fix within the offending task's scope in the worktree, update the local merge, and re-run — do not push a red tree. Notes: the gate wipes cross-OS `bin/`/`obj/` in the tree it runs from (the main checkout — same as all prior runs); re-build on Linux afterwards if further Linux test runs are needed. Do NOT hand-edit the worktree gitfile to a Windows path as a workaround (it breaks WSL-side git).
 
 - [ ] **Step 3: Report**
 

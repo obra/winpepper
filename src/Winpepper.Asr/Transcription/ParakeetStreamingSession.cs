@@ -64,7 +64,7 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
     /// (PipelineHost.TrimForTranscription → SilenceTrimmer.Trim); the streaming
     /// path must gate leading silence too, because Parakeet-TDT deterministically
     /// deletes tokens around silence (NeMo-Speech #15757; FluidAudio #746) and
-    /// the 500 ms pre-roll is mostly silence.
+    /// the seeded pre-roll (up to ~2 s with lag compensation) is mostly silence.
     /// 
     /// DELIBERATE DIVERGENCE from the batch SilenceTrimmer (2026-07-28,
     /// pill-silence-observability): this latch is a START-OF-SPEECH feed
@@ -73,16 +73,16 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
     /// SilenceTrimmer.Trim IsSilent verdict (which now also enforces a
     /// minimum-voiced-duration), and on a silent verdict the streaming
     /// session is disposed unused. Consequences accepted on purpose:
-    /// (a) granularity differs (whole pushed buffer here vs 20 ms frames in
-    /// batch), so a short transient inside a large buffer may or may not
-    /// unlatch depending on buffer sizing; (b) a transient can permanently
-    /// unlatch the stream -- that costs only encoder work, never words,
-    /// because the batch verdict still governs. A minimum-voiced-duration
-    /// has no natural counterpart in a one-shot start latch; do not unify.
-    /// Mirrors the documentation precedent in InteriorSilenceSkipper.
-    /// A second divergence since 2026-08-02: the batch gate additionally masks
-    /// the start-cue window out of its decision (SilenceTrimmer.Trim maskMs);
-    /// streaming has no gate and therefore no mask.
+    /// (a) granularity now MATCHES the batch trimmer's 20 ms frames (per-frame
+    /// latch since 2026-08-04), so threshold behavior is byte-identical on
+    /// clean onsets and only sub-floor near-silence diverges; (b) a single
+    /// frame at/above floor can permanently unlatch the stream -- that costs
+    /// only encoder work, never words, because the batch verdict still governs.
+    /// A minimum-voiced-duration has no natural counterpart in a one-shot start
+    /// latch; do not unify. Mirrors the documentation precedent in
+    /// InteriorSilenceSkipper. A second divergence since 2026-08-02: the batch
+    /// gate additionally masks the start-cue window out of its decision
+    /// (SilenceTrimmer.Trim maskMs); streaming has no gate and therefore no mask.
     /// </summary>
     private const double LeadingSilenceRmsFloor = 0.002;
 
@@ -115,11 +115,19 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
         if (_corrupt) return ValueTask.CompletedTask;
         if (!_speechSeen)
         {
-            // Leading-silence gate: skip whole pushed frames (never fed to the
-            // mel extractor — they would also pollute the running normalizer's
-            // stats) until the first frame with speech-level energy.
-            if (Rms(mono16k.Span) < LeadingSilenceRmsFloor) return ValueTask.CompletedTask;
+            // Leading-silence gate, per-20 ms-frame since 2026-08-04 (head-loss
+            // work): a whole-buffer RMS diluted quiet onsets linearly with
+            // buffer length — a 2 s lag-compensated pre-roll made a miss
+            // routine, and a miss discarded the onset words themselves. Now
+            // the first frame at/above the floor unlatches, and audio is fed
+            // FROM that frame — pre-onset silence is skipped instead of
+            // polluting the running normalizer. Still a START-OF-SPEECH feed
+            // gate with NO drop authority (the batch SilenceTrimmer verdict
+            // governs drops), same as before.
+            var onset = FirstVoicedFrameOffset(mono16k.Span);
+            if (onset < 0) return ValueTask.CompletedTask;
             _speechSeen = true;
+            mono16k = mono16k.Slice(onset);
         }
         try
         {
@@ -256,6 +264,23 @@ public sealed class ParakeetStreamingSession : IStreamingTranscriptionSession
         var sum = 0.0;
         foreach (var s in samples) sum += (double)s * s;
         return Math.Sqrt(sum / samples.Length);
+    }
+
+    /// <summary>
+    /// Sample offset of the first 20 ms frame (320 samples @ 16 kHz; trailing
+    /// partial frame included so a just-arrived onset is never discarded)
+    /// whose RMS is at/above LeadingSilenceRmsFloor; -1 when the whole buffer
+    /// is below the floor.
+    /// </summary>
+    private static int FirstVoicedFrameOffset(ReadOnlySpan<float> samples)
+    {
+        const int frameSamples = 320;
+        for (var offset = 0; offset < samples.Length; offset += frameSamples)
+        {
+            var length = Math.Min(frameSamples, samples.Length - offset);
+            if (Rms(samples.Slice(offset, length)) >= LeadingSilenceRmsFloor) return offset;
+        }
+        return -1;
     }
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;

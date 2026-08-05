@@ -7,7 +7,7 @@ namespace Winpepper.Audio;
 /// <summary>
 /// Warm capture (Bug 2). When <c>prewarm</c> is true a single capture runs for
 /// the app lifetime, feeding a <see cref="WarmCaptureBuffer"/> so a session
-/// includes the ~500 ms spoken just before the hotkey press. When false, capture
+/// includes the ~1 s spoken just before the hotkey press. When false, capture
 /// is started lazily on <see cref="StartSession"/> and stopped on
 /// <see cref="StopSession"/> (cold-start, no pre-roll).
 ///
@@ -32,7 +32,11 @@ namespace Winpepper.Audio;
 public sealed class WarmWasapiRecorder : IWarmAudioRecorder
 {
     private const int SampleRate16k = 16000;
-    private const int RingCapacitySamples = SampleRate16k; // ~1 s of history
+    private const int RingCapacitySamples = SampleRate16k * 2; // ~2 s of history: the 1000 ms
+    // request plus up to 1000 ms of hotkey-lag compensation (PrerollRequest) must never race
+    // the ring edge. Cost: ~128 KB float backing store; the per-callback head-trim RemoveRange
+    // memmoves the retained ~32 000 floats (~128 KB) every ~50 ms; measured 2026-08-04 (.NET 9
+    // Release micro-bench): mean ~2.3 µs, p99 ~7.7 µs vs the 50 ms budget — accepted.
 
     private readonly bool _prewarm;
     private readonly string? _deviceId;
@@ -142,7 +146,7 @@ public sealed class WarmWasapiRecorder : IWarmAudioRecorder
         var preroll = _buffer.StartSession(prerollSamples);
         // The seeded pre-roll never flows through Ingest during the session, so
         // raise it here — otherwise streaming consumers (Task 10's frame tee)
-        // would be missing the dictation's first ~500 ms. The level meter also
+        // would be missing the dictation's first ~1 s. The level meter also
         // subscribes; one larger frame at session start is harmless.
         if (preroll.Length > 0) FramesAvailable?.Invoke(preroll);
         // Report the pre-roll ACTUALLY seeded: prewarm-off yields 0, a

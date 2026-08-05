@@ -54,6 +54,11 @@ public class DictationTimingSummaryTests
         GcGen2 = 0,
         GcPauseMs = 12,
         PrewarmActive = true,
+        PrerollMs = 1000,
+        ArmLatencyMs = 17,
+        RetriggerGapMs = 812,
+        HeadSpeechAtMs = 120,
+        HeadClipped = false,
         TotalMs = 2354,
     };
 
@@ -64,7 +69,7 @@ public class DictationTimingSummaryTests
 
         line.ShouldBe(
             "session=11111111-2222-3333-4444-555555555555 kind=hold outcome=completed"
-            + " rec=3512ms mic_stop=42ms trim=8ms trim_removed=1200ms"
+            + " rec=3512ms preroll=1000ms arm_latency=17ms retrigger_gap=812ms head_speech_at=120ms head_clipped=false mic_stop=42ms trim=8ms trim_removed=1200ms"
             + " asr=812ms asr_mode=streaming asr_model=nemotron-streaming-en"
             + " asr_wait=95ms asr_native=210ms backlog=2 backlog_ms=100ms"
             + " native_calls=74 native_total=1900ms native_max=620ms native_over250=2 over250_at=[1180,3420]"
@@ -368,5 +373,55 @@ public class DictationTimingSummaryTests
     {
         DictationTimingSummary.SystemCpuPercent(0, 0, 0).ShouldBeNull();      // empty window
         DictationTimingSummary.SystemCpuPercent(2000, 1000, 0).ShouldBeNull(); // busy < 0 (clock skew)
+    }
+
+    [Fact]
+    public void FormatLine_HeadLossFields_AreOmittedWhenNull()
+    {
+        // The five 2026-08-04 head-loss diagnostics are all optional: a
+        // session where they were never stamped renders none of them.
+        var s = new DictationTimingSummary
+        {
+            SessionId = Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            Kind = "hold",
+        };
+
+        var line = s.FormatLine();
+
+        line.ShouldNotContain("preroll=");
+        line.ShouldNotContain("arm_latency=");
+        line.ShouldNotContain("retrigger_gap=");
+        line.ShouldNotContain("head_speech_at=");
+        line.ShouldNotContain("head_clipped=");
+    }
+
+    [Fact]
+    public void HeadClipped_True_Is_Emitted_Explicitly()
+    {
+        // Follows the cpu_pegged bool idiom: an explicit true/false when set.
+        var s = new DictationTimingSummary
+        {
+            SessionId = Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            Kind = "hold",
+            HeadSpeechAtMs = 0,
+            HeadClipped = true,
+        };
+
+        s.FormatLine().ShouldContain(" head_speech_at=0ms head_clipped=true");
+    }
+
+    [Fact]
+    public void RetriggerGap_RendersWhateverIsAssigned()
+    {
+        // The < 3000 ms emit gate lives at the ASSIGNMENT site (PipelineHost),
+        // not here — FormatLine renders any set value, per class convention.
+        var s = new DictationTimingSummary
+        {
+            SessionId = Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            Kind = "toggle",
+            RetriggerGapMs = 2999,
+        };
+
+        s.FormatLine().ShouldContain(" retrigger_gap=2999ms");
     }
 }

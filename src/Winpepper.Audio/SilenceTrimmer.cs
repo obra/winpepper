@@ -48,6 +48,23 @@ public readonly struct TrimResult
     /// the log by how close it came to the 0.02 clear tier.
     /// </summary>
     public required double MaxFrameRms { get; init; }
+
+    /// <summary>
+    /// ms offset (from buffer t=0) of the first 20 ms frame at/above the
+    /// clear-speech floor (0.02) OUTSIDE the cue-pickup window (the band
+    /// [prerollMs, maskMs) where the app's own start cue can masquerade as
+    /// speech); null when no such frame exists or the input is sub-frame.
+    /// Head-loss diagnostic (2026-08-04) — no influence on the gate verdict
+    /// or trimming.
+    /// </summary>
+    public required int? HeadSpeechAtMs { get; init; }
+
+    /// <summary>
+    /// True when head speech lands within the first two frames (offset
+    /// &lt; 40 ms) — the signature of speech predating the recording window
+    /// (the utterance onset was cut off). Null when HeadSpeechAtMs is null.
+    /// </summary>
+    public bool? HeadClipped => HeadSpeechAtMs is int h ? h < 40 : null;
 }
 
 /// <summary>
@@ -135,8 +152,9 @@ public static class SilenceTrimmer
     /// cueBudgetMs &lt;= 0 deducts nothing; both default to 0 = pre-mask
     /// behavior, byte-identical. Trimming offsets and the output buffer
     /// are unaffected by mask and budget by construction.
+    /// <paramref name="prerollMs"/> is the pre-roll the recorder actually seeded (buffer t=0 sits that far before the hotkey); it locates the cue-pickup band [prerollMs, maskMs) that the head-speech diagnostic must not scan.
     /// </summary>
-    public static TrimResult Trim(ReadOnlySpan<float> samples, int maskMs = 0, int cueBudgetMs = 0)
+    public static TrimResult Trim(ReadOnlySpan<float> samples, int maskMs = 0, int cueBudgetMs = 0, int prerollMs = 0)
     {
         var n = samples.Length;
         var frameCount = n / FrameSamples;
@@ -153,6 +171,7 @@ public static class SilenceTrimmer
                 VoicedMs = 0,
                 ClearVoicedMs = 0,
                 MaxFrameRms = 0,
+                HeadSpeechAtMs = null,
             };
         }
 
@@ -162,7 +181,7 @@ public static class SilenceTrimmer
 
         // Start-cue budget DEDUCTION (2026-08-03, replacing the 2026-08-02
         // window EXCLUSION). The exclusion blinded the gate to the first
-        // ~500 ms of post-hotkey time (buffer t=0 sits the seeded pre-roll
+        // ~1 s of post-hotkey time (buffer t=0 sits the seeded pre-roll
         // BEFORE the hotkey), so a prompt short reply could not reach the
         // 600/100 ms floors and the WHOLE dictation dropped: 4/10 owner
         // dictations on 2026-08-04 (archive WAVs 173b20b3, 525f0643,
@@ -178,6 +197,21 @@ public static class SilenceTrimmer
         // whole.
         var maskFrames = maskMs <= 0 ? 0 : Math.Min((maskMs + FrameMs - 1) / FrameMs, frameCount);
         var budgetFrames = cueBudgetMs <= 0 ? 0 : (cueBudgetMs + FrameMs - 1) / FrameMs;
+
+        // Head-speech diagnostic (2026-08-04 head-loss work): first clearly-
+        // speech-loud frame OUTSIDE the cue-pickup band. The cue can only be
+        // picked up AFTER the hotkey — measured onset preroll+92..144 ms
+        // (StartCueGateMask doc) — so the pre-roll head [0, prerollFrames)
+        // is scannable and only [prerollFrames, maskFrames) is excluded.
+        // maskMs == 0 means no cue was played: scan everything. Diagnostic
+        // only — no effect on the verdict, tallies, or trimming below.
+        var prerollFrames = maskFrames == 0 ? 0 : Math.Min(Math.Max(prerollMs, 0) / FrameMs, maskFrames);
+        int? headSpeechAtMs = null;
+        for (var f = 0; f < frameCount; f++)
+        {
+            if (f >= prerollFrames && f < maskFrames) continue;
+            if (rms[f] >= ClearSpeechRmsFloor) { headSpeechAtMs = f * FrameMs; break; }
+        }
 
         // DECISION statistics run over ALL frames again -- the 2026-08-02
         // post-mask stats exclusion is deliberately REMOVED, not kept.
@@ -229,6 +263,7 @@ public static class SilenceTrimmer
                 VoicedMs = 0,
                 ClearVoicedMs = (clearAll - Math.Min(budgetFrames, clearInWindow)) * FrameMs,
                 MaxFrameRms = postWindowMax,
+                HeadSpeechAtMs = headSpeechAtMs,
             };
         }
 
@@ -280,6 +315,7 @@ public static class SilenceTrimmer
                 VoicedMs = voicedMs,
                 ClearVoicedMs = clearVoicedMs,
                 MaxFrameRms = maxFrameRms,
+                HeadSpeechAtMs = headSpeechAtMs,
             };
         }
 
@@ -358,6 +394,7 @@ public static class SilenceTrimmer
             VoicedMs = voicedMs,
             ClearVoicedMs = clearVoicedMs,
             MaxFrameRms = maxFrameRms,
+            HeadSpeechAtMs = headSpeechAtMs,
         };
     }
 

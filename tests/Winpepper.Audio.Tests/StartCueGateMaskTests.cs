@@ -10,14 +10,15 @@ public class StartCueGateMaskTests
     public void ComputeMaskMs_WarmFullPreroll_AddsPrerollAndBothMargins()
     {
         // With the shipped 150 ms cue and a fully-seeded warm pre-roll:
-        // 500 + 200 + 150 + 150 = 1000 ms. Re-validated 2026-08-02/03 with
-        // the plan's exact dual-threshold semantics over the frozen
-        // 100-recording archive: 0/91 real pass->drop, 0/6 drop->pass at
-        // this window; tightest passer margin 140 ms. The 500/150 here are
-        // TEST inputs, not production constants — production feeds the
-        // recorder's actually-seeded pre-roll and the runtime-measured WAV.
-        StartCueGateMask.ComputeMaskMs(500, 150, soundsEnabled: true).ShouldBe(1000);
-        StartCueGateMask.ComputeMaskMs(500, 150, soundsEnabled: true).ShouldBe(
+        // 1000 + 200 + 150 + 150 = 1500 ms. Validated 2026-08-04 by padded-
+        // archive replication (both frozen corpora, +500 ms silence prefixed,
+        // mask 1000->1500): 0 real pass->drop, 0 silent drop->pass — see
+        // docs/plans/2026-07-29-cleanup-asr-contention-evidence.md (2026-08-04
+        // section). The 1000/150 here are TEST inputs, not production
+        // constants — production feeds the recorder's actually-seeded pre-roll
+        // and the runtime-measured WAV.
+        StartCueGateMask.ComputeMaskMs(1000, 150, soundsEnabled: true).ShouldBe(1500);
+        StartCueGateMask.ComputeMaskMs(1000, 150, soundsEnabled: true).ShouldBe(
             StartCueGateMask.WarmPrerollMs
             + StartCueGateMask.CueStartLatencyMarginMs
             + 150
@@ -79,7 +80,9 @@ public class StartCueGateMaskTests
         // StartSession(includePrerollMs:) at both hotkey arms and feeds the
         // RETURNED actual pre-roll back into ComputeMaskMs. If this value
         // changes, the request follows automatically — that is the point.
-        StartCueGateMask.WarmPrerollMs.ShouldBe(500);
+        // The request is 1000 ms, raised 2026-08-04 from 500 — speech begun
+        // >500 ms before the hotkey was never recorded, confirmed instance 8ec9e52c.
+        StartCueGateMask.WarmPrerollMs.ShouldBe(1000);
     }
 
     [Fact]

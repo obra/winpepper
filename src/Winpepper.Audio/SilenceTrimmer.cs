@@ -125,15 +125,15 @@ public static class SilenceTrimmer
     private const int MinVoicedDurationMs = 350;
 
     /// <summary>
-    /// Frames at or above this RMS (~-34 dBFS) are "clearly speech-loud".
-    /// MEASURED (2026-07-28, 100-recording archive): every archived
-    /// non-speech file has at most ONE 20 ms frame at or above 0.02, while
-    /// loud short utterances reach it -- but 17% of real dictations never
-    /// do, so this tier is a loud-short-utterance escape hatch, NOT a
-    /// speech test. Known residual: quiet short utterances (max frame RMS
-    /// 0.013-0.017, e.g. the two archived "Thank you."s) sit inside the
-    /// transient level band and are dropped -- see
-    /// Trim_QuietShortUtterance_IsDropped_KnownResidual.
+    /// Tier 2 level: frames at or above this RMS (~-34 dBFS) are "clearly
+    /// speech-loud". MEASURED (2026-07-28, 100-recording archive): every
+    /// archived non-speech file has at most ONE 20 ms frame at or above
+    /// 0.02, while loud short utterances reach it -- but 17% of real
+    /// dictations never do, so this tier is a loud-short-utterance escape
+    /// hatch, NOT a speech test. Since 2026-08-05 it is evaluated on BOTH
+    /// paths (including P90-silent); quiet short utterances below it are
+    /// handled by the quiet tier (QuietSpeechRmsFloor) -- see
+    /// Trim_QuietShortUtterance_IsRescued_ByQuietTier.
     /// </summary>
     private const double ClearSpeechRmsFloor = 0.02;
 
@@ -147,6 +147,30 @@ public static class SilenceTrimmer
     /// voiced/clear/max-RMS fields exist for recalibration).
     /// </summary>
     private const int MinClearVoicedDurationMs = 100;
+
+    /// <summary>
+    /// Tier 3 level: frames at or above this RMS (~-40 dBFS) are plausibly
+    /// QUIET speech. MEASURED (2026-08-05 recalibration: gate replicated
+    /// bit-exactly over the retained 100-recording archive + 90 enriched
+    /// drop lines from 14 days of logs; 7 drop-archived recordings
+    /// human-labeled): the two real long-hold false-rejects carried
+    /// 460 ms / 280 ms at or above 0.010 on the P90-silent path, while all
+    /// 3 labeled non-speech drops have max frame RMS &lt;= 0.0010 with at
+    /// most 60 ms of budget-deducted content at or above 0.010 (start-cue
+    /// leakage past the 100 ms cue budget; raw in-window cue footprints at
+    /// this floor reach 160 ms).
+    /// </summary>
+    private const double QuietSpeechRmsFloor = 0.010;
+
+    /// <summary>
+    /// Tier 3 duration: quiet-speech audio (>= QuietSpeechRmsFloor,
+    /// cue-budget-deducted) needed to count as speech. 240 ms = 4x the
+    /// measured 60 ms worst-case budget-deducted start-cue leakage (see
+    /// QuietSpeechRmsFloor), and sits at or under both measured real
+    /// rescues (460/280 ms). Evaluated on BOTH paths, including
+    /// P90-silent.
+    /// </summary>
+    private const int MinQuietSpeechDurationMs = 240;
 
     /// <summary>
     /// Trim interior/edge silence and decide whether the recording is
@@ -248,6 +272,30 @@ public static class SilenceTrimmer
         for (var f = maskFrames; f < frameCount; f++)
             if (rms[f] > postWindowMax) postWindowMax = rms[f];
 
+        // Absolute-floor tallies (tier 2 clear and tier 3 quiet), computed
+        // on BOTH paths and cue-budget-deducted exactly like the voiced
+        // tally: count ALL frames at/above each floor, track the in-window
+        // share, then deduct up to the budget of in-window frames.
+        var clearFrames = 0;
+        var clearFramesInWindow = 0;
+        var quietFrames = 0;
+        var quietFramesInWindow = 0;
+        for (var f = 0; f < frameCount; f++)
+        {
+            if (rms[f] >= ClearSpeechRmsFloor)
+            {
+                clearFrames++;
+                if (f < maskFrames) clearFramesInWindow++;
+            }
+            if (rms[f] >= QuietSpeechRmsFloor)
+            {
+                quietFrames++;
+                if (f < maskFrames) quietFramesInWindow++;
+            }
+        }
+        var clearVoicedMs = (clearFrames - Math.Min(budgetFrames, clearFramesInWindow)) * FrameMs;
+        var quietVoicedMs = (quietFrames - Math.Min(budgetFrames, quietFramesInWindow)) * FrameMs;
+
         if (speechLevel < SilentSpeechLevel)
         {
             // P90-silent: the adaptive threshold is undefined (it is
@@ -256,14 +304,6 @@ public static class SilenceTrimmer
             // budget-deducted so the cue cannot inflate the recalibration
             // fields (pre-mask logs showed clear = 60-160 ms of pure beep
             // on every silent drop).
-            var clearAll = 0;
-            var clearInWindow = 0;
-            for (var f = 0; f < frameCount; f++)
-            {
-                if (rms[f] < ClearSpeechRmsFloor) continue;
-                clearAll++;
-                if (f < maskFrames) clearInWindow++;
-            }
             return new TrimResult
             {
                 Trimmed = Array.Empty<float>(),
@@ -271,7 +311,7 @@ public static class SilenceTrimmer
                 RunsTrimmed = 0,
                 IsSilent = true,
                 VoicedMs = 0,
-                ClearVoicedMs = (clearAll - Math.Min(budgetFrames, clearInWindow)) * FrameMs,
+                ClearVoicedMs = clearVoicedMs,
                 MaxFrameRms = postWindowMax,
                 HeadSpeechAtMs = headSpeechAtMs,
             };
@@ -289,32 +329,27 @@ public static class SilenceTrimmer
         // real audio.
         threshold = Math.Min(threshold, SpeechCapFactor * speechLevel);
 
-        // Minimum-voiced-duration gate (2026-07-28 transient-rejection
-        // fix; AND semantics -- this gate can only make the verdict MORE
-        // silent). Tally ALL frames, tracking the in-window share, then
-        // deduct up to the cue budget of the loudest in-window frames from
-        // each tally. The tallies are frame COUNTS, so "loudest first"
-        // reduces to capping the deduction at the in-window share.
+        // Tier 1 voiced tally (2026-07-28 transient-rejection fix,
+        // recalibrated 2026-08-05). Tally ALL frames, tracking the
+        // in-window share, then deduct up to the cue budget of the loudest
+        // in-window frames. The tallies are frame COUNTS, so "loudest
+        // first" reduces to capping the deduction at the in-window share.
         var voicedFrames = 0;
-        var clearFrames = 0;
         var voicedFramesInWindow = 0;
-        var clearFramesInWindow = 0;
         for (var f = 0; f < frameCount; f++)
         {
             if (rms[f] < threshold) continue;
             voicedFrames++;
             if (f < maskFrames) voicedFramesInWindow++;
-            if (rms[f] >= ClearSpeechRmsFloor)
-            {
-                clearFrames++;
-                if (f < maskFrames) clearFramesInWindow++;
-            }
         }
         var voicedMs = (voicedFrames - Math.Min(budgetFrames, voicedFramesInWindow)) * FrameMs;
-        var clearVoicedMs = (clearFrames - Math.Min(budgetFrames, clearFramesInWindow)) * FrameMs;
         var maxFrameRms = postWindowMax;
 
-        if (voicedMs < MinVoicedDurationMs && clearVoicedMs < MinClearVoicedDurationMs)
+        // Three-tier speech verdict (2026-08-05 recalibration): the
+        // recording is SPEECH when ANY tier fires.
+        if (voicedMs < MinVoicedDurationMs
+            && clearVoicedMs < MinClearVoicedDurationMs
+            && quietVoicedMs < MinQuietSpeechDurationMs)
         {
             return new TrimResult
             {

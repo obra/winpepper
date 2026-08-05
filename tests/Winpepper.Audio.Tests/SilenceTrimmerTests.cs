@@ -334,21 +334,23 @@ public class SilenceTrimmerTests
     }
 
     [Fact]
-    public void Trim_QuietShortUtterance_IsDropped_KnownResidual()
+    public void Trim_QuietShortUtterance_IsRescued_ByQuietTier()
     {
-        // Characterization of the MEASURED residual: the two archived
-        // "Thank you." dictations (voiced 240/260 ms, max frame RMS
-        // 0.013-0.017) sit inside the transient level band and are now
-        // dropped. Encoded here as 260 ms @ 0.015 in a 2 s capture:
-        // P90 = 0.015 passes (13/100 frames), threshold = 0.00225,
-        // voiced = 260 < 600, clear = 0 -> silent via the NEW gate.
-        // Non-destructive (archived). Any future change to this verdict must
-        // be a visible decision backed by new archive measurements.
+        // Formerly Trim_QuietShortUtterance_IsDropped_KnownResidual -- the
+        // 2026-08-05 recalibration flips the verdict. The two logged
+        // "Thank you." dictations (drop lines: voiced 240/260 ms,
+        // clear@0.02 = 60/80 ms; WAVs since purged, so their quiet@0.010
+        // content is unknowable) were REAL SPEECH false-rejects; this
+        // fixture encodes the CLASS -- the measured tier-3 anchors are the
+        // two archived long-holds (460/280 ms @ >= 0.010). Encoded as 260 ms
+        // @ 0.015 in a 2 s capture: P90 = 0.015 passes, voiced = 260 < 350
+        // (tier 1 misses), clear@0.02 = 0 (tier 2 misses), but 260 ms
+        // >= 0.010 clears the 240 ms quiet tier -> KEPT.
         var buf = Join(Dc(0.001, 860), Dc(0.015, 260), Dc(0.001, 880));
 
         var result = SilenceTrimmer.Trim(buf);
 
-        result.IsSilent.ShouldBeTrue();
+        result.IsSilent.ShouldBeFalse();
         result.VoicedMs.ShouldBe(260);
     }
 

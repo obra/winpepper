@@ -90,6 +90,20 @@ That key combination is the default; you can record your own during setup. There
 also a second shortcut you tap once to start recording and tap again to stop, if
 holding keys down isn't comfortable.
 
+<details>
+<summary>Optional: dictate with a foot pedal</summary>
+
+A cheap USB foot pedal makes a great hands-free dictation key. This
+[PCsensor-compatible USB foot pedal](https://www.amazon.com/dp/B0BWTRBLNP)
+works well, and you can skip the vendor's sketchy configuration software:
+[reprogram-foot-pedal](https://github.com/danshapiro/reprogram-foot-pedal)
+shows how to write a key combination (say `Ctrl+Shift+Alt+D`) permanently
+into the pedal's own firmware with an open-source command-line tool. Then
+record that same combination as your Winpepper hotkey on the **Recording**
+tab — step on the pedal, speak, step off.
+
+</details>
+
 ### What you need
 
 - Windows 11, version 22H2 or newer
@@ -174,7 +188,7 @@ improving quickly. Expect an occasional rough edge — and when you hit one, the
 **Diagnostics** tab builds a safe-to-share bug report bundle in one click (see
 above).
 
-Quality is taken seriously. Nearly a thousand automated tests run on every
+Quality is taken seriously. Over 1,400 automated tests run on every
 change, every release is installed and self-tested on a clean Windows machine
 before it is published, and the speech engine is verified against real recorded
 audio.

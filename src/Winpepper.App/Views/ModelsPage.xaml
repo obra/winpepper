@@ -249,15 +249,23 @@
                 </StackPanel>
             </Border>
 
-            <Button Click="OnDownloadMissing"
+            <Button x:Name="DownloadSelectedButton"
+                    Click="OnDownloadSelected"
                     AutomationProperties.AutomationId="ModelsDownloadButton"
+                    ToolTipService.ToolTip="Downloads the models chosen above that aren't installed yet."
                     Style="{StaticResource AccentButtonStyle}"
                     HorizontalAlignment="Left">
                 <StackPanel Orientation="Horizontal" Spacing="8">
                     <FontIcon Glyph="&#xE896;" FontSize="16" />
-                    <TextBlock Text="Download missing models" />
+                    <TextBlock Text="Download selected models" />
                 </StackPanel>
             </Button>
+            <TextBlock x:Name="ManualInstallNote"
+                       AutomationProperties.AutomationId="ModelsManualInstallNote"
+                       Style="{ThemeResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Visibility="Collapsed" />
         </StackPanel>
     </ScrollViewer>
 </Page>

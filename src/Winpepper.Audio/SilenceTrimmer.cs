@@ -102,17 +102,27 @@ public static class SilenceTrimmer
     private const double SilentSpeechLevel = 0.004;
 
     /// <summary>
-    /// Minimum total duration of voiced (above-adaptive-threshold) audio a
-    /// recording must contain to count as speech. The P90 gate above is
-    /// PROPORTIONAL (needs >10% of frames loud), so a brief non-speech
-    /// transient (cough, mic bump, keyboard clatter) in a SHORT recording
-    /// can unlock the whole buffer -- confirmed near-miss 2026-07-28
-    /// (~450 ms transient at -36..-45 dBFS in an 8.95 s silent recording).
-    /// This is an absolute backstop. 600 ms exceeds the confirmed transient
-    /// class; real speech shorter than this passes via the clear-speech
-    /// tier below. Drops remain non-destructive (original audio archived).
+    /// Tier 1: minimum total duration of voiced (above-adaptive-threshold)
+    /// audio a recording must contain to count as speech. Only meaningful
+    /// on the normal path -- below SilentSpeechLevel the adaptive
+    /// threshold has no speech level to anchor to and VoicedMs is 0.
+    /// RECALIBRATED 2026-08-05: the gate was replicated bit-exactly over
+    /// the retained 100-recording archive (computed voiced/clear/max-RMS
+    /// match the logged drop lines exactly) plus 90 enriched drop lines
+    /// from 14 days of logs; 7 drop-archived recordings were human-labeled.
+    /// Two quiet real "you have" takes (voiced 360/500 ms, max frame RMS
+    /// 0.0093-0.0185, clear@0.02 = 0) were false-rejected by the old
+    /// 600 ms floor; 350 admits both (the 360 ms take passes with ZERO
+    /// frame margin). All 93 kept real dictations remain
+    /// kept (the rule only loosens). KNOWN SACRIFICE: the 2026-07-28
+    /// confirmed ~450 ms transient class (-36..-45 dBFS) is no longer
+    /// archived -- voiced >= 350 admits such a transient in a SHORT
+    /// recording (the P90 gate still covers long recordings unless the
+    /// quiet tier fires). Accepted trade-off: one wasted ASR call on an
+    /// archived recording vs 4 lost dictations in 2 days -- see
+    /// Trim_BriefQuietTransient_ShortRecording_IsKept_AcceptedTradeoff.
     /// </summary>
-    private const int MinVoicedDurationMs = 600;
+    private const int MinVoicedDurationMs = 350;
 
     /// <summary>
     /// Frames at or above this RMS (~-34 dBFS) are "clearly speech-loud".

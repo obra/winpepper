@@ -202,23 +202,23 @@ public class SilenceTrimmerTests
     }
 
     [Fact]
-    public void Trim_BriefQuietTransient_ShortRecording_IsSilent()
+    public void Trim_BriefQuietTransient_ShortRecording_IsKept_AcceptedTradeoff()
     {
-        // THE bug (2026-07-28 near-miss class): a ~460 ms transient at 0.015
-        // RMS (-36.5 dBFS -- cough/mic-bump loudness, below clear speech) in
-        // a 2 s otherwise-silent capture. 23 of 100 frames exceed 0.004, so
-        // the proportional P90 gate alone says "speech" and the whole silent
-        // recording would be transcribed. The absolute voiced-duration gate
-        // must drop it: 460 ms voiced < 600 ms, and no frame reaches the
-        // 0.02 clear-speech tier.
+        // KNOWN SACRIFICE of the 2026-08-05 recalibration: the confirmed
+        // 2026-07-28 ~450 ms transient class (-36..-45 dBFS) in a SHORT
+        // recording now passes via the 350 ms voiced floor (460 >= 350).
+        // Accepted trade-off: cost is one wasted ASR call on an archived
+        // recording vs 4 real dictations lost in 2 days under the old
+        // 600 ms floor (2026-08-05: batch Parakeet transcribed this
+        // encoded transient to empty; non-empty hallucinations would
+        // reach injection unguarded -- accepted residual). The P90 gate
+        // still covers LONG recordings unless the quiet tier fires (see
+        // the long-recording pins below).
         var buf = Join(Dc(0.001, 760), Dc(0.015, 460), Dc(0.001, 780));
 
         var result = SilenceTrimmer.Trim(buf);
 
-        result.IsSilent.ShouldBeTrue();
-        result.Trimmed.Length.ShouldBe(0);
-        result.RemovedMs.ShouldBe(0);
-        result.RunsTrimmed.ShouldBe(0);
+        result.IsSilent.ShouldBeFalse();
         result.VoicedMs.ShouldBe(460);
         result.ClearVoicedMs.ShouldBe(0);
     }
@@ -226,25 +226,50 @@ public class SilenceTrimmerTests
     [Fact]
     public void Trim_ModerateVoiced_JustUnderFloor_IsSilent()
     {
-        // Boundary pin: 580 ms of quiet voiced audio (0.01 RMS, below the
-        // 0.02 clear tier) is under the 600 ms floor -> silent.
-        var buf = Join(Dc(0.001, 720), Dc(0.01, 580), Dc(0.001, 700));
+        // Boundary pin at the 2026-08-05 floor: 340 ms of quiet voiced
+        // audio (0.008 RMS -- below the 0.010 quiet tier and the 0.02
+        // clear tier) is one frame under the 350 ms floor -> silent.
+        // P90 = 0.008 (17/100 frames, idx 89), threshold =
+        // min(max(3*0.001, 0.002), 0.15*0.008) = 0.0012.
+        var buf = Join(Dc(0.001, 840), Dc(0.008, 340), Dc(0.001, 820));
 
         var result = SilenceTrimmer.Trim(buf);
 
         result.IsSilent.ShouldBeTrue();
+        result.VoicedMs.ShouldBe(340);
     }
 
     [Fact]
     public void Trim_ModerateVoiced_AtDurationFloor_IsKept()
     {
-        // Boundary pin: exactly 600 ms of quiet voiced audio (0.01 RMS)
-        // meets the floor -> kept. Protects soft-spoken dictation.
-        var buf = Join(Dc(0.001, 700), Dc(0.01, 600), Dc(0.001, 700));
+        // Boundary pin: 360 ms of quiet voiced audio (0.008 RMS) meets the
+        // 350 ms floor (first whole frame >= 350) -> kept via tier 1 ALONE
+        // (0.008 is below both the 0.010 quiet and 0.02 clear floors).
+        // Protects soft-spoken dictation.
+        var buf = Join(Dc(0.001, 820), Dc(0.008, 360), Dc(0.001, 820));
 
         var result = SilenceTrimmer.Trim(buf);
 
         result.IsSilent.ShouldBeFalse();
+        result.VoicedMs.ShouldBe(360);
+    }
+
+    [Fact]
+    public void Trim_QuietShortUtterance_MidVoiced_IsKept_By350Floor()
+    {
+        // 2026-08-05 recalibration scenario: the two quiet real "you have"
+        // takes (voiced 360/500 ms, max frame RMS 0.0093-0.0185,
+        // clear@0.02 = 0) were false-rejected by the old 600 ms floor.
+        // Encoded as 500 ms @ 0.015 in a 2 s capture: P90 = 0.015
+        // (25/100 frames, idx 89), threshold = min(max(3*0.001, 0.002),
+        // 0.15*0.015) = 0.00225, voiced = 500 >= 350 -> kept.
+        var buf = Join(Dc(0.001, 760), Dc(0.015, 500), Dc(0.001, 740));
+
+        var result = SilenceTrimmer.Trim(buf);
+
+        result.IsSilent.ShouldBeFalse();
+        result.VoicedMs.ShouldBe(500);
+        result.ClearVoicedMs.ShouldBe(0);
     }
 
     [Fact]
@@ -296,11 +321,12 @@ public class SilenceTrimmerTests
     [Fact]
     public void Trim_ClearSpeech_JustUnderClearTier_IsSilent()
     {
-        // The boundary's one-frame-under twin: 80 ms at 0.05 inside
-        // quiet-voiced padding. P90 = 0.01, threshold = 0.0015 (the
-        // 0.15*speechLevel cap binds), voiced = 460 < 600,
-        // clear = 80 < 100 -> silent.
-        var buf = Join(Dc(0.001, 700), Dc(0.01, 380), Dc(0.05, 80), Dc(0.001, 740));
+        // The clear boundary's one-frame-under twin, recalibrated so no
+        // tier fires: clear = 80 < 100; voiced = 180 + 80 = 260 < 350;
+        // quiet-tier content (>= 0.010) = 80 < 240 (the 0.008 block sits
+        // below the quiet floor). P90 = 0.008 (13/85 frames, idx 75),
+        // threshold = min(max(3*0.001, 0.002), 0.15*0.008) = 0.0012.
+        var buf = Join(Dc(0.001, 700), Dc(0.008, 180), Dc(0.05, 80), Dc(0.001, 740));
 
         var result = SilenceTrimmer.Trim(buf);
 
@@ -308,21 +334,23 @@ public class SilenceTrimmerTests
     }
 
     [Fact]
-    public void Trim_QuietShortUtterance_IsDropped_KnownResidual()
+    public void Trim_QuietShortUtterance_IsRescued_ByQuietTier()
     {
-        // Characterization of the MEASURED residual: the two archived
-        // "Thank you." dictations (voiced 240/260 ms, max frame RMS
-        // 0.013-0.017) sit inside the transient level band and are now
-        // dropped. Encoded here as 260 ms @ 0.015 in a 2 s capture:
-        // P90 = 0.015 passes (13/100 frames), threshold = 0.00225,
-        // voiced = 260 < 600, clear = 0 -> silent via the NEW gate.
-        // Non-destructive (archived). Any future change to this verdict must
-        // be a visible decision backed by new archive measurements.
+        // Formerly Trim_QuietShortUtterance_IsDropped_KnownResidual -- the
+        // 2026-08-05 recalibration flips the verdict. The two logged
+        // "Thank you." dictations (drop lines: voiced 240/260 ms,
+        // clear@0.02 = 60/80 ms; WAVs since purged, so their quiet@0.010
+        // content is unknowable) were REAL SPEECH false-rejects; this
+        // fixture encodes the CLASS -- the measured tier-3 anchors are the
+        // two archived long-holds (460/280 ms @ >= 0.010). Encoded as 260 ms
+        // @ 0.015 in a 2 s capture: P90 = 0.015 passes, voiced = 260 < 350
+        // (tier 1 misses), clear@0.02 = 0 (tier 2 misses), but 260 ms
+        // >= 0.010 clears the 240 ms quiet tier -> KEPT.
         var buf = Join(Dc(0.001, 860), Dc(0.015, 260), Dc(0.001, 880));
 
         var result = SilenceTrimmer.Trim(buf);
 
-        result.IsSilent.ShouldBeTrue();
+        result.IsSilent.ShouldBeFalse();
         result.VoicedMs.ShouldBe(260);
     }
 
@@ -345,39 +373,147 @@ public class SilenceTrimmerTests
     [Fact]
     public void Trim_BriefQuietTransient_LongRecording_IsSilent()
     {
-        // Characterization: the same 460 ms transient in a 10 s capture is
-        // only ~4.6% of frames, so the P90 gate already drops it today. The
-        // new gate must not change that. On this P90-silent path VoicedMs
-        // reports 0 (the adaptive threshold is undefined without a speech
-        // level) but the absolute fields stay meaningful for recalibration.
-        var buf = Join(Dc(0.001, 4760), Dc(0.015, 460), Dc(0.001, 4780));
+        // A 460 ms sub-quiet transient (0.008 RMS, below the 0.010 quiet
+        // floor) in a 10 s capture is only ~4.6% of frames: the P90 gate
+        // holds and no rescue tier fires (clear = 0, quiet-tier content
+        // = 0) -> still dropped. VoicedMs reports 0 on this path but the
+        // absolute fields stay meaningful for recalibration.
+        var buf = Join(Dc(0.001, 4760), Dc(0.008, 460), Dc(0.001, 4780));
 
         var result = SilenceTrimmer.Trim(buf);
 
         result.IsSilent.ShouldBeTrue();
         result.VoicedMs.ShouldBe(0);
         result.ClearVoicedMs.ShouldBe(0);
-        result.MaxFrameRms.ShouldBe(0.015, 0.0005);
+        result.MaxFrameRms.ShouldBe(0.008, 0.0005);
     }
 
     [Fact]
-    public void Trim_SparseSpeechBurst_LongRecording_IsSilent_KnownResidual()
+    public void Trim_LongHoldTailSpeech_P90Silent_IsRescued_ByQuietTier_NoAudioLoss()
     {
-        // Characterization of the PRE-EXISTING accepted residual (the
-        // 2026-07-24 silence-trimming plan asked for this pin and it was
-        // never written): a real 300 ms burst in a 10 s mostly-silent
-        // recording lands P90 on the room tone, so the P90 gate fires FIRST
-        // and the recording is dropped -- recoverable from the archive.
-        // ClearVoicedMs = 300 >= 100 here, pinning the AND semantics: the
-        // clear tier is an escape hatch WITHIN the new gate, it never
-        // overrides a P90-silent verdict. Any future change to this verdict
-        // must be a visible decision.
-        var buf = Join(Dc(0.001, 4840), Dc(0.05, 300), Dc(0.001, 4860));
+        // 2026-08-05 recalibration scenario: the archived 7.15 s long-hold
+        // with tail speech (P90-silent path, 460 ms @ 0.010) was a REAL
+        // SPEECH false-reject. Encoded as 460 ms @ 0.012 outside the cue
+        // window in a 7.16 s capture (mask 1000 / budget 100 / preroll
+        // 500): speech frames start at 3300 ms, far past the 1000 ms
+        // window, so nothing is deducted; quiet = 460 >= 240 -> KEPT
+        // (tier 3 on the P90-silent path). NO AUDIO LOSS: the trim
+        // threshold caps at 0.15 * P90 = 0.00015, below the 0.001 room
+        // tone, so the returned buffer is the input, sample-identical.
+        var buf = Join(Dc(0.001, 3300), Dc(0.012, 460), Dc(0.001, 3400));
+
+        var result = SilenceTrimmer.Trim(buf, 1000, 100, 500);
+
+        result.IsSilent.ShouldBeFalse();
+        result.VoicedMs.ShouldBe(0);
+        result.RemovedMs.ShouldBe(0);
+        result.Trimmed.Length.ShouldBe(buf.Length);
+        result.Trimmed.SequenceEqual(buf).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Trim_QuietTier_AtFloor_P90SilentPath_IsKept()
+    {
+        // Tier 3 boundary: exactly 240 ms @ 0.012 in a 10 s P90-silent
+        // capture (12/500 frames; P90 = 0.001) meets the 240 ms floor ->
+        // kept. The archived 6.0 s "when it posts" long-hold (280 ms
+        // @ 0.010) sits just above this boundary.
+        var buf = Join(Dc(0.001, 4880), Dc(0.012, 240), Dc(0.001, 4880));
+
+        var result = SilenceTrimmer.Trim(buf);
+
+        result.IsSilent.ShouldBeFalse();
+        result.VoicedMs.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Trim_QuietTier_JustUnderFloor_P90SilentPath_IsSilent()
+    {
+        // Tier 3 boundary's one-frame-under twin: 220 ms @ 0.012 in a
+        // 10 s P90-silent capture -> no tier fires -> dropped.
+        var buf = Join(Dc(0.001, 4900), Dc(0.012, 220), Dc(0.001, 4880));
 
         var result = SilenceTrimmer.Trim(buf);
 
         result.IsSilent.ShouldBeTrue();
+        result.VoicedMs.ShouldBe(0);
+        result.ClearVoicedMs.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Trim_QuietCueLeakage_InsideMask_StillDrops()
+    {
+        // Beep-leakage guard (2026-08-05 measurement: all 3 human-labeled
+        // non-speech drops had <= 60 ms of budget-deducted quiet-floor
+        // content -- start-cue leakage; raw cue footprints reach 160 ms). A recording whose ONLY >= 0.010
+        // content is ~80 ms inside the cue window (mask 1500 / budget 100)
+        // deducts to 0 quiet ms and stays dropped. 4 s capture ->
+        // P90 = 0.001, P90-silent path.
+        var buf = Join(Dc(0.001, 600), Dc(0.012, 80), Dc(0.001, 3320));
+
+        var result = SilenceTrimmer.Trim(buf, 1500, 100);
+
+        result.IsSilent.ShouldBeTrue();
+        result.VoicedMs.ShouldBe(0);
+        result.ClearVoicedMs.ShouldBe(0);
+        result.MaxFrameRms.ShouldBe(0.001, 0.0005);
+    }
+
+    [Fact]
+    public void Trim_QuietContentInsideMask_IsBudgetDeducted_BeforeQuietTier()
+    {
+        // Proves the tier 3 tally is cue-budget-deducted: 300 ms @ 0.012
+        // entirely inside the 1500 ms window. Unmasked it clears the tier
+        // (300 >= 240 -> kept); with budget 100 (5 frames) it deducts to
+        // 200 < 240 and DROPS. Without the deduction the masked call
+        // would pass -- this pin is what keeps cue pickup from unlocking
+        // the quiet tier.
+        var buf = Join(Dc(0.001, 600), Dc(0.012, 300), Dc(0.001, 3100));
+
+        SilenceTrimmer.Trim(buf).IsSilent.ShouldBeFalse(); // tier 3, unmasked
+
+        var masked = SilenceTrimmer.Trim(buf, 1500, 100);
+        masked.IsSilent.ShouldBeTrue();
+        masked.ClearVoicedMs.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Trim_TrueSilence_AtNoiseFloor_IsStillDropped()
+    {
+        // 2026-08-05 non-speech class: all 3 human-labeled non-speech
+        // drops have max frame RMS <= 0.0010 -- essentially silence. A
+        // 5 s capture at exactly 0.001 fires no tier -> dropped.
+        var buf = Dc(0.001, 5000);
+
+        var result = SilenceTrimmer.Trim(buf);
+
+        result.IsSilent.ShouldBeTrue();
+        result.VoicedMs.ShouldBe(0);
+        result.ClearVoicedMs.ShouldBe(0);
+        result.MaxFrameRms.ShouldBe(0.001, 0.0005);
+        result.Trimmed.Length.ShouldBe(0);
+    }
+
+    [Fact]
+    public void Trim_SparseSpeechBurst_LongRecording_IsRescued_ByClearTier()
+    {
+        // Formerly ..._IsSilent_KnownResidual -- the 2026-08-05
+        // recalibration flips it: the P90-silent path is no longer an
+        // unconditional drop; tiers 2 and 3 are consulted there. A real
+        // 300 ms burst @ 0.05 in a 10 s mostly-silent recording lands P90
+        // on the room tone, but clear@0.02 = 300 >= 100 -> KEPT (tier 2).
+        // VoicedMs stays 0 on this path (adaptive threshold undefined).
+        // Trim safety: threshold = 0.15 * P90 = 0.00015 sits below the
+        // 0.001 room tone, so nothing is trimmed -- no audio loss.
+        var buf = Join(Dc(0.001, 4840), Dc(0.05, 300), Dc(0.001, 4860));
+
+        var result = SilenceTrimmer.Trim(buf);
+
+        result.IsSilent.ShouldBeFalse();
+        result.VoicedMs.ShouldBe(0);
         result.ClearVoicedMs.ShouldBe(300);
+        result.RemovedMs.ShouldBe(0);
+        result.Trimmed.Length.ShouldBe(buf.Length);
     }
 
     // ------------------------------------------------------------------

@@ -23,8 +23,10 @@ public readonly struct TrimResult
     /// Milliseconds of voiced (above-adaptive-threshold) audio detected.
     /// Cue-budget-deducted count (in-window frames count, then up to the cue
     /// budget of them is subtracted).
-    /// 0 when the P90 gate fired (the adaptive threshold is derived from a
-    /// speech level that does not exist there) and for sub-frame buffers.
+    /// 0 whenever the recording's P90 is below SilentSpeechLevel (the
+    /// adaptive threshold is derived from a speech level that does not
+    /// exist there) -- including recordings rescued by the clear/quiet
+    /// tiers -- and for sub-frame buffers.
     /// Observability only -- lets the drop log say WHY.
     /// </summary>
     public required int VoicedMs { get; init; }
@@ -35,8 +37,9 @@ public readonly struct TrimResult
     /// budget of them is subtracted).
     /// Absolute, so it is reported on BOTH silent paths (0 only for
     /// sub-frame buffers). Together with MaxFrameRms this makes the gate
-    /// constants recalibratable from production logs (they were measured
-    /// from one 100-recording archive, 2026-07-28, and are provisional).
+    /// constants recalibratable from production logs (measured 2026-07-28,
+    /// recalibrated 2026-08-05 against the archive plus 14 days of
+    /// drop-line logs).
     /// </summary>
     public required int ClearVoicedMs { get; init; }
 
@@ -98,37 +101,54 @@ public static class SilenceTrimmer
     private const double ThresholdAbsFloor = 0.002;
     private const double SpeechCapFactor = 0.15;
 
-    /// <summary>Below this 90th-percentile RMS the recording has no speech.</summary>
+    /// <summary>
+    /// Below this 90th-percentile RMS the adaptive threshold has no speech
+    /// level to anchor to: tier 1 (voiced duration) is unavailable and
+    /// VoicedMs reports 0. Since 2026-08-05 this is NOT an unconditional
+    /// drop -- the clear and quiet tiers still apply.
+    /// </summary>
     private const double SilentSpeechLevel = 0.004;
 
     /// <summary>
-    /// Minimum total duration of voiced (above-adaptive-threshold) audio a
-    /// recording must contain to count as speech. The P90 gate above is
-    /// PROPORTIONAL (needs >10% of frames loud), so a brief non-speech
-    /// transient (cough, mic bump, keyboard clatter) in a SHORT recording
-    /// can unlock the whole buffer -- confirmed near-miss 2026-07-28
-    /// (~450 ms transient at -36..-45 dBFS in an 8.95 s silent recording).
-    /// This is an absolute backstop. 600 ms exceeds the confirmed transient
-    /// class; real speech shorter than this passes via the clear-speech
-    /// tier below. Drops remain non-destructive (original audio archived).
+    /// Tier 1: minimum total duration of voiced (above-adaptive-threshold)
+    /// audio a recording must contain to count as speech. Only meaningful
+    /// on the normal path -- below SilentSpeechLevel the adaptive
+    /// threshold has no speech level to anchor to and VoicedMs is 0.
+    /// RECALIBRATED 2026-08-05: the gate was replicated bit-exactly over
+    /// the retained 100-recording archive (computed voiced/clear/max-RMS
+    /// match the logged drop lines exactly) plus 90 enriched drop lines
+    /// from 14 days of logs; 7 drop-archived recordings were human-labeled.
+    /// Two quiet real "you have" takes (voiced 360/500 ms, max frame RMS
+    /// 0.0093-0.0185, clear@0.02 = 0) were false-rejected by the old
+    /// 600 ms floor; 350 admits both (the 360 ms take passes with ZERO
+    /// frame margin). All 93 kept real dictations remain
+    /// kept (the rule only loosens). KNOWN SACRIFICE: the 2026-07-28
+    /// confirmed ~450 ms transient class (-36..-45 dBFS) is no longer
+    /// archived -- voiced >= 350 admits such a transient in a SHORT
+    /// recording (the P90 gate still covers long recordings unless the
+    /// quiet tier fires). Accepted trade-off: one wasted ASR call on an
+    /// archived recording vs 4 lost dictations in 2 days -- see
+    /// Trim_BriefQuietTransient_ShortRecording_IsKept_AcceptedTradeoff.
     /// </summary>
-    private const int MinVoicedDurationMs = 600;
+    private const int MinVoicedDurationMs = 350;
 
     /// <summary>
-    /// Frames at or above this RMS (~-34 dBFS) are "clearly speech-loud".
-    /// MEASURED (2026-07-28, 100-recording archive): every archived
-    /// non-speech file has at most ONE 20 ms frame at or above 0.02, while
-    /// loud short utterances reach it -- but 17% of real dictations never
-    /// do, so this tier is a loud-short-utterance escape hatch, NOT a
-    /// speech test. Known residual: quiet short utterances (max frame RMS
-    /// 0.013-0.017, e.g. the two archived "Thank you."s) sit inside the
-    /// transient level band and are dropped -- see
-    /// Trim_QuietShortUtterance_IsDropped_KnownResidual.
+    /// Tier 2 level: frames at or above this RMS (~-34 dBFS) are "clearly
+    /// speech-loud". MEASURED (2026-07-28, 100-recording archive): every
+    /// archived non-speech file has at most ONE 20 ms frame at or above
+    /// 0.02, while loud short utterances reach it -- but 17% of real
+    /// dictations never do, so this tier is a loud-short-utterance escape
+    /// hatch, NOT a speech test. Since 2026-08-05 it is evaluated on BOTH
+    /// paths (including P90-silent); quiet short utterances below it are
+    /// handled by the quiet tier (QuietSpeechRmsFloor) -- see
+    /// Trim_QuietShortUtterance_IsRescued_ByQuietTier.
     /// </summary>
     private const double ClearSpeechRmsFloor = 0.02;
 
     /// <summary>
-    /// Clear-speech-loud audio needed to bypass the duration floor. 100 ms
+    /// Tier 2 duration: clear-speech-loud audio needed to count as speech
+    /// on EITHER path (2026-08-05: also consulted on the P90-silent
+    /// path). 100 ms
     /// = 5 frames: the measured worst non-speech file shows 1 frame at or
     /// above 0.02 (5x margin), while the archived loud short utterance
     /// "Great." has EXACTLY 100 ms of clear audio and 9/93 real dictations
@@ -137,6 +157,30 @@ public static class SilenceTrimmer
     /// voiced/clear/max-RMS fields exist for recalibration).
     /// </summary>
     private const int MinClearVoicedDurationMs = 100;
+
+    /// <summary>
+    /// Tier 3 level: frames at or above this RMS (~-40 dBFS) are plausibly
+    /// QUIET speech. MEASURED (2026-08-05 recalibration: gate replicated
+    /// bit-exactly over the retained 100-recording archive + 90 enriched
+    /// drop lines from 14 days of logs; 7 drop-archived recordings
+    /// human-labeled): the two real long-hold false-rejects carried
+    /// 460 ms / 280 ms at or above 0.010 on the P90-silent path, while all
+    /// 3 labeled non-speech drops have max frame RMS &lt;= 0.0010 with at
+    /// most 60 ms of budget-deducted content at or above 0.010 (start-cue
+    /// leakage past the 100 ms cue budget; raw in-window cue footprints at
+    /// this floor reach 160 ms).
+    /// </summary>
+    private const double QuietSpeechRmsFloor = 0.010;
+
+    /// <summary>
+    /// Tier 3 duration: quiet-speech audio (>= QuietSpeechRmsFloor,
+    /// cue-budget-deducted) needed to count as speech. 240 ms = 4x the
+    /// measured 60 ms worst-case budget-deducted start-cue leakage (see
+    /// QuietSpeechRmsFloor), and sits at or under both measured real
+    /// rescues (460/280 ms). Evaluated on BOTH paths, including
+    /// P90-silent.
+    /// </summary>
+    private const int MinQuietSpeechDurationMs = 240;
 
     /// <summary>
     /// Trim interior/edge silence and decide whether the recording is
@@ -238,34 +282,29 @@ public static class SilenceTrimmer
         for (var f = maskFrames; f < frameCount; f++)
             if (rms[f] > postWindowMax) postWindowMax = rms[f];
 
-        if (speechLevel < SilentSpeechLevel)
+        // Absolute-floor tallies (tier 2 clear and tier 3 quiet), computed
+        // on BOTH paths and cue-budget-deducted exactly like the voiced
+        // tally: count ALL frames at/above each floor, track the in-window
+        // share, then deduct up to the budget of in-window frames.
+        var clearFrames = 0;
+        var clearFramesInWindow = 0;
+        var quietFrames = 0;
+        var quietFramesInWindow = 0;
+        for (var f = 0; f < frameCount; f++)
         {
-            // P90-silent: the adaptive threshold is undefined (it is
-            // derived from a speech level that does not exist), so
-            // VoicedMs reports 0. The clear count is reported
-            // budget-deducted so the cue cannot inflate the recalibration
-            // fields (pre-mask logs showed clear = 60-160 ms of pure beep
-            // on every silent drop).
-            var clearAll = 0;
-            var clearInWindow = 0;
-            for (var f = 0; f < frameCount; f++)
+            if (rms[f] >= ClearSpeechRmsFloor)
             {
-                if (rms[f] < ClearSpeechRmsFloor) continue;
-                clearAll++;
-                if (f < maskFrames) clearInWindow++;
+                clearFrames++;
+                if (f < maskFrames) clearFramesInWindow++;
             }
-            return new TrimResult
+            if (rms[f] >= QuietSpeechRmsFloor)
             {
-                Trimmed = Array.Empty<float>(),
-                RemovedMs = 0,
-                RunsTrimmed = 0,
-                IsSilent = true,
-                VoicedMs = 0,
-                ClearVoicedMs = (clearAll - Math.Min(budgetFrames, clearInWindow)) * FrameMs,
-                MaxFrameRms = postWindowMax,
-                HeadSpeechAtMs = headSpeechAtMs,
-            };
+                quietFrames++;
+                if (f < maskFrames) quietFramesInWindow++;
+            }
         }
+        var clearVoicedMs = (clearFrames - Math.Min(budgetFrames, clearFramesInWindow)) * FrameMs;
+        var quietVoicedMs = (quietFrames - Math.Min(budgetFrames, quietFramesInWindow)) * FrameMs;
 
         var noiseFloor = Percentile(sorted, NoiseFloorPercentile);
 
@@ -279,32 +318,37 @@ public static class SilenceTrimmer
         // real audio.
         threshold = Math.Min(threshold, SpeechCapFactor * speechLevel);
 
-        // Minimum-voiced-duration gate (2026-07-28 transient-rejection
-        // fix; AND semantics -- this gate can only make the verdict MORE
-        // silent). Tally ALL frames, tracking the in-window share, then
-        // deduct up to the cue budget of the loudest in-window frames from
-        // each tally. The tallies are frame COUNTS, so "loudest first"
-        // reduces to capping the deduction at the in-window share.
-        var voicedFrames = 0;
-        var clearFrames = 0;
-        var voicedFramesInWindow = 0;
-        var clearFramesInWindow = 0;
-        for (var f = 0; f < frameCount; f++)
+        // Tier 1 (voiced duration) exists only when the P90 gate finds a
+        // speech level: below SilentSpeechLevel the adaptive threshold is
+        // derived from a speech level that does not exist, so VoicedMs
+        // reports 0 (unchanged field semantics) and tier 1 cannot fire.
+        // Tally ALL frames, tracking the in-window share, then deduct up
+        // to the cue budget of the loudest in-window frames. The tallies
+        // are frame COUNTS, so "loudest first" reduces to capping the
+        // deduction at the in-window share.
+        var voicedMs = 0;
+        if (speechLevel >= SilentSpeechLevel)
         {
-            if (rms[f] < threshold) continue;
-            voicedFrames++;
-            if (f < maskFrames) voicedFramesInWindow++;
-            if (rms[f] >= ClearSpeechRmsFloor)
+            var voicedFrames = 0;
+            var voicedFramesInWindow = 0;
+            for (var f = 0; f < frameCount; f++)
             {
-                clearFrames++;
-                if (f < maskFrames) clearFramesInWindow++;
+                if (rms[f] < threshold) continue;
+                voicedFrames++;
+                if (f < maskFrames) voicedFramesInWindow++;
             }
+            voicedMs = (voicedFrames - Math.Min(budgetFrames, voicedFramesInWindow)) * FrameMs;
         }
-        var voicedMs = (voicedFrames - Math.Min(budgetFrames, voicedFramesInWindow)) * FrameMs;
-        var clearVoicedMs = (clearFrames - Math.Min(budgetFrames, clearFramesInWindow)) * FrameMs;
         var maxFrameRms = postWindowMax;
 
-        if (voicedMs < MinVoicedDurationMs && clearVoicedMs < MinClearVoicedDurationMs)
+        // Three-tier speech verdict (2026-08-05 recalibration): the
+        // recording is SPEECH when ANY tier fires. Tiers 2 and 3 are
+        // consulted on BOTH paths -- the P90-silent path is no longer an
+        // unconditional drop (it false-rejected two real long-hold
+        // dictations: 460 ms and 280 ms @ >= 0.010).
+        if (voicedMs < MinVoicedDurationMs
+            && clearVoicedMs < MinClearVoicedDurationMs
+            && quietVoicedMs < MinQuietSpeechDurationMs)
         {
             return new TrimResult
             {
@@ -323,6 +367,12 @@ public static class SilenceTrimmer
         // ALL frames now, so the mask/budget can never move trimming
         // offsets or change the output buffer (the walker's sole input is
         // isSilence[]).
+        // On a rescued P90-silent recording the SpeechCapFactor cap binds:
+        // threshold = 0.15 * speechLevel < 0.15 * SilentSpeechLevel =
+        // 0.0006, far below QuietSpeechRmsFloor (0.010) -- no frame that
+        // qualified a rescue tier can be classified as trim-silence, so
+        // the walk cannot eat rescued speech. Pinned by
+        // Trim_LongHoldTailSpeech_P90Silent_IsRescued_ByQuietTier_NoAudioLoss.
         var trimThreshold = threshold;
 
         var isSilence = new bool[frameCount];

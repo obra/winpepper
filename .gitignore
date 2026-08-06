@@ -21,3 +21,6 @@ node_modules/
 *.wsb
 
 .kata.local.toml
+
+# Per-machine agent tooling state (OpenCode)
+.opencode/

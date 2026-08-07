@@ -93,4 +93,15 @@ public record AppSettings
     // first-run default is applied (spec Task 4). No position persistence.
     public int? WindowWidth { get; init; }
     public int? WindowHeight { get; init; }
+
+    /// <summary>Injection delivery-ladder order (design doc 2026-08-06 §2.3).
+    /// Channel names, case-insensitive: "emReplaceSel", "wmCharSmto",
+    /// "vkPacket". Unknown names are logged and skipped at parse time; an
+    /// empty or fully-invalid list falls back to this hardcoded default.
+    /// Parsing lives in Winpepper.Platform.Injection.InjectionChannelNames
+    /// (Core cannot reference Platform's DeliveryChannel type). First
+    /// collection-typed settings property — DebouncedSettingsWriter's diff
+    /// special-cases string sequences for it.</summary>
+    public IReadOnlyList<string> InjectionChannels { get; init; } =
+        new[] { "emReplaceSel", "wmCharSmto", "vkPacket" };
 }

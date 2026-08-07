@@ -15,7 +15,8 @@ public class TextInjectorGuardedTests
             isKeyDown: _ => false,          // no held modifiers => no wait, no modifier halt
             foregroundHwnd: foregroundHwnd,
             sendChunk: sendChunk,
-            sleep: _ => { });               // no real pacing in unit tests
+            sleep: _ => { },                // no real pacing in unit tests
+            focusedChildCapture: _ => new FocusedChildCapture(0, false)); // ladder => VkPacket floor
 
     [Fact]
     public void Guarded_StableFocus_SendsWholeText_InChunks()
@@ -178,7 +179,8 @@ public class TextInjectorGuardedTests
             isKeyDown: _ => sent.Count >= 1, // "Alt goes down" after chunk 1
             foregroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; },
-            sleep: _ => { });
+            sleep: _ => { },
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 96); // 12 chunks of 8
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Interrupted);
@@ -202,7 +204,8 @@ public class TextInjectorGuardedTests
             foregroundHwnd: () => 42,
             sendChunk: _ => true,
             sleep: sleeps.Add,
-            monotonicMs: () => 0.0);
+            monotonicMs: () => 0.0,
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 96); // 12 chunks => exactly 11 inter-chunk pauses
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
@@ -257,7 +260,8 @@ public class TextInjectorGuardedTests
             {
                 sleeps.Add(ms);
                 if (sleeps.Count >= 2) held = false; // ...released after 2 polls
-            });
+            },
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
 
         // "hi" = 1 chunk => no inter-chunk pauses; the only sleeps are the
         // two 15 ms modifier-wait polls, recorded through the seam.
@@ -285,7 +289,8 @@ public class TextInjectorGuardedTests
             foregroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; },
             sleep: ms => { sleeps.Add(ms); if (sleeps.Count >= 3) buttonDown = false; },
-            monotonicMs: () => 0.0);
+            monotonicMs: () => 0.0,
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 16); // 2 chunks of 8
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
@@ -329,7 +334,8 @@ public class TextInjectorGuardedTests
             isKeyDown: vk => vk == 0x01 && sent.Count >= 1, // click after chunk 1
             foregroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; },
-            sleep: _ => { });
+            sleep: _ => { },
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 24); // 3 chunks of 8
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Interrupted);
@@ -410,7 +416,8 @@ public class TextInjectorGuardedTests
             foregroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; },
             sleep: _ => { },
-            foregroundElevation: _ => ForegroundElevation.Unknown);
+            foregroundElevation: _ => ForegroundElevation.Unknown,
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 16); // 2 chunks of 8
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
@@ -428,7 +435,8 @@ public class TextInjectorGuardedTests
             foregroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; },
             sleep: _ => { },
-            foregroundElevation: _ => ForegroundElevation.NotElevated);
+            foregroundElevation: _ => ForegroundElevation.NotElevated,
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 16);
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
@@ -448,7 +456,8 @@ public class TextInjectorGuardedTests
             isKeyDown: _ => false,
             foregroundHwnd: () => 42,
             sendChunk: c => { sent.Add(c); return true; },
-            sleep: _ => { });
+            sleep: _ => { },
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 8);
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
@@ -470,7 +479,8 @@ public class TextInjectorGuardedTests
             foregroundHwnd: () => 42,
             sendChunk: _ => { now += 5.0; return true; }, // each send "costs" 5 ms
             sleep: ms => { sleeps.Add(ms); now += ms; },
-            monotonicMs: () => now);
+            monotonicMs: () => now,
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 24); // 3 chunks => 2 inter-chunk pauses
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
@@ -494,7 +504,8 @@ public class TextInjectorGuardedTests
             foregroundHwnd: () => { hwndReads++; return 42; },
             sendChunk: _ => { now += 20.0; return true; }, // send alone exceeds the period
             sleep: ms => { sleeps.Add(ms); now += ms; },
-            monotonicMs: () => now);
+            monotonicMs: () => now,
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 24); // 3 chunks
 
         injector.TryInjectGuarded(text).ShouldBe(InjectionRunOutcome.Completed);
@@ -518,7 +529,8 @@ public class TextInjectorGuardedTests
             foregroundHwnd: () => 42,
             sendChunk: _ => true,
             sleep: sleeps.Add,
-            monotonicMs: () => 0.0);
+            monotonicMs: () => 0.0,
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var block = "a\U0001F600\U0001F600\U0001F600\U0001F600"; // 9 units: 1 BMP char + 4 surrogate pairs
         var text = block + block + block; // 3 straddle chunks of 9 units => 2 inter-chunk pauses
 
@@ -535,7 +547,8 @@ public class TextInjectorGuardedTests
             isKeyDown: _ => false,
             foregroundHwnd: () => 42,
             sendChunk: _ => true,
-            sleep: _ => { });
+            sleep: _ => { },
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 96); // 12 chunks of 8
 
         var report = injector.TryInjectGuardedDetailed(text);
@@ -558,7 +571,8 @@ public class TextInjectorGuardedTests
             isKeyDown: _ => false,
             foregroundHwnd: () => foreground,
             sendChunk: c => { sent.Add(c); if (sent.Count == 3) foreground = 99; return true; },
-            sleep: _ => { });
+            sleep: _ => { },
+            focusedChildCapture: _ => new FocusedChildCapture(0, false));
         var text = new string('a', 96); // 12 chunks of 8
 
         var report = injector.TryInjectGuardedDetailed(text);

@@ -13,4 +13,7 @@
     <PackageReference Include="Serilog.Sinks.File" />
     <PackageReference Include="Serilog.Sinks.Console" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Winpepper.Core.Tests" />
+  </ItemGroup>
 </Project>

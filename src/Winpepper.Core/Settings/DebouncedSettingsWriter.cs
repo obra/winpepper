@@ -157,12 +157,12 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
     private void LogChangedFields(AppSettings before, AppSettings after)
     {
         if (_log is null) return;
-        // Reflection + Equals diffing is valid for the CURRENT AppSettings:
-        // all 27 properties are scalar (int / string / bool / int?), verified
-        // during planning. Revisit if a collection-typed property is ever
-        // added — Equals on a rebuilt-but-equal collection would mis-diff.
+        // Reflection diffing is valid for the CURRENT AppSettings: all
+        // properties are scalar except InjectionChannels; PropertyValuesEqual
+        // sequence-compares string collections so a rebuilt-but-equal list
+        // does not mis-diff as changed.
         var changed = SettingsProperties
-            .Where(p => !Equals(p.GetValue(before), p.GetValue(after)))
+            .Where(p => !PropertyValuesEqual(p.GetValue(before), p.GetValue(after)))
             .Select(p => p.Name)
             .ToList();
         // Field NAMES only — never values: settings can carry user content
@@ -171,6 +171,17 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
             "Settings flushed: {ChangedCount} field(s) changed: {ChangedFields}",
             changed.Count,
             changed.Count == 0 ? "(none)" : string.Join(", ", changed));
+    }
+
+    /// <summary>Value comparison for the change-diff log. Scalars use
+    /// Equals; string collections (InjectionChannels) compare by sequence so
+    /// a rebuilt-but-content-equal list does not mis-diff as changed.
+    /// Internal for direct unit testing.</summary>
+    internal static bool PropertyValuesEqual(object? a, object? b)
+    {
+        if (a is IEnumerable<string> ea && b is IEnumerable<string> eb)
+            return ea.SequenceEqual(eb);
+        return Equals(a, b);
     }
 
     public void Dispose()

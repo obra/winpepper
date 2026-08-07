@@ -178,7 +178,25 @@ public sealed class PipelineHost : IDisposable
             factory.CreateLogger<HotkeyHook>(),
             cancelEnabled: () => _engine.State != SessionState.Idle,
             normalTriggersEnabled: () => _hotkeyReadiness.IsEnabled);
-        _injector = new TextInjector(factory.CreateLogger<TextInjector>());
+        // _settingsProvider is assigned before _injector below: the ladder
+        // lambda captures the FIELD (read only when TextInjector later
+        // invokes channelOrder(), never during construction), but the
+        // nullable-flow checker analyzes assignment order textually, so
+        // assigning first here also keeps the field's flow state non-null
+        // at the capture site (avoids CS8602, promoted to an error by this
+        // repo's WarningsAsErrors=nullable).
+        _settingsProvider = settingsProvider;
+        // Ladder order is re-read per injection run (the lambda defers to
+        // the settings provider), so a settings.json reorder/removal takes
+        // effect without an app restart — the design's field-regression
+        // recovery story. Unknown names warn-and-skip; empty/invalid lists
+        // fall back to the hardcoded default inside ParseLadder.
+        _injector = new TextInjector(
+            factory.CreateLogger<TextInjector>(),
+            channelOrder: () => InjectionChannelNames.ParseLadder(
+                _settingsProvider().InjectionChannels,
+                unknown => _log.LogWarning(
+                    "Unknown injectionChannels entry '{Name}' in settings; skipping", unknown)));
         _resolveModelDir = resolveModelDir;
         _desiredAsrModel = desiredAsrModelName;
         _resolveAsrModelName = resolveAsrModelName;
@@ -191,7 +209,6 @@ public sealed class PipelineHost : IDisposable
             : new Winpepper.Platform.WindowContext.WindowContextPrefetchCoordinator(windowContext.StartAsync);
         _clipboardFallback = clipboardFallback;
         _toasts = toasts;
-        _settingsProvider = settingsProvider;
         _buildTranscriber = transcriberFactory;
         _postPaste = postPaste;
         _focusedCapturer = focusedCapturer;
@@ -507,8 +524,9 @@ public sealed class PipelineHost : IDisposable
         }
         if (injected)
             _log.LogInformation(
-                "Pending paste injected ({Chars} chars, {ChunksSent}/{ChunksTotal} chunks, nominal pacing {PacingMs} ms)",
-                text.Length, report.ChunksSent, report.ChunksTotal, report.PacingWaitMs);
+                "Pending paste injected ({Chars} chars, {ChunksSent}/{ChunksTotal} chunks, nominal pacing {PacingMs} ms, via {Via})",
+                text.Length, report.ChunksSent, report.ChunksTotal, report.PacingWaitMs,
+                InjectionChannelNames.Name(report.Via));
         else if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.BlockedElevated)
             // The clicked-into window is elevated: UIPI would have silently
             // dropped every keystroke while reporting success (the exact
@@ -1035,6 +1053,9 @@ public sealed class PipelineHost : IDisposable
                             timing.InjectChunksSent = injReport.ChunksSent;
                             timing.InjectChunksTotal = injReport.ChunksTotal;
                             timing.InjectPacingMs = injReport.PacingWaitMs;
+                            timing.InjectVia = InjectionChannelNames.Name(injReport.Via);
+                            if (!string.IsNullOrEmpty(injReport.GatesSummary))
+                                timing.InjectGates = injReport.GatesSummary;
                         }
                         injected = outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
                         if (outcome == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)
@@ -1663,6 +1684,9 @@ public sealed class PipelineHost : IDisposable
                                 timing2.InjectChunksSent = injReport2.ChunksSent;
                                 timing2.InjectChunksTotal = injReport2.ChunksTotal;
                                 timing2.InjectPacingMs = injReport2.PacingWaitMs;
+                                timing2.InjectVia = InjectionChannelNames.Name(injReport2.Via);
+                                if (!string.IsNullOrEmpty(injReport2.GatesSummary))
+                                    timing2.InjectGates = injReport2.GatesSummary;
                             }
                             injected2 = outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.Completed;
                             if (outcome2 == Winpepper.Platform.Injection.InjectionRunOutcome.Interrupted)

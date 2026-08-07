@@ -2,6 +2,7 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <TargetFramework></TargetFramework>
     <TargetFrameworks>net9.0;net9.0-windows10.0.19041.0</TargetFrameworks>
   </PropertyGroup>

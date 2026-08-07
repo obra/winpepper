@@ -72,6 +72,18 @@ public sealed class DictationTimingSummary
     public int? InjectChunksSent { get; set; }
     public int? InjectChunksTotal { get; set; }
     public int? InjectPacingMs { get; set; }
+
+    /// <summary>Delivery channel that carried the injection run, camelCase
+    /// channel name ("emReplaceSel" | "wmCharSmto" | "vkPacket") — design
+    /// doc 2026-08-06 §2.4 provenance; null when no delivery was attempted.</summary>
+    public string? InjectVia { get; set; }
+
+    /// <summary>Rungs that gated out and why, e.g.
+    /// "emReplaceSel:no-em,wmCharSmto:focus-unstable"; null/empty (omitted)
+    /// when the first rung delivered. Makes field routing regressions
+    /// diagnosable from the log alone.</summary>
+    public string? InjectGates { get; set; }
+
     public int? GcGen0 { get; set; }            // GC.CollectionCount deltas, recording start -> emit
     public int? GcGen1 { get; set; }
     public int? GcGen2 { get; set; }
@@ -161,6 +173,8 @@ public sealed class DictationTimingSummary
         AppendOptNum(sb, "inject_chars", InjectChars);
         if (InjectChunksSent is not null || InjectChunksTotal is not null)
             sb.Append(" inject_chunks=").Append(InjectChunksSent ?? 0).Append('/').Append(InjectChunksTotal ?? 0);
+        AppendOptStr(sb, "inject_via", InjectVia);
+        AppendOptStr(sb, "inject_gates", string.IsNullOrEmpty(InjectGates) ? null : InjectGates);
         AppendOptMs(sb, "inject_pace", InjectPacingMs);
         if (GcGen0 is not null || GcGen1 is not null || GcGen2 is not null)
             sb.Append(" gc=").Append(GcGen0 ?? 0).Append('/').Append(GcGen1 ?? 0).Append('/').Append(GcGen2 ?? 0);

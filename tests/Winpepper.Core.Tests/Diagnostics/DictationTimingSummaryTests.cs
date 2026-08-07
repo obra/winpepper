@@ -48,6 +48,7 @@ public class DictationTimingSummaryTests
         InjectChars = 458,
         InjectChunksSent = 58,
         InjectChunksTotal = 58,
+        InjectVia = "emReplaceSel",
         InjectPacingMs = 798,
         GcGen0 = 1,
         GcGen1 = 0,
@@ -74,7 +75,7 @@ public class DictationTimingSummaryTests
             + " asr_wait=95ms asr_native=210ms backlog=2 backlog_ms=100ms"
             + " native_calls=74 native_total=1900ms native_max=620ms native_over250=2 over250_at=[1180,3420]"
             + " corrections=2ms cleanup=640ms cleanup_path=Llm cleanup_model=qwen2.5-1.5b ctx_src=uia"
-            + " inject=850ms inject_chars=458 inject_chunks=58/58 inject_pace=798ms"
+            + " inject=850ms inject_chars=458 inject_chunks=58/58 inject_via=emReplaceSel inject_pace=798ms"
             + " gc=1/0/0 gc_pause=12ms prewarm_active=true proc_cpu_ms=1875"
             + " pf=418 mem=3061/1542 thr=167 hnd=2003 sys_cpu=37 cpu_pegged=true"
             + " total=2354ms");
@@ -423,5 +424,65 @@ public class DictationTimingSummaryTests
         };
 
         s.FormatLine().ShouldContain(" retrigger_gap=2999ms");
+    }
+
+    [Fact]
+    public void FormatLine_RendersInjectVia_BetweenInjectChunksAndInjectPace()
+    {
+        var t = new DictationTimingSummary
+        {
+            SessionId = Guid.NewGuid(),
+            Kind = "hold",
+            Outcome = "completed",
+            InjectChunksSent = 3,
+            InjectChunksTotal = 3,
+            InjectPacingMs = 28,
+            InjectVia = "emReplaceSel",
+        };
+        var line = t.FormatLine();
+
+        line.ShouldContain("inject_chunks=3/3 inject_via=emReplaceSel inject_pace=28ms");
+    }
+
+    [Fact]
+    public void FormatLine_RendersInjectGates_ImmediatelyAfterInjectVia()
+    {
+        var t = new DictationTimingSummary
+        {
+            SessionId = Guid.NewGuid(),
+            Kind = "hold",
+            Outcome = "completed",
+            InjectChunksSent = 3,
+            InjectChunksTotal = 3,
+            InjectVia = "vkPacket",
+            InjectGates = "emReplaceSel:no-em,wmCharSmto:focus-unstable",
+        };
+        var line = t.FormatLine();
+
+        line.ShouldContain(
+            "inject_via=vkPacket inject_gates=emReplaceSel:no-em,wmCharSmto:focus-unstable");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    public void FormatLine_OmitsInjectGates_WhenNullOrEmpty(string? gates)
+    {
+        var t = new DictationTimingSummary
+        {
+            SessionId = Guid.NewGuid(),
+            Kind = "hold",
+            Outcome = "completed",
+            InjectVia = "emReplaceSel",
+            InjectGates = gates,
+        };
+        t.FormatLine().ShouldNotContain("inject_gates");
+    }
+
+    [Fact]
+    public void FormatLine_OmitsInjectVia_WhenNull()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold", Outcome = "empty" };
+        t.FormatLine().ShouldNotContain("inject_via");
     }
 }

@@ -307,3 +307,50 @@ owner review invited)
 4. **Word: deferred, non-blocking** — installed but not probeable unattended; its
    canvas gates out of rung 1; verify rung 2 on Word at the first-week telemetry
    review (or sooner if dictating into Word).
+
+## 6. Implementation notes (2026-08-07, appended by the implementation)
+
+Gap resolutions pinned by `docs/plans/2026-08-07-injection-delivery-ladder.md`
+(none change the accepted architecture; recorded here so the doc and the code
+agree):
+
+- `DeliveryChannel` is declared with `VkPacket = 0` so
+  `default(InjectionRunReport).Via` reads as the status-quo floor.
+- Stability plumbing: `FocusedChildCapture(FocusedChildHwnd, Stable)` with
+  `!Stable => FocusedChildHwnd == 0`; `CanDeliver` receives that effective
+  hwnd, which is how the two-`long` contract "receives the stability fact".
+- Gate-out reasons are derived by the router (the gate returns only bool):
+  `focus-unstable` when the capture was unstable/zero, else `no-em`.
+- The §2.4 example rung name `wmCharFenced` and §3's `inject_via=wmchar` are
+  treated as typos; the canonical spelling everywhere is `wmCharSmto`.
+- "Rung 4" in §2.2/§2.5 is read as rung 3 (`VkPacket`) — the table defines
+  three rungs.
+- If a settings-configured ladder exhausts with no passing gate (only
+  possible when `vkPacket` was removed), delivery degrades to the VkPacket
+  floor and the gates record still lists the gated rungs (§3: "rungs degrade
+  to the VK_PACKET floor = status quo").
+- The capture + ladder walk run after the elevation check AND the
+  modifier/mouse release preludes, immediately before chunking.
+- A zero FIRST focus sample short-circuits the capture as unstable without
+  the 30 ms gap (outcome-equivalent to sampling twice).
+- Telemetry: `inject_via=` renders immediately after `inject_chunks=`,
+  `inject_gates=` immediately after `inject_via=`; both are stamped under
+  the existing `ChunksTotal > 0` guard. `TryPastePending` has no timing
+  summary; its provenance is `via <channel>` on its existing success log
+  line. Duplicate settings entries de-duplicate (first occurrence wins).
+
+Known residual risks surfaced by the plan's load-bearing validation (accepted;
+none changes the architecture — details in the plan's "Known residual risks"):
+
+- Rungs 1–2 deliver every chunk to the ONE focused-child hwnd captured at send
+  start; the shared halt observes only the top-level foreground window, so a
+  mid-run focus move to a *different child in the same window* is not detected.
+- A `SendMessageTimeout` `false` (150 ms, SMTO_ABORTIFHUNG) does not guarantee
+  non-delivery — a slow (not hung) receiver may process the chunk later. The
+  pinned no-reroute/no-auto-retry behavior on `SendFailed` is therefore
+  LOAD-BEARING: never add automated retry for a message-based rung without
+  content de-duplication. Residual: a manual retry after the pill can duplicate.
+- Rung 2's worst-case per-chunk send is ~8–9 × 150 ms ≈ 1.35 s against a
+  slow/degraded target (healthy targets: ~µs per WM_CHAR), wider than the
+  microsecond-scale exposure window the guarded-run comment assumes; halts stay
+  at chunk boundaries. Accepted as the rung-2 correctness/liveness trade-off.

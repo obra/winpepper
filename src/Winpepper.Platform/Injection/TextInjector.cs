@@ -101,6 +101,9 @@ public sealed class TextInjector
     private readonly Action<int> _sleep;
     private readonly Func<long, ForegroundElevation> _foregroundElevation;
     private readonly Func<double> _monotonicMs;
+    private readonly Func<IReadOnlyList<DeliveryChannel>> _channelOrder;
+    private readonly Func<long, FocusedChildCapture> _focusedChildCapture;
+    private readonly IReadOnlyList<IDeliveryStrategy> _strategies;
 
     /// <summary>
     /// hwnd==0 occurrence counts (at-start vs mid-stream), for field
@@ -115,7 +118,27 @@ public sealed class TextInjector
         Func<string, bool>? sendChunk = null,
         Action<int>? sleep = null,
         Func<long, ForegroundElevation>? foregroundElevation = null,
-        Func<double>? monotonicMs = null)
+        Func<double>? monotonicMs = null,
+        Func<IReadOnlyList<DeliveryChannel>>? channelOrder = null,
+        Func<long, FocusedChildCapture>? focusedChildCapture = null)
+        : this(log, isKeyDown, foregroundHwnd, sendChunk, sleep, foregroundElevation,
+               monotonicMs, channelOrder, focusedChildCapture, strategies: null)
+    {
+    }
+
+    /// <summary>Test seam: IDeliveryStrategy is internal, so custom strategy
+    /// sets enter through this internal overload (InternalsVisibleTo).</summary>
+    internal TextInjector(
+        ILogger<TextInjector> log,
+        Func<int, bool>? isKeyDown,
+        Func<long>? foregroundHwnd,
+        Func<string, bool>? sendChunk,
+        Action<int>? sleep,
+        Func<long, ForegroundElevation>? foregroundElevation,
+        Func<double>? monotonicMs,
+        Func<IReadOnlyList<DeliveryChannel>>? channelOrder,
+        Func<long, FocusedChildCapture>? focusedChildCapture,
+        IReadOnlyList<IDeliveryStrategy>? strategies)
     {
         _log = log;
         _isKeyDown = isKeyDown ?? DefaultKeyProbe;
@@ -124,6 +147,17 @@ public sealed class TextInjector
         _sleep = sleep ?? PacingWaiter.Wait;
         _foregroundElevation = foregroundElevation ?? ElevationProbe.Probe;
         _monotonicMs = monotonicMs ?? DefaultMonotonicMs;
+        _channelOrder = channelOrder ?? (() => InjectionChannelNames.DefaultLadder);
+        _focusedChildCapture = focusedChildCapture ?? DefaultFocusedChildCapture;
+        // VkPacket wraps _sendChunk: rung 3 stays byte-identical to today's
+        // send, and the sendChunk ctor seam keeps meaning "the VK_PACKET
+        // send" for every existing test.
+        _strategies = strategies ?? new IDeliveryStrategy[]
+        {
+            new EmReplaceSelStrategy(log),
+            new WmCharSmtoStrategy(log),
+            new VkPacketStrategy(_sendChunk),
+        };
     }
 
     private static bool DefaultKeyProbe(int vk)
@@ -148,6 +182,17 @@ public sealed class TextInjector
     private static double DefaultMonotonicMs()
         => System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0
            / System.Diagnostics.Stopwatch.Frequency;
+
+    /// <summary>Production focused-child capture (design doc §2.2): double-
+    /// sample GetGUIThreadInfo(...).hwndFocus for the foreground window's
+    /// GUI thread, >= 30 ms apart, via the injected sleep. Off-Windows the
+    /// capture is unavailable => unstable => the ladder degrades to the
+    /// VkPacket floor (status quo).</summary>
+    private FocusedChildCapture DefaultFocusedChildCapture(long foregroundHwnd)
+    {
+        if (!OperatingSystem.IsWindows()) return new FocusedChildCapture(0, false);
+        return FocusedChildProbe.Capture(foregroundHwnd, MessageDelivery.SampleFocusedChild, _sleep);
+    }
 
     /// <summary>
     /// Per-chunk minimum period: <see cref="InterChunkPauseMs"/> scaled by
@@ -243,6 +288,21 @@ public sealed class TextInjector
                 MouseWaitTimeoutMs);
             return new InjectionRunReport(InjectionRunOutcome.Interrupted, 0, 0, 0);
         }
+        // Delivery routing (design doc §2.2-§2.3): capture the focused child
+        // (double-sample) and walk the ladder ONCE, before any text is sent.
+        // Runs after the elevation check and the modifier/mouse preludes so
+        // the capture is as close to the first send as possible. The winning
+        // rung delivers the WHOLE run against a FIXED target -- no mid-run
+        // re-route (first refused chunk => SendFailed => pill).
+        var capture = _focusedChildCapture(hwndAtSendStart);
+        var selection = DeliveryLadder.Select(_channelOrder(), _strategies, hwndAtSendStart, capture);
+        if (selection.GatesSummary.Length > 0)
+        {
+            _log.LogInformation(
+                "Delivery ladder gated rungs out ({Gates}); delivering via {Via}",
+                selection.GatesSummary, InjectionChannelNames.Name(selection.Strategy.Channel));
+        }
+        var targetHwnd = capture.FocusedChildHwnd; // 0 when unstable; VkPacket ignores it
         var chunks = InjectionChunker.Split(text, ChunkCodeUnits);
         // Deadline pacing: period accounting starts NOW, so the first
         // chunk's guard probes + send count toward the first period.
@@ -255,7 +315,7 @@ public sealed class TextInjector
             chunks,
             hwndAtSendStart,
             _foregroundHwnd,
-            _sendChunk,
+            chunk => selection.Strategy.TrySendChunk(targetHwnd, chunk),
             physicalInputDown: () => ModifierGuard.AnyDown(_isKeyDown)
                                      || MouseButtonGuard.AnyDown(_isKeyDown),
             pauseBetweenChunks: () =>
@@ -274,7 +334,9 @@ public sealed class TextInjector
             });
         if (run.Outcome == InjectionRunOutcome.Interrupted)
             _log.LogInformation("Injection interrupted: foreground window, physical modifier, or mouse button state changed mid-paste");
-        return new InjectionRunReport(run.Outcome, chunks.Count, run.ChunksSent, nominalPacingMs);
+        return new InjectionRunReport(
+            run.Outcome, chunks.Count, run.ChunksSent, nominalPacingMs,
+            selection.Strategy.Channel, selection.GatesSummary);
     }
 
     public InjectionRunOutcome TryInjectGuarded(string text) => TryInjectGuardedDetailed(text).Outcome;

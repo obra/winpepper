@@ -12,7 +12,10 @@ param(
   [switch]$ExistingTabs, # safe mode: user Notepad may be open; probe-owned tabs only
   [string]$Prime = "none",  # none | arrow (one real Right-arrow tap) | ctrla (Ctrl+A,Delete like old probe)
   [int]$SettleMs = 0,       # extra settle after tab open, before injection
-  [ValidateSet("SendInput","WmChar","SmtoChar","EmReplaceSel")][string]$SendMode = "SendInput",
+  [ValidateSet("SendInput","WmChar","SmtoChar","EmReplaceSel","WmCharFenced")][string]$SendMode = "SendInput",
+  [int]$ChunkUnits = 8,     # E9-control: 32 reproduces the pre-b4af9fc send shape
+  [switch]$DoubleInject,    # warm-tab regression: inject twice into the same tab
+  [switch]$TypeDuring,      # E9d: real letter key tap after chunk 5 (ordering probe)
   [int]$PeriodMs = 14,      # inter-chunk pacing
   [switch]$ClosedLoop,      # after each chunk, poll WM_GETTEXTLENGTH for backpressure
   [switch]$AttackE3,        # post phantom Ctrl to target: DOWN after chunk 1, UP after chunk 6
@@ -61,6 +64,8 @@ public static extern IntPtr SendMessagePtr(IntPtr h, uint m, IntPtr w, IntPtr l)
 [DllImport("user32.dll", SetLastError=true, EntryPoint="SendMessageTimeoutW")]
 public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
 [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+[DllImport("user32.dll", CharSet=CharSet.Unicode)]
+public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
 '@
 
 $INPUT_SIZE = [Runtime.InteropServices.Marshal]::SizeOf([type][Probe.Native+INPUT])
@@ -74,6 +79,15 @@ function Send-UnicodeChunk([string]$chunk) {
     foreach ($ch in $chunk.ToCharArray()) {
       [Probe.Native]::PostMessage($script:target, 0x0102, [IntPtr][int][char]$ch, [IntPtr]1) | Out-Null
     }
+    return
+  }
+  if ($script:SendMode -eq "WmCharFenced") {
+    foreach ($ch in $chunk.ToCharArray()) {
+      [Probe.Native]::PostMessage($script:target, 0x0102, [IntPtr][int][char]$ch, [IntPtr]1) | Out-Null
+    }
+    $r = [IntPtr]::Zero   # WM_NULL fence: returns after the posted chunk is processed
+    $ok = [Probe.Native]::SendMessageTimeout($script:target, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 150, [ref]$r)
+    if ($ok -eq [IntPtr]::Zero) { $script:fenceTimeouts++ }
     return
   }
   if ($script:SendMode -eq "SmtoChar") {
@@ -132,8 +146,8 @@ Even though it's been a couple of decades since we worked together, I think back
 '@
 $text = $text.TrimEnd() + " "
 $chunks = @()
-for ($i = 0; $i -lt $text.Length; $i += 8) {
-  $chunks += $text.Substring($i, [Math]::Min(8, $text.Length - $i))
+for ($i = 0; $i -lt $text.Length; $i += $ChunkUnits) {
+  $chunks += $text.Substring($i, [Math]::Min($ChunkUnits, $text.Length - $i))
 }
 
 # Safety: refuse to run if a user Notepad is already open (we must never join
@@ -177,8 +191,21 @@ for ($run = 1; $run -le $Runs; $run++) {
   $gti = New-Object Probe.Native+GUITHREADINFO
   $gti.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type][Probe.Native+GUITHREADINFO])
   [Probe.Native]::GetGUIThreadInfo($tid, [ref]$gti) | Out-Null
-  $target = if ($gti.hwndFocus -ne [IntPtr]::Zero) { $gti.hwndFocus } else { $fg }
+  # E9c: double-sample the focused child 30 ms apart
+  Start-Sleep -Milliseconds 30
+  $gti2 = New-Object Probe.Native+GUITHREADINFO
+  $gti2.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type][Probe.Native+GUITHREADINFO])
+  [Probe.Native]::GetGUIThreadInfo($tid, [ref]$gti2) | Out-Null
+  $stable = ($gti.hwndFocus -eq $gti2.hwndFocus) -and ($gti.hwndFocus -ne [IntPtr]::Zero)
+  $target = if ($gti2.hwndFocus -ne [IntPtr]::Zero) { $gti2.hwndFocus } else { $fg }
   $script:target = $target
+  # E9a: class name + EM_GETSEL gate diagnostics
+  $cls = New-Object System.Text.StringBuilder 128
+  [Probe.Native]::GetClassName($target, $cls, 128) | Out-Null
+  $selR = [IntPtr]::Zero
+  $selOk = [Probe.Native]::SendMessageTimeout($target, 0x00B0, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 150, [ref]$selR)
+  Write-Output ("run $run gate: class=[{0}] stable={1} em_getsel_ok={2} sel=0x{3:X}" -f $cls.ToString(), $stable, ($selOk -ne [IntPtr]::Zero), $selR.ToInt64())
+  $script:fenceTimeouts = 0
 
   if ($SettleMs -gt 0) { Start-Sleep -Milliseconds $SettleMs }
   if ($Prime -eq "arrow") { Send-VkTap 0x27; Start-Sleep -Milliseconds 150 }
@@ -195,6 +222,7 @@ for ($run = 1; $run -le $Runs; $run++) {
     if (([Probe.Native]::GetAsyncKeyState(0x11) -band 0x8000) -ne 0) { $asyncDirty = $true }
     Send-UnicodeChunk $chunks[$i]
     $expectedLen += $chunks[$i].Length
+    if ($TypeDuring -and $i -eq 5) { Send-VkTap 0x58 }   # real 'X' key
     if ($AttackE3 -and $i -eq 0) { [Probe.Native]::PostMessage($target, 0x100, [IntPtr]0x11, [IntPtr]0x001D0001) | Out-Null }
     if ($AttackE3 -and $i -eq 5) { [Probe.Native]::PostMessage($target, 0x101, [IntPtr]0x11, [IntPtr]([int64]0xC01D0001)) | Out-Null }
     if ($ClosedLoop) {
@@ -211,7 +239,12 @@ for ($run = 1; $run -le $Runs; $run++) {
     Start-Sleep -Milliseconds $PeriodMs
   }
   if ($ClosedLoop -and $stalls -gt 0) { Write-Output "  CLOSED-LOOP STALLS: $stalls" }
+  if ($DoubleInject) {
+    Start-Sleep -Milliseconds 300
+    for ($i = 0; $i -lt $chunks.Count; $i++) { Send-UnicodeChunk $chunks[$i]; Start-Sleep -Milliseconds $PeriodMs }
+  }
   $swInject.Stop()
+  if ($script:fenceTimeouts -gt 0) { Write-Output "  FENCE-TIMEOUTS: $($script:fenceTimeouts)" }
   Start-Sleep -Milliseconds 500
 
   $sb = New-Object System.Text.StringBuilder 4096
@@ -221,7 +254,16 @@ for ($run = 1; $run -le $Runs; $run++) {
   # Post-measurement belief read (attach may heal -- after capture, harmless).
   $belief = Read-TargetBelief $tid
 
-  if ($result -ceq $text) { $intact++; $v = "INTACT" } else { $corrupt++; $v = "CORRUPTED" }
+  $expected = if ($DoubleInject) { $text + $text } else { $text }
+  if ($TypeDuring) {
+    # ordering probe: PASS if result is expected-with-one-x-inserted; report x position
+    $stripped = $result -replace 'x',''
+    if ($stripped -ceq $expected -and ($result.Length - $stripped.Length) -eq 1) {
+      $xpos = $result.IndexOf('x')
+      $intact++; $v = "INTACT-X@$xpos/$($result.Length)"
+    } else { $corrupt++; $v = "CORRUPTED" }
+  }
+  elseif ($result -ceq $expected) { $intact++; $v = "INTACT" } else { $corrupt++; $v = "CORRUPTED" }
   Write-Output "run $run [$v] belief=$belief asyncDirty=$asyncDirty inject_ms=$($swInject.ElapsedMilliseconds)"
   if ($v -eq "CORRUPTED") {
     Write-Output "  EXPECTED: [$text]"

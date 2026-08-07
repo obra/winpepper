@@ -1,7 +1,9 @@
-# Injection Delivery Integrity — v3.1 (pinned strategy ladder)
+# Injection Delivery Integrity — v3.2 (pinned strategy ladder; E9 gates run)
 
-**Status:** Proposed v3.1 (design only; per-rung probe gates in §3 must pass before a rung
-enters the default ladder; no implementation yet)
+**Status:** Accepted v3.2 — E9 probe gates ran 2026-08-07 03:05–03:15 (results §0.6);
+default-ladder decisions recorded in §5 (made by the agent under explicit owner
+delegation, owner asleep). E9 results in §0.4. Implementation authorized. Residual
+gaps flagged in §3.
 **Supersedes:** v2 of this document (deleted). v2's causal model — a phantom Ctrl-class
 modifier in the target's translation context as THE production root cause — was
 **falsified for the Notepad incident class by E6** (2026-08-05/06): corruption reproduces
@@ -87,7 +89,26 @@ session record)
    ignore-formats — and it STILL has open clipboard-clobber/race bugs. Recorded here
    because it informed the decision to exclude clipboard from automatic delivery (§1).
 
-### 0.4 Salvaged from v1/v2 (still valid, still constraining)
+### 0.4 E9 — per-rung gate probes (2026-08-07 03:05–03:15, production host, unattended)
+
+All against fresh Win11 Notepad tabs (`freshprobe.ps1 -ExistingTabs`) unless noted.
+
+| Cell | Result | Consequence |
+|---|---|---|
+| **E9b fenced WM_CHAR** (post chunk + SMTO WM_NULL fence) | **FALSIFIED: 3/8 intact, 5/8 cross-chunk transposition** (`togethworked er`) | sent messages are processed AHEAD of posted messages — a sent fence cannot serialize a posted stream. Rung removed; do not implement |
+| **E9a EmReplaceSel**, fresh + warm (double-inject same tab) | **4/4 intact** (concatenation byte-exact); classic WinForms `EDIT` intact ×4 (two runs had a harness accumulation artifact — content itself verbatim) | rung validated cold AND warm |
+| E9a gate diagnostics | Notepad focused child class=`RichEditD2DPT`, WinForms=`WindowsForms10.EDIT...`; Terminal=`Windows.UI.Input.InputSite.WindowClass`, Chromium=`Chrome_WidgetWin_1`. **EM_GETSEL answers ok=TRUE, sel=0 on ALL four** (DefWindowProc) | EM_GETSEL alone cannot gate; **pinned predicate: focused-child class contains `edit` (case-insensitive) AND SMTO EM_GETSEL succeeds AND double-sample focus stable** |
+| E9a gate-out side-effect check | EM_REPLACESEL `EMPROBE` into Terminal → echo file byte-exact (nothing typed); into Chromium → document.title unchanged | gate-out is side-effect-free on non-edit classes |
+| **WmCharSmto compat** (E9e) | Windows Terminal **2/2 intact** (echo-to-file readback, exact); Chromium (isolated Edge `--user-data-dir`, textarea + title-mirror readback) **1/1 intact** verbatim, 1 run inconclusive (title read empty) | rung 2 validated on both island-class targets, incl. the production-incident-1 class |
+| E9c anomaly | not reproduced tonight (all runs `stable=True`); double-sample rule stays | — |
+| E9d interleave (real `X` tap mid-injection) | X landed mid-text (position 48/135) under BOTH rungs; injected content otherwise byte-exact | interleave semantics ≈ status quo, **no** contiguous-injection change. Signed off (no regression) |
+| **E9-control: pre-`b4af9fc` send shape** (VK_PACKET, 32-unit chunks @ 20 ms) | **0/4 intact** | the 07-27 chunking change is NOT the exposure driver; combined with the latency-suspect analysis (streaming ASR / cleanup-disable mechanistically implausible — E6 showed 3 s settle doesn't heal), **the recent-incidence driver remains unidentified** (plausibly usage mix; logs carry no target-app field) |
+
+Not probed (recorded gaps): Word (installed; unattended first-run dialog risk — its
+canvas class has no `edit`, so it routes to rung 2/3; rung 2 on Word untested),
+Chromium n=1 conclusive. Follow-up cells listed in §3.
+
+### 0.5 Salvaged from v1/v2 (still valid, still constraining)
 
 1. **Injected Ctrl is sufficient to corrupt** (E1 real pulse, E3 posted/queue-only) —
    and the E3 class is invisible to GetAsyncKeyState sampling; no send-time sampling
@@ -100,7 +121,7 @@ session record)
 4. The transcript is always archived correctly; corruption is delivery-time only.
 5. Elevation/UIPI: posted/sent messages fail loudly where SendInput lies silently.
 
-### 0.5 Root cause (evidence-graded)
+### 0.6 Root cause (evidence-graded)
 
 **Demonstrated:** Windows 11 Notepad mishandles sustained synthetic text input into a
 cold (never-typed-in) tab, independent of modifier state and delivery rate —
@@ -178,13 +199,14 @@ internal interface IDeliveryStrategy
 
 | Rung | Channel | Gate | Send | Status |
 |---|---|---|---|---|
-| 1 | `EmReplaceSel` | focused child answers `EM_GETSEL` sanely via SMTO (capability probe — E9a pins the exact predicate) | one `EM_REPLACESEL` per chunk (SMTO, 150 ms) | E6: 3/3 intact; **gate probe pending (E9a)** |
-| 2 | `WmCharFenced` | focused child observable + stable (double sample) | post chunk's units as WM_CHAR, then one synchronous `WM_NULL` fence per chunk (SMTO, 150 ms) | **probe pending (E9b)** — expected ~8× fewer round-trips than rung 3 |
-| 3 | `WmCharSmto` | focused child observable + stable | `SendMessageTimeout` WM_CHAR per unit (SMTO_ABORTIFHUNG, 150 ms) | **validated (E7)**: 10/12 + attack-immune + surrogates |
-| 4 | `VkPacket` | always | today's SendInput path, unchanged | status quo floor |
+| 1 | `EmReplaceSel` | focused-child class contains `edit` (case-insensitive) AND SMTO `EM_GETSEL` succeeds AND double-sample focus stable (predicate pinned by E9a) | one `EM_REPLACESEL` per chunk (SMTO, 150 ms) | **validated (E6+E9a)**: fresh 3/3+4/4, warm double-inject 4/4, classic EDIT; gate-out side-effect-free on Terminal/Chromium |
+| 2 | `WmCharSmto` | focused child observable + stable (double sample) | `SendMessageTimeout` WM_CHAR per unit (SMTO_ABORTIFHUNG, 150 ms) | **validated (E7+E9e)**: Notepad 10/12 + attack-immune + surrogates; Terminal 2/2; Chromium 1/1 (+1 inconclusive) |
+| 3 | `VkPacket` | always | today's SendInput path, unchanged | status quo floor |
 
 Not a rung, by owner decision: clipboard (see §1). Not a rung: posted WM_CHAR without
-a fence (E6: transposition).
+a fence (E6: transposition). **Not a rung, falsified (E9b): fenced WM_CHAR** — a sent
+WM_NULL fence is processed AHEAD of the posted chunk (sent-message priority), so it
+cannot serialize a posted stream; 5/8 cross-chunk transpositions. Do not implement.
 
 **Focused-child capture hardening (all rungs above 4):** at send start, sample
 `GetGUIThreadInfo.hwndFocus` twice, ≥30 ms apart, after foreground stabilization; if
@@ -196,11 +218,11 @@ delivery, not silently type into the wrong control.
 
 - Walk the ladder in order; the first rung whose gate passes delivers the whole run.
   Gates run once, before any text is sent. No scoring, no heuristics, no app lists.
-- **Ladder order lives in settings** (e.g. `"injectionChannels":
-  ["emReplaceSel","wmCharFenced","wmCharSmto","vkPacket"]`), hardcoded default = the
-  enabled-rung order above. A field regression is fixed by reordering or removing a
-  rung in settings — no release. Unknown names are logged and skipped; an empty or
-  invalid list falls back to the hardcoded default.
+- **Ladder order lives in settings** (`"injectionChannels":
+  ["emReplaceSel","wmCharSmto","vkPacket"]`), hardcoded default = that order (decided
+  §5). A field regression is fixed by reordering or removing a rung in settings — no
+  release. Unknown names are logged and skipped; an empty or invalid list falls back
+  to the hardcoded default.
 - **Pinned ≠ enabled:** every rung ships as code with tests, but a rung enters the
   DEFAULT ladder only after its §3 probe gate passes. Until then it is present but
   not in the default order (available for explicit opt-in via settings).
@@ -231,26 +253,26 @@ delivery, not silently type into the wrong control.
 
 ---
 
-## 3. Pre-implementation gates (per rung)
+## 3. Gate status (run 2026-08-07; results §0.4)
 
-- **E9a — EM_REPLACESEL gate probe:** pin the exact capability predicate (candidate:
-  SMTO `EM_GETSEL` returns TRUE with a sane selection range AND target class/behavior
-  checks) and verify: fresh Notepad tab (expect pass+intact), Windows Terminal /
-  Chromium / non-edit controls (expect gate-out, no side effects), classic EDIT
-  (expect pass+intact). Undo/caret behavior recorded.
-- **E9b — fenced WM_CHAR probe:** posted chunk + WM_NULL fence on fresh Notepad tabs
-  (expect: no transposition, intact ≥ SMTO's rate) + timing (expect ≥4× faster than
-  per-unit SMTO).
-- **E9c — no-delivery anomaly (was E7c):** reproduce the empty-readback class with
-  focus-capture logging; confirm the double-sample rule converts it to a rung-4 route.
-- **E9d — typing-interleave semantics (was E7d/E5f):** characterize; owner signs off.
-- **E9e — compatibility matrix (was E7b):** for every rung in the default ladder:
-  Windows Terminal, Chromium (omnibox + textarea), Word (or record not-installed),
-  classic EDIT, warm Notepad regression. Criterion per target: intact and identical
-  to the VK_PACKET warm baseline, or a clean gate-out to a lower rung. **NO-GO for a
-  rung** on any silent-wrong-delivery; the rung then ships default-disabled.
-- Probe harnesses exist: `.trycycle-lifecycle-probe/freshprobe.ps1` (rungs 2–4 cells),
-  `compat.ps1` + `edithost.ps1` (E9e targets).
+- **E9a — DONE.** Predicate pinned (§2.2 rung 1); pass+intact on Notepad and classic
+  EDIT; side-effect-free gate-out on Terminal and Chromium.
+- **E9b — DONE, rung FALSIFIED.** Fenced WM_CHAR removed (sent-message priority).
+- **E9c — double-sample rule stands;** anomaly not reproduced tonight. Keep the
+  hardening; re-examine only if `inject_gates` telemetry shows it firing in the field.
+- **E9d — DONE, signed off:** interleave ≈ status quo (real key can land mid-text).
+- **E9e — DONE for Notepad/Terminal/classic-EDIT/Chromium(n=1).** Remaining
+  follow-ups, non-blocking (rungs degrade to the VK_PACKET floor = status quo):
+  1. Chromium second conclusive run (first run's title readback was empty).
+  2. Word: installed but not probed unattended (first-run dialog risk). Its canvas
+     gates out of rung 1 by class; rung 2 on Word untested — verify before trusting
+     `inject_via=wmchar` incidents there.
+  3. Warm-target regression spot-check on daily-driver apps during first-week
+     telemetry review.
+- Probe harnesses: `.trycycle-lifecycle-probe/freshprobe.ps1` (send modes:
+  SendInput/WmChar/SmtoChar/EmReplaceSel/WmCharFenced, gate diagnostics, chunk-shape
+  control, double-inject, interleave), `compat.ps1` + `edithost.ps1` (Edit/Terminal),
+  `edgeprobe.ps1` (isolated-profile Chromium cell, title-mirror readback).
 
 ---
 
@@ -269,12 +291,19 @@ delivery, not silently type into the wrong control.
 
 ---
 
-## 5. Open decisions for the owner
+## 5. Decisions (made 2026-08-07 03:15 by the agent under explicit owner delegation;
+owner review invited)
 
-1. Default ladder order once E9a/E9b land: is `emReplaceSel` first (fastest, most
-   invasive of control state) or `wmCharFenced` first (more universal, slightly
-   slower)?
-2. Does `wmCharSmto` remain in the default ladder once `wmCharFenced` is validated,
-   or stay pinned-but-default-disabled as the spare?
-3. E9d interleave semantics sign-off.
-4. Word in E9e: required, or not-applicable on this host?
+1. **Default ladder order: `emReplaceSel → wmCharSmto → vkPacket`.** Rung 1 is both
+   the fastest and the best-validated on the incident class; the fenced alternative
+   was falsified, mooting the order question as originally posed.
+2. **`wmCharSmto` stays in the default ladder** (not a disabled spare): it is now the
+   only corruption-resistant channel for non-edit-class targets, and it validated on
+   Terminal (the production-incident-1 class) and Chromium tonight. Cost honestly
+   stated: ~0.8 s per 134 units on targets that reach rung 2, vs ~0.25 s for
+   VK_PACKET.
+3. **E9d interleave: signed off** — measured behavior matches the status quo class
+   (a real keystroke can land mid-injection); no semantics regression to accept.
+4. **Word: deferred, non-blocking** — installed but not probeable unattended; its
+   canvas gates out of rung 1; verify rung 2 on Word at the first-week telemetry
+   review (or sooner if dictating into Word).

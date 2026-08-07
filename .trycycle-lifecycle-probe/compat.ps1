@@ -1,4 +1,5 @@
-param([ValidateSet("Edit","Terminal")][string]$Target = "Edit", [int]$Runs = 3)
+param([ValidateSet("Edit","Terminal")][string]$Target = "Edit", [int]$Runs = 3,
+      [ValidateSet("SmtoChar","EmReplaceSel")][string]$Mode = "SmtoChar")
 $ErrorActionPreference = "Stop"
 Add-Type -Name Native -Namespace Compat -MemberDefinition @'
 [StructLayout(LayoutKind.Sequential)]
@@ -22,6 +23,8 @@ public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, System.Text.
 public static extern IntPtr SendMessageStr(IntPtr h, uint m, IntPtr w, string s);
 [DllImport("user32.dll", SetLastError=true, EntryPoint="SendMessageTimeoutW")]
 public static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr result);
+[DllImport("user32.dll", CharSet=CharSet.Unicode)]
+public static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
 '@
 function Get-FgTitle {
   $sb = New-Object System.Text.StringBuilder 512
@@ -37,6 +40,20 @@ function Get-FocusChild {
   [Compat.Native]::GetGUIThreadInfo($tid, [ref]$g) | Out-Null
   Write-Host ("FOCUS-HWND: 0x{0:X} (fg 0x{1:X})" -f $g.hwndFocus.ToInt64(), $fg.ToInt64())
   if ($g.hwndFocus -ne [IntPtr]::Zero) { $g.hwndFocus } else { $fg }
+}
+function Show-Gate([IntPtr]$h) {
+  $cls = New-Object System.Text.StringBuilder 128
+  [Compat.Native]::GetClassName($h, $cls, 128) | Out-Null
+  $r = [IntPtr]::Zero
+  $ok = [Compat.Native]::SendMessageTimeout($h, 0x00B0, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 150, [ref]$r)
+  Write-Output ("  gate: class=[{0}] em_getsel_ok={1} sel=0x{2:X}" -f $cls.ToString(), ($ok -ne [IntPtr]::Zero), $r.ToInt64())
+}
+function Send-EmText([IntPtr]$h, [string]$s) {
+  for ($i = 0; $i -lt $s.Length; $i += 8) {
+    $chunk = $s.Substring($i, [Math]::Min(8, $s.Length - $i))
+    [Compat.Native]::SendMessageStr($h, 0x00C2, [IntPtr]1, $chunk) | Out-Null
+    Start-Sleep -Milliseconds 14
+  }
 }
 function Send-SmtoText([IntPtr]$h, [string]$s) {
   $fails = 0
@@ -59,11 +76,14 @@ if ($Target -eq "Edit") {
     $deadline = (Get-Date).AddSeconds(8)
     while ((Get-Date) -lt $deadline -and (Get-FgTitle) -ne "WP-EDIT-HOST") { Start-Sleep -Milliseconds 250 }
     if ((Get-FgTitle) -ne "WP-EDIT-HOST") { Write-Output "run $run ABORT: fg='$(Get-FgTitle)'"; $proc | Stop-Process -Force; continue }
-    $target = Get-FocusChild
-    Send-SmtoText $target $text
+    $tgt = Get-FocusChild
+    Show-Gate $tgt
+    [Compat.Native]::SendMessageStr($tgt, 0x000C, [IntPtr]::Zero, "") | Out-Null
+    Start-Sleep -Milliseconds 100
+    if ($Mode -eq "EmReplaceSel") { Send-EmText $tgt $text } else { Send-SmtoText $tgt $text }
     Start-Sleep -Milliseconds 300
     $sb = New-Object System.Text.StringBuilder 4096
-    [Compat.Native]::SendMessage($target, 0x000D, [IntPtr]4096, $sb) | Out-Null
+    [Compat.Native]::SendMessage($tgt, 0x000D, [IntPtr]4096, $sb) | Out-Null
     $r = $sb.ToString()
     if ($r -ceq $text) { Write-Output "run $run [INTACT]" } else { Write-Output "run $run [CORRUPTED]"; Write-Output "  RESULT: [$r]" }
     $proc | Stop-Process -Force
@@ -77,14 +97,19 @@ if ($Target -eq "Edit") {
     Remove-Item $out -ErrorAction SilentlyContinue
     $proc = Start-Process cmd.exe -ArgumentList "/k" -PassThru
     $deadline = (Get-Date).AddSeconds(8)
-    while ((Get-Date) -lt $deadline -and (Get-FgTitle) -notmatch 'cmd') { Start-Sleep -Milliseconds 300 }
+    while ((Get-Date) -lt $deadline -and (Get-FgTitle) -notmatch 'cmd|Terminal') { Start-Sleep -Milliseconds 300 }
     $title = Get-FgTitle
     Write-Output "run $run fg='$title'"
-    if ($title -notmatch 'cmd') { Write-Output "run $run ABORT: terminal never took foreground"; if (-not $proc.HasExited) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }; continue }
-    $target = Get-FocusChild
+    if ($title -notmatch 'cmd|Terminal') { Write-Output "run $run ABORT: terminal never took foreground"; if (-not $proc.HasExited) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }; continue }
+    $tgt = Get-FocusChild
+    Show-Gate $tgt
+    # EM_REPLACESEL no-delivery check: send a marker via EM_REPLACESEL; if the
+    # terminal typed it, the echo command below would be corrupted/prefixed.
+    [Compat.Native]::SendMessageStr($tgt, 0x00C2, [IntPtr]1, "EMPROBE") | Out-Null
+    Start-Sleep -Milliseconds 200
     $cmd = "echo $marker> `"$out`""
-    Send-SmtoText $target $cmd
-    Send-SmtoText $target ([string][char]0x0D)
+    Send-SmtoText $tgt $cmd
+    Send-SmtoText $tgt ([string][char]0x0D)
     Start-Sleep -Milliseconds 1200
     if (Test-Path $out) {
       $got = (Get-Content $out -Raw).Trim()
@@ -92,8 +117,8 @@ if ($Target -eq "Edit") {
       else { Write-Output "run $run [CORRUPTED] got: [$got]" }
     } else { Write-Output "run $run [NO-DELIVERY] file never created" }
     # close the terminal window (it is probe-owned)
-    Send-SmtoText $target "exit"
-    Send-SmtoText $target ([string][char]0x0D)
+    Send-SmtoText $tgt "exit"
+    Send-SmtoText $tgt ([string][char]0x0D)
     Start-Sleep -Milliseconds 800
     if (-not $proc.HasExited) { $proc | Stop-Process -Force -ErrorAction SilentlyContinue }
     Remove-Item $out -ErrorAction SilentlyContinue

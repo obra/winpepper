@@ -238,6 +238,25 @@ public class SettingsStoreTests : IDisposable
         store.Save(store.Load() with { PostPasteLearningEnabled = true });
         new SettingsStore(_path).Load().PostPasteLearningEnabled.ShouldBeTrue();
     }
+
+    [Fact]
+    public void InjectionChannels_MissingFromOlderFile_DefaultsToFullLadder()
+    {
+        File.WriteAllText(_path, """{ "schema": 1 }""");
+
+        var settings = new SettingsStore(_path).Load();
+
+        settings.InjectionChannels.ShouldBe(new[] { "emReplaceSel", "wmCharSmto", "vkPacket" });
+    }
+
+    [Fact]
+    public void InjectionChannels_CustomOrder_RoundTrips()
+    {
+        var store = new SettingsStore(_path);
+        store.Save(new AppSettings { InjectionChannels = new[] { "vkPacket" } });
+
+        store.Load().InjectionChannels.ShouldBe(new[] { "vkPacket" });
+    }
 }
 
 internal static class PipeExtensions

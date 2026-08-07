@@ -40,4 +40,11 @@ public sealed class AppSettingsDefaultsTests
         var s = new AppSettings();
         s.StreamingEnabled.ShouldBeTrue();
     }
+
+    [Fact]
+    public void Defaults_InjectionChannels_IsFullLadderOrder()
+    {
+        new AppSettings().InjectionChannels.ShouldBe(
+            new[] { "emReplaceSel", "wmCharSmto", "vkPacket" });
+    }
 }

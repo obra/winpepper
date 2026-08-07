@@ -2492,6 +2492,8 @@ git commit -m "feat(app): settings-driven delivery-ladder order and inject_via/i
 ### Task 11: Windows-gate in-proc tests — hosted EDIT child + capture stability
 
 **Files:**
+- Modify: `tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj`
+  (add `AllowUnsafeBlocks` — required by `[LibraryImport]`, Step 1)
 - Create: `tests/Winpepper.Platform.Tests/Injection/NativeEditHost.cs`
 - Create: `tests/Winpepper.Platform.Tests/Injection/DeliveryStrategyWindowsTests.cs`
 
@@ -2508,7 +2510,34 @@ These tests compile on both TFMs but are excluded from Linux runs by
 self-guard with `if (!OperatingSystem.IsWindows()) return;`. They EXECUTE only
 under `./scripts/windows-gate.sh` (Task 12).
 
-- [ ] **Step 1: Write the test helper**
+- [ ] **Step 1: Enable the LibraryImport source generator in the test project**
+
+`NativeEditHost.cs` (Step 2) uses `[LibraryImport]`, whose source generator
+requires `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>` — without it
+**[BUILD-PLATFORM]** fails with SYSLIB1062 + CS0227 (the same requirement the
+Task 3 validation note records). `src/Winpepper.Platform/Winpepper.Platform.csproj`
+already sets it, but `tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj`
+does NOT (and `Directory.Build.props` does not set it either). In
+`tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj`, replace:
+
+```xml
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+```
+
+with:
+
+```xml
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+```
+
+(The anchor is unique — it opens the file's first `<PropertyGroup>`. Change
+nothing else: the TFM list, trait-based Linux exclusion, and linked
+`Production\*.cs` compile items stay exactly as they are.)
+
+- [ ] **Step 2: Write the test helper**
 
 Create `tests/Winpepper.Platform.Tests/Injection/NativeEditHost.cs`:
 
@@ -2642,7 +2671,7 @@ internal sealed partial class NativeEditHost : IDisposable
 }
 ```
 
-- [ ] **Step 2: Write the Windows tests**
+- [ ] **Step 3: Write the Windows tests**
 
 Create `tests/Winpepper.Platform.Tests/Injection/DeliveryStrategyWindowsTests.cs`:
 
@@ -2768,7 +2797,7 @@ public class DeliveryStrategyWindowsTests
 (If Shouldly's string overload set differs, `cls.ToLowerInvariant().ShouldContain("edit")`
 is the acceptable equivalent for the class-name assertion.)
 
-- [ ] **Step 3: Verify Linux behavior** (compiles; excluded from the run)
+- [ ] **Step 4: Verify Linux behavior** (compiles; excluded from the run)
 
 Run **[BUILD-PLATFORM]** — expected: build succeeds. Then run the full DLL with
 the standard filter and confirm the new class does not execute:
@@ -2780,13 +2809,15 @@ dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform
 
 Expected: 0 tests run (all excluded by trait).
 
-- [ ] **Step 4: Full suite + commit**
+- [ ] **Step 5: Full suite + commit**
 
 ```bash
 ./scripts/linux-tests.sh   # LINUX SUITE: GREEN
-git add tests/Winpepper.Platform.Tests/Injection/NativeEditHost.cs \
+git add tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj \
+        tests/Winpepper.Platform.Tests/Injection/NativeEditHost.cs \
         tests/Winpepper.Platform.Tests/Injection/DeliveryStrategyWindowsTests.cs
-git commit -m "test(injection): Windows in-proc EDIT-host delivery and capture-stability tests"
+git commit -m "test(injection): Windows in-proc EDIT-host delivery and capture-stability tests" \
+  -m "Enables AllowUnsafeBlocks in the test csproj for the LibraryImport source generator used by NativeEditHost."
 ```
 
 The actual Windows execution of these tests happens in Task 12's gate run; if the

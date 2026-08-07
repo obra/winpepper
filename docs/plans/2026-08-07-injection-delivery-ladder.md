@@ -109,6 +109,61 @@ plan; Task 12 appends them to the design doc:
 11. **Duplicate channel names in settings are de-duplicated** (first occurrence
     wins) so gates run at most once per rung per run.
 
+## Known residual risks (surfaced by load-bearing validation, 2026-08-07)
+
+A load-bearing validation pass confirmed the plan's technical pins (Win32
+constants/semantics, both `LibraryImport` P/Invoke forms compile on net9.0, no
+`AppSettings` value-equality blast radius) and surfaced four safety facts the
+design doc and this plan were previously **silent** on. None changes the accepted
+v3.2 architecture and none is a stop-the-line data-loss risk (every blast radius
+below is a visible, same-application, user-recoverable text anomaly — never silent
+corruption of unrelated data or an irreversible action). They are recorded here so
+implementers and the owner treat them as *known* rather than *discovered-in-the-field*.
+Each was evaluated against alternatives (per-chunk hardening vs. document-and-defer);
+the accepted-design deferral won because in-repo code mitigations either expand past
+the accepted fixed-target model, add per-chunk Win32 calls + latency, or perturb the
+byte-identical `GuardedInjectionRun` machinery — disproportionate to low-probability
+edges that the design already routes to field telemetry.
+
+- **R1 — Stale focused-child target within one foreground window (from A2).**
+  Rungs 1–2 capture the focused-child hwnd ONCE and `SendMessageTimeout` every chunk
+  to that fixed hwnd. The unchanged `GuardedInjectionRun`/`MidPasteDecider` halt
+  observes only the **top-level foreground window**, never the focused *child*. If the
+  user Tabs/clicks to a *different child control inside the same still-foreground
+  window* mid-run, rungs 1–2 keep delivering to the stale child and the halt never
+  fires (rung 3/SendInput cannot exhibit this — it has no fixed target). Accepted as
+  residual: the fixed-target model is the pinned v3.2 design; a per-chunk focused-child
+  re-check was considered and deferred (adds a Win32 sample + latency per chunk and
+  expands the strategy contract). Watched via the owner field review (Task 12 step 5).
+- **R2 — Timed-out SMTO send may still be processed later (from A3).**
+  A `SendMessageTimeout(SMTO_ABORTIFHUNG, 150 ms)` returning `false` does **not**
+  guarantee non-delivery: the OS hang heuristic is ≥5 s of no `GetMessage`, so a merely
+  *slow* (not hung) receiver can dequeue and process the "timed-out" chunk later
+  (confirmed against MS Learn). The **automated** path stays safe because the pinned
+  no-reroute / no-auto-retry behavior (a first refused chunk ⇒ `SendFailed` ⇒ pill,
+  never a second automated send) is load-bearing — **do not add auto-retry or reroute
+  on `SendFailed` for a message-based rung without content de-duplication.** Residual:
+  a *manual* user retry after the pill could duplicate text (visible, correctable).
+- **R3 — Rung-2 widens the per-chunk exposure window (from A4).**
+  Rung 2 sends one `SendMessageTimeout` per UTF-16 unit; a chunk (`ChunkCodeUnits = 8`,
+  9 across a surrogate straddle) is up to 8–9 × 150 ms ≈ **~1.35 s worst case**, whereas
+  `GuardedInjectionRun`'s bleed-safety comment assumes "the exposure window is the
+  (microsecond-scale) send itself" and halts run only at chunk boundaries. The worst case
+  only arises against a slow/degraded target (which would fail SMTO and stop shortly
+  after); healthy targets process each WM_CHAR in ~µs. Accepted as the rung-2
+  correctness/liveness trade-off already priced in design §5.2; intra-chunk halts were
+  considered and deferred (would perturb the byte-identical run loop).
+- **R4 — Real-target correctness & capture are gate/owner-verified, not Linux-proven
+  (from A1/A5/A6).** The Linux suite proves only off-Windows fail-closed behavior and
+  pure logic; Task 11 hosts a synthetic classic `EDIT`, not the motivating classes.
+  Rung-1's "class contains 'edit'" gate correctly routes Chromium (`Chrome_WidgetWin_1`)
+  and Terminal (`InputSite.WindowClass`) AWAY from EM_REPLACESEL, so rung-1 correctness
+  need only hold for genuine edit controls (E9a-tested, n=4); Chromium/Terminal ride
+  rung 2 (WM_CHAR), probed at n=1–2. The "edit"-substring gate and cross-process /
+  elevated-target `GetGUIThreadInfo` capture (graceful-degrades to the VkPacket floor if
+  it fails) are inductive/edge claims with no cheaper proof than the Windows gate +
+  owner live runs + `inject_via`/`inject_gates` telemetry. Enumerated in Task 12 step 5.
+
 ## File structure
 
 **Create — `src/Winpepper.Platform/Injection/` (namespace `Winpepper.Platform.Injection`):**
@@ -720,7 +775,13 @@ internal static partial class MessageDeliveryNative
 }
 ```
 
-(If the LibraryImport source generator rejects the `char[]` parameter, use
+(Validated 2026-08-07: this exact surface — `[Out] char[]` + `StringMarshalling.Utf16`,
+both `SendMessageTimeoutW` overloads, and `ref GUITHREADINFO` with nested `RECT` —
+compiles clean on this host's net9.0 SDK with `-p:EnableWindowsTargeting=true`, 0
+warnings; the fallback below is NOT expected to be needed. Note `LibraryImport`
+requires `<AllowUnsafeBlocks>true</AllowUnsafeBlocks>` (SYSLIB1062 otherwise), which
+`Winpepper.Platform.csproj` already sets — do not remove it. If the source generator
+nevertheless rejects the `char[]` parameter, use
 `[Out, MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.U2)] char[] lpClassName`
 and drop `StringMarshalling` from that one attribute — behavior is identical.)
 
@@ -1931,6 +1992,15 @@ are permitted — halt/pacing/prelude pins must not change semantics:
    named argument to any test in the file that constructs `TextInjector` directly
    (skip constructions whose run parks before routing, e.g. `foregroundHwnd: () => 0`
    — adding it there is harmless and acceptable too).
+
+   Checklist (enumerated 2026-08-07 by load-bearing validation; re-run
+   `grep -n "new TextInjector(" tests/Winpepper.Platform.Tests/Injection/TextInjectorGuardedTests.cs`
+   to confirm no drift): 19 construction sites at lines
+   98, 159, 176, 199, 251, 282, 307, 327, 350, 387, 407, 425, 446, 467, 491, 515,
+   533, 556, 576. Of these, 6 park before routing (98, 159, 307, 350, 387, 576 —
+   exempt) and 13 reach routing and NEED the seam (176, 199, 251, 282, 327, 407,
+   425, 446, 467, 491, 515, 533, 556). Every needed site must be covered before
+   this step is complete.
 2. If any assertion compares a whole `InjectionRunReport` value, rewrite it to
    assert the four original properties individually (`.Outcome`, `.ChunksTotal`,
    `.ChunksSent`, `.PacingWaitMs`) — do not weaken any of them.
@@ -2768,6 +2838,22 @@ agree):
   the existing `ChunksTotal > 0` guard. `TryPastePending` has no timing
   summary; its provenance is `via <channel>` on its existing success log
   line. Duplicate settings entries de-duplicate (first occurrence wins).
+
+Known residual risks surfaced by the plan's load-bearing validation (accepted;
+none changes the architecture — details in the plan's "Known residual risks"):
+
+- Rungs 1–2 deliver every chunk to the ONE focused-child hwnd captured at send
+  start; the shared halt observes only the top-level foreground window, so a
+  mid-run focus move to a *different child in the same window* is not detected.
+- A `SendMessageTimeout` `false` (150 ms, SMTO_ABORTIFHUNG) does not guarantee
+  non-delivery — a slow (not hung) receiver may process the chunk later. The
+  pinned no-reroute/no-auto-retry behavior on `SendFailed` is therefore
+  LOAD-BEARING: never add automated retry for a message-based rung without
+  content de-duplication. Residual: a manual retry after the pill can duplicate.
+- Rung 2's worst-case per-chunk send is ~8–9 × 150 ms ≈ 1.35 s against a
+  slow/degraded target (healthy targets: ~µs per WM_CHAR), wider than the
+  microsecond-scale exposure window the guarded-run comment assumes; halts stay
+  at chunk boundaries. Accepted as the rung-2 correctness/liveness trade-off.
 ```
 
 - [ ] **Step 2: GuardedInjectionRun zero-diff pin (spec §4 requirement)**
@@ -2811,6 +2897,27 @@ per default-ladder rung against the real binary, then the first-week
 `inject_via`/`inject_gates` field review. They remain with the owner; nothing to
 code.
 
+The load-bearing validation pass (2026-08-07) enumerated exactly what those owner
+runs/reviews must cover, because it is the coverage no automated test in this plan
+provides (see "Known residual risks"):
+
+- **Rung 1 on a real `RichEditD2DPT`** (Win11 Notepad): verbatim, in-order,
+  surrogates-intact delivery — Task 11 only proves a synthetic classic `EDIT`.
+- **Rung 2 on Chromium (`Chrome_WidgetWin_1`) and Windows Terminal
+  (`InputSite.WindowClass`)**: these classes gate OUT of rung 1 by design (no
+  "edit" in the class name) and ride rung 2, whose real-target evidence is n=1–2
+  probe runs.
+- **`inject_gates` review for capture failures**: `focus-unstable` firing against
+  ordinary targets would indicate the cross-process / elevated-target
+  `GetGUIThreadInfo` capture degrading (feature silently neutered to the VkPacket
+  floor — status quo, not corruption, but worth catching).
+- **`inject_via=emReplaceSel` false-positive watch**: any "edit"-named third-party
+  control that mis-handles EM_REPLACESEL (the E9a sample was 4 apps; EM_GETSEL is
+  non-discriminating — DefWindowProc answers it — so the gate rests on the class-name
+  heuristic).
+- **`SendFailed` occurrences on message-based rungs**: check the target document for
+  late-arriving duplicate text before/after any manual retry (residual R2).
+
 ---
 
 ## Self-review record
@@ -2843,4 +2950,21 @@ Checked against the design doc (v3.2) and the task spec:
    string? GatesSummary = null)`, `InjectionChannelNames.ParseLadder(IReadOnlyList<string>?,
    Action<string>?)`, and the TextInjector ctor seam names are used identically
    across Tasks 1–11 (verified by re-reading each Consumes/Produces block).
+4. **Load-bearing validation pass (2026-08-07):** 10 assumptions surfaced and
+   dispositioned — 4 verified (Win32 constants + wParam/lParam semantics vs. MS
+   Learn; the exact Task-3 `LibraryImport` surface compiles on net9.0 via a /tmp
+   probe, fallback unnecessary, `AllowUnsafeBlocks` precondition already met; the
+   19 `TextInjectorGuardedTests` construction sites enumerated with a 13-site
+   needs-seam checklist; no `AppSettings` whole-record equality consumer exists),
+   3 falsified-and-planned-around (stale-child fixed target R1, SMTO
+   timeout-then-late-delivery R2, rung-2 exposure window R3 — see "Known residual
+   risks"), 3 accepted as gate/owner-deferred residuals (real-target rung
+   correctness, "edit"-gate generalization, cross-process/elevated capture — Task
+   12 step 5 now enumerates the required owner coverage). No edit changed any
+   task's interfaces, test code, or commands; the changes are documentation
+   (residual risks, Task 3 validation note, Task 7 step-6 checklist, Task 12
+   step-1 appended notes and step-5 owner checklist), so the plan's task
+   spec-coverage, no-silent-deferral, and type-consistency reviews (items 1–3)
+   remain valid as written. Evidence ledger:
+   `.worktrees/.the-usual-logs/injection-delivery-ladder/load-bearing-ledger.md`.
 ```

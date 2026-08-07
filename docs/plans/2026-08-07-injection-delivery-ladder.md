@@ -2247,7 +2247,7 @@ Add to the existing test class in
     {
         var t = new DictationTimingSummary
         {
-            SessionId = "s1",
+            SessionId = Guid.NewGuid(),
             Kind = "hold",
             Outcome = "completed",
             InjectChunksSent = 3,
@@ -2265,7 +2265,7 @@ Add to the existing test class in
     {
         var t = new DictationTimingSummary
         {
-            SessionId = "s1",
+            SessionId = Guid.NewGuid(),
             Kind = "hold",
             Outcome = "completed",
             InjectChunksSent = 3,
@@ -2286,7 +2286,7 @@ Add to the existing test class in
     {
         var t = new DictationTimingSummary
         {
-            SessionId = "s1",
+            SessionId = Guid.NewGuid(),
             Kind = "hold",
             Outcome = "completed",
             InjectVia = "emReplaceSel",
@@ -2298,7 +2298,7 @@ Add to the existing test class in
     [Fact]
     public void FormatLine_OmitsInjectVia_WhenNull()
     {
-        var t = new DictationTimingSummary { SessionId = "s1", Kind = "hold", Outcome = "empty" };
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold", Outcome = "empty" };
         t.FormatLine().ShouldNotContain("inject_via");
     }
 ```

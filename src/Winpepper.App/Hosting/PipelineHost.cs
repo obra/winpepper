@@ -178,6 +178,14 @@ public sealed class PipelineHost : IDisposable
             factory.CreateLogger<HotkeyHook>(),
             cancelEnabled: () => _engine.State != SessionState.Idle,
             normalTriggersEnabled: () => _hotkeyReadiness.IsEnabled);
+        // _settingsProvider is assigned before _injector below: the ladder
+        // lambda captures the FIELD (read only when TextInjector later
+        // invokes channelOrder(), never during construction), but the
+        // nullable-flow checker analyzes assignment order textually, so
+        // assigning first here also keeps the field's flow state non-null
+        // at the capture site (avoids CS8602, promoted to an error by this
+        // repo's WarningsAsErrors=nullable).
+        _settingsProvider = settingsProvider;
         // Ladder order is re-read per injection run (the lambda defers to
         // the settings provider), so a settings.json reorder/removal takes
         // effect without an app restart — the design's field-regression
@@ -201,7 +209,6 @@ public sealed class PipelineHost : IDisposable
             : new Winpepper.Platform.WindowContext.WindowContextPrefetchCoordinator(windowContext.StartAsync);
         _clipboardFallback = clipboardFallback;
         _toasts = toasts;
-        _settingsProvider = settingsProvider;
         _buildTranscriber = transcriberFactory;
         _postPaste = postPaste;
         _focusedCapturer = focusedCapturer;

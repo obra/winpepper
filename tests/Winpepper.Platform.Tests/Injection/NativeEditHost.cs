@@ -18,7 +18,15 @@ internal sealed partial class NativeEditHost : IDisposable
 
     private readonly bool _pump;
     private readonly ManualResetEventSlim _ready = new();
-    private readonly ManualResetEventSlim _stop = new();
+    // Deliberately NOT a WaitHandle-based primitive: an STA thread parked in
+    // WaitHandle.WaitOne (what ManualResetEventSlim.Wait falls back to once
+    // its spin budget is exhausted) can service pending sent messages via
+    // the CLR's COM-interop wait path, which would silently turn this
+    // "non-pumping" host into a pumping one and let SendMessageTimeout
+    // succeed instead of timing out. A polled volatile flag + Thread.Sleep
+    // never enters any wait state that is message-queue-aware, so the host
+    // genuinely never dispatches WM_CHAR/EM_REPLACESEL while parked.
+    private volatile bool _stopRequested;
     private Thread? _thread;
 
     private NativeEditHost(bool pump) => _pump = pump;
@@ -50,7 +58,11 @@ internal sealed partial class NativeEditHost : IDisposable
         _ready.Set();
         if (!_pump)
         {
-            _stop.Wait(); // deliberately never pump: SMTO sends must time out
+            // Deliberately never pump: SMTO sends must time out. Poll a
+            // volatile flag via Thread.Sleep -- see _stopRequested's doc
+            // comment for why a WaitHandle-based wait is unsafe here.
+            while (!_stopRequested)
+                Thread.Sleep(20);
             return;
         }
         while (GetMessageW(out var msg, IntPtr.Zero, 0, 0) > 0)
@@ -72,10 +84,9 @@ internal sealed partial class NativeEditHost : IDisposable
     {
         if (_pump && ThreadId != 0)
             PostThreadMessageW(ThreadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
-        _stop.Set();
+        _stopRequested = true;
         _thread?.Join(TimeSpan.FromSeconds(5));
         _ready.Dispose();
-        _stop.Dispose();
     }
 
     private const uint WS_OVERLAPPED = 0x00000000;

@@ -162,8 +162,9 @@ public sealed class OnboardingModelProvisioner : IOnboardingModelProvisioner
         var probeOk = await _engineLoadProbe(speechModelName, CancellationToken.None);
         if (!probeOk)
             return $"The {Friendly(d)} downloaded and verified, but its speech engine failed to load. " +
-                   "Open Settings > Models to repair it. A missing Microsoft Visual C++ x64 Redistributable " +
-                   "is the most common cause.";
+                   "Install the Microsoft Visual C++ x64 Redistributable " +
+                   "(aka.ms/vs/17/release/vc_redist.x64.exe) — a missing redistributable is the most " +
+                   "common cause — then retry. If it still fails, open Settings > Models to repair the model.";
         return null;
     }
 

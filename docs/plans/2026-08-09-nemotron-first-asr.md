@@ -1135,8 +1135,9 @@ going to withdraw the claim as artifact-free. Load-bearing validation of
 this fix batch then located substantiating artifacts for that review pass
 (item 3 below) in the workflow logs archive — not the repo, which is why
 they were initially missed — so the claim is substantiated, not withdrawn.
-One caveat survives: the execute-stage review's named artifact FILES were
-never preserved (item 2 below states exactly what evidence exists). The
+The execute-stage review's artifact files also survive, outside both the
+repo and the logs archive (item 2 below records their verified location
+and a durability caveat). The
 full review record over this branch, with artifact locations (workflow
 logs under
 `.the-usual-logs/nemotron-first-asr/`, archived under
@@ -1146,12 +1147,17 @@ logs under
    reports V1–V10 (archived).
 2. Execute-stage whole-branch review + re-review — initial verdict "With
    fixes", re-review confirmed both fixes resolved. Evidence: the archived
-   `execute-result.json` records the review outcome and two artifact NAMES
-   (`sdd/final-review-fix-report.md`, `review-c73b9f1..4d5e63d.diff`), but
-   the named files themselves were never preserved — they exist nowhere in
-   the repo, its git history, or the logs archive — so this pass is
-   substantiated only by the archived execute record, not by artifact
-   files.
+   `execute-result.json` records the review verdict, and its execution
+   notes point to the SDD ledger ("progress.md in the worktree git dir").
+   The review artifact FILES themselves were verified present on
+   2026-08-09 in that same worktree git directory —
+   `<main checkout>/.git/worktrees/nemotron-first-asr/sdd/` — including
+   `final-review-fix-report.md` and `review-c73b9f1..4d5e63d.diff`
+   (alongside the per-task briefs/reports, the other review diffs, and
+   `progress.md`). Durability caveat: that directory sits outside the
+   repo and its git history and is deleted when the worktree is removed,
+   so the preserved evidence for this pass is this dated observation plus
+   the archived execute record.
 3. Independent cross-model fresh-eyes CODE review of `080e4f1..HEAD`
    (`fresheyes-delta.md`): iteration 1 FAILED on a bench-compile blocker
    (fixed in `dc73c52`), iteration 2 PASSED with 0 blocking issues; plus

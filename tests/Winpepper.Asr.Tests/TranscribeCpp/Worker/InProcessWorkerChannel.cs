@@ -43,8 +43,18 @@ public sealed class InProcessWorkerChannel : IWorkerProcess
     public Stream Output => _fromWorker;
     public bool HasExited => _exited;
 
+    public int KillCalls { get; private set; }
+    public int DisposeCalls { get; private set; }
+
+    /// <summary>Simulates the worker process dying on its own (natural exit):
+    /// HasExited flips true but nothing is torn down — like a real child that
+    /// exited while the parent still holds the Process object, pipes, and
+    /// (on Windows) the job handle.</summary>
+    public void SimulateNaturalExit() => _exited = true;
+
     public void Kill()
     {
+        KillCalls++;
         _exited = true;
         // WRITE ends FIRST — each unblocks the opposite side's blocked read
         // (EOF / IO fault). Disposing a read end while a read is in flight
@@ -55,7 +65,11 @@ public sealed class InProcessWorkerChannel : IWorkerProcess
         _workerIn.Dispose();
     }
 
-    public void Dispose() => Kill();
+    public void Dispose()
+    {
+        DisposeCalls++;
+        Kill();
+    }
 }
 
 public sealed class InProcessWorkerChannelFactory : IWorkerProcessFactory
@@ -64,10 +78,12 @@ public sealed class InProcessWorkerChannelFactory : IWorkerProcessFactory
     public InProcessWorkerChannelFactory(Func<ITranscribeCppEngine> engineFactory) => _engineFactory = engineFactory;
     public int Started { get; private set; }
     public InProcessWorkerChannel? Last { get; private set; }
+    public List<InProcessWorkerChannel> All { get; } = new();
     public IWorkerProcess Start()
     {
         Started++;
         Last = new InProcessWorkerChannel(_engineFactory);
+        All.Add(Last);
         return Last;
     }
 }

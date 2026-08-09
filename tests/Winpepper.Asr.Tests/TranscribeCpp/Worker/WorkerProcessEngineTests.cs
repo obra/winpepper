@@ -202,4 +202,47 @@ public sealed class WorkerProcessEngineTests
         factory.Started.ShouldBe(2); // wedged worker killed, fresh worker served the batch
         feedGate.Set();
     }
+
+    [Fact]
+    public void NaturalDeathBetweenRpcs_ChargesTheRestartBudget()
+    {
+        long now = 0;
+        var policy = new WorkerRestartPolicy(maxConsecutiveFailures: 1, cooldown: TimeSpan.FromSeconds(60), nowMs: () => now);
+        var factory = new InProcessWorkerChannelFactory(() => new FakeTranscribeCppEngine());
+        using var engine = Engine(factory, policy);
+
+        engine.TranscribeBatch(new float[16], null, out _); // healthy spawn; completed batch resets the budget
+        factory.All[0].SimulateNaturalExit();               // dies between RPCs
+
+        // The death is charged BEFORE the respawn attempt, so with a
+        // 1-failure budget no second worker may spawn.
+        var ex = Should.Throw<TranscribeCppException>(() => engine.TranscribeBatch(new float[16], null, out _));
+        ex.Message.ShouldContain("restart budget exhausted");
+        factory.Started.ShouldBe(1);
+
+        now = 60_000; // cooldown elapsed -> one respawn attempt allowed
+        Should.NotThrow(() => engine.TranscribeBatch(new float[16], null, out _));
+        factory.Started.ShouldBe(2);
+    }
+
+    [Fact]
+    public void NaturalExitRespawn_InvalidatesStaleStreamProxy_AndDisposesTheOldProcess()
+    {
+        var factory = new InProcessWorkerChannelFactory(() => new FakeTranscribeCppEngine());
+        using var engine = Engine(factory);
+
+        var staleStream = engine.BeginStream(13, null, out _); // dictation 1 opens a stream
+        factory.All[0].SimulateNaturalExit();                   // its worker dies on its own
+
+        engine.TranscribeBatch(new float[16], null, out _);     // dictation 2 triggers the respawn
+        factory.Started.ShouldBe(2);
+        factory.All[0].DisposeCalls.ShouldBe(1); // old process retired through KillLocked, not leaked
+
+        // The stale proxy must see "stream lost", NOT reach dictation 2's
+        // fresh one-stream worker (pre-fix it RPCs the fresh worker and gets
+        // its "no open stream (send BeginStream first)" error instead).
+        var ex = Should.Throw<TranscribeCppException>(() => staleStream.Feed(new float[2560], 2560));
+        ex.Message.ShouldContain("stream lost");
+        Should.NotThrow(() => staleStream.Dispose()); // benign no-op on a lost stream
+    }
 }

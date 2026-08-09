@@ -113,6 +113,18 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
         // would silently respawn a worker for the OLD layout (V5/A10).
         if (_disposed) throw new ObjectDisposedException(nameof(WorkerProcessEngine));
         if (_proc is { HasExited: false }) return;
+        if (_proc is not null)
+        {
+            // The worker died on its own since the last RPC. Retire it
+            // through KillLocked so BOTH retirement paths share the same
+            // invariant (the generation bump invalidates stale stream
+            // proxies; Dispose frees the Process, pipes, and job handle),
+            // and charge the budget: a worker crash-looping between RPCs
+            // must exhaust the 3-strike/60 s budget instead of silently
+            // reloading ~700 MB per call forever (council fixes #2, #3).
+            _restartPolicy.NoteFailure();
+            KillLocked("worker exited between requests");
+        }
         if (!_restartPolicy.CanAttempt())
         {
             _log?.Invoke("speech worker restart blocked by budget; next attempt after cooldown");

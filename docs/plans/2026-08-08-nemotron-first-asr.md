@@ -1553,14 +1553,6 @@ public sealed class ExeWorkerProcessFactory : IWorkerProcessFactory
 }
 ```
 
-> **Correction (2026-08-09):** the class comment in the listing above claims
-> the job binding "also reaps kernel-wedge zombies at app exit" — that is the
-> same false claim corrected in clause (d) (line 934): in the supervised path
-> the per-worker job handle is closed at kill time (`KillLocked` →
-> `ExeWorkerProcess.Dispose`), so KILL_ON_JOB_CLOSE fires then, not at app
-> exit; the job's at-exit guarantee covers only parent crash. The listing is
-> preserved verbatim as the historical record.
-
 - [ ] **Step 1: Write the failing tests** (portable: a long-sleeping child on both OSes)
 
 Create `tests/Winpepper.Asr.Tests/TranscribeCpp/Worker/ExeWorkerProcessTests.cs`:
@@ -1776,6 +1768,14 @@ public sealed class ExeWorkerProcessFactory : IWorkerProcessFactory
     public IWorkerProcess Start() => ExeWorkerProcess.Start(_psi(), _onStderrLine);
 }
 ```
+
+> **Correction (2026-08-09):** the class comment in the listing above claims
+> the job binding "also reaps kernel-wedge zombies at app exit" — that is the
+> same false claim corrected in clause (d) (line 934): in the supervised path
+> the per-worker job handle is closed at kill time (`KillLocked` →
+> `ExeWorkerProcess.Dispose`), so KILL_ON_JOB_CLOSE fires then, not at app
+> exit; the job's at-exit guarantee covers only parent crash. The listing is
+> preserved verbatim as the historical record.
 
 - [ ] **Step 4: Run the new tests, expect PASS** (`-class "Winpepper.Asr.Tests.TranscribeCpp.Worker.ExeWorkerProcessTests"`).
 

@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 
@@ -42,7 +43,7 @@ public sealed class ExeWorkerProcess : IWorkerProcess
             process.ErrorDataReceived += (_, _) => { };
             process.BeginErrorReadLine();
         }
-        var jobHandle = OperatingSystem.IsWindows() ? WindowsJob.BindKillOnClose(process) : 0;
+        var jobHandle = OperatingSystem.IsWindows() ? WindowsJob.BindKillOnClose(process, onStderrLine) : 0;
         return new ExeWorkerProcess(process, jobHandle);
     }
 
@@ -118,16 +119,25 @@ internal static class WindowsJob
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(nint handle);
 
-    internal static nint BindKillOnClose(Process process)
+    internal static nint BindKillOnClose(Process process, Action<string>? log = null)
     {
         var job = CreateJobObjectW(0, null);
-        if (job == 0) return 0;
+        if (job == 0)
+        {
+            log?.Invoke("worker job object create failed: " +
+                $"{new Win32Exception(Marshal.GetLastWin32Error()).Message} — " +
+                "workers will not be reaped if this process crashes");
+            return 0;
+        }
         var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info,
                 Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
             || !AssignProcessToJobObject(job, process.Handle))
         {
+            log?.Invoke("worker job object bind failed: " +
+                $"{new Win32Exception(Marshal.GetLastWin32Error()).Message} — " +
+                "workers will not be reaped if this process crashes");
             CloseHandle(job);
             return 0;
         }

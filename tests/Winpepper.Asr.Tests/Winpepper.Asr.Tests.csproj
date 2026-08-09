@@ -12,6 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Winpepper.Asr\Winpepper.Asr.csproj" />
+    <ProjectReference Include="..\TranscribeWorkerHost\TranscribeWorkerHost.csproj" />
   </ItemGroup>
   <ItemGroup>
     <None Update="fixtures\**\*">

@@ -78,10 +78,16 @@ public sealed class OnboardingModelProvisioner : IOnboardingModelProvisioner
             var done = selection.ToDictionary(d => d.Name,
                 d => plan.Any(p => p.Name == d.Name) ? 0L : d.TotalSizeBytes);
 
+            // The file's own invariant (see the progress callback below):
+            // EVERY read of `done` for a percent snapshot must happen under
+            // _gate — straggler Progress<> callbacks keep writing `done`
+            // after DownloadAsync returns.
+            double SnapshotPercent() { lock (_gate) return Percent(selection, done); }
+
             var opGate = ModelsTabViewModel.SharedOperationGateFor(_models);
             foreach (var descriptor in plan)
             {
-                Publish(Percent(selection, done), $"Downloading {Friendly(descriptor)}…", null, false);
+                Publish(SnapshotPercent(), $"Downloading {Friendly(descriptor)}…", null, false);
                 await opGate.WaitAsync();
                 try
                 {
@@ -109,14 +115,14 @@ public sealed class OnboardingModelProvisioner : IOnboardingModelProvisioner
 
                 if (descriptor.Name == speechModelName)
                 {
-                    Publish(Percent(selection, done), "Verifying speech model…", null, false);
+                    Publish(SnapshotPercent(), "Verifying speech model…", null, false);
                     var error = await VerifySpeechDeepAsync(speechModelName);
                     if (error is not null)
                     {
-                        Publish(Percent(selection, done), "Speech model failed verification.", error, false);
+                        Publish(SnapshotPercent(), "Speech model failed verification.", error, false);
                         return;
                     }
-                    Publish(Percent(selection, done), "Speech model ready — keep going while the rest downloads.", null, true);
+                    Publish(SnapshotPercent(), "Speech model ready — keep going while the rest downloads.", null, true);
                 }
             }
 

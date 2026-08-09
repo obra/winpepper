@@ -148,6 +148,11 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
             if (!read.Wait(timeout))
             {
                 KillLocked($"{op} timed out after {(int)timeout.TotalMilliseconds} ms");
+                // The abandoned reader faults once the killed worker's pipe closes;
+                // observe it so it can never surface as TaskScheduler.UnobservedTaskException
+                // (which would fire the app's crash machinery at an arbitrary later moment).
+                read.ContinueWith(t => _ = t.Exception,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
                 throw new TranscribeCppException(
                     $"speech worker did not respond to {op} within {(int)timeout.TotalSeconds} s; worker killed and will restart on the next call");
             }

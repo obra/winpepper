@@ -87,13 +87,23 @@ public sealed class OnboardingModelProvisioner : IOnboardingModelProvisioner
                 {
                     var progress = new Progress<DownloadProgress>(p =>
                     {
-                        // per-file bytes -> per-descriptor tally (sum file dones)
-                        lock (_gate) { done[descriptor.Name] = TallyFor(descriptor, p, done[descriptor.Name]); }
-                        Publish(Percent(selection, done), $"Downloading {Friendly(descriptor)}…", null,
+                        // per-file bytes -> per-descriptor tally (sum file dones);
+                        // the percent snapshot must be computed under the same
+                        // lock — concurrent callbacks racing an unlocked read
+                        // of `done` would be a data race.
+                        double percent;
+                        lock (_gate)
+                        {
+                            done[descriptor.Name] = TallyFor(descriptor, p, done[descriptor.Name]);
+                            percent = Percent(selection, done);
+                        }
+                        Publish(percent, $"Downloading {Friendly(descriptor)}…", null,
                             SpeechReadyNow(speechModelName));
                     });
                     await _models.DownloadAsync(descriptor, root, progress, CancellationToken.None);
-                    done[descriptor.Name] = descriptor.TotalSizeBytes;
+                    // Straggler progress callbacks may still be in flight: write
+                    // the final tally under the same lock they use.
+                    lock (_gate) done[descriptor.Name] = descriptor.TotalSizeBytes;
                 }
                 finally { opGate.Release(); }
 

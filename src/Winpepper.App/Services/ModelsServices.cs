@@ -77,7 +77,7 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
     /// ModelProvisioningCoordinator.VerifyReadyAsync, which queues behind any
     /// in-flight download) for the CANONICAL model name — resolved per-name
     /// because <see cref="AsrDescriptor"/> is frozen at boot. The positive
-    /// result is CACHED per selection change: a full ~1.1 GB SHA-256 on every
+    /// result is CACHED per selection change: a full ~670 MB SHA-256 on every
     /// dictation start is too slow, so we re-verify only when the requested
     /// name differs from the last verified one. A negative result is never
     /// cached (missing files short-circuit cheaply, and the next dictation

@@ -50,7 +50,8 @@ your download is byte-for-byte the file that was published.
 ### First launch: one download of the speech models
 
 Winpepper does its listening on your own PC, so it needs to fetch the speech
-files it thinks with — about 1.2 GB, once.
+files it thinks with — about 760 MB once (more if you add the optional backup
+or cleanup models).
 
 1. Start Winpepper from the Start Menu.
 2. A short setup walks you through picking your microphone and your hotkey, and
@@ -64,7 +65,9 @@ Until the models are downloaded, Winpepper will tell you "Speech model not
 installed. Open the Models tab to download it."
 
 **Live streaming:** Winpepper also downloads the **Nemotron Speech Streaming**
-model (~720 MB, English only, NVIDIA Open Model License) automatically in the
+model (~760 MB, English by default — a multilingual variant is available;
+NVIDIA Open Model License for the English model, OpenMDW-1.1 for the
+multilingual one) automatically in the
 background on first run — dictation works immediately without it, and you can
 install or repair it yourself from the Models tab (or skip it entirely by
 turning streaming off there). Once installed it enables real local streaming —
@@ -74,11 +77,11 @@ release the hotkey. It uses the MIT-licensed
 (downloaded alongside the model, pinned and checksum-verified; see
 THIRD-PARTY-NOTICES.md). Without it, local dictations are transcribed in one
 pass after you stop — same results, just slower to appear. All local speech
-audio stays on your machine either way. Two practical notes: the engine needs
-the Microsoft Visual C++ x64 runtime (preinstalled on most PCs; if streaming
-silently stays off, install it from aka.ms/vs/17/release/vc_redist.x64.exe),
-and after your first streaming dictation the model stays loaded (~1 GB of
-memory) until you close Winpepper.
+audio stays on your machine either way. Two practical notes: local dictation
+requires the Microsoft Visual C++ x64 Redistributable — both local engines
+need it (preinstalled on most PCs; if local dictation fails, install it from
+aka.ms/vs/17/release/vc_redist.x64.exe), and after your first streaming
+dictation the model stays loaded (~1 GB of memory) until you close Winpepper.
 
 ### How to dictate
 
@@ -108,8 +111,9 @@ tab — step on the pedal, speak, step off.
 
 - Windows 11, version 22H2 or newer
 - A 64-bit PC (nearly all PCs)
-- About 2 GB of free disk space (roughly 700 MB for the app, 1.2 GB for the
-  speech models)
+- About 1.5 GB of free disk space for a default install (roughly 700 MB for
+  the app, 760 MB for the speech model); up to ~3 GB with the optional backup
+  speech and text-cleanup models
 - A microphone
 - A graphics card or chip that supports DirectX 12 — nearly all PCs from the last
   several years. Without one, Winpepper still works, just more slowly.

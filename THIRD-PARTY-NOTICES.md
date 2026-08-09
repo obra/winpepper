@@ -54,6 +54,19 @@ SOFTWARE.
   case facilitating the download is ever characterized as distribution. The
   License may be updated by NVIDIA; the live URL above is authoritative.
 
+## Nemotron 3.5 ASR Streaming multilingual model weights (downloaded at user request)
+
+- Model: nvidia/nemotron-3.5-asr-streaming-0.6b, GGUF Q8_0 conversion by
+  handy-computer (https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf)
+- License: OpenMDW-1.1 (Open Model, Data, and Weights License Agreement,
+  version 1.1), per the upstream Hugging Face model card and the GGUF
+  conversion's README (verified 2026-08-08)
+- The weights are not redistributed by this project. Users download them
+  directly from Hugging Face via the Models tab. The attribution line and
+  license identification above are included preemptively in case facilitating
+  the download is ever characterized as distribution; the upstream Hugging
+  Face model card is authoritative for the governing terms.
+
 ## Existing model downloads
 
 The Parakeet-TDT ONNX models and the Qwen cleanup model are likewise

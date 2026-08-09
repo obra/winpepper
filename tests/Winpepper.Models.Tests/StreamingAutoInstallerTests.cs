@@ -232,6 +232,37 @@ public class StreamingAutoInstallerTests : IDisposable
         Assert.Equal(2, fake.EnteredCount);
     }
 
+    [Fact]
+    public async Task StartAsync_WithSelectedMultilingual_DownloadsTheMultilingualDescriptor()
+    {
+        // Arranged exactly like the download-when-missing test, but the user's
+        // selected primary model is Multilingual: the upgrade-path install must
+        // fetch the SELECTED descriptor, not unconditionally the English one.
+        var fake = new FakeDownloader();
+        var installer = CreateInstaller(fake);
+
+        await installer.StartAsync(streamingEnabled: true,
+            selectedModelName: ModelRegistry.MultilingualStreamingAsrName,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { ModelRegistry.MultilingualStreamingAsrName }, fake.DownloadedNames);
+    }
+
+    [Fact]
+    public async Task StartAsync_WithUnknownSelectedName_FallsBackToEnglish()
+    {
+        // Unknown/bad selected names must never stall the upgrade: fall back
+        // to the English default (mirrors ModelRegistry.ResolveOrDefault).
+        var fake = new FakeDownloader();
+        var installer = CreateInstaller(fake);
+
+        await installer.StartAsync(streamingEnabled: true,
+            selectedModelName: "no-such-model",
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(new[] { ModelRegistry.StreamingAsrName }, fake.DownloadedNames);
+    }
+
     private sealed class ThrowingDownloader : ModelsTabViewModel.IDownloader
     {
         public Task DownloadAsync(ModelDescriptor descriptor, string installRoot,

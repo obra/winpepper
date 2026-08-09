@@ -257,6 +257,51 @@ public class SettingsStoreTests : IDisposable
 
         store.Load().InjectionChannels.ShouldBe(new[] { "vkPacket" });
     }
+
+    [Fact]
+    public void Defaults_StreamingModelName_IsEnglishNemotron()
+    {
+        var s = new AppSettings();
+        s.StreamingModelName.ShouldBe("nemotron-streaming-en");
+        s.OnboardingBackupModelChosen.ShouldBeFalse();
+        s.OnboardingCleanupModelChosen.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Load_LegacySettingsJson_WithoutStreamingModelName_DefaultsToEnglish()
+    {
+        // Upgrade path: a pre-nemotron-first settings.json has no
+        // streamingModelName key and MUST keep streaming with the English model.
+        File.WriteAllText(_path, """
+            {
+              "schema": 1,
+              "asrModelName": "parakeet-tdt-0.6b-v3",
+              "streamingEnabled": true,
+              "onboardingCompleted": true
+            }
+            """);
+        var store = new SettingsStore(_path);
+        var s = store.Load();
+        s.StreamingModelName.ShouldBe("nemotron-streaming-en");
+        s.AsrModelName.ShouldBe("parakeet-tdt-0.6b-v3"); // untouched
+        s.StreamingEnabled.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void RoundTrip_PersistsStreamingModelName_AndPickerChoices()
+    {
+        var store = new SettingsStore(_path);
+        store.Save(new AppSettings
+        {
+            StreamingModelName = "nemotron-streaming-multi",
+            OnboardingBackupModelChosen = true,
+            OnboardingCleanupModelChosen = true,
+        });
+        var loaded = store.Load();
+        loaded.StreamingModelName.ShouldBe("nemotron-streaming-multi");
+        loaded.OnboardingBackupModelChosen.ShouldBeTrue();
+        loaded.OnboardingCleanupModelChosen.ShouldBeTrue();
+    }
 }
 
 internal static class PipeExtensions

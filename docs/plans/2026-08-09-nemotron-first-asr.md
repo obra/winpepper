@@ -648,8 +648,10 @@ Replace lines 6–13 of `src/Winpepper.Asr/TranscribeCpp/Worker/ExeWorkerProcess
 /// <summary>Real child-process IWorkerProcess: redirected stdio, stderr lines
 /// forwarded to a log callback, kill = whole process tree (ggml may spawn
 /// nothing today, but the tree kill is free insurance). On Windows the child
-/// is additionally bound to a Job Object with KILL_ON_JOB_CLOSE. What the job
-/// actually guarantees: if the PARENT CRASHES, the kernel closes the orphaned
+/// is additionally bound to a Job Object with KILL_ON_JOB_CLOSE (a failed
+/// bind is logged — see WindowsJob.BindKillOnClose — and forfeits the job
+/// guarantees below). What the job actually guarantees: if the PARENT
+/// CRASHES, the kernel closes the orphaned
 /// job handle and the worker — even one wedged in native code that will never
 /// see stdin EOF — is killed. In the supervised path the handle is closed at
 /// kill time (KillLocked -> Dispose below), which kills any survivor THEN —
@@ -706,7 +708,7 @@ In `docs/plans/2026-08-08-nemotron-first-asr.md`, line 934, replace exactly this
 with:
 
 ```
-(d) **A1 residual, accepted (text corrected 2026-08-09)**: killing a worker wedged in kernel-mode I/O may delay its actual exit and leak one blocked threadpool thread per kill. The Task 6 Job Object does NOT reap such zombies at app exit — the supervised path closes the per-worker job handle at kill time (`KillLocked` → `ExeWorkerProcess.Dispose`), so KILL_ON_JOB_CLOSE fires then, and a kernel-wedged worker that survives it can linger until the kernel operation completes or the OS cleans up; the job's at-exit guarantee covers only parent CRASH (the kernel closes the orphaned handle). The respawn side is genuinely bounded as of the 2026-08-09 fix batch (`docs/plans/2026-08-09-nemotron-first-asr.md`): operation-phase kills and between-RPC worker deaths charge the 3-strike/60 s restart budget, and only a completed operation RPC (finished batch / finalized stream) resets it.
+(d) **A1 residual, accepted (text corrected 2026-08-09)**: killing a worker wedged in kernel-mode I/O may delay its actual exit and leak one blocked threadpool thread per kill. The Task 6 Job Object does NOT reap such zombies at app exit — the supervised path closes the per-worker job handle at kill time (`KillLocked` → `ExeWorkerProcess.Dispose`), so KILL_ON_JOB_CLOSE fires then, and a kernel-wedged worker that survives it can linger until the kernel operation completes or the OS cleans up; the job's at-exit guarantee covers only parent CRASH (the kernel closes the orphaned handle). All job guarantees are conditional on the bind succeeding — bind failures are logged as of the 2026-08-09 fix batch. The respawn side is genuinely bounded as of the 2026-08-09 fix batch (`docs/plans/2026-08-09-nemotron-first-asr.md`): operation-phase kills and between-RPC worker deaths charge the 3-strike/60 s restart budget, and only a completed operation RPC (finished batch / finalized stream) resets it.
 ```
 
 - [ ] **Step 2: Add the residual label key at the end of the file**
@@ -975,6 +977,8 @@ Expected: `linux-tests grand total: <N> tests` then `LINUX SUITE: GREEN`. Record
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/nemotron-first-asr
+PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+"$PS" -NoProfile -Command "Write-Output interop-ok"  # must print interop-ok; if it hangs/errors, the WSL vsock interop is in an outage window — wait and re-probe (see Step 3) before burning a ~20 min gate run
 git rev-parse --short HEAD > /tmp/windows-gate-nemotron-fixbatch.sha
 nohup ./scripts/windows-gate.sh > /tmp/windows-gate-nemotron-fixbatch.log 2>&1 &
 # Poll until done (do NOT run linux-tests.sh concurrently):
@@ -982,9 +986,13 @@ tail -f /tmp/windows-gate-nemotron-fixbatch.log
 ```
 Expected: exit 0, final line `GATE: GREEN` (non-zero `Skipped` counts are normal — model-presence skips; record them honestly). The gate script prints no SHA — that is why Step 2 stamps `/tmp/windows-gate-nemotron-fixbatch.sha` first; the two files together are the evidence inputs.
 
-- [ ] **Step 3: On RED — fix forward**
+- [ ] **Step 3: On RED — first distinguish ENVIRONMENTAL from CODE red, then retry or fix forward**
 
-Read `artifacts/windows-gate/*.log` for the failing stage, fix, run `./scripts/linux-tests.sh` (must be GREEN), commit as `fix(gate): <what>`, then re-run Step 2 in full (fresh SHA stamp + fresh log). Repeat until GREEN. Never paper over a RED.
+Read `artifacts/windows-gate/*.log` for the failing stages.
+
+**ENVIRONMENTAL RED (known failure mode, observed under load-bearing validation 2026-08-09):** failing stages have tiny (~66-byte) logs containing `UtilAcceptVsock ... accept4 failed 110` and the gate summary shows `<no summary line>` for them — a transient WSL→Windows vsock interop outage, not a code failure. (Two validation gate runs at `9c080c4` went RED exactly this way while every stage that actually executed was green — 863 tests, 0 failures; the prior branch GREEN at `4d5e63d` also needed vsock retries.) Do NOT change code: wait for the interop to answer again (outages were observed to self-heal within ~10 min — re-probe with the Step 2 `interop-ok` command), then re-run Step 2 in full (fresh SHA stamp + fresh log). If still environmentally blocked after 3 full attempts, STOP retrying and record the state honestly in Task 10's evidence doc — gate: BLOCKED-ENVIRONMENTAL with the verbatim log lines, never claimed as GREEN — and note the remaining remediation for the user: run `wsl.exe --shutdown` from Windows and retry (it kills every WSL session including this workflow's; never run it from here).
+
+**CODE RED:** fix, run `./scripts/linux-tests.sh` (must be GREEN), commit as `fix(gate): <what>`, then re-run Step 2 in full (fresh SHA stamp + fresh log). Repeat until GREEN. Never paper over a RED.
 
 - [ ] **Step 4: No commit**
 
@@ -1013,7 +1021,7 @@ PS=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
 "$PS" -NoProfile -Command "Get-Process Winpepper -ErrorAction SilentlyContinue | Select-Object Id, ProcessName"
 "$PS" -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w scripts/smoke-windows.ps1)" -RunSelftest 2>&1 | tee /tmp/smoke-windows-fixbatch.log
 ```
-Expected: exit 0 (no FAILs); WARN/MANUAL lines are recorded as-is. If Winpepper is not MSI-installed on this host, the script reports FAILs on install checks — record that verbatim and mark the affected sub-checks SKIPPED (not installed), do not fake them.
+Expected: exit 0 (no FAILs); WARN/MANUAL lines are recorded as-is. If Winpepper is not MSI-installed on this host, the script reports FAILs on install checks — record that verbatim and mark the affected sub-checks SKIPPED (not installed), do not fake them. Also record the INSTALLED binary's identity next to the selftest result (e.g. `"$PS" -NoProfile -Command "(Get-Item 'C:\Program Files\Winpepper\Winpepper.exe').VersionInfo, (Get-Item 'C:\Program Files\Winpepper\Winpepper.exe').LastWriteTime"` — adjust the path to the script's install dir): the smoke exercises the installed build, which may predate this branch, and the evidence must say which build was actually tested. (Safety, validated 2026-08-09: `--selftest` returns before the singleton registration and writes nothing beyond idempotent dir-creates, so running it beside a live user instance is side-effect-free; the script never kills processes and suppresses launch when an instance is already running.)
 
 - [ ] **Step 2: Fresh-profile onboarding path**
 
@@ -1088,7 +1096,7 @@ the gate logs themselves contain no SHA).
 Verbatim summary block from `/tmp/windows-gate-nemotron-fixbatch.log`:
 
 ```
-<the "================ windows-gate summary ================" block through "GATE: GREEN">
+<the "================ windows-gate summary ================" block through the final "GATE: ..." line — GREEN, or the honest BLOCKED-ENVIRONMENTAL/RED state per Task 9 Step 3; never invented>
 ```
 
 Honesty note: Skipped totals <n> across the 12 runs (<which self-skips>).
@@ -1096,14 +1104,34 @@ Honesty note: Skipped totals <n> across the 12 runs (<which self-skips>).
 gate SHA are docs-only — verified: `git diff --stat <gate-sha>..HEAD` touches
 only docs/plans/*.">
 
-## Review-claims correction
+## Review-claims record (corrected 2026-08-09)
 
-A previous recap of this branch claimed a "second independent review pass".
-No artifacts of such a pass exist (no reports, no logs, no reviewer output);
-that claim is withdrawn here and must not be restated. The review passes with
-artifacts are: (1) the load-bearing validation whose ledger and validator
-reports live in the workflow logs (archived), and (2) the 2026-08-09
-adversarial council review that produced this fix batch.
+A previous recap of this branch claimed a "second independent review pass"
+without locatable artifacts, and an earlier draft of this correction was
+going to withdraw the claim as artifact-free. Load-bearing validation of
+this fix batch then LOCATED the artifacts: the claim is substantiated, not
+withdrawn — the artifacts live in the workflow logs archive, not the repo,
+which is why they were initially missed. The full review record over this
+branch, with artifact locations (workflow logs under
+`.the-usual-logs/nemotron-first-asr/`, archived under
+`prior-run-archive-20260809/`):
+
+1. Plan-stage load-bearing validation — assumption ledger + validator
+   reports V1–V10 (archived).
+2. Execute-stage whole-branch review + re-review — initial verdict "With
+   fixes", re-review confirmed both fixes resolved (artifacts:
+   `sdd/final-review-fix-report.md`, `review-c73b9f1..4d5e63d.diff`,
+   recorded in the archived `execute-result.json`).
+3. Independent cross-model fresh-eyes CODE review of `080e4f1..HEAD`
+   (`fresheyes-delta.md`): iteration 1 FAILED on a bench-compile blocker
+   (fixed in `dc73c52`), iteration 2 PASSED with 0 blocking issues; plus
+   an independent fresh-eyes PLAN review (`fresheyes-plan.md`). This is
+   most plausibly the "second independent review pass" the recap referred
+   to (the recap's original text itself was not archived, so its exact
+   referent cannot be asserted).
+4. The 2026-08-09 adversarial council review that produced this fix batch
+   (its verdict is carried in the fix-batch plan itself; no separate
+   council report file was archived).
 
 ## Residual label key (restated in-repo)
 
@@ -1148,4 +1176,4 @@ This is the final commit. Leave `feat/nemotron-first-asr` unmerged; do not push 
 
 ## Recorded backlog (explicitly out of scope — do not do)
 
-Carried from the council verdict for a future batch: PipelineHost backup-role machinery simplification; duplicated selection-slot class; `"-batch"` string-suffix invariant; rerun-vs-dictation lock-convoy; MSI vc_redist chaining (also noted at `2026-08-08-nemotron-first-asr.md:4559`); model-quality evaluation work; ModelsPage's other stale card headers (`:23-24`, `:89`, `:142-143`) and the files-only "Installed" predicate on the recovery card (`ModelsPage.xaml.cs:459-472`); a stderr/log sink for the `AppShell.cs:145-147` probe factory.
+Carried from the council verdict for a future batch: PipelineHost backup-role machinery simplification; duplicated selection-slot class; `"-batch"` string-suffix invariant; rerun-vs-dictation lock-convoy; MSI vc_redist chaining (also noted at `2026-08-08-nemotron-first-asr.md:4559`); model-quality evaluation work; ModelsPage's other stale card headers (`:23-24`, `:89`, `:142-143`) and the files-only "Installed" predicate on the recovery card (`ModelsPage.xaml.cs:459-472`); a stderr/log sink for the `AppShell.cs:145-147` probe factory; RPC deadline tuning for slow hardware — the per-op deadlines (batch 30 s + 2 s/audio-s, feed 10 s, finalize 20 s, begin 15 s) are validated only on the dev host (~1.13x headroom), and timeout kills now charge the restart budget, so if field reports show budget-exhausted lockouts on honest-but-slow machines, widen the constants (one-line tunables; the 60 s cooldown meanwhile bounds the blast radius to periodic retry).

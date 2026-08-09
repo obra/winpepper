@@ -1,7 +1,9 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using Winpepper.Asr.TranscribeCpp;
 using Winpepper.Asr.TranscribeCpp.Worker;
 using Winpepper.Asr.Tests.Transcription;
+using Winpepper.Asr.Transcription;
 using Xunit;
 
 namespace Winpepper.Asr.Tests.TranscribeCpp.Worker;
@@ -144,16 +146,30 @@ public sealed class WorkerProcessEngineTests
         factory.Started.ShouldBe(0); // the pre-check fired before any spawn/RPC
     }
 
-    // TODO(Task 8): add the end-to-end wedge test here once NemotronBatchTranscriber
-    // exists (Task 8). Per the task brief it MUST exist by the end of Task 8:
-    //
-    //   EndToEnd_WedgedStream_FallsBackToNemotronBatch_OnFreshWorker
-    //
-    //   The headline scenario the subprocess exists for: a wedged native feed no
-    //   longer wedges the app — the streaming transcriber falls back to batch on a
-    //   FRESH worker and the dictation still yields text. Wire a wedged first
-    //   worker (FeedGate) + healthy respawn through NemotronStreamingTranscriber
-    //   with a NemotronBatchTranscriber over the same WorkerProcessEngine; assert
-    //   result.ProviderModelName == "nemotron-streaming-en-batch" and
-    //   factory.Started == 2.
+    /// <summary>The headline scenario the subprocess exists for: a wedged
+    /// native feed no longer wedges the app — the streaming transcriber falls
+    /// back to batch on a FRESH worker and the dictation still yields text.</summary>
+    [Fact]
+    public async Task EndToEnd_WedgedStream_FallsBackToNemotronBatch_OnFreshWorker()
+    {
+        using var feedGate = new ManualResetEventSlim(false);
+        var first = true;
+        var factory = new InProcessWorkerChannelFactory(() =>
+        {
+            if (first) { first = false; return new FakeTranscribeCppEngine { FeedGate = feedGate }; }
+            return new FakeTranscribeCppEngine(); // the respawned worker is healthy
+        });
+        using var engine = Engine(factory);
+        var batch = new NemotronBatchTranscriber(() => engine, "nemotron-streaming-en-batch");
+        var streaming = new NemotronStreamingTranscriber(() => engine, batch, "nemotron-streaming-en",
+            NullLogger<NemotronStreamingTranscriber>.Instance);
+
+        await using var session = await streaming.StartSessionAsync(CancellationToken.None);
+        await session.PushAsync(new float[2560], CancellationToken.None); // wedges -> times out -> corrupt
+        var result = await session.FinishAsync(new float[2560], CancellationToken.None);
+
+        result.ProviderModelName.ShouldBe("nemotron-streaming-en-batch"); // batch fallback produced it
+        factory.Started.ShouldBe(2); // wedged worker killed, fresh worker served the batch
+        feedGate.Set();
+    }
 }

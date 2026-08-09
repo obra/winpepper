@@ -7,11 +7,18 @@ namespace Winpepper.Asr.TranscribeCpp.Worker;
 /// <summary>Real child-process IWorkerProcess: redirected stdio, stderr lines
 /// forwarded to a log callback, kill = whole process tree (ggml may spawn
 /// nothing today, but the tree kill is free insurance). On Windows the child
-/// is additionally bound to a Job Object with KILL_ON_JOB_CLOSE: a worker
-/// wedged in native code never sees stdin EOF, so a parent CRASH would orphan
-/// a ~700 MB process; the job binding also reaps kernel-wedge zombies at app
-/// exit (the kernel closes the job handle with the parent). No-op on Linux,
-/// so the Linux tests are unaffected.</summary>
+/// is additionally bound to a Job Object with KILL_ON_JOB_CLOSE (a failed
+/// bind is logged — see WindowsJob.BindKillOnClose — and forfeits the job
+/// guarantees below). What the job actually guarantees: if the PARENT
+/// CRASHES, the kernel closes the orphaned
+/// job handle and the worker — even one wedged in native code that will never
+/// see stdin EOF — is killed. In the supervised path the handle is closed at
+/// kill time (KillLocked -> Dispose below), which kills any survivor THEN —
+/// there is no job handle left at app exit, so a killed worker that is wedged
+/// in a KERNEL-mode call and survives both the kill and the job-close is NOT
+/// reaped at app exit; it can linger until the kernel operation completes or
+/// the OS cleans it up. That leak is the accepted residual (see the plan's A1
+/// residual note). No-op on Linux, so the Linux tests are unaffected.</summary>
 public sealed class ExeWorkerProcess : IWorkerProcess
 {
     private readonly Process _process;

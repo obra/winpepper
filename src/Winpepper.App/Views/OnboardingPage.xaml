@@ -5,7 +5,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Winpepper.App.Views.Controls">
     <ScrollViewer>
-        <StackPanel MaxWidth="560" HorizontalAlignment="Center" Spacing="20" Padding="24,40,24,24">
+        <StackPanel MaxWidth="720" HorizontalAlignment="Center" Spacing="20" Padding="24,40,24,24">
 
             <!-- Hero -->
             <StackPanel Spacing="8" HorizontalAlignment="Center">
@@ -89,30 +89,117 @@
                                Style="{ThemeResource CaptionTextBlockStyle}"
                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                HorizontalAlignment="Center" />
+                    <TextBlock Text="Choose your models"
+                               Style="{ThemeResource SubtitleTextBlockStyle}"
+                               HorizontalAlignment="Center" />
+                    <TextBlock Text="Winpepper downloads speech models once, then works fully offline. You can change any of this later in Settings › Models."
+                               Style="{ThemeResource BodyTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" TextAlignment="Center" />
+
+                    <TextBlock Margin="0,8,0,0" TextWrapping="Wrap">
+                        <Run Text="Speech model" FontWeight="SemiBold" />
+                        <Run Text=" — transcribes while you speak. Pick one." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </TextBlock>
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Border Grid.Column="0" x:Name="EnglishCard"
+                                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="8" Padding="14,12">
+                            <RadioButton x:Name="EnglishRadio" GroupName="SpeechModel" IsChecked="True"
+                                         AutomationProperties.AutomationId="OnboardingSpeechEnglishRadio">
+                                <StackPanel Spacing="3">
+                                    <StackPanel Orientation="Horizontal" Spacing="10">
+                                        <TextBlock Text="English" FontWeight="SemiBold" />
+                                        <Border Background="{ThemeResource AccentFillColorSelectedTextBackgroundBrush}"
+                                                CornerRadius="10" Padding="9,2">
+                                            <TextBlock Text="Recommended" Style="{ThemeResource CaptionTextBlockStyle}"
+                                                       Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                                        </Border>
+                                    </StackPanel>
+                                    <TextBlock Text="Best English accuracy."
+                                               Style="{ThemeResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock x:Name="EnglishSizeText" FontWeight="SemiBold" Margin="0,6,0,0"
+                                               Style="{ThemeResource CaptionTextBlockStyle}" />
+                                </StackPanel>
+                            </RadioButton>
+                        </Border>
+                        <Border Grid.Column="1" x:Name="MultilingualCard"
+                                Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                BorderThickness="1" CornerRadius="8" Padding="14,12">
+                            <RadioButton x:Name="MultilingualRadio" GroupName="SpeechModel"
+                                         AutomationProperties.AutomationId="OnboardingSpeechMultilingualRadio">
+                                <StackPanel Spacing="3">
+                                    <TextBlock Text="Multilingual" FontWeight="SemiBold" />
+                                    <TextBlock Text="40 languages, auto-detected. Slightly lower English accuracy."
+                                               Style="{ThemeResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock x:Name="MultilingualSizeText" FontWeight="SemiBold" Margin="0,6,0,0"
+                                               Style="{ThemeResource CaptionTextBlockStyle}" />
+                                </StackPanel>
+                            </RadioButton>
+                        </Border>
+                    </Grid>
+
+                    <TextBlock Text="Options" FontWeight="SemiBold" Margin="0,10,0,0" />
                     <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                             BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                            BorderThickness="1" CornerRadius="8" Padding="16">
-                        <StackPanel Spacing="12">
-                            <StackPanel Orientation="Horizontal" Spacing="12">
-                                <FontIcon Glyph="&#xE896;" FontSize="20" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
-                                <TextBlock Text="Download models" Style="{ThemeResource SubtitleTextBlockStyle}" VerticalAlignment="Center" />
-                            </StackPanel>
-                            <TextBlock Text="Winpepper needs the speech model (~670 MB) before you can test dictation. The optional cleanup model can be downloaded later from Models."
-                                       Style="{ThemeResource BodyTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                       TextWrapping="Wrap" />
-                            <TextBlock x:Name="DownloadStatusText"
-                                       AutomationProperties.AutomationId="OnboardingDownloadStatusText"
-                                       Style="{ThemeResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <ProgressBar x:Name="DownloadProgress" AutomationProperties.AutomationId="OnboardingDownloadProgressBar" Minimum="0" Maximum="100" Visibility="Collapsed" />
-                            <TextBlock x:Name="DownloadErrorText"
-                                       AutomationProperties.AutomationId="OnboardingDownloadErrorText"
-                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
-                                       TextWrapping="Wrap"
-                                       Visibility="Collapsed" />
-                        </StackPanel>
+                            BorderThickness="1" CornerRadius="8" Padding="14,12">
+                        <CheckBox x:Name="BackupCheck" AutomationProperties.AutomationId="OnboardingBackupModelCheckBox">
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Spacing="3">
+                                    <TextBlock Text="Backup speech model" FontWeight="SemiBold" />
+                                    <TextBlock Text="Slower — transcribes after you stop speaking. Steps in automatically if the main speech engine ever has trouble."
+                                               Style="{ThemeResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <TextBlock Grid.Column="1" x:Name="BackupSizeText"
+                                           Style="{ThemeResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </Grid>
+                        </CheckBox>
                     </Border>
+                    <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1" CornerRadius="8" Padding="14,12">
+                        <CheckBox x:Name="CleanupCheck" AutomationProperties.AutomationId="OnboardingCleanupModelCheckBox">
+                            <Grid ColumnSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="0" Spacing="3">
+                                    <TextBlock Text="Text cleanup" FontWeight="SemiBold" />
+                                    <TextBlock Text="Tidies what you dictate — punctuation, capitalization, and filler words — before it's typed into your apps."
+                                               Style="{ThemeResource CaptionTextBlockStyle}"
+                                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                                <TextBlock Grid.Column="1" x:Name="CleanupSizeText"
+                                           Style="{ThemeResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            </Grid>
+                        </CheckBox>
+                    </Border>
+
+                    <TextBlock Text="Downloads happen in the background — you can keep setting up while they run."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="TotalDownloadText"
+                               AutomationProperties.AutomationId="OnboardingTotalDownloadText" />
                 </StackPanel>
 
                 <StackPanel x:Name="TestPanel" Visibility="Collapsed" Spacing="8">
@@ -132,6 +219,19 @@
                                        Style="{ThemeResource BodyTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        TextWrapping="Wrap" />
+                            <TextBlock x:Name="DownloadStatusText"
+                                       AutomationProperties.AutomationId="OnboardingDownloadStatusText"
+                                       Style="{ThemeResource CaptionTextBlockStyle}"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <ProgressBar x:Name="DownloadProgress" AutomationProperties.AutomationId="OnboardingDownloadProgressBar" Minimum="0" Maximum="100" Visibility="Collapsed" />
+                            <TextBlock x:Name="DownloadErrorText"
+                                       AutomationProperties.AutomationId="OnboardingDownloadErrorText"
+                                       Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                       TextWrapping="Wrap"
+                                       Visibility="Collapsed" />
+                            <Button x:Name="RetryDownloadButton"
+                                    AutomationProperties.AutomationId="OnboardingRetryDownloadButton"
+                                    Content="Retry download" Visibility="Collapsed" Click="OnRetryDownload" />
                             <TextBox x:Name="TestBox" AutomationProperties.AutomationId="OnboardingTestTextBox" PlaceholderText="Dictate into me..." Height="100" AcceptsReturn="True" TextWrapping="Wrap" />
                             <CheckBox x:Name="TestDoneCheck" AutomationProperties.AutomationId="OnboardingTestDoneCheckBox" Content="That worked." />
                         </StackPanel>

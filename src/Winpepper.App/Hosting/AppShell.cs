@@ -69,6 +69,14 @@ public sealed class AppShell : IDisposable
     /// </summary>
     public Winpepper.Models.StreamingAutoInstaller StreamingAutoInstaller { get; }
 
+    /// <summary>
+    /// Background multi-model onboarding downloads (speech model first, with
+    /// deep verification + engine load probe). Lives on the shell so the
+    /// downloads survive the onboarding page being navigated away from, and
+    /// so boot reconciliation can resume interrupted optional downloads.
+    /// </summary>
+    public Winpepper.Core.ViewModels.IOnboardingModelProvisioner OnboardingProvisioner { get; }
+
     private readonly WinUiSoundEffectPlayer _sounds;
 
     public static AppShell Create()
@@ -119,6 +127,32 @@ public sealed class AppShell : IDisposable
         // an Install click during the auto-install can never double-download.
         var streamingAutoInstaller = new Winpepper.Models.StreamingAutoInstaller(
             modelsServices.Registry, modelsServices.ModelsRoot, modelsServices);
+        var onboardingProvisioner = new Winpepper.App.Services.OnboardingModelProvisioner(
+            modelsServices,
+            factory.CreateLogger<Winpepper.App.Services.OnboardingModelProvisioner>(),
+            Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread(),
+            engineLoadProbe: (name, ct) => Task.Run(() =>
+            {
+                // One-shot engine load probe: spawn a worker for the selected
+                // layout, force the Load RPC (a tiny batch drives spawn+Load),
+                // dispose. Failure -> the provisioner publishes the sticky
+                // redist/repair error instead of a false "ready".
+                try
+                {
+                    var layout = Winpepper.Asr.TranscribeCpp.StreamingModelLayout.For(name);
+                    var exe = Environment.ProcessPath
+                        ?? throw new InvalidOperationException("no process path for the probe worker");
+                    using var probe = new Winpepper.Asr.TranscribeCpp.Worker.WorkerProcessEngine(
+                        new Winpepper.Asr.TranscribeCpp.Worker.ExeWorkerProcessFactory(
+                            () => new System.Diagnostics.ProcessStartInfo(exe, "--transcribe-worker")),
+                        layout.RuntimeDir(modelsServices.ModelsRoot),
+                        layout.GgufPath(modelsServices.ModelsRoot),
+                        layout.Name);
+                    probe.TranscribeBatch(new float[1600], layout.Language, out _); // 0.1 s of silence
+                    return true;
+                }
+                catch { return false; }
+            }, ct));
         var asrSelection = new Winpepper.Core.Settings.AsrModelSelectionSlot();
         asrSelection.Publish(settings.AsrModelName); // seed with the persisted boot value
         var writer = new DebouncedSettingsWriter(store,
@@ -408,7 +442,7 @@ public sealed class AppShell : IDisposable
                             aaiKeyStore, aaiClient, aaiOptions, asrSelection,
                             streamingSelection,
                             cleanupSelection, cleanupHolder,
-                            streamingAutoInstaller);
+                            streamingAutoInstaller, onboardingProvisioner);
     }
 
     private AppShell(ILoggerFactory factory, SettingsStore store, AppSettings settings,
@@ -433,7 +467,8 @@ public sealed class AppShell : IDisposable
                      Winpepper.Core.Settings.StreamingModelSelectionSlot streamingSelection,
                      Winpepper.Core.Settings.CleanupModelSelectionSlot cleanupSelection,
                      Winpepper.Cleanup.CleanupBackendHolder cleanupHolder,
-                     Winpepper.Models.StreamingAutoInstaller streamingAutoInstaller)
+                     Winpepper.Models.StreamingAutoInstaller streamingAutoInstaller,
+                     Winpepper.Core.ViewModels.IOnboardingModelProvisioner onboardingProvisioner)
     {
         LogFactory = factory; SettingsStore = store; Settings = settings;
         SettingsWriter = writer; Engine = engine; SessionVm = sessionVm; RecordingVm = recVm;
@@ -454,6 +489,7 @@ public sealed class AppShell : IDisposable
         CleanupModelSelection = cleanupSelection;
         CleanupBackend = cleanupHolder;
         StreamingAutoInstaller = streamingAutoInstaller;
+        OnboardingProvisioner = onboardingProvisioner;
 
         Pill = new StatusPillWindow(sessionVm);
         // Clicking the pill in its PENDING state pastes the held text into the

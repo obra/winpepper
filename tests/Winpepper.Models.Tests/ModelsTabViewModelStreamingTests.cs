@@ -23,11 +23,13 @@ public class ModelsTabViewModelStreamingTests : IDisposable
             promoteAsr: _ => { }, promoteCleanup: _ => { });
 
     [Fact]
-    public void StreamingCard_lists_exactly_the_nemotron_descriptor()
+    public void StreamingCard_lists_exactly_the_nemotron_descriptors()
     {
         var vm = CreateVm(new FakeDownloader());
         var names = vm.StreamingCard.Available.Select(d => d.Name).ToList();
-        Assert.Equal(new[] { ModelRegistry.StreamingAsrName }, names);
+        Assert.Equal(
+            new[] { ModelRegistry.StreamingAsrName, ModelRegistry.MultilingualStreamingAsrName },
+            names);
     }
 
     [Fact]

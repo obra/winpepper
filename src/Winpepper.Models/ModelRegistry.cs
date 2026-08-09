@@ -11,6 +11,7 @@ public sealed class ModelRegistry
     public const string SecondAsrName = "parakeet-tdt-0.6b-v2";
     public const string DefaultCleanupName = "qwen2.5-0.5b-instruct-q4_k_m";
     public const string StreamingAsrName = "nemotron-streaming-en";
+    public const string MultilingualStreamingAsrName = "nemotron-streaming-multi";
 
     private readonly List<ModelDescriptor> _all;
 
@@ -188,6 +189,33 @@ public sealed class ModelRegistry
                     },
                 },
             },
+            new ModelDescriptor
+            {
+                Name = MultilingualStreamingAsrName,
+                Kind = ModelKind.StreamingAsr,
+                DisplayName = "Nemotron 3.5 Speech Streaming (0.6B, Q8_0 GGUF, Multilingual)",
+                InstallDirRelative = "nemotron-streaming-multi",
+                Files = new[]
+                {
+                    new ModelFile
+                    {
+                        RelativePath = "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+                        Url = "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf",
+                        // Size+SHA-256 read from the HF API (LFS oid) 2026-08-08 and
+                        // re-verified in this task; the downloader hard-verifies on install.
+                        Sha256 = "b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c",
+                        SizeBytes = 751_094_240,
+                    },
+                    new ModelFile
+                    {
+                        RelativePath = "transcribe-native-0.1.3-windows-x86_64-cpu-vulkan.tar.gz",
+                        Url = "https://github.com/handy-computer/transcribe.cpp/releases/download/v0.1.3/transcribe-native-0.1.3-windows-x86_64-cpu-vulkan.tar.gz",
+                        Sha256 = "9f536cb0fb839bd305e6d92fb214fd417c7718a416a6c7646a9911fbd56fdad5",
+                        SizeBytes = 25_957_910,
+                        ExtractToRelative = "runtime",
+                    },
+                },
+            },
         };
     }
 
@@ -197,6 +225,14 @@ public sealed class ModelRegistry
 
     public ModelDescriptor? Find(string name) => _all.FirstOrDefault(d => d.Name == name);
 
+    /// <summary>
+    /// Resolves <paramref name="requestedName"/> to a descriptor of the
+    /// requested <paramref name="kind"/>, falling back to the kind's default
+    /// for unknown/null names or a kind mismatch (Asr -> DefaultAsrName,
+    /// Cleanup -> DefaultCleanupName, StreamingAsr -> StreamingAsrName, i.e.
+    /// English). The StreamingAsr default is the upgrade-path repair for
+    /// AppSettings.StreamingModelName.
+    /// </summary>
     public ModelDescriptor ResolveOrDefault(string? requestedName, ModelKind kind)
     {
         var requested = requestedName is null ? null : Find(requestedName);
@@ -206,7 +242,7 @@ public sealed class ModelRegistry
         {
             ModelKind.Asr => DefaultAsrName,
             ModelKind.Cleanup => DefaultCleanupName,
-            ModelKind.StreamingAsr => throw new ArgumentOutOfRangeException(nameof(kind), kind, "StreamingAsr is never a selectable AsrModelName; it has no default."),
+            ModelKind.StreamingAsr => StreamingAsrName,
             _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, null),
         };
         return Find(defaultName)

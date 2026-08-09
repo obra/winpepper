@@ -690,7 +690,7 @@ git commit -m "docs(asr): correct the Job Object comment — killed workers are 
 ### Task 5: Correct the plan document's A1 residual text and residual labels (council fix #5, doc half)
 
 **Files:**
-- Modify: `docs/plans/2026-08-08-nemotron-first-asr.md:934` (clause (d) of the "Additional contracts" line) and end of file (after line 4643)
+- Modify: `docs/plans/2026-08-08-nemotron-first-asr.md:934` (clause (d) of the "Additional contracts" line), the historical `ExeWorkerProcess` code listing (`:1628` at `dc73c52` — Step 1b's correction note goes just after its fence), and end of file (line 4643 at `dc73c52`; Step 1b shifts EOF down a few lines — append at end of file)
 
 **Interfaces:**
 - Consumes: Tasks 1–2 being merged (the corrected text asserts the budget now genuinely bounds kills and between-RPC deaths — do not run this task before them). Produces: the corrected certification record Task 10's evidence doc cross-references.
@@ -711,9 +711,31 @@ with:
 (d) **A1 residual, accepted (text corrected 2026-08-09)**: killing a worker wedged in kernel-mode I/O may delay its actual exit and leak one blocked threadpool thread per kill. The Task 6 Job Object does NOT reap such zombies at app exit — the supervised path closes the per-worker job handle at kill time (`KillLocked` → `ExeWorkerProcess.Dispose`), so KILL_ON_JOB_CLOSE fires then, and a kernel-wedged worker that survives it can linger until the kernel operation completes or the OS cleans up; the job's at-exit guarantee covers only parent CRASH (the kernel closes the orphaned handle). All job guarantees are conditional on the bind succeeding — bind failures are logged as of the 2026-08-09 fix batch. The respawn side is genuinely bounded as of the 2026-08-09 fix batch (`docs/plans/2026-08-09-nemotron-first-asr.md`): operation-phase kills and between-RPC worker deaths charge the 3-strike/60 s restart budget, and only a completed operation RPC (finished batch / finalized stream) resets it.
 ```
 
+- [ ] **Step 1b: Annotate the stale reap claim in the historical code listing**
+
+The same false at-app-exit reaping claim also survives inside a verbatim
+historical code listing in the same doc: the old `ExeWorkerProcess` class
+comment, line 1628 as of `dc73c52` ("/// a ~700 MB process; the job binding
+also reaps kernel-wedge zombies at app / exit ..."), inside the csharp code
+fence that opens near line 1617. Locate it by content (grep for
+`reaps kernel-wedge zombies`), keep the listing byte-for-byte (it is the
+historical plan-time specification), and insert immediately AFTER that code
+block's closing fence line, separated by a blank line:
+
+```markdown
+> **Correction (2026-08-09):** the class comment in the listing above claims
+> the job binding "also reaps kernel-wedge zombies at app exit" — that is the
+> same false claim corrected in clause (d) (line 934): in the supervised path
+> the per-worker job handle is closed at kill time (`KillLocked` →
+> `ExeWorkerProcess.Dispose`), so KILL_ON_JOB_CLOSE fires then, not at app
+> exit; the job's at-exit guarantee covers only parent crash. The listing is
+> preserved verbatim as the historical record.
+```
+
 - [ ] **Step 2: Add the residual label key at the end of the file**
 
-Append after the final line (4643, the deviations list):
+Append after the final line (the deviations list — line 4643 at `dc73c52`,
+shifted a few lines down by Step 1b's insertion; append at end of file):
 
 ```markdown
 
@@ -743,9 +765,9 @@ residual as A15/V8. The 2026-08-09 evidence doc restates this key in-repo.
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/nemotron-first-asr
-grep -n "A15\|V6/A16\|reaps" docs/plans/2026-08-08-nemotron-first-asr.md
+grep -n "A15\|V6/A16\|reap" docs/plans/2026-08-08-nemotron-first-asr.md
 ```
-Expected: `A15` appears in the new key; the only remaining "reap" claims describe the corrected semantics; clause (d) matches Step 1.
+Expected: `A15` appears in the new key; clause (d) matches Step 1; every remaining `reap` hit is one of exactly three things — the corrected clause (d), the historical listing line (~`:1628`) that Step 1b annotates, or Step 1b's correction blockquote itself (which quotes the claim in order to refute it). No other hits.
 
 - [ ] **Step 4: Full Linux suite, then commit**
 
@@ -756,7 +778,7 @@ Expected: `LINUX SUITE: GREEN` (docs-only change; the run satisfies the every-co
 
 ```bash
 git add docs/plans/2026-08-08-nemotron-first-asr.md
-git commit -m "docs: correct A1 accepted-residual text and add residual label key (A15 vs V6/A16)"
+git commit -m "docs: correct A1 accepted-residual text, annotate the stale at-app-exit reap claim in the historical ExeWorkerProcess listing, and add the residual label key (A15 vs V6/A16)"
 ```
 
 ---
@@ -933,6 +955,7 @@ Read the file first, then remove, as ONE atomic edit (line numbers from `dc73c52
 - `:60-61` — delete `public Task EnsureReadyAsync(CancellationToken ct)` (no caller anywhere).
 - `:154-158` — delete `private void OnCoordinatorStateChanged(...)`.
 - `:160-172` — delete `private static AsrProvisioningState MapState(...)`.
+- `:176` — delete the `Dispose()` unsubscription line `_coordinator.StateChanged -= OnCoordinatorStateChanged;` (it pairs with the `:20` subscription; once the handler at `:154-158` is gone, leaving this line is a guaranteed CS0103 in the Windows-only `Winpepper.App` build, which no Linux verification can catch).
 - `:86` — the XML doc contains `<see cref="State"/>`; reword that phrase to plain text (e.g. "the coordinator's global state") so no CS1574 dangling-cref warning appears.
 - KEEP `VerifyReadyAsync` (`:63-71`) exactly as is.
 
@@ -940,7 +963,7 @@ Read the file first, then remove, as ONE atomic edit (line numbers from `dc73c52
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/nemotron-first-asr
-git grep -n "IAsrProvisioningService\|AsrProvisioningState\|AsrProvisioningStatus" -- src/ tests/
+git grep -n "IAsrProvisioningService\|AsrProvisioningState\|AsrProvisioningStatus\|OnCoordinatorStateChanged" -- src/ tests/
 ```
 Expected: no output. (Docs mentions in `docs/plans/*.md` are historical records — leave them.)
 
@@ -1109,19 +1132,26 @@ only docs/plans/*.">
 A previous recap of this branch claimed a "second independent review pass"
 without locatable artifacts, and an earlier draft of this correction was
 going to withdraw the claim as artifact-free. Load-bearing validation of
-this fix batch then LOCATED the artifacts: the claim is substantiated, not
-withdrawn — the artifacts live in the workflow logs archive, not the repo,
-which is why they were initially missed. The full review record over this
-branch, with artifact locations (workflow logs under
+this fix batch then located substantiating artifacts for that review pass
+(item 3 below) in the workflow logs archive — not the repo, which is why
+they were initially missed — so the claim is substantiated, not withdrawn.
+One caveat survives: the execute-stage review's named artifact FILES were
+never preserved (item 2 below states exactly what evidence exists). The
+full review record over this branch, with artifact locations (workflow
+logs under
 `.the-usual-logs/nemotron-first-asr/`, archived under
 `prior-run-archive-20260809/`):
 
 1. Plan-stage load-bearing validation — assumption ledger + validator
    reports V1–V10 (archived).
 2. Execute-stage whole-branch review + re-review — initial verdict "With
-   fixes", re-review confirmed both fixes resolved (artifacts:
-   `sdd/final-review-fix-report.md`, `review-c73b9f1..4d5e63d.diff`,
-   recorded in the archived `execute-result.json`).
+   fixes", re-review confirmed both fixes resolved. Evidence: the archived
+   `execute-result.json` records the review outcome and two artifact NAMES
+   (`sdd/final-review-fix-report.md`, `review-c73b9f1..4d5e63d.diff`), but
+   the named files themselves were never preserved — they exist nowhere in
+   the repo, its git history, or the logs archive — so this pass is
+   substantiated only by the archived execute record, not by artifact
+   files.
 3. Independent cross-model fresh-eyes CODE review of `080e4f1..HEAD`
    (`fresheyes-delta.md`): iteration 1 FAILED on a bench-compile blocker
    (fixed in `dc73c52`), iteration 2 PASSED with 0 blocking issues; plus

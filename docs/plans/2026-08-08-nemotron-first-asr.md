@@ -3383,22 +3383,41 @@ public static class RerunModelRouter
         => isStreamingModelName ? Route.NemotronBatch
          : parakeetFilesPresent ? Route.ParakeetSession
          : Route.NotInstalled;
+
+    /// <summary>An engine may only serve a rerun for the model it actually
+    /// loaded. Guards the wrong-model hazard: the shared holder engine serves
+    /// whichever streaming model is CURRENTLY SELECTED for dictation, while
+    /// the rerun stamps its result with the PICKED model name.</summary>
+    public static bool EngineServes(string? engineModelName, string requestedModelName)
+        => engineModelName is not null && engineModelName == requestedModelName;
 }
 
 // #if WINDOWS (like the old service)
 public sealed class LocalTranscriptionRerunService : ITranscriptionRerunService
 {
     public LocalTranscriptionRerunService(
-        Func<Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine?> nemotronEngine,
+        Func<string, Winpepper.Asr.TranscribeCpp.ITranscribeCppEngine?> nemotronEngineFor, // name-keyed: returns an engine that serves EXACTLY the requested model, else null
         Func<string, bool> isStreamingModelName);
-    // RerunAsync: read WAV; Decide(...); NemotronBatch -> engine.TranscribeBatch
+    // RerunAsync: read WAV; Decide(...); NemotronBatch -> nemotronEngineFor(modelName).TranscribeBatch
     //   (language from StreamingModelLayout.For(modelName).Language; null engine ->
-    //   InvalidOperationException("Speech engine unavailable ... Install it from Settings > Models."));
+    //   InvalidOperationException("Speech engine for '<name>' is unavailable. Select it as the speech model in Settings > Models (installing it if needed), then rerun."));
     // ParakeetSession -> using var session = new ParakeetSession(modelDirectory); session.Transcribe(...);
     // NotInstalled -> InvalidOperationException($"Model '{modelName}' is not installed. Download it from Settings > Models.")
 }
 ```
-- `HistoryServices` ctor becomes `HistoryServices(string historyRoot, ITranscriptionRerunService transcriptionRerun)`; `AppShell.Create()` passes `new LocalTranscriptionRerunService(() => nemotronHolder.TryGet(), name => modelsServices.Registry.Find(name)?.Kind == Winpepper.Models.ModelKind.StreamingAsr)`.
+- `HistoryServices` ctor becomes `HistoryServices(string historyRoot, ITranscriptionRerunService transcriptionRerun)`; `AppShell.Create()` passes:
+
+```csharp
+new LocalTranscriptionRerunService(
+    name =>
+    {
+        var engine = nemotronHolder.TryGet(); // serves the CURRENTLY SELECTED streaming model
+        return Winpepper.History.Lab.RerunModelRouter.EngineServes(engine?.ModelName, name) ? engine : null;
+    },
+    name => modelsServices.Registry.Find(name)?.Kind == Winpepper.Models.ModelKind.StreamingAsr)
+```
+
+  The name guard is load-bearing (do NOT wire `() => nemotronHolder.TryGet()` directly): the holder's engine serves whichever streaming model is currently selected for dictation, so without the guard, picking the non-active Nemotron in the History Lab would silently transcribe with the ACTIVE model while stamping the picked name (both layouts' `Language` is `null`, so nothing else differentiates the call) — and would even "succeed" when the picked model isn't installed at all. With the guard, a picked streaming model that the shared engine doesn't serve gets a null engine and surfaces the actionable inline error (the approved "clear unavailable state"); comparing against the RETURNED engine's `ModelName` (not `CurrentLayout`) makes the check immune to holder-state staleness.
 - `HistoryDetailPage.xaml.cs:57` picker source: `models.Registry.ByKind(ModelKind.Asr).Concat(models.Registry.ByKind(ModelKind.StreamingAsr))`. The "Promote as default" handler (`:63-67`) is guarded: only invoke for descriptors whose `Kind == ModelKind.Asr` (a streaming name must not be published into `AsrModelSelection`; disable/hide the promote button when a streaming model is selected in the panel).
 - Rerun error surface: `RerunPanelViewModel.Runner` is awaited by the panel — check `src/Winpepper.History/ViewModels/RerunPanelViewModel.cs` for its exception handling; if the runner's exceptions are unhandled, wrap the runner lambda in `HistoryDetailViewModel` (lines 35-42) with `try { ... } catch (InvalidOperationException e) { return $"[{e.Message}]"; }` so a missing model shows a clear inline message instead of crashing (this IS the approved "clear 'model not installed' state").
 
@@ -3422,6 +3441,13 @@ public sealed class RerunModelRouterTests
     [InlineData(false, false, RerunModelRouter.Route.NotInstalled)]
     public void Decide_RoutesByKindThenPresence(bool streaming, bool filesPresent, RerunModelRouter.Route expected)
         => RerunModelRouter.Decide(streaming, filesPresent).ShouldBe(expected);
+
+    [Theory]
+    [InlineData("nemotron-streaming-en", "nemotron-streaming-en",    true)]
+    [InlineData("nemotron-streaming-en", "nemotron-streaming-multi", false)]
+    [InlineData(null,                    "nemotron-streaming-multi", false)]
+    public void EngineServes_RequiresExactModelMatch(string? engineModelName, string requested, bool expected)
+        => RerunModelRouter.EngineServes(engineModelName, requested).ShouldBe(expected);
 }
 ```
 
@@ -3438,19 +3464,21 @@ using Winpepper.Asr.TranscribeCpp;
 namespace Winpepper.History.Lab;
 
 /// <summary>Reruns a history WAV against a locally installed model: Nemotron
-/// (batch, via the shared worker engine) or Parakeet (fresh ONNX session per
-/// call). Missing models fail with an actionable message instead of a raw
-/// FileNotFoundException. Replaces ParakeetTranscriptionRerunService.</summary>
+/// (batch, via a NAME-KEYED engine provider that must return an engine serving
+/// exactly the requested model, or null) or Parakeet (fresh ONNX session per
+/// call). Missing/unavailable models fail with an actionable message instead
+/// of a raw FileNotFoundException or a silent wrong-model transcript.
+/// Replaces ParakeetTranscriptionRerunService.</summary>
 public sealed class LocalTranscriptionRerunService : ITranscriptionRerunService
 {
-    private readonly Func<ITranscribeCppEngine?> _nemotronEngine;
+    private readonly Func<string, ITranscribeCppEngine?> _nemotronEngineFor;
     private readonly Func<string, bool> _isStreamingModelName;
 
     public LocalTranscriptionRerunService(
-        Func<ITranscribeCppEngine?> nemotronEngine,
+        Func<string, ITranscribeCppEngine?> nemotronEngineFor,
         Func<string, bool> isStreamingModelName)
     {
-        _nemotronEngine = nemotronEngine;
+        _nemotronEngineFor = nemotronEngineFor;
         _isStreamingModelName = isStreamingModelName;
     }
 
@@ -3468,9 +3496,12 @@ public sealed class LocalTranscriptionRerunService : ITranscriptionRerunService
             switch (route)
             {
                 case RerunModelRouter.Route.NemotronBatch:
-                    var engine = _nemotronEngine()
+                    // Name-keyed: the provider returns null unless the shared
+                    // engine serves EXACTLY modelName (see AppShell wiring) —
+                    // never transcribe with a different model than we stamp.
+                    var engine = _nemotronEngineFor(modelName)
                         ?? throw new InvalidOperationException(
-                            $"Speech engine unavailable for '{modelName}'. Install it from Settings > Models.");
+                            $"Speech engine for '{modelName}' is unavailable. Select it as the speech model in Settings > Models (installing it if needed), then rerun.");
                     text = engine.TranscribeBatch(samples, StreamingModelLayout.For(modelName).Language, out _);
                     break;
                 case RerunModelRouter.Route.ParakeetSession:

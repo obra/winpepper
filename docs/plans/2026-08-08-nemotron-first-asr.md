@@ -69,10 +69,10 @@ Deleted: `src/Winpepper.Asr/Transcription/ParakeetStreamingTranscriber.cs`, `Par
 
 ### Naming and role decisions locked by this plan
 
-- Registry id of the multilingual model: **`nemotron-streaming-multi`** (`ModelRegistry.MultilingualStreamingAsrName`); file `nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf`; language hint `"auto"`.
+- Registry id of the multilingual model: **`nemotron-streaming-multi`** (`ModelRegistry.MultilingualStreamingAsrName`); file `nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf`; language hint `null`. The literal `"auto"` is rejected by the v0.1.3 dispatcher gate (exact strcmp against the GGUF's `general.languages`, which lacks `"auto"`); autodetect is a TRUE null (never `string.Empty` — the P/Invoke layer maps null to `IntPtr.Zero`); validated 2026-08-08.
 - New setting `AppSettings.StreamingModelName`, default `"nemotron-streaming-en"` — which Nemotron is primary. Existing settings.json files lack the field → default → English → upgrades keep streaming exactly as today.
 - `AsrModelName` keeps meaning "the (optional, backup) batch ONNX model" and keeps default `parakeet-tdt-0.6b-v3`; boot repair is untouched. A missing Parakeet is no longer an error.
-- `NemotronBatchTranscriber.ModelName` = `<streaming name> + "-batch"` (e.g. `nemotron-streaming-en-batch`). It MUST differ from the streaming model name: `PipelineHost.cs:909-917` classifies `asr_mode=streaming` by exact name match, and a batch result must be classified/budgeted as batch.
+- `NemotronBatchTranscriber.ModelName` = `<streaming name> + "-batch"` (e.g. `nemotron-streaming-en-batch`). It MUST differ from the streaming model name: `PipelineHost` classifies `asr_mode=streaming` by streaming-name matching, and a batch result must be classified/budgeted as batch. Task 13 updates that classifier (both hotkey arms, `PipelineHost.cs:909-917` HOLD and `~:1547-1550` TOGGLE) from an exact match against the English constant to name-set membership via `StreamingModelLayout.For(...)`, so BOTH streaming models (English AND Multilingual) stamp `asr_mode=streaming` and are budgeted with the 2 s streaming budget; `-batch` names still classify as batch.
 - Batch fallback ladder everywhere local batch is needed: **Nemotron batch first, Parakeet second (only when installed)**, composed with the existing `FallbackTranscriber` (`src/Winpepper.Asr/Transcription/FallbackTranscriber.cs:26-33`, ctor `(ITranscriber primary, ITranscriber local, ILogger<FallbackTranscriber> logger, Action<string>? onFallback = null, ...)`).
 - Picker sizes are computed from real registry bytes (MB = bytes/1,000,000; display rounded to nearest 10 with `~`), NOT the prototype's mock numbers: English ~760 MB (755,608,086 B incl. 26 MB runtime), Multilingual ~780 MB (777,052,150 B), Backup ~670 MB (670,479,942 B), Text cleanup ~490 MB (491,400,032 B). Total format: `>= 1000 MB → one-decimal GB (divide by 1000)`, else `N MB` — the prototype's 1000/1024 asymmetry is consciously fixed (its own spec flags this as a decision point). All other copy is verbatim from the prototype.
 - Background-download contradiction in the prototype (footnote promises background, JS blocks) is resolved per the approved spec: clicking **Download & continue** starts downloads in the background and advances immediately to Test dictation, which gates on the chosen speech model verifying + the pipeline starting.
@@ -117,7 +117,7 @@ git commit -m "docs(designs): add onboarding model-picker prototype (authoritati
 - Produces (used by Tasks 3, 5):
   - `enum WorkerOp : byte { Load = 1, BeginStream = 2, Feed = 3, FinalizeStream = 4, DisposeStream = 5, TranscribeBatch = 6, Shutdown = 7, Ok = 100, LoadOk = 101, BeginStreamOk = 102, FeedOk = 103, FinalizeOk = 104, BatchOk = 105, Error = 110 }`
   - `static class WorkerWire` with:
-    - `void WriteFrame(Stream s, WorkerOp op, byte[] payload)` / `(WorkerOp Op, byte[] Payload) ReadFrame(Stream s)` (throws `EndOfStreamException` on EOF, `InvalidDataException` on length > 64 MiB)
+    - `void WriteFrame(Stream s, WorkerOp op, byte[] payload)` / `(WorkerOp Op, byte[] Payload) ReadFrame(Stream s)` (WriteFrame throws `InvalidDataException` on payload > 64 MiB BEFORE writing anything — an oversize frame is lethal to the peer's reader; ReadFrame throws `EndOfStreamException` on EOF, `InvalidDataException` on length > 64 MiB)
     - `void WriteString(BinaryWriter w, string? value)` / `string? ReadString(BinaryReader r)` (length `-1` = null, UTF-8)
     - `void WriteFloats(BinaryWriter w, float[] samples, int count)` / `float[] ReadFloats(BinaryReader r)`
   - Payload schemas (documented in the file header, binding for Tasks 3/5):
@@ -189,6 +189,18 @@ public sealed class WorkerProtocolTests
         ms.Write(BitConverter.GetBytes(int.MaxValue));
         ms.Position = 0;
         Should.Throw<InvalidDataException>(() => WorkerWire.ReadFrame(ms));
+    }
+
+    [Fact]
+    public void WriteFrame_OversizePayload_Throws_WithoutWriting()
+    {
+        // A frame the peer would fatally reject must never leave the writer.
+        // Allocating MaxPayloadBytes+1 (~65 MiB) once in a unit test is
+        // wasteful but acceptable.
+        using var ms = new MemoryStream();
+        var oversize = new byte[WorkerWire.MaxPayloadBytes + 1];
+        Should.Throw<InvalidDataException>(() => WorkerWire.WriteFrame(ms, WorkerOp.TranscribeBatch, oversize));
+        ms.Length.ShouldBe(0); // nothing written — the connection stays usable
     }
 
     [Theory]
@@ -282,6 +294,13 @@ public static class WorkerWire
 
     public static void WriteFrame(Stream s, WorkerOp op, byte[] payload)
     {
+        // Guard the WRITE side too: an oversize frame is lethal to the peer
+        // (its ReadFrame throws InvalidDataException and the process dies).
+        // Failing here, before any bytes hit the stream, protects the peer
+        // and leaves this connection usable.
+        if (payload.Length > MaxPayloadBytes)
+            throw new InvalidDataException(
+                $"worker frame payload length {payload.Length} exceeds the {MaxPayloadBytes} cap; refusing to write a frame the peer would fatally reject");
         Span<byte> header = stackalloc byte[5];
         header[0] = (byte)op;
         BitConverter.TryWriteBytes(header[1..], payload.Length);
@@ -355,7 +374,7 @@ Run:
 dotnet build "$R/tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj" -c Release -f net9.0 -p:EnableWindowsTargeting=true
 dotnet exec "$R/tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll" -notrait "Platform=Windows" -class "Winpepper.Asr.Tests.TranscribeCpp.Worker.WorkerProtocolTests"
 ```
-Expected: all 7 facts PASS (`Errors: 0`, `Failed: 0`).
+Expected: all 8 facts PASS (`Errors: 0`, `Failed: 0`).
 
 - [ ] **Step 5: Full Linux suite, then commit**
 
@@ -892,7 +911,7 @@ public sealed record WorkerEngineOptions
     public TimeSpan BeginStreamTimeout { get; init; } = TimeSpan.FromSeconds(15); // 5 s gate + native begin headroom
     public TimeSpan FeedTimeout { get; init; } = TimeSpan.FromSeconds(10);
     public TimeSpan FinalizeTimeout { get; init; } = TimeSpan.FromSeconds(20);
-    public TimeSpan BatchTimeout { get; init; } = TimeSpan.FromSeconds(120);
+    public TimeSpan BatchTimeout { get; init; } = TimeSpan.FromSeconds(120); // FLOOR — the engine raises the per-call batch deadline to max(this, 30 s + 2 s per audio-second)
     public TimeSpan DisposeTimeout { get; init; } = TimeSpan.FromSeconds(5);
 }
 
@@ -904,11 +923,13 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
     public string ModelName { get; }   // the passed modelName (e.g. "nemotron-streaming-en")
     public ITranscribeCppStream BeginStream(int attContextRight, string? language, out int gateWaitMs);
     public string TranscribeBatch(float[] mono16k, string? language, out int gateWaitMs);
-    public void Dispose();             // best-effort Shutdown RPC, then Kill
+    public void Dispose();             // best-effort Shutdown RPC, then Kill; latches disposed (later ops throw ObjectDisposedException, never respawn)
 }
 ```
 
   Supervision contract (binding): every RPC failure (timeout, process exit, EOF, protocol error) kills the worker, invalidates any open stream proxy (its later Feed/Finalize throw `TranscribeCppException`; its Dispose is a no-op), and throws `TranscribeCppException` to the caller. The NEXT engine call respawns + reloads lazily, subject to `WorkerRestartPolicy`. Worker `Error` frames whose type name is `TranscribeCppException` rethrow as `TranscribeCppException`; other worker exceptions rethrow as `TranscribeCppException` with the type name prefixed in the message. All RPCs are serialized under one client-side lock. Log lines (via the `log` callback): `"speech worker started"`, `"speech worker load ok ({model})"`, `"speech worker killed: {op} timed out after {ms} ms"`, `"speech worker died: {reason}"`, `"speech worker restart blocked by budget; next attempt after cooldown"`.
+
+  Additional contracts (2026-08-08 validation hardening): (a) **disposed stays dead** — `Dispose()` sets a `_disposed` latch under the RPC lock; `EnsureWorkerLocked` (and thus every later op) throws `ObjectDisposedException(nameof(WorkerProcessEngine))` and never respawns (a live dictation's captured old engine fails over through the batch ladder instead of resurrecting an old-layout worker). (b) **oversize pre-check** — `TranscribeBatch` checks the encoded floats payload against `WorkerWire.MaxPayloadBytes` BEFORE any RPC and throws `InvalidOperationException("dictation too long for the local batch engine (> ~17 minutes); shorten the recording")` without touching the worker (the ladder's `FallbackTranscriber` catches it → Parakeet when installed). (c) **length-aware batch deadline** — the batch RPC uses `max(BatchTimeout, 30 s + 2 s per audio-second)` instead of the fixed `BatchTimeout` (a cap-sized batch measured ~106 s on the dev host vs the fixed 120 s — only 1.13× headroom; 2 s/audio-second covers worst-case RTF≈2 low-end hardware). (d) **A1 residual, accepted**: killing a worker wedged in kernel-mode I/O may delay its actual exit and leak one blocked threadpool thread per kill — bounded by the restart budget (3 strikes → 60 s cooldown); the Task 6 job object reaps such zombies at app exit.
 
 - [ ] **Step 1: Write the in-process channel test double**
 
@@ -924,8 +945,13 @@ namespace Winpepper.Asr.Tests.TranscribeCpp.Worker;
 /// <summary>
 /// Runs the REAL TranscribeWorkerLoop on a background thread over anonymous
 /// pipes — full client↔worker integration without a child process. Kill()
-/// tears the pipes down, which is exactly what killing a real process does to
-/// its stdio. The factory counts started channels so tests can assert respawns.
+/// tears the pipes down WRITE-ENDS-FIRST. NOTE this is NOT identical to real
+/// process death: killing a real child closes the PEER's (child's) ends, and
+/// only peer-WRITE-end closure unblocks a blocked read. On Unix, disposing a
+/// read end with an in-flight blocked read blocks the DISPOSER until the peer
+/// write end closes (socket-wrapped pipe fds) — hence the strict order below
+/// (V7: 300/300 clean vs a deterministic deadlock with read-ends-first).
+/// The factory counts started channels so tests can assert respawns.
 /// </summary>
 public sealed class InProcessWorkerChannel : IWorkerProcess
 {
@@ -958,10 +984,13 @@ public sealed class InProcessWorkerChannel : IWorkerProcess
     public void Kill()
     {
         _exited = true;
-        _toWorker.Dispose();
+        // WRITE ends FIRST — each unblocks the opposite side's blocked read
+        // (EOF / IO fault). Disposing a read end while a read is in flight
+        // would block THIS thread until its peer write end closes (V7).
+        _toWorker.Dispose();   // client->worker write end: the worker's ReadFrame EOFs
+        _workerOut.Dispose();  // worker->client write end: the client's deadline'd ReadFrame unblocks
         _fromWorker.Dispose();
         _workerIn.Dispose();
-        _workerOut.Dispose();
     }
 
     public void Dispose() => Kill();
@@ -1107,6 +1136,35 @@ public sealed class WorkerProcessEngineTests
         static ITranscribeCppEngine FailingEngine() => throw new TranscribeCppException("model load failed");
     }
 
+    [Fact]
+    public void Dispose_ThenCall_ThrowsObjectDisposed_AndDoesNotRespawn()
+    {
+        var fake = new FakeTranscribeCppEngine();
+        var factory = new InProcessWorkerChannelFactory(() => fake);
+        var engine = Engine(factory);
+        engine.TranscribeBatch(new float[16], null, out _); // spawn + load once (also settles the reader before Kill)
+        var startedBeforeDispose = factory.Started;
+
+        engine.Dispose();
+
+        Should.Throw<ObjectDisposedException>(() => engine.TranscribeBatch(new float[16], null, out _));
+        Should.Throw<ObjectDisposedException>(() => engine.BeginStream(13, null, out _));
+        factory.Started.ShouldBe(startedBeforeDispose); // a disposed engine NEVER respawns a worker
+    }
+
+    [Fact]
+    public void Batch_OversizeAudio_ThrowsInvalidOperation_WithoutTouchingTheWorker()
+    {
+        var factory = new InProcessWorkerChannelFactory(() => new FakeTranscribeCppEngine());
+        using var engine = Engine(factory);
+        // Just over the 64 MiB frame cap (~17 min at 16 kHz). One ~67 MB array
+        // in a unit test is wasteful but acceptable.
+        var oversize = new float[WorkerWire.MaxPayloadBytes / sizeof(float) + 1];
+        var ex = Should.Throw<InvalidOperationException>(() => engine.TranscribeBatch(oversize, null, out _));
+        ex.Message.ShouldContain("dictation too long");
+        factory.Started.ShouldBe(0); // the pre-check fired before any spawn/RPC
+    }
+
     /// <summary>The headline scenario the subprocess exists for: a wedged
     /// native feed no longer wedges the app — the streaming transcriber falls
     /// back to batch on a FRESH worker and the dictation still yields text.</summary>
@@ -1138,6 +1196,8 @@ public sealed class WorkerProcessEngineTests
 
 Notes for the implementer:
 - The commented awkwardness inside `WedgedFeed_TimesOut_...` shows intent; write it cleanly with a `first` flag exactly like `EndToEnd_WedgedStream_...` does. Keep the `ManualResetEventSlim` pattern (30 s-bounded waits inside the fake already prevent runner hangs).
+- Kill-based scenarios (worker death, dispose) must run AFTER a first successful RPC so the channel's reader is settled — avoids a rare cold-start race in the pipe double (V7: 2/600 hangs only when a reader's very first read raced Kill). The tests above already follow this.
+- The length-aware batch deadline makes the EFFECTIVE batch deadline under `FastTimeouts` `max(5 s, ~30 s)` — none of these tests wedge a BATCH call (only Feed wedges, bounded by `FeedTimeout`), so nothing changes; do not add a batch-wedge test against `FastTimeouts`. The deadline computation is private — the oversize pre-check test above is the unit-level proof for the A9 fix.
 - The end-to-end test needs `NemotronBatchTranscriber`, which is written in Task 8. Add this ONE test in Task 8 instead if you prefer strictly compiling tests per task — but it must exist by the end of Task 8. Everything else in this file compiles in this task.
 
 - [ ] **Step 3: Run to verify failure** — build `Winpepper.Asr.Tests`; expected `CS0246` for `WorkerProcessEngine`/`IWorkerProcess`. (Comment out the end-to-end test until Task 8 if you deferred it.)
@@ -1175,14 +1235,18 @@ namespace Winpepper.Asr.TranscribeCpp.Worker;
 /// treated as wedged: the worker is killed and the call throws
 /// TranscribeCppException (the existing batch-fallback trigger). Feed's 10 s
 /// mirrors the drain budget; BeginStream covers the engine's 5 s gate wait
-/// plus native begin; Load covers the ~0.9 s model load with cold-IO headroom.</summary>
+/// plus native begin; Load covers the ~0.9 s model load with cold-IO headroom.
+/// BatchTimeout is the FLOOR of the per-call batch deadline: the engine
+/// raises it to max(BatchTimeout, 30 s + 2 s per audio-second) so cap-sized
+/// dictations are not killed mid-compute (a cap-sized batch measured ~106 s
+/// on the dev host vs a fixed 120 s — only 1.13x headroom).</summary>
 public sealed record WorkerEngineOptions
 {
     public TimeSpan LoadTimeout { get; init; } = TimeSpan.FromSeconds(60);
     public TimeSpan BeginStreamTimeout { get; init; } = TimeSpan.FromSeconds(15);
     public TimeSpan FeedTimeout { get; init; } = TimeSpan.FromSeconds(10);
     public TimeSpan FinalizeTimeout { get; init; } = TimeSpan.FromSeconds(20);
-    public TimeSpan BatchTimeout { get; init; } = TimeSpan.FromSeconds(120);
+    public TimeSpan BatchTimeout { get; init; } = TimeSpan.FromSeconds(120); // floor; see summary
     public TimeSpan DisposeTimeout { get; init; } = TimeSpan.FromSeconds(5);
 }
 ```
@@ -1202,6 +1266,11 @@ namespace Winpepper.Asr.TranscribeCpp.Worker;
 /// Failure contract: any RPC failure kills the worker, invalidates open
 /// stream proxies, and throws TranscribeCppException — the exact exception
 /// the in-process engine used, so every existing fallback path just works.
+/// Two deliberate exceptions: Dispose() latches the engine DEAD (later calls
+/// throw ObjectDisposedException and never respawn — a retained reference
+/// across a model swap must not resurrect an old-layout worker), and the
+/// oversize batch pre-check throws InvalidOperationException WITHOUT touching
+/// the worker (the ladder's FallbackTranscriber routes it to Parakeet).
 /// </summary>
 public sealed class WorkerProcessEngine : ITranscribeCppEngine
 {
@@ -1215,6 +1284,7 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
 
     private IWorkerProcess? _proc;
     private int _generation; // bumped on every kill; stream proxies check it
+    private bool _disposed;  // set by Dispose(); a disposed engine never respawns (V5/A10)
 
     public WorkerProcessEngine(IWorkerProcessFactory factory, string runtimeDir, string ggufPath,
         string modelName, WorkerEngineOptions? options = null,
@@ -1247,11 +1317,23 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
 
     public string TranscribeBatch(float[] mono16k, string? language, out int gateWaitMs)
     {
+        // Oversize pre-check BEFORE any RPC or spawn: a frame above the wire
+        // cap would kill the worker (fatal InvalidDataException in its reader).
+        // Throwing InvalidOperationException (not TranscribeCppException) here
+        // lets the ladder's FallbackTranscriber route to Parakeet when installed.
+        if ((long)mono16k.Length * sizeof(float) + 64 > WorkerWire.MaxPayloadBytes)
+            throw new InvalidOperationException(
+                "dictation too long for the local batch engine (> ~17 minutes); shorten the recording");
         lock (_rpcGate)
         {
             EnsureWorkerLocked();
             var payload = Build(w => { WorkerWire.WriteString(w, language); WorkerWire.WriteFloats(w, mono16k, mono16k.Length); });
-            var (op, response) = RpcLocked(WorkerOp.TranscribeBatch, payload, _options.BatchTimeout);
+            // Length-aware deadline: BatchTimeout is a FLOOR. A cap-sized batch
+            // measured ~106 s on the dev host vs the fixed 120 s (1.13x headroom);
+            // 2 s per audio-second covers worst-case RTF~2 low-end hardware.
+            var batchDeadline = TimeSpan.FromSeconds(Math.Max(
+                _options.BatchTimeout.TotalSeconds, 30 + 2.0 * (mono16k.Length / 16000.0)));
+            var (op, response) = RpcLocked(WorkerOp.TranscribeBatch, payload, batchDeadline);
             using var r = Reader(response);
             if (op == WorkerOp.Error) throw ReadError(r, out gateWaitMs);
             gateWaitMs = r.ReadInt32();
@@ -1263,6 +1345,8 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
     {
         lock (_rpcGate)
         {
+            if (_disposed) return;
+            _disposed = true; // latch: EnsureWorkerLocked refuses to respawn from now on
             if (_proc is { HasExited: false })
             {
                 try { RpcLocked(WorkerOp.Shutdown, Array.Empty<byte>(), _options.DisposeTimeout); }
@@ -1276,6 +1360,10 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
 
     private void EnsureWorkerLocked()
     {
+        // A disposed engine must stay dead: without this latch a retained
+        // reference (e.g. a live dictation captured across a model swap)
+        // would silently respawn a worker for the OLD layout (V5/A10).
+        if (_disposed) throw new ObjectDisposedException(nameof(WorkerProcessEngine));
         if (_proc is { HasExited: false }) return;
         if (!_restartPolicy.CanAttempt())
         {
@@ -1451,6 +1539,9 @@ public sealed class ExeWorkerProcess : IWorkerProcess
     public static ExeWorkerProcess Start(System.Diagnostics.ProcessStartInfo psi, Action<string>? onStderrLine = null);
     // Input = process StandardInput.BaseStream; Output = StandardOutput.BaseStream;
     // stderr lines forwarded to onStderrLine; Kill() = Process.Kill(entireProcessTree: true).
+    // On Windows the child is additionally bound to a Job Object with
+    // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE at start (handle held for the worker's
+    // lifetime); no-op on Linux so the Linux tests are unaffected.
 }
 
 public sealed class ExeWorkerProcessFactory : IWorkerProcessFactory
@@ -1523,17 +1614,28 @@ Create `src/Winpepper.Asr/TranscribeCpp/Worker/ExeWorkerProcess.cs`:
 
 ```csharp
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace Winpepper.Asr.TranscribeCpp.Worker;
 
 /// <summary>Real child-process IWorkerProcess: redirected stdio, stderr lines
 /// forwarded to a log callback, kill = whole process tree (ggml may spawn
-/// nothing today, but the tree kill is free insurance).</summary>
+/// nothing today, but the tree kill is free insurance). On Windows the child
+/// is additionally bound to a Job Object with KILL_ON_JOB_CLOSE: a worker
+/// wedged in native code never sees stdin EOF, so a parent CRASH would orphan
+/// a ~700 MB process; the job binding also reaps kernel-wedge zombies at app
+/// exit (the kernel closes the job handle with the parent). No-op on Linux,
+/// so the Linux tests are unaffected.</summary>
 public sealed class ExeWorkerProcess : IWorkerProcess
 {
     private readonly Process _process;
+    private readonly nint _jobHandle; // Windows Job Object; 0 elsewhere. Held for the worker's lifetime.
 
-    private ExeWorkerProcess(Process process) => _process = process;
+    private ExeWorkerProcess(Process process, nint jobHandle)
+    {
+        _process = process;
+        _jobHandle = jobHandle;
+    }
 
     public static ExeWorkerProcess Start(ProcessStartInfo psi, Action<string>? onStderrLine = null)
     {
@@ -1555,7 +1657,8 @@ public sealed class ExeWorkerProcess : IWorkerProcess
             process.ErrorDataReceived += (_, _) => { };
             process.BeginErrorReadLine();
         }
-        return new ExeWorkerProcess(process);
+        var jobHandle = OperatingSystem.IsWindows() ? WindowsJob.BindKillOnClose(process) : 0;
+        return new ExeWorkerProcess(process, jobHandle);
     }
 
     public Stream Input => _process.StandardInput.BaseStream;
@@ -1572,7 +1675,81 @@ public sealed class ExeWorkerProcess : IWorkerProcess
     {
         Kill();
         _process.Dispose();
+        if (_jobHandle != 0) WindowsJob.Close(_jobHandle); // closing the job kills any survivor
     }
+}
+
+/// <summary>Minimal Job Object P/Invoke: CreateJobObject + SetInformationJobObject
+/// (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) + AssignProcessToJobObject. Failures are
+/// tolerated (returns 0): the EOF/kill paths still supervise the worker; the job
+/// is the belt-and-braces guarantee for parent CRASH and kernel-wedged workers.</summary>
+internal static class WindowsJob
+{
+    private const int JobObjectExtendedLimitInformation = 9;
+    private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public nuint MinimumWorkingSetSize;
+        public nuint MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public nuint Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+        public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public nuint ProcessMemoryLimit;
+        public nuint JobMemoryLimit;
+        public nuint PeakProcessMemoryUsed;
+        public nuint PeakJobMemoryUsed;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern nint CreateJobObjectW(nint lpJobAttributes, string? lpName);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool SetInformationJobObject(nint hJob, int infoClass,
+        ref JOBOBJECT_EXTENDED_LIMIT_INFORMATION info, int cbInfo);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AssignProcessToJobObject(nint hJob, nint hProcess);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(nint handle);
+
+    internal static nint BindKillOnClose(Process process)
+    {
+        var job = CreateJobObjectW(0, null);
+        if (job == 0) return 0;
+        var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info,
+                Marshal.SizeOf<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+            || !AssignProcessToJobObject(job, process.Handle))
+        {
+            CloseHandle(job);
+            return 0;
+        }
+        return job;
+    }
+
+    internal static void Close(nint handle) => CloseHandle(handle);
 }
 
 public sealed class ExeWorkerProcessFactory : IWorkerProcessFactory
@@ -1591,6 +1768,8 @@ public sealed class ExeWorkerProcessFactory : IWorkerProcessFactory
 ```
 
 - [ ] **Step 4: Run the new tests, expect PASS** (`-class "Winpepper.Asr.Tests.TranscribeCpp.Worker.ExeWorkerProcessTests"`).
+
+Note on test coverage: the Linux tests cannot exercise the job object (`WindowsJob.BindKillOnClose` is only called under `OperatingSystem.IsWindows()`); the windows gate (Task 22) compiles and links it. `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` behavior itself is a kernel guarantee — deliberately left untested here.
 
 - [ ] **Step 5: Full Linux suite, then commit**
 
@@ -1625,13 +1804,41 @@ In `src/Winpepper.App/Program.cs`, immediately AFTER the `--selftest` block (whi
         // paths via the Load request; stderr carries worker logs.
         if (args.Any(a => a.Equals("--transcribe-worker", StringComparison.OrdinalIgnoreCase)))
         {
-            return Winpepper.Asr.TranscribeCpp.Worker.TranscribeWorkerLoop.Run(
-                Console.OpenStandardInput(),
-                Console.OpenStandardOutput(),
-                (runtimeDir, ggufPath) => Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
-                    runtimeDir, ggufPath, msg => Console.Error.WriteLine($"[transcribe-worker] {msg}")),
-                msg => Console.Error.WriteLine($"[transcribe-worker] {msg}"));
+            // Suppress WER UI: a native crash must exit the worker promptly
+            // (parent sees EOF -> kill/respawn) instead of wedging invisibly
+            // on an error dialog.
+            _ = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+
+            // Main is [STAThread]; the worker's blocking native loop must not
+            // inherit an STA — run it on a dedicated MTA foreground thread
+            // and join (SetApartmentState is a no-op where unsupported).
+            var exitCode = 0;
+            var loop = new Thread(() =>
+            {
+                exitCode = Winpepper.Asr.TranscribeCpp.Worker.TranscribeWorkerLoop.Run(
+                    Console.OpenStandardInput(),
+                    Console.OpenStandardOutput(),
+                    (runtimeDir, ggufPath) => Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
+                        runtimeDir, ggufPath, msg => Console.Error.WriteLine($"[transcribe-worker] {msg}")),
+                    msg => Console.Error.WriteLine($"[transcribe-worker] {msg}"));
+            }) { IsBackground = false };
+            loop.SetApartmentState(System.Threading.ApartmentState.MTA);
+            loop.Start();
+            loop.Join();
+            return exitCode;
         }
+```
+
+Add the WER-suppression P/Invoke as private members of `Program` (one declaration + constants):
+
+```csharp
+    // Worker-verb WER suppression: without it a native AV in transcribe.dll
+    // can pop an (invisible, CreateNoWindow) WER dialog and wedge the worker
+    // instead of exiting so the parent supervises it.
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern uint SetErrorMode(uint uMode);
+    private const uint SEM_FAILCRITICALERRORS = 0x0001;
+    private const uint SEM_NOGPFAULTERRORBOX = 0x0002;
 ```
 
 - [ ] **Step 2: Rewrite `NemotronEngineHolder`**
@@ -1740,13 +1947,15 @@ public sealed class NemotronBatchTranscriberTests
     public async Task Transcribes_ViaEngineBatch_WithLanguageHint_AndReportsItsOwnModelName()
     {
         var engine = new FakeTranscribeCppEngine();
-        var t = new NemotronBatchTranscriber(() => engine, "nemotron-streaming-multi-batch", language: "auto");
+        // Pass-through proof with a realistic locale (autodetect is a TRUE
+        // null hint, not the string "auto" — the v0.1.3 gate rejects "auto").
+        var t = new NemotronBatchTranscriber(() => engine, "nemotron-streaming-multi-batch", language: "en-US");
 
         var result = await t.TranscribeAsync(new float[128], TestContext.Current.CancellationToken);
 
         result.ProviderModelName.ShouldBe("nemotron-streaming-multi-batch");
         result.Text.ShouldNotBeNull();
-        engine.LastBatchLanguage.ShouldBe("auto");
+        engine.LastBatchLanguage.ShouldBe("en-US");
     }
 
     [Fact]
@@ -1975,16 +2184,18 @@ public sealed class LocalStreamingTranscriberFactoryTests
     }
 
     [Fact]
-    public void MultilingualLanguageHint_FlowsIntoTheStreamingTranscriber()
+    public void MultilingualModel_Builds_WithNullAutodetectLanguage()
     {
         var engine = new FakeTranscribeCppEngine();
         var t = LocalStreamingTranscriberFactory.Build(
-            () => engine, null, "nemotron-streaming-multi", "auto",
+            () => engine, null, "nemotron-streaming-multi", null,
             streamingEnabled: true, NullLoggerFactory.Instance);
         t.ModelName.ShouldBe("nemotron-streaming-multi");
-        // Language plumb-through is proven behaviorally in
-        // NemotronStreamingTranscriberTests via BeginStreamLanguages; here the
-        // construction path is what's under test.
+        // The multilingual layout's language hint is a TRUE null (autodetect
+        // via the model's auto prompt slot; the literal "auto" is rejected by
+        // the v0.1.3 language gate). Language plumb-through is proven
+        // behaviorally in NemotronStreamingTranscriberTests via
+        // BeginStreamLanguages; here the construction path is what's under test.
     }
 }
 ```
@@ -2056,7 +2267,7 @@ public static class LocalStreamingTranscriberFactory
 }
 ```
 
-Note: `FallbackTranscriber`'s ctor is `(ITranscriber primary, ITranscriber local, ILogger<FallbackTranscriber> logger, Action<string>? onFallback = null, TimeSpan? cloudDeadline = null, ...)` — the default 10 s "cloud deadline" also bounds the primary here. That is DESIRED: a Nemotron batch that cannot answer in 10 s (worker restart loop) should yield to Parakeet. If review prefers a longer bound, pass `cloudDeadline: TimeSpan.FromSeconds(30)` explicitly — but keep it bounded.
+Note: `FallbackTranscriber`'s ctor is `(ITranscriber primary, ITranscriber local, ILogger<FallbackTranscriber> logger, Action<string>? onFallback = null, TimeSpan? cloudDeadline = null, ...)`. Its ~10 s deadline only bounds primaries that FAIL/THROW: it cancels a linked token which the batch adapter observes only BEFORE the native call starts (`ct.ThrowIfCancellationRequested()` at the top of the `Task.Run` lambda) — an in-flight healthy-but-slow Nemotron batch returns its OWN result, bounded by the worker's length-aware batch deadline (`max(BatchTimeout, 30 s + 2 s per audio-second)`, Task 5), NOT by 10 s. Parakeet steps in on THROWN failures: engine unavailable, restart-budget exhaustion, oversize dictation (>~17 min pre-check), or a worker kill (`TranscribeCppException`). Do not expect or document a 10 s yield-to-Parakeet for slow-but-healthy batches — that mechanism does not exist (V5/A11).
 
 - [ ] **Step 4: Run the new tests, expect PASS** (`-class "Winpepper.Asr.Tests.Transcription.LocalStreamingTranscriberFactoryTests"`).
 
@@ -2096,7 +2307,7 @@ public sealed record StreamingModelLayout(string Name, string GgufFileName, stri
     public static readonly StreamingModelLayout English =
         new("nemotron-streaming-en", "nemotron-speech-streaming-en-0.6b-Q8_0.gguf", Language: null);
     public static readonly StreamingModelLayout Multilingual =
-        new("nemotron-streaming-multi", "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf", Language: "auto");
+        new("nemotron-streaming-multi", "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf", Language: null); // null = autodetect (the model's auto prompt); the literal "auto" is rejected by the v0.1.3 language gate
     public static StreamingModelLayout For(string? name)
         => name == Multilingual.Name ? Multilingual : English;   // unknown/null -> English (safe default)
     public string ModelFileRelative => Path.Combine(Name, GgufFileName);
@@ -2188,11 +2399,11 @@ public sealed class StreamingModelLayoutTests
     }
 
     [Fact]
-    public void Multilingual_UsesAutoLanguage_AndItsOwnDir()
+    public void Multilingual_UsesNullAutodetectLanguage_AndItsOwnDir()
     {
         var m = StreamingModelLayout.Multilingual;
         m.Name.ShouldBe("nemotron-streaming-multi");
-        m.Language.ShouldBe("auto");
+        m.Language.ShouldBeNull(); // TRUE null = autodetect; "auto" is rejected by the v0.1.3 gate
         m.ModelFileRelative.ShouldBe(Path.Combine("nemotron-streaming-multi", "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"));
         m.RuntimeDirRelative.ShouldBe(Path.Combine("nemotron-streaming-multi", "runtime", StreamingModelLayout.TarballTopLevelDir));
     }
@@ -2699,13 +2910,22 @@ git commit -m "refactor(asr,core): IDisposableTranscriber seam; startup gate tak
 Add to `src/Winpepper.App/Services/ModelsServices.cs` (below `VerifyCleanupModelReady`):
 
 ```csharp
-    /// <summary>True when the named streaming model is fully installed AND its
-    /// runtime archive is extracted (presence + exact sizes + marker — the
-    /// same check StreamingAutoInstaller trusts; the engine's contract.json /
-    /// ABI gates provide the deep validation at load time).</summary>
+    /// <summary>True when the named streaming model is fully installed with
+    /// its runtime archive extracted (descriptor check: files non-empty +
+    /// extraction marker) AND the engine layout's concrete runtime files are
+    /// present (layout check: gguf + transcribe.dll + contract.json).
+    /// Requiring BOTH keeps this gate in lockstep with the engine holder's
+    /// own predicate (StreamingModelLayout.IsInstalled): the gate can never
+    /// pass while NemotronEngineHolder.TryGet() would return null — e.g.
+    /// transcribe.dll/contract.json deleted post-install by AV quarantine or
+    /// manual cleanup, the sticky "verified but engine unavailable" state
+    /// (V6/A18). The REVERSE divergence (layout-true/descriptor-false, e.g. a
+    /// missing extraction marker) intentionally stays conservative — the
+    /// Models page repair path handles it.</summary>
     public bool IsStreamingModelInstalled(string name)
         => Registry.Find(name) is { Kind: ModelKind.StreamingAsr } d
-           && d.IsFullyInstalledAndExtracted(ModelsRoot);
+           && d.IsFullyInstalledAndExtracted(ModelsRoot)
+           && Winpepper.Asr.TranscribeCpp.StreamingModelLayout.For(name).IsInstalled(ModelsRoot);
 
     /// <summary>Boot/onboarding gate for nemotron-first: the PRIMARY speech
     /// model is ready when the selected streaming model is installed+extracted,
@@ -2785,6 +3005,8 @@ public sealed class NemotronEngineHolder
     }
 }
 ```
+
+Note (V5/A10): because Task 5's `WorkerProcessEngine` latches on Dispose, a live dictation whose streaming session captured the OLD engine across this swap now fails over cleanly through the batch ladder (`ObjectDisposedException` → `FallbackTranscriber` → Parakeet-or-error) instead of resurrecting an old-layout worker.
 
 - [ ] **Step 3: `PipelineHost` — retype the seam (all sites, BOTH arms)**
 
@@ -2918,7 +3140,19 @@ with:
 8. Late/batch gate, TOGGLE arm (lines 1504-1534, `asrNow2` at 1506, factory call at 1532): the identical replacement.
 9. Boot gate (line 386, in `TryStartCore`): unchanged code (`if (!TryEnsureAsrModel()) return false;`) — semantics now come from the new method (primary OR backup).
 10. Teardown (lines 2012-2016): unchanged code — `_asr` is `IDisposableTranscriber` and `asrAtTeardown.Dispose` still compiles via the orphan guard.
-11. Preserve untouched: `StreamingRouteGuard` wiring, `OrphanedPumpGuard` registrations, mode classification (909-917), timing stamps, the finish-before-ensure ordering comments (814-819 / 1448-1453 — update the words "ParakeetSession" to "backup session" in those two comments).
+11. Mode classification — EDIT BOTH ARMS (previously listed here as untouched; V5/A7 proved the exact-match misclassifies every multilingual streamed result as `batch`, silently checking it against the 8 s batch budget instead of 2 s). At the HOLD arm (`PipelineHost.cs:909-917`) and the TOGGLE arm (`~:1547-1550`, `producedModelName2` locals), replace the exact match against `NemotronStreamingModel.Name` with name-set membership:
+```csharp
+                    // Streaming iff the produced name IS a known streaming layout name.
+                    // For() maps unknown names to English, so only exact streaming names
+                    // classify as streaming; "-batch" names stay batch.
+                    var isStreaming = Winpepper.Asr.TranscribeCpp.StreamingModelLayout.For(producedModelName).Name == producedModelName;
+                    timing.AsrMode =
+                        isStreaming ? "streaming"
+                        : Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName) ? "cloud"
+                        : "batch";
+```
+    (toggle arm identical with `producedModelName2`). Both streaming models now stamp `asr_mode=streaming` and get the 2 s streaming budget.
+12. Preserve untouched: `StreamingRouteGuard` wiring, `OrphanedPumpGuard` registrations, timing stamps, the finish-before-ensure ordering comments (814-819 / 1448-1453 — update the words "ParakeetSession" to "backup session" in those two comments).
 
 - [ ] **Step 4: `AppShell` — wiring**
 
@@ -3027,6 +3261,26 @@ with:
                     Guid.Empty));
 ```
 5. Auto-install call (line ~551): `await StreamingAutoInstaller.StartAsync(settings.StreamingEnabled, CancellationToken.None);` → `await StreamingAutoInstaller.StartAsync(settings.StreamingEnabled, settings.StreamingModelName, CancellationToken.None);` and update the surrounding comment (the `!OnboardingCompleted` deferral stays — on new installs onboarding now owns the install; the comment's "~1.1 GB v3 download" wording is refreshed in Task 21).
+6. Boot reconciliation for picker-chosen optional models, right next to the auto-install call (V6/A17: nothing else ever completes an interrupted backup/cleanup download — the flags' only other readers live in the onboarding page, unreachable once `OnboardingCompleted`): when `settings.OnboardingCompleted` and a picker-chosen optional model is missing, kick the onboarding provisioner's `StartDownloads` in the background with the persisted scope (same join/no-op semantics; resumes the `.partial` sidecars):
+```csharp
+        // V6/A17: picker-chosen optional downloads interrupted by app exit
+        // would otherwise never complete (the onboarding page is the only
+        // other initiator and it is unreachable once onboarding completes).
+        if (settings.OnboardingCompleted)
+        {
+            bool Missing(string name) => modelsServices.Registry.Find(name) is { } d
+                && !d.IsFullyInstalledAndExtracted(modelsServices.ModelsRoot);
+            if ((settings.OnboardingBackupModelChosen && Missing(settings.AsrModelName))
+                || (settings.OnboardingCleanupModelChosen && Missing(settings.CleanupModelName)))
+            {
+                var scope = new List<string> { settings.StreamingModelName };
+                if (settings.OnboardingBackupModelChosen) scope.Add(settings.AsrModelName);
+                if (settings.OnboardingCleanupModelChosen) scope.Add(settings.CleanupModelName);
+                onboardingProvisioner.StartDownloads(scope, settings.StreamingModelName);
+            }
+        }
+```
+   (The `OnboardingModelProvisioner` type lands in Task 18 — `Winpepper.App` is not built by the Linux suite and the windows gate runs at Task 22, matching the plan's existing Task 17→18 compile window. If you prefer strictly compiling per task, add this block in Task 18's AppShell step instead; it MUST exist by the end of Task 18.)
 
 - [ ] **Step 5: Run the full Linux suite** (shared bricks untouched by this task must stay green): `./scripts/linux-tests.sh` → `LINUX SUITE: GREEN`.
 
@@ -3264,14 +3518,23 @@ public sealed record OnboardingDownloadState(
     double ProgressPercent,        // 0..100 aggregate across the batch, byte-weighted
     string StatusText,             // e.g. "Downloading English speech model…", "All models verified — ready to dictate."
     string? Error,                 // sticky until the next StartDownloads
-    bool SpeechModelReady);        // true only after the speech model verified (and pipeline may start)
+    bool SpeechModelReady);        // true only after the speech model's FILES verified AND a one-shot
+                                   // ENGINE LOAD PROBE succeeded (spawn worker -> Load -> dispose);
+                                   // only then may the pipeline start
 
 /// <summary>Background, multi-model onboarding downloads. StartDownloads never
 /// throws and never blocks the caller; it downloads the SPEECH model first
 /// (it gates Test dictation), then the optional models, publishing progress
-/// via StateChanged. Calling it again while a run is active is a no-op join;
-/// calling it after a failure retries. The underlying downloads survive the
-/// caller navigating away (coordinator/downloader semantics).</summary>
+/// via StateChanged. SpeechModelReady requires BOTH file verification
+/// (size + SHA-256 + extraction) AND a successful one-shot ENGINE LOAD PROBE
+/// (spawn a worker for the selected layout, issue Load, dispose) — file checks
+/// alone cannot see a missing VC++ redistributable, a model/runtime ABI
+/// mismatch, or a worker spawn failure, so this closes the "onboarding says
+/// ready but the first dictation fails" hole (V6/A16). On probe failure the
+/// provisioner publishes a sticky Error with actionable text. Calling
+/// StartDownloads again while a run is active is a no-op join; calling it
+/// after a failure retries. The underlying downloads survive the caller
+/// navigating away (coordinator/downloader semantics).</summary>
 public interface IOnboardingModelProvisioner
 {
     OnboardingDownloadState State { get; }
@@ -3673,12 +3936,21 @@ namespace Winpepper.App.Services;
 /// page and StreamingAutoInstaller via the shared per-downloader operation
 /// gate, so nothing double-downloads. Never throws; errors surface in State.
 /// "Verified" for the speech model = per-file size + SHA-256 + extraction
-/// (the same bar the old blocking Step 3 enforced).
+/// (the bar the old blocking Step 3 enforced) PLUS a one-shot ENGINE LOAD
+/// PROBE (spawn worker -> Load -> dispose, injected as a delegate so this
+/// class stays testable) — file checks cannot see a missing VC++
+/// redistributable, an ABI mismatch, or a spawn failure (V6/A16).
+/// StateChanged is raised on the UI thread via the DispatcherQueue captured
+/// at construction: WinUI bindings are thread-affine, and subscribers (the
+/// onboarding VM) mutate bound properties — raising from the download thread
+/// would risk RPC_E_WRONG_THREAD (V2/A12).
 /// </summary>
 public sealed class OnboardingModelProvisioner : IOnboardingModelProvisioner
 {
     private readonly ModelsServices _models;
     private readonly ILogger _log;
+    private readonly Microsoft.UI.Dispatching.DispatcherQueue _dispatcherQueue;
+    private readonly Func<string, CancellationToken, Task<bool>> _engineLoadProbe;
     private readonly object _gate = new();
     private Task? _run;
     private OnboardingDownloadState _state = new(0, "Waiting to download", null, false);
@@ -3691,10 +3963,14 @@ public sealed class OnboardingModelProvisioner : IOnboardingModelProvisioner
         [ModelRegistry.DefaultCleanupName] = "text cleanup model",
     };
 
-    public OnboardingModelProvisioner(ModelsServices models, ILogger log)
+    public OnboardingModelProvisioner(ModelsServices models, ILogger log,
+        Microsoft.UI.Dispatching.DispatcherQueue dispatcherQueue,
+        Func<string, CancellationToken, Task<bool>> engineLoadProbe)
     {
         _models = models;
         _log = log;
+        _dispatcherQueue = dispatcherQueue;   // captured at construction (AppShell.Create runs on the UI thread)
+        _engineLoadProbe = engineLoadProbe;   // AppShell injects the worker-engine-based probe
     }
 
     public OnboardingDownloadState State { get { lock (_gate) return _state; } }
@@ -3743,26 +4019,23 @@ public sealed class OnboardingModelProvisioner : IOnboardingModelProvisioner
                 if (descriptor.Name == speechModelName)
                 {
                     Publish(Percent(selection, done), "Verifying speech model…", null, false);
-                    var verified = await VerifySpeechAsync(speechModelName);
-                    if (!verified)
+                    var error = await VerifySpeechDeepAsync(speechModelName);
+                    if (error is not null)
                     {
-                        Publish(Percent(selection, done),
-                            "Speech model failed verification.",
-                            "The speech model could not be verified. Retry the download.", false);
+                        Publish(Percent(selection, done), "Speech model failed verification.", error, false);
                         return;
                     }
                     Publish(Percent(selection, done), "Speech model ready — keep going while the rest downloads.", null, true);
                 }
             }
 
-            // Plan may be empty (everything installed) — still verify the speech model.
+            // Plan may be empty (everything installed) — still verify + probe the speech model.
             if (!State.SpeechModelReady)
             {
-                var verified = await VerifySpeechAsync(speechModelName);
-                if (!verified)
+                var error = await VerifySpeechDeepAsync(speechModelName);
+                if (error is not null)
                 {
-                    Publish(100, "Speech model failed verification.",
-                        "The speech model could not be verified. Retry the download.", false);
+                    Publish(100, "Speech model failed verification.", error, false);
                     return;
                 }
             }
@@ -3775,14 +4048,26 @@ public sealed class OnboardingModelProvisioner : IOnboardingModelProvisioner
         }
     }
 
-    private async Task<bool> VerifySpeechAsync(string speechModelName)
+    /// <summary>Speech readiness = files verified AND a one-shot ENGINE LOAD
+    /// PROBE (spawn a worker for the selected layout, issue Load, dispose).
+    /// File checks alone cannot see a missing VC++ redistributable, a
+    /// model/runtime ABI mismatch, or a worker spawn failure (V6/A16) — the
+    /// probe closes the "onboarding says ready but the first dictation
+    /// fails" hole. Returns null when ready, else sticky actionable error text.</summary>
+    private async Task<string?> VerifySpeechDeepAsync(string speechModelName)
     {
         var d = _models.Registry.Find(speechModelName);
-        if (d is null) return false;
-        if (d.Kind == ModelKind.StreamingAsr)
-            return await ModelFilesVerifier.VerifyAsync(d, _models.ModelsRoot, CancellationToken.None)
-                   && d.IsFullyInstalledAndExtracted(_models.ModelsRoot);
-        return await ModelFilesVerifier.VerifyAsync(d, _models.ModelsRoot, CancellationToken.None);
+        if (d is null) return "The speech model could not be verified. Retry the download.";
+        var filesOk = await ModelFilesVerifier.VerifyAsync(d, _models.ModelsRoot, CancellationToken.None)
+                      && (d.Kind != ModelKind.StreamingAsr || d.IsFullyInstalledAndExtracted(_models.ModelsRoot));
+        if (!filesOk) return "The speech model could not be verified. Retry the download.";
+        Publish(State.ProgressPercent, "Checking the speech engine…", null, false);
+        var probeOk = await _engineLoadProbe(speechModelName, CancellationToken.None);
+        if (!probeOk)
+            return $"The {Friendly(d)} downloaded and verified, but its speech engine failed to load. " +
+                   "Open Settings > Models to repair it. A missing Microsoft Visual C++ x64 Redistributable " +
+                   "is the most common cause.";
+        return null;
     }
 
     private bool SpeechReadyNow(string speechModelName) => State.SpeechModelReady; // monotonic within a run
@@ -3819,14 +4104,48 @@ public sealed class OnboardingModelProvisioner : IOnboardingModelProvisioner
             var ready = speechReady || _state.SpeechModelReady;
             s = _state = new OnboardingDownloadState(percent, status, error, ready);
         }
-        StateChanged?.Invoke(this, s);
+        // WinUI bindings are thread-affine: subscribers (the onboarding VM)
+        // mutate bound properties, so StateChanged must be raised on the UI
+        // thread — anything else risks RPC_E_WRONG_THREAD (V2/A12).
+        _dispatcherQueue.TryEnqueue(() => StateChanged?.Invoke(this, s));
     }
 }
 #endif
 ```
 (Verify `ModelFilesVerifier.VerifyAsync`'s exact signature in `src/Winpepper.Models/` — `ModelsServices.VerifyCleanupModelReady` calls `ModelFilesVerifier.VerifyAsync(descriptor, ModelsRoot, CancellationToken.None)`, so match that. A NEW `StartDownloads` run starts from `RunAsync`'s own flow, whose first `Publish(..., speechReady: false)` happens before any `_state` reuse — reset `_state` to a fresh non-ready state at the top of `RunAsync` so a retry re-verifies rather than inheriting a stale `SpeechModelReady`.)
 
-In `AppShell`: construct after `modelsServices` (`var onboardingProvisioner = new Winpepper.App.Services.OnboardingModelProvisioner(modelsServices, factory.CreateLogger<Winpepper.App.Services.OnboardingModelProvisioner>());`), expose `public Winpepper.Core.ViewModels.IOnboardingModelProvisioner OnboardingProvisioner { get; }` via the ctor like the other services.
+In `AppShell`: construct after `modelsServices` — the ctor takes the UI-thread `DispatcherQueue` (`AppShell.Create` runs on the UI thread) and a load-probe delegate built on the worker engine machinery (injected so the provisioner stays testable):
+
+```csharp
+        var onboardingProvisioner = new Winpepper.App.Services.OnboardingModelProvisioner(
+            modelsServices,
+            factory.CreateLogger<Winpepper.App.Services.OnboardingModelProvisioner>(),
+            Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread(),
+            engineLoadProbe: (name, ct) => Task.Run(() =>
+            {
+                // One-shot engine load probe: spawn a worker for the selected
+                // layout, force the Load RPC (a tiny batch drives spawn+Load),
+                // dispose. Failure -> the provisioner publishes the sticky
+                // redist/repair error instead of a false "ready".
+                try
+                {
+                    var layout = Winpepper.Asr.TranscribeCpp.StreamingModelLayout.For(name);
+                    var exe = Environment.ProcessPath
+                        ?? throw new InvalidOperationException("no process path for the probe worker");
+                    using var probe = new Winpepper.Asr.TranscribeCpp.Worker.WorkerProcessEngine(
+                        new Winpepper.Asr.TranscribeCpp.Worker.ExeWorkerProcessFactory(
+                            () => new System.Diagnostics.ProcessStartInfo(exe, "--transcribe-worker")),
+                        layout.RuntimeDir(modelsServices.ModelsRoot),
+                        layout.GgufPath(modelsServices.ModelsRoot),
+                        layout.Name);
+                    probe.TranscribeBatch(new float[1600], layout.Language, out _); // 0.1 s of silence
+                    return true;
+                }
+                catch { return false; }
+            }, ct));
+```
+
+expose `public Winpepper.Core.ViewModels.IOnboardingModelProvisioner OnboardingProvisioner { get; }` via the ctor like the other services. (This same instance serves Task 13's boot reconciliation for interrupted optional downloads.)
 
 - [ ] **Step 2: Replace the Step-3 XAML**
 
@@ -4188,7 +4507,8 @@ git commit -m "fix(settings): drop the write-only AutostartEnabled shadow — HK
 ### Task 21: Copy/docs sweep — honest sizes everywhere
 
 **Files:**
-- Modify: `README.md` (lines 53, 67, 80, 111 — the download/disk claims)
+- Modify: `README.md` (lines 53, 67, 80, 111 — the download/disk claims; plus the license line and any redist-fallback claim)
+- Modify: `THIRD-PARTY-NOTICES.md` (OpenMDW-1.1 entry for the multilingual model)
 - Modify: `src/Winpepper.App/Views/ModelsPage.xaml` (line 209 "about 720 MB")
 - Modify: `src/Winpepper.App/Hosting/AppShell.cs` (comment blocks near the auto-install: "~1.1 GB v3" / "~730 MB", lines ~490-494 pre-edit)
 - Verify only: `grep -rn "670 MB\|1.2 GB\|~730\|~1.1 GB" src/ README.md`
@@ -4198,8 +4518,10 @@ git commit -m "fix(settings): drop the write-only AutostartEnabled shadow — HK
 - [ ] **Step 1: Apply the copy edits**
 
 - `README.md:53` — `about 1.2 GB, once` → `about 760 MB once (more if you add the optional backup or cleanup models)`
-- `README.md:67` — keep the `(~720 MB, English only, NVIDIA Open Model License)` line's structure but correct to `(~760 MB, English by default — a multilingual variant is available, NVIDIA Open Model License)`
-- `README.md:80` — `(~1 GB of memory)` stays (runtime RAM, still accurate).
+- `README.md:67` — keep the `(~720 MB, English only, NVIDIA Open Model License)` line's structure but correct to `(~760 MB, English by default — a multilingual variant is available; NVIDIA Open Model License for the English model, OpenMDW-1.1 for the multilingual one)`. The multilingual variant is NOT under the NVIDIA Open Model License — its governing terms are OpenMDW-1.1 (V4/A20; HF model card + GGUF README, verified 2026-08-08).
+- `README.md:80` — `(~1 GB of memory)` stays (runtime RAM, still accurate). While editing this region (README:79-80): if the surrounding text claims that machines WITHOUT the Microsoft Visual C++ x64 Redistributable gracefully fall back to Parakeet, correct it — ONNX Runtime needs the SAME redistributable (V8), so local dictation requires the Microsoft Visual C++ x64 Redistributable, full stop.
+- `THIRD-PARTY-NOTICES.md` — ADD an OpenMDW-1.1 entry for the multilingual model (`nemotron-3.5-asr-streaming-0.6b` weights), mirroring the existing "Nemotron Speech Streaming model weights" NVIDIA-OML entry's pattern: models are NOT redistributed with the app, users download directly from Hugging Face, notice included preemptively. Do not invent license text obligations — follow the existing entry's structure.
+- Follow-up note (out of scope for this plan, record for the release backlog): the MSI should chain the Microsoft Visual C++ x64 Redistributable (`vc_redist.x64.exe`) in a future release — BOTH local engines (transcribe.cpp and ONNX Runtime) require it, and the onboarding load probe (Task 18) only reports the problem, it cannot fix it.
 - `README.md:111` — `About 2 GB of free disk space (roughly 700 MB for the app, 1.2 GB for the speech models)` → `About 1.5 GB of free disk space for a default install (roughly 700 MB for the app, 760 MB for the speech model); up to ~3 GB with the optional backup speech and text-cleanup models`
 - `ModelsPage.xaml:209` — `about 720 MB` → `about 760 MB` (and if the sentence names "the streaming model", generalize to "each speech model (about 760–780 MB)").
 - `AppShell.cs` auto-install comments: replace "~1.1 GB v3" with "the onboarding model download" and "~730 MB" with "~760 MB" (the deferral comment's rationale text should now say onboarding owns the first-run install and the auto-installer covers upgrades).
@@ -4214,8 +4536,8 @@ Expected: `clean` twice.
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/nemotron-first-asr && ./scripts/linux-tests.sh
-git add README.md src/Winpepper.App
-git commit -m "docs: correct download-size claims for nemotron-first defaults"
+git add README.md THIRD-PARTY-NOTICES.md src/Winpepper.App
+git commit -m "docs: correct download-size and license claims for nemotron-first defaults"
 ```
 
 ---
@@ -4255,6 +4577,8 @@ grep -n "OnboardingCompleted" src/Winpepper.App/Hosting/AppShell.cs
 grep -n "StartAsync(settings.StreamingEnabled, settings.StreamingModelName" src/Winpepper.App/Hosting/AppShell.cs
 ```
 
+Non-blocking recommendation (A6 residual, not a gate condition): before SHIPPING the multilingual picker option, run one Windows eval of the multilingual gguf with `null` language (autodetect) through the existing eval harness (see `docs/plans/2026-07-27-asr-model-comparison-evidence.md`) to confirm autodetect-mode latency matches the measured en-US parity (V9 predicted ≈parity from publisher benchmarks; one measured run closes it).
+
 - [ ] **Step 4: Record the result** — note the gate's summary (project/TFM pass counts, skips) in the final commit message if any fix-forward commits were needed; otherwise no commit (the branch is ready for review/PR — pushing is the workflow's decision, and the gate being GREEN satisfies the pre-push rule).
 
 ---
@@ -4263,15 +4587,15 @@ grep -n "StartAsync(settings.StreamingEnabled, settings.StreamingModelName" src/
 
 | Spec item | Covering tasks | Production outcome proven by |
 |---|---|---|
-| 1. Subprocess isolation (kill/respawn/retry; observability preserved; guard semantics intact) | 2–7 | `WorkerProcessEngineTests` (timeout→kill→respawn, budget), `TranscribeWorkerLoopTests` (gate-safe batch, EOF frees gate), end-to-end wedge test (Task 5/8) proving a wedged feed no longer hangs and the SAME dictation still yields text; `NemotronStreamingTranscriber`/`StreamingRouteGuard` and their suites untouched (stamps/wedge logs preserved by construction); worker lifecycle log lines specified in Task 5 |
+| 1. Subprocess isolation (kill/respawn/retry; observability preserved; guard semantics intact) | 2–7 | `WorkerProcessEngineTests` (timeout→kill→respawn, budget, dispose-latch, oversize pre-check), `TranscribeWorkerLoopTests` (gate-safe batch, EOF frees gate), end-to-end wedge test (Task 5/8) proving a wedged feed no longer hangs and the SAME dictation still yields text; `NemotronStreamingTranscriber`/`StreamingRouteGuard` and their suites untouched (wedge logs preserved by construction; the `asr_mode` classifier is NOT preserved-by-construction — Task 13 explicitly rewrites it to streaming-name-set membership so both streaming models stamp `asr_mode=streaming`); validation hardening: write-side oversize frame guard (Task 2), dispose latch + length-aware batch deadline (Task 5), Windows job object (Task 6), MTA/WER-suppressed worker verb (Task 7); worker lifecycle log lines specified in Task 5 |
 | 2. Nemotron batch adapter in production (streaming-off path, post-restart fallback, replaces ParakeetTranscriber-required paths) | 8, 9, 13 | `NemotronBatchTranscriberTests`; `LocalStreamingTranscriberFactoryTests.StreamingDisabled_UsesNemotronBatch...`; ladder tests; end-to-end wedge test |
 | 3. Pipeline decoupled from Parakeet (no-Parakeet dictation, streaming starts w/o session, AssemblyAI local fallback = Nemotron batch, History rerun graceful, ResolveOrDefault:209 lifted) | 9, 10, 12, 13, 15 | Ladder tests (no-Parakeet paths); registry `ResolveOrDefault_StreamingAsr_DefaultsToEnglish`; gate-delegate tests; `RerunModelRouterTests`; PipelineHost gate edits verified by windows-gate build + Task 22 grep checklist |
 | 4. Registry entries + roles (multilingual entry, ONE Nemotron primary, Parakeet optional backup, cleanup optional, Q8_0 only) | 10, 11 | `Registry_contains_the_multilingual_nemotron_streaming_model` (real HF-API-sourced hash/size, re-verified in-task), catalog tests, settings defaults/round-trip tests |
-| 5. Onboarding model picker (prototype copy/behavior, live total, background downloads, verified Test-dictation gate, resumable machinery kept, silent auto-install removed for new installs) | 16, 17, 18 | `OnboardingModelPickerTests` (defaults, totals table, advance→background+TestDictation, verified gate, retry, resume); `DownloadBatchPlannerTests`; XAML copy verbatim from prototype (Task 18); coordinator/downloader reuse via `ModelsServices.DownloadAsync` + shared op gate; new-install deferral branch in AppShell unchanged (onboarding now owns first-run install) |
+| 5. Onboarding model picker (prototype copy/behavior, live total, background downloads, verified Test-dictation gate, resumable machinery kept, silent auto-install removed for new installs) | 16, 17, 18 | `OnboardingModelPickerTests` (defaults, totals table, advance→background+TestDictation, verified gate, retry, resume); `DownloadBatchPlannerTests`; XAML copy verbatim from prototype (Task 18); coordinator/downloader reuse via `ModelsServices.DownloadAsync` + shared op gate; new-install deferral branch in AppShell unchanged (onboarding now owns first-run install); `SpeechModelReady` = files verified AND one-shot engine load probe (Task 18) — closes the redist/ABI/spawn "ready but first dictation fails" hole; Task 13's boot reconciliation resumes picker-chosen optional downloads interrupted by app exit |
 | 6. Existing installs unchanged (Parakeet keeps batch-fallback role; AsrModelName repair intact; settings migrate) | 9, 11, 13 | `Load_LegacySettingsJson_WithoutStreamingModelName_DefaultsToEnglish`; ladder test `Ladder_NemotronUnavailable_ParakeetStepsIn`; boot-repair block untouched (Task 13 only ADDS a streaming repair beside it); auto-installer selected-name fallback tests |
 | 7. Dead code deleted | 19 | `git rm` + grep verification + green suite |
 | 8. Autostart reconciliation | 20 | Setting removed (nothing left to drift); legacy-json ignore test; registry read/write path unchanged and MSI-compatible |
-| 9. Docs/copy | 18, 21 | grep gates (`~670 MB`, `1.2 GB` absent); README/ModelsPage edits |
+| 9. Docs/copy | 18, 21 | grep gates (`~670 MB`, `1.2 GB` absent); README/ModelsPage edits; multilingual license corrected to OpenMDW-1.1 (README + new THIRD-PARTY-NOTICES.md entry); redist requirement stated honestly (no Parakeet-without-redist claim) |
 | 10. Tests (worker supervision, batch adapter, picker VM incl. radio invariant, upgrade-path resolution) | throughout | Tasks 2–6 (supervision), 8 (adapter), 17 (picker: the radio guarantees exactly-one-speech-model — `SelectedSpeechModelName` is total, no empty state exists), 10+11 (upgrade resolution) |
 
 ## Known deliberate deviations from the prototype (approved-by-spec resolutions)
@@ -4281,3 +4605,4 @@ grep -n "StartAsync(settings.StreamingEnabled, settings.StreamingModelName" src/
 3. **GB formatting uses ÷1000** — the prototype's 1000-threshold/1024-divisor asymmetry is fixed (its §9.4 flags this as a conscious decision point).
 4. **A "Retry download" button exists on the Test-dictation step** — the prototype defines no error states (§9.6); the existing onboarding retry affordance is preserved in the new location.
 5. **Progress-line copy** fixes the prototype's doubled-"model" bug via explicit friendly names (its §2 copy-quirk note recommends exactly this).
+6. **Speech readiness includes a one-shot engine load probe** — the prototype's Step 3 promises only downloads; `SpeechModelReady` additionally requires a worker load probe (spawn→Load→dispose) plus the "Checking the speech engine…" status line, so "ready" can never precede a loadable engine (a missing VC++ x64 Redistributable, ABI mismatch, or spawn failure surfaces in onboarding with actionable copy instead of at the first dictation — V6/A16).

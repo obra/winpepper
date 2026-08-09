@@ -146,6 +146,36 @@ public sealed class WorkerProcessEngineTests
         factory.Started.ShouldBe(0); // the pre-check fired before any spawn/RPC
     }
 
+    [Fact]
+    public void OperationWedge_ThreeConsecutiveKills_ExhaustRestartBudget_ThenCooldownAllowsOneRetry()
+    {
+        long now = 0;
+        var policy = new WorkerRestartPolicy(maxConsecutiveFailures: 3, cooldown: TimeSpan.FromSeconds(60), nowMs: () => now);
+        using var feedGate = new ManualResetEventSlim(false); // never set until the end: EVERY feed wedges
+        var factory = new InProcessWorkerChannelFactory(() => new FakeTranscribeCppEngine { FeedGate = feedGate });
+        using var engine = Engine(factory, policy);
+
+        for (var i = 1; i <= 3; i++)
+        {
+            using var stream = engine.BeginStream(13, null, out _); // respawn allowed while budget remains
+            Should.Throw<TranscribeCppException>(() => stream.Feed(new float[2560], 2560)); // wedge -> 300 ms timeout -> kill
+            factory.Last!.HasExited.ShouldBeTrue();
+        }
+        factory.Started.ShouldBe(3);
+
+        // Wedge x3 exhausted the budget: the next call must NOT spawn a 4th worker.
+        var blocked = Should.Throw<TranscribeCppException>(() => engine.BeginStream(13, null, out _));
+        blocked.Message.ShouldContain("restart budget exhausted");
+        factory.Started.ShouldBe(3);
+
+        // Cooldown engages: exactly one attempt is allowed after 60 s.
+        now = 60_000;
+        Should.NotThrow(() => engine.BeginStream(13, null, out _));
+        factory.Started.ShouldBe(4);
+
+        feedGate.Set(); // release the parked worker threads
+    }
+
     /// <summary>The headline scenario the subprocess exists for: a wedged
     /// native feed no longer wedges the app — the streaming transcriber falls
     /// back to batch on a FRESH worker and the dictation still yields text.</summary>

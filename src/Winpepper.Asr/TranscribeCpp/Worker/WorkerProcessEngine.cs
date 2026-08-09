@@ -81,7 +81,11 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
             using var r = Reader(response);
             if (op == WorkerOp.Error) throw ReadError(r, out gateWaitMs);
             gateWaitMs = r.ReadInt32();
-            return WorkerWire.ReadString(r) ?? "";
+            var text = WorkerWire.ReadString(r) ?? "";
+            // A completed dictation is the only success credit: it proves the
+            // kill->respawn cycle actually recovered (council fix #1).
+            _restartPolicy.NoteSuccess();
+            return text;
         }
     }
 
@@ -114,21 +118,33 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
             _log?.Invoke("speech worker restart blocked by budget; next attempt after cooldown");
             throw new TranscribeCppException("speech worker restart budget exhausted; retrying after cooldown");
         }
+        var spawned = false;
         try
         {
             _proc = _factory.Start();
+            spawned = true;
             _log?.Invoke("speech worker started");
             var payload = Build(w => { WorkerWire.WriteString(w, _runtimeDir); WorkerWire.WriteString(w, _ggufPath); });
             var (op, response) = RpcLocked(WorkerOp.Load, payload, _options.LoadTimeout);
             using var r = Reader(response);
             if (op == WorkerOp.Error) throw ReadError(r, out _);
             var loadedName = WorkerWire.ReadString(r);
-            _restartPolicy.NoteSuccess();
+            // Success is credited ONLY by a completed operation RPC (batch
+            // returned text / stream finalized) — never by Load. Crediting
+            // Load made the budget oscillate 0<->1 across every
+            // kill->respawn->Load cycle, so it could never bound the
+            // operation-phase kills it exists to bound (council fix #1).
             _log?.Invoke($"speech worker load ok ({loadedName})");
         }
         catch (Exception e)
         {
-            _restartPolicy.NoteFailure();
+            // Failures inside RpcLocked (timeout / broken pipe) already
+            // noted themselves and killed the worker, nulling _proc. The two
+            // cases still uncounted here: _factory.Start() threw
+            // (spawned == false), and Load answered with an Error frame
+            // (worker alive, _proc != null).
+            var alreadyCounted = spawned && _proc is null;
+            if (!alreadyCounted) _restartPolicy.NoteFailure();
             KillLocked($"load failed: {e.Message}");
             throw e as TranscribeCppException
                   ?? new TranscribeCppException($"speech worker failed to start: {e.Message}");
@@ -147,6 +163,7 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
             var read = Task.Run(() => WorkerWire.ReadFrame(proc.Output));
             if (!read.Wait(timeout))
             {
+                _restartPolicy.NoteFailure(); // operation-phase kills charge the budget (council fix #1)
                 KillLocked($"{op} timed out after {(int)timeout.TotalMilliseconds} ms");
                 // The abandoned reader faults once the killed worker's pipe closes;
                 // observe it so it can never surface as TaskScheduler.UnobservedTaskException
@@ -162,6 +179,7 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
         catch (Exception e)
         {
             var inner = (e as AggregateException)?.InnerException ?? e;
+            _restartPolicy.NoteFailure(); // connection failures charge the budget too (council fix #1)
             KillLocked($"{op} failed: {inner.Message}");
             throw new TranscribeCppException($"speech worker connection failed during {op}: {inner.Message}");
         }
@@ -233,7 +251,10 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
                 var (op, response) = _owner.RpcLocked(WorkerOp.FinalizeStream, Array.Empty<byte>(), _owner._options.FinalizeTimeout);
                 using var r = Reader(response);
                 if (op == WorkerOp.Error) throw ReadError(r, out _);
-                return (WorkerWire.ReadString(r) ?? "", r.ReadBoolean());
+                var text = WorkerWire.ReadString(r) ?? "";
+                var truncated = r.ReadBoolean();
+                _owner._restartPolicy.NoteSuccess(); // a finished stream dictation resets the budget
+                return (text, truncated);
             }
         }
 

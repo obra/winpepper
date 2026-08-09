@@ -2,8 +2,9 @@
 # Build the ASR latency bench with the Windows dotnet (over the
 # \\wsl.localhost UNC path), stage the build output to a Windows-local %TEMP%
 # dir (ONNX/DirectML native library loads from UNC are unreliable), generate
-# the reference TTS WAVs on the host, and run the real Parakeet model
-# batch-vs-streaming over the four phrase categories.
+# the reference TTS WAVs on the host, and run real Parakeet model batch
+# transcription over the four phrase categories. Streaming evidence comes
+# from run-nemotron-bench-windows.sh (real-nemotron-stream).
 #
 # Host safety: the only host writes are %TEMP% staging dirs and NuGet
 # restore. The model dir is read, never written. Never touches a running
@@ -44,7 +45,7 @@ echo "=== [3/4] Generate TTS WAVs on the host ==="
 gen_script="$UNC_ROOT"'\scripts\generate-bench-wavs.ps1'
 ps_run 300 "$OUT/tts.log" "& '$gen_script' -OutDir (Join-Path \$env:TEMP 'winpepper-bench-wavs')"
 
-echo "=== [4/4] real-local batch-vs-streaming, four phrase categories ==="
+echo "=== [4/4] real-local batch, four phrase categories ==="
 run_category() { # run_category <name> <wavfile> [extra bench args...]
   local name="$1" wav="$2"; shift 2
   echo "--- $name ---"

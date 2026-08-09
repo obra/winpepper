@@ -100,7 +100,7 @@ if (repeatsResolution.LegacyMode)
 if (BenchArgs.ValidateStopCondition(maxPasses, timeBudgetMinutes) is { } stopError) { Console.Error.WriteLine(stopError); Environment.ExitCode = 2; return; }
 var requested = scenarioArgs.Count > 0 ? scenarioArgs.ToArray() : new[]
 {
-    "sim-local-batch", "sim-local-stream",
+    "sim-local-batch",
     "sim-remote-batch", "sim-remote-stream",
     "real-remote-batch", "real-remote-stream",
 };
@@ -153,18 +153,6 @@ foreach (var scenario in requested)
             var result = await transcriber.TranscribeAsync(audio, CancellationToken.None);
             rows.Add((scenario, "REAL network", audioSeconds, sw.ElapsedMilliseconds));
             Console.WriteLine($"  (transcript: \"{result.Text}\")");
-            break;
-        }
-        case "sim-local-stream":
-        {
-            // REAL production pipeline (StreamingDictationSession +
-            // ParakeetStreamingTranscriber + chunked mel/decode) with the ONNX
-            // encoder edge replaced by the same RTF delay model as sim-local-batch.
-            var backend = new PacedParakeetBackend(LocalRtf);
-            var batch = new PacedTranscriber("parakeet-sim", TimeSpan.FromSeconds(AudioSeconds * LocalRtf));
-            var streaming = new ParakeetStreamingTranscriber(
-                backend, batch, "parakeet-sim", PreprocessorConfig.ParakeetTdtV3);
-            rows.Add((scenario, "simulated", audioSeconds, await MeasureStreaming(streaming, audio)));
             break;
         }
         case "sim-remote-stream":
@@ -231,34 +219,6 @@ foreach (var scenario in requested)
                 swBatch.Stop();
                 rows.Add(($"real-local-batch {name}", "REAL local", seconds, swBatch.ElapsedMilliseconds));
                 Console.WriteLine($"# batch[{name}]: \"{batchResult.Text}\"");
-
-                // Streaming: ParakeetStreamingSession fed 50 ms frames at real-time
-                // pace; post-stop latency is FinishAsync only. The batchFallback flag
-                // proves the run genuinely streamed (FinishAsync silently falls back
-                // on any streaming failure, which would fake a plausible number).
-                var fellBack = false;
-                var sessionLog = new CollectingLogger();
-                await using var streaming = new ParakeetStreamingSession(
-                    session, "parakeet-tdt-0.6b-v3", PreprocessorConfig.ParakeetTdtV3,
-                    (mem, ct) => { fellBack = true; return realBatch.TranscribeAsync(mem, ct); },
-                    log: sessionLog);
-                const int frame = 800; // 50 ms at 16 kHz
-                for (var i = 0; i < wavAudio.Length; i += frame)
-                {
-                    await streaming.PushAsync(
-                        wavAudio.AsMemory(i, Math.Min(frame, wavAudio.Length - i)), CancellationToken.None);
-                    await Task.Delay(50);
-                }
-                var swStream = Stopwatch.StartNew();
-                var streamResult = await streaming.FinishAsync(wavAudio, CancellationToken.None);
-                swStream.Stop();
-                rows.Add(($"real-local-stream {name}", "REAL local", seconds, swStream.ElapsedMilliseconds));
-                Console.WriteLine($"# stream[{name}]: fellBackToBatch={fellBack} \"{streamResult.Text}\"");
-                foreach (var logLine in sessionLog.Lines)
-                    Console.WriteLine($"# log[{name}]: {logLine}");
-
-                var diff = TranscriptDiff.Summarize(batchResult.Text, streamResult.Text);
-                Console.WriteLine($"# diff[{name}]: {diff.Describe()}");
             }
             break;
         }
@@ -843,46 +803,6 @@ sealed class BenchKeyStore : IAssemblyAiKeyStore
     public void Clear() { }
 }
 
-/// <summary>IParakeetBackend whose Encode costs rtf x chunk-audio-seconds (the
-/// same realtime-factor assumption as sim-local-batch); decode steps are free.</summary>
-sealed class PacedParakeetBackend : IParakeetBackend
-{
-    private readonly double _rtf;
-    private bool _emitNext;
-    public PacedParakeetBackend(double rtf) => _rtf = rtf;
-    public int VocabSize => 8;
-    public int BlankId => 7;
-    public int DecoderHiddenLayers => 2;
-    public int DecoderHiddenDim => 4;
-
-    public EncoderOutput Encode(float[,] melFrames)
-    {
-        var tIn = melFrames.GetLength(0);
-        Thread.Sleep(TimeSpan.FromSeconds(_rtf * tIn / 100.0)); // 100 mel frames per audio second
-        // MUST be the exact output-length function floor((T-1)/8)+1 that
-        // ParakeetStreamingSession.EncodeAndDecode asserts on every encode
-        // (a proportional tIn/8 diverges on the second chunk: T=300 -> 37 vs 38,
-        // silently corrupting the session and falling back to the 3 s batch fake).
-        var tOut = (tIn - 1) / 8 + 1;
-        _emitNext = true; // first decode step after each encode emits one token
-        return new EncoderOutput(new float[2 * tOut], tOut, 2, tOut);
-    }
-
-    public DecoderJointResult DecodeJoint(float[] encoderFrame, int lastToken, float[] stateH, float[] stateC)
-    {
-        var logits = new float[8 + 5];
-        // One non-blank token per encode: an all-blank stream would trip the
-        // session's blank-collapse guard and fall back to the 3 s batch fake,
-        // which would fake sim-local-stream's post-stop latency number.
-        logits[_emitNext ? 0 : BlankId] = 10f;
-        _emitNext = false;
-        logits[8 + 1] = 10f;
-        return new DecoderJointResult(logits, stateH, stateC);
-    }
-
-    public string DecodeTokens(IEnumerable<int> tokenIds) => "simulated transcript";
-}
-
 /// <summary>Paced fake AssemblyAI streaming socket: replies with a final Turn +
 /// Termination <c>finalizeDelay</c> after the Terminate message arrives.</summary>
 sealed class PacedFakeSocket : IStreamingWebSocket
@@ -904,23 +824,4 @@ sealed class PacedFakeSocket : IStreamingWebSocket
     }
     public async Task<string?> ReceiveTextAsync(CancellationToken ct) => await _incoming.Reader.ReadAsync(ct);
     public ValueTask DisposeAsync() { _incoming.Writer.TryWrite(null); return ValueTask.CompletedTask; }
-}
-
-/// <summary>Captures ParakeetStreamingSession log lines so the bench can print
-/// InteriorSilenceSkipper skip stats and fallback warnings inline.</summary>
-sealed class CollectingLogger : Microsoft.Extensions.Logging.ILogger
-{
-    public List<string> Lines { get; } = new();
-
-    public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-    public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
-
-    public void Log<TState>(
-        Microsoft.Extensions.Logging.LogLevel logLevel,
-        Microsoft.Extensions.Logging.EventId eventId,
-        TState state,
-        Exception? exception,
-        Func<TState, Exception?, string> formatter)
-        => Lines.Add($"{logLevel}: {formatter(state, exception)}{(exception is null ? "" : " :: " + exception.Message)}");
 }

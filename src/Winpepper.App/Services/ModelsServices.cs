@@ -5,10 +5,8 @@ using Winpepper.Core.ViewModels;
 
 namespace Winpepper.App.Services;
 
-public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisioningService, IDisposable
+public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IDisposable
 {
-    private AsrProvisioningState _state = new(AsrProvisioningStatus.Missing);
-
     public ModelsServices(string modelsRoot, string? asrModelName = null)
     {
         ModelsRoot = modelsRoot;
@@ -17,16 +15,11 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
         _http = new HttpClientRangeClient();
         _downloader = new ModelDownloader(_http);
         _coordinator = new ModelProvisioningCoordinator(modelsRoot, _downloader.DownloadAsync);
-        _coordinator.StateChanged += OnCoordinatorStateChanged;
-        _state = MapState(_coordinator.State);
     }
 
     public string ModelsRoot { get; }
     public ModelRegistry Registry { get; }
     public ModelDescriptor AsrDescriptor { get; }
-    public AsrProvisioningState State => _state;
-
-    public event EventHandler<AsrProvisioningState>? StateChanged;
 
     private readonly HttpClientRangeClient _http;
     private readonly ModelDownloader _downloader;
@@ -57,9 +50,6 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
         }
     }
 
-    public Task EnsureReadyAsync(CancellationToken ct)
-        => _coordinator.EnsureReadyAsync(AsrDescriptor, ct);
-
     public async Task<bool> VerifyReadyAsync(CancellationToken ct)
     {
         var ready = await _coordinator.VerifyReadyAsync(AsrDescriptor, ct);
@@ -83,7 +73,7 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
     /// cached (missing files short-circuit cheaply, and the next dictation
     /// should pick up a completed download). Only the per-descriptor
     /// VerifyReadyAsync return is authoritative — the coordinator's global
-    /// <see cref="State"/> is not a per-model signal.
+    /// state is not a per-model signal.
     /// </summary>
     public bool VerifyAsrModelReady(string canonicalName)
     {
@@ -151,29 +141,8 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
         return await VerifyReadyAsync(ct);
     }
 
-    private void OnCoordinatorStateChanged(object? sender, ModelProvisioningState state)
-    {
-        _state = MapState(state);
-        StateChanged?.Invoke(this, _state);
-    }
-
-    private static AsrProvisioningState MapState(ModelProvisioningState state) => new(
-        state.Status switch
-        {
-            ModelProvisioningStatus.Missing => AsrProvisioningStatus.Missing,
-            ModelProvisioningStatus.Downloading => AsrProvisioningStatus.Downloading,
-            ModelProvisioningStatus.Verifying => AsrProvisioningStatus.Verifying,
-            ModelProvisioningStatus.Retrying => AsrProvisioningStatus.Retrying,
-            ModelProvisioningStatus.Ready => AsrProvisioningStatus.Ready,
-            ModelProvisioningStatus.Failed => AsrProvisioningStatus.Failed,
-            _ => AsrProvisioningStatus.Failed,
-        },
-        state.ProgressPercent,
-        state.ErrorMessage);
-
     public void Dispose()
     {
-        _coordinator.StateChanged -= OnCoordinatorStateChanged;
         _http.Dispose();
     }
 }

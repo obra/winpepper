@@ -67,6 +67,10 @@ public sealed partial class RecordingPage : Page
         PrewarmMicToggle.IsOn = vm.PrewarmMicEnabled;
         PrewarmMicToggle.Toggled += (_, _) => vm.PrewarmMicEnabled = PrewarmMicToggle.IsOn;
 
+        // Autostart state lives in HKCU\...\Run ONLY (the MSI seeds it; the
+        // toggle reads/writes it). There is deliberately no settings.json
+        // mirror: a write-only shadow drifts (fresh install: key ON, old
+        // setting false) and nothing ever read it.
         AutostartToggle.IsOn = _shell.Autostart.IsEnabled();
         AutostartToggle.Toggled += (_, _) =>
         {
@@ -83,10 +87,6 @@ public sealed partial class RecordingPage : Page
                 _shell.Autostart.Enable(exe, "--tray");
             }
             else _shell.Autostart.Disable();
-            // Capture on the UI thread: mutators execute at FLUSH time and
-            // WinUI controls are thread-affine (see the ModelsPage toggles).
-            var isOn = AutostartToggle.IsOn;
-            _ = _shell.SettingsWriter.QueueAndFlushAsync(s => s with { AutostartEnabled = isOn });
         };
 
         RestartLevelMeter(vm.MicDeviceId);

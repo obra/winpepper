@@ -9,19 +9,26 @@ public sealed class AsrPipelineStartupGateTests
     [Fact]
     public async Task TryStartAsync_DoesNotStartPipelineWhenAsrIsUnverified()
     {
-        var provisioner = new FakeProvisioner(ready: false);
+        var verifyCalls = 0;
         var startCalls = 0;
         var notReadyCalls = 0;
-        var gate = new AsrPipelineStartupGate(provisioner, () =>
-        {
-            startCalls++;
-            return true;
-        }, onNotReady: () => notReadyCalls++);
+        var gate = new AsrPipelineStartupGate(
+            _ =>
+            {
+                verifyCalls++;
+                return Task.FromResult(false);
+            },
+            () =>
+            {
+                startCalls++;
+                return true;
+            },
+            onNotReady: () => notReadyCalls++);
 
         var started = await gate.TryStartAsync(TestContext.Current.CancellationToken);
 
         started.ShouldBeFalse();
-        provisioner.VerifyCalls.ShouldBe(1);
+        verifyCalls.ShouldBe(1);
         startCalls.ShouldBe(0);
         notReadyCalls.ShouldBe(1);
     }
@@ -29,29 +36,54 @@ public sealed class AsrPipelineStartupGateTests
     [Fact]
     public async Task TryStartAsync_StartsPipelineAfterVerifiedAsrReadiness()
     {
-        var provisioner = new FakeProvisioner(ready: true);
+        var verifyCalls = 0;
         var startCalls = 0;
-        var gate = new AsrPipelineStartupGate(provisioner, () =>
-        {
-            startCalls++;
-            return true;
-        });
+        var gate = new AsrPipelineStartupGate(
+            _ =>
+            {
+                verifyCalls++;
+                return Task.FromResult(true);
+            },
+            () =>
+            {
+                startCalls++;
+                return true;
+            });
 
         var started = await gate.TryStartAsync(TestContext.Current.CancellationToken);
 
         started.ShouldBeTrue();
-        provisioner.VerifyCalls.ShouldBe(1);
+        verifyCalls.ShouldBe(1);
         startCalls.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task TryStartAsync_ReturnsFalseWhenVerifiedButPipelineFailsToStart()
+    {
+        var gate = new AsrPipelineStartupGate(_ => Task.FromResult(true), () => false);
+
+        (await gate.TryStartAsync(TestContext.Current.CancellationToken)).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task TryStartAsync_PropagatesVerificationExceptions()
+    {
+        var gate = new AsrPipelineStartupGate(
+            _ => Task.FromException<bool>(new InvalidOperationException("verify blew up")),
+            () => true);
+
+        await Should.ThrowAsync<InvalidOperationException>(
+            () => gate.TryStartAsync(TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public async Task TryStartAsync_RunsPipelineStartOnCapturedSynchronizationContext()
     {
-        var provisioner = new DeferredProvisioner();
+        var ready = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var context = new ManualSynchronizationContext();
         var callerThread = Environment.CurrentManagedThreadId;
         var startThread = -1;
-        var gate = new AsrPipelineStartupGate(provisioner, () =>
+        var gate = new AsrPipelineStartupGate(ct => ready.Task.WaitAsync(ct), () =>
         {
             startThread = Environment.CurrentManagedThreadId;
             return true;
@@ -63,7 +95,7 @@ public sealed class AsrPipelineStartupGateTests
         {
             SynchronizationContext.SetSynchronizationContext(context);
             startup = gate.TryStartAsync(TestContext.Current.CancellationToken);
-            provisioner.Complete(ready: true);
+            ready.TrySetResult(true);
             context.RunUntil(() => startup.IsCompleted);
         }
         finally
@@ -73,39 +105,6 @@ public sealed class AsrPipelineStartupGateTests
 
         (await startup!).ShouldBeTrue();
         startThread.ShouldBe(callerThread);
-    }
-
-    private sealed class FakeProvisioner(bool ready) : IAsrProvisioningService
-    {
-        public AsrProvisioningState State { get; } = new(AsrProvisioningStatus.Missing);
-        public int VerifyCalls { get; private set; }
-        public event EventHandler<AsrProvisioningState>? StateChanged
-        {
-            add { }
-            remove { }
-        }
-        public Task EnsureReadyAsync(CancellationToken ct) => Task.CompletedTask;
-        public Task<bool> VerifyReadyAsync(CancellationToken ct)
-        {
-            VerifyCalls++;
-            return Task.FromResult(ready);
-        }
-    }
-
-    private sealed class DeferredProvisioner : IAsrProvisioningService
-    {
-        private readonly TaskCompletionSource<bool> _ready =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public AsrProvisioningState State { get; } = new(AsrProvisioningStatus.Missing);
-        public event EventHandler<AsrProvisioningState>? StateChanged
-        {
-            add { }
-            remove { }
-        }
-        public Task EnsureReadyAsync(CancellationToken ct) => Task.CompletedTask;
-        public Task<bool> VerifyReadyAsync(CancellationToken ct) => _ready.Task.WaitAsync(ct);
-        public void Complete(bool ready) => _ready.TrySetResult(ready);
     }
 
     private sealed class ManualSynchronizationContext : SynchronizationContext

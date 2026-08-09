@@ -123,6 +123,34 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
         return ready;
     }
 
+    /// <summary>True when the named streaming model is fully installed with
+    /// its runtime archive extracted (descriptor check: files non-empty +
+    /// extraction marker) AND the engine layout's concrete runtime files are
+    /// present (layout check: gguf + transcribe.dll + contract.json).
+    /// Requiring BOTH keeps this gate in lockstep with the engine holder's
+    /// own predicate (StreamingModelLayout.IsInstalled): the gate can never
+    /// pass while NemotronEngineHolder.TryGet() would return null — e.g.
+    /// transcribe.dll/contract.json deleted post-install by AV quarantine or
+    /// manual cleanup, the sticky "verified but engine unavailable" state
+    /// (V6/A18). The REVERSE divergence (layout-true/descriptor-false, e.g. a
+    /// missing extraction marker) intentionally stays conservative — the
+    /// Models page repair path handles it.</summary>
+    public bool IsStreamingModelInstalled(string name)
+        => Registry.Find(name) is { Kind: ModelKind.StreamingAsr } d
+           && d.IsFullyInstalledAndExtracted(ModelsRoot)
+           && Winpepper.Asr.TranscribeCpp.StreamingModelLayout.For(name).IsInstalled(ModelsRoot);
+
+    /// <summary>Boot/onboarding gate for nemotron-first: the PRIMARY speech
+    /// model is ready when the selected streaming model is installed+extracted,
+    /// OR the (optional, backup) Parakeet descriptor passes full size+SHA-256
+    /// verification. Preserves the invariant that a merely loadable stale
+    /// Parakeet cannot satisfy the gate.</summary>
+    public async Task<bool> VerifyPrimarySpeechReadyAsync(string streamingModelName, CancellationToken ct)
+    {
+        if (IsStreamingModelInstalled(streamingModelName)) return true;
+        return await VerifyReadyAsync(ct);
+    }
+
     private void OnCoordinatorStateChanged(object? sender, ModelProvisioningState state)
     {
         _state = MapState(state);

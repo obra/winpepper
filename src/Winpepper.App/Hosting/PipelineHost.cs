@@ -26,7 +26,7 @@ public sealed class PipelineHost : IDisposable
     private readonly HotkeyLifecycleGate _hotkeyLifecycle = new(nameof(PipelineHost));
     private bool _hotkeyLoopStarted;
     private readonly TextInjector _injector;
-    private ParakeetSession? _asr;
+    private Winpepper.Asr.Transcription.IDisposableTranscriber? _asr;
     private readonly Func<string, string> _resolveModelDir;
     private readonly Func<string?> _desiredAsrModel;
     private readonly Func<string?, string> _resolveAsrModelName;
@@ -133,7 +133,9 @@ public sealed class PipelineHost : IDisposable
     /// same source the cleanup call uses), or null when unknown -- null behaves
     /// as today (prefetch allowed). See WindowContextPrefetchGate.</summary>
     private readonly Func<string?>? _activeCleanupPromptFormat;
-    private readonly Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> _buildTranscriber;
+    private readonly Func<Winpepper.Asr.Transcription.ITranscriber?, string?, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> _buildTranscriber;
+    private readonly Func<string, string, Winpepper.Asr.Transcription.IDisposableTranscriber> _loadBatchAsr;
+    private readonly Func<bool> _isPrimarySpeechReady;
     private readonly Winpepper.Core.Learning.PostPasteWatcher? _postPaste;
     private readonly Winpepper.Platform.Learning.FocusedElementCapturer? _focusedCapturer;
     private InjectionTarget _targetAtStart = InjectionTarget.Empty;
@@ -151,12 +153,14 @@ public sealed class PipelineHost : IDisposable
         Func<string?> desiredAsrModelName,
         Func<string?, string> resolveAsrModelName,
         Func<string, bool> isAsrModelReady,
+        Func<string, string, Winpepper.Asr.Transcription.IDisposableTranscriber> loadBatchAsr,
+        Func<bool> isPrimarySpeechReady,
         Winpepper.History.HistoryArchiver archiver,
         Winpepper.Cleanup.CleanupBackendHolder cleanupHolder,
         Winpepper.Platform.Injection.ClipboardFallback clipboardFallback,
         Winpepper.Core.Notifications.IToastService toasts,
         Func<AppSettings> settingsProvider,
-        Func<Winpepper.Asr.ParakeetSession, string, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> transcriberFactory,
+        Func<Winpepper.Asr.Transcription.ITranscriber?, string?, AppSettings, Action<string>, Winpepper.Asr.Transcription.IStreamingTranscriber> transcriberFactory,
         Winpepper.Corrections.CorrectionStore? corrections = null,             // PLAN2-TYPE
         Winpepper.Platform.WindowContext.WindowContextPrefetch? windowContext = null, // PLAN2-TYPE
         Winpepper.Core.Learning.PostPasteWatcher? postPaste = null,
@@ -210,6 +214,8 @@ public sealed class PipelineHost : IDisposable
         _clipboardFallback = clipboardFallback;
         _toasts = toasts;
         _buildTranscriber = transcriberFactory;
+        _loadBatchAsr = loadBatchAsr;
+        _isPrimarySpeechReady = isPrimarySpeechReady;
         _postPaste = postPaste;
         _focusedCapturer = focusedCapturer;
         _postPasteLearningEnabled = postPasteLearningEnabled;
@@ -283,98 +289,75 @@ public sealed class PipelineHost : IDisposable
         return TryStartCore();
     });
 
-    /// <summary>
-    /// Ensure the local ASR session matches the currently-selected model.
-    /// Called only from the serialized run loop (`await foreach` + inline
-    /// `await HandleHotkey`), so it can never race another dictation; it takes
-    /// <see cref="_startGate"/> around all session mutation, including disposal
-    /// of the old session. Resolves the canonical descriptor name FIRST, feeds
-    /// the decider descriptor-level VERIFIED readiness (size + SHA-256, cached
-    /// per selection change), loads the first session, swaps to a newly
-    /// selected model (disposing the old one), or keeps the current session
-    /// when the selection is unchanged or the desired model is not yet
-    /// verified-ready. On load failure the previous working session is kept
-    /// and, when <paramref name="reportErrors"/> is true, the error is
-    /// reported; the cloud path passes false to soften the local error surface.
-    /// Returns true iff a usable session is loaded afterward.
-    /// </summary>
+    /// <summary>Nemotron-first semantics: the Parakeet ONNX model is an
+    /// OPTIONAL BACKUP. This method (a) loads/swaps/disposes the backup
+    /// exactly as before when its files are verified-present (keep-old-on-
+    /// failure, orphan-guarded dispose), but a MISSING backup is no longer an
+    /// error; and (b) returns whether a LOCAL dictation can proceed at all:
+    /// true when the primary streaming model is ready OR a backup session is
+    /// loaded. Cloud dictations don't require it (callers pass cloudSelected).</summary>
     private bool TryEnsureAsrModel(bool reportErrors = true)
     {
         lock (_startGate)
         {
-            // Read the desired name from the in-memory slot — NOT from
-            // _settingsProvider(): the settings-file round-trip is not a safe
-            // cross-thread transport (a Windows atomic replace can fail against
-            // this loop's open read handle, silently dropping a promote).
-            // Then resolve FIRST: unknown/null/"" values fall back to the
-            // default descriptor via ModelRegistry.ResolveOrDefault, so the
-            // decider only ever sees canonical catalog names. Planning or
-            // committing the raw name would record a model that never ran and
-            // cause spurious swaps between two unknown names.
             var desired = _resolveAsrModelName(_desiredAsrModel());
             var desiredDir = _resolveModelDir(desired);
-            // Descriptor-level verified readiness (per-file size + SHA-256 via
-            // ModelProvisioningCoordinator.VerifyReadyAsync, cached per
-            // selection change by ModelsServices) — NOT a bare File.Exists.
-            // "A merely loadable stale model must not enter PipelineHost."
             var ready = _isAsrModelReady(desired);
             var action = _asrSwap.Plan(desired, ready);
 
             switch (action)
             {
                 case Winpepper.Core.Asr.AsrSwapAction.KeepCurrent:
-                    return _asr is not null;
+                    break;
 
                 case Winpepper.Core.Asr.AsrSwapAction.CannotStart:
-                    _log.LogWarning(
-                        "ASR model {Model} not verified-ready in {ModelDir}; pipeline disabled until models are downloaded",
+                    // Backup not installed/verified: fine — Nemotron is primary.
+                    _log.LogDebug("backup ASR model {Model} not verified-ready in {ModelDir}; continuing without a backup",
                         desired, desiredDir);
-                    if (reportErrors)
-                    {
-                        _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                            new FileNotFoundException("Speech model not installed. Open the Models tab to download it."),
-                            Guid.Empty);
-                    }
-                    return false;
+                    break;
 
                 case Winpepper.Core.Asr.AsrSwapAction.Load:
                 case Winpepper.Core.Asr.AsrSwapAction.Swap:
                     try
                     {
                         var previousModel = _asrSwap.LoadedModelName;
-                        var fresh = new ParakeetSession(desiredDir);
+                        var fresh = _loadBatchAsr(desiredDir, desired);
                         var old = _asr;
                         _asr = fresh;
                         _asrSwap.CommitLoad(desired);
-                        // Under _startGate; idempotent (Step 5). Routed through the
-                        // orphan guard: if an abandoned streaming pump may still be
-                        // executing a native call on the old session, the dispose is
-                        // deferred until that pump completes (RunOrDefer never blocks).
+                        // Under _startGate; idempotent. Routed through the orphan
+                        // guard: an abandoned streaming pump may still be executing
+                        // a native call on the old session (RunOrDefer never blocks).
                         if (old is not null) _orphanGuard.RunOrDefer(old.Dispose);
                         _log.LogInformation(
-                            "ASR model loaded (swap #{Generation}): {Previous} -> {Model}",
+                            "backup ASR model loaded (swap #{Generation}): {Previous} -> {Model}",
                             _asrSwap.Generation, previousModel ?? "(none)", desired);
-                        // Recovery success for the Asr CONDITION ("no usable
-                        // speech model"): a model that loads is proof the
-                        // condition is over.
                         _vm.NotifyConditionRecovered(Winpepper.Core.Errors.ErrorStage.Asr);
-                        return true;
                     }
                     catch (Exception ex)
                     {
                         _log.LogError(ex,
-                            "Failed to load ASR model {Model} from {ModelDir}; keeping previous session",
+                            "Failed to load backup ASR model {Model} from {ModelDir}; keeping previous session",
                             desired, desiredDir);
-                        if (reportErrors && _asr is null)   // no usable session at all -> the ongoing condition
-                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr, ex, Guid.Empty);
-                        else if (reportErrors)              // kept the old working model -> per-attempt failure
+                        if (reportErrors)
                             _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Models, ex, Guid.Empty);
-                        return _asr is not null; // keep-old-on-failure
+                        // keep-old-on-failure; fall through to primary check
                     }
-
-                default:
-                    return _asr is not null;
+                    break;
             }
+
+            // A LOCAL dictation needs at least one of: primary streaming model
+            // ready, or a loaded backup session.
+            if (_asr is not null || _isPrimarySpeechReady()) return true;
+
+            _log.LogWarning("no local speech model available (primary not installed, no backup loaded)");
+            if (reportErrors)
+            {
+                _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
+                    new FileNotFoundException("Speech model not installed. Open the Models tab to download it."),
+                    Guid.Empty);
+            }
+            return false;
         }
     }
 
@@ -615,8 +598,8 @@ public sealed class PipelineHost : IDisposable
                                 var cloudSel = string.Equals(settingsForStream.AsrProvider, "assemblyai",
                                     StringComparison.OrdinalIgnoreCase);
                                 var ready = TryEnsureAsrModel(reportErrors: false);
-                                if ((!ready && !cloudSel) || _asr is null) return null;
-                                return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream, notice =>
+                                if (!ready && !cloudSel) return null;
+                                return _buildTranscriber(_asr, _asrSwap.LoadedModelName, settingsForStream, notice =>
                                     _ = _toasts.ShowAsync(
                                         "Winpepper",
                                         "Cloud transcription unavailable — used local speech recognition instead.",
@@ -812,7 +795,7 @@ public sealed class PipelineHost : IDisposable
                         Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
                         TimeSpan.FromSeconds(6));
                 // Finish the streaming session FIRST — before ANY TryEnsureAsrModel
-                // call: the ensure's swap branch disposes the ParakeetSession the
+                // call: the ensure's swap branch disposes the backup session the
                 // streaming transcriber still holds (no engine-state gating), so
                 // no ensure may run while a session is in flight. The factory's
                 // own ensure (start arm) ran before the session captured the
@@ -869,7 +852,7 @@ public sealed class PipelineHost : IDisposable
                     // completes instead of racing its in-flight native call.
                     var localReady = TryEnsureAsrModel(reportErrors: !cloudSelected);
                     var asrNow = _asr;
-                    if ((!localReady && !cloudSelected) || asrNow is null)
+                    if (!localReady && !cloudSelected)
                     {
                         if (streaming is not null)
                         {
@@ -878,14 +861,6 @@ public sealed class PipelineHost : IDisposable
                         // Terminal-state early-exit (S2): never bare-return — drive
                         // the engine back so the next dictation can start.
                         _engine.Apply(SessionEvent.Failed);
-                        if (cloudSelected && asrNow is null)
-                        {
-                            // Cloud selected but no local session exists at all (the
-                            // fallback wrapper needs one): surface this rare case.
-                            _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                                new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
-                                Guid.Empty);
-                        }
                         _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
                         timing.Outcome = "failed";
                         timing.AsrMs = (int)transcribeSw.ElapsedMilliseconds;
@@ -895,7 +870,7 @@ public sealed class PipelineHost : IDisposable
                         EmitTimingSummary(timing);
                         return;
                     }
-                    var transcriber = _buildTranscriber(asrNow, _asrSwap.LoadedModelName!, settingsNow, fallbackNotice);
+                    var transcriber = _buildTranscriber(asrNow, _asrSwap.LoadedModelName, settingsNow, fallbackNotice);
                     await using var lateSession = await transcriber.StartSessionAsync(ct);
                     maybeTranscription = await lateSession.FinishAsync(trimmed, ct);
                 }
@@ -906,12 +881,12 @@ public sealed class PipelineHost : IDisposable
                 var producedModelName = transcription.ProviderModelName;
                 timing.AsrMs = (int)transcribeSw.ElapsedMilliseconds;
                 StampStreamingFinishStats(timing, streaming, _dictStartTicks);
-                // Mode from the model that ACTUALLY produced the result (not from
-                // which code arm returned): nemotron const => true local streaming;
-                // the assemblyai/ prefix => cloud (shares the batch budget); else
-                // local batch (incl. every fallback path).
+                // Streaming iff the produced name IS a known streaming layout name.
+                // For() maps unknown names to English, so only exact streaming names
+                // classify as streaming; "-batch" names stay batch.
+                var isStreaming = Winpepper.Asr.TranscribeCpp.StreamingModelLayout.For(producedModelName).Name == producedModelName;
                 timing.AsrMode =
-                    string.Equals(producedModelName, Winpepper.Asr.TranscribeCpp.NemotronStreamingModel.Name, StringComparison.OrdinalIgnoreCase) ? "streaming"
+                    isStreaming ? "streaming"
                     : Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName) ? "cloud"
                     : "batch";
                 timing.AsrModel = producedModelName;
@@ -1250,8 +1225,8 @@ public sealed class PipelineHost : IDisposable
                                     var cloudSel2 = string.Equals(settingsForStream2.AsrProvider, "assemblyai",
                                         StringComparison.OrdinalIgnoreCase);
                                     var ready2 = TryEnsureAsrModel(reportErrors: false);
-                                    if ((!ready2 && !cloudSel2) || _asr is null) return null;
-                                    return _buildTranscriber(_asr!, _asrSwap.LoadedModelName!, settingsForStream2, notice =>
+                                    if (!ready2 && !cloudSel2) return null;
+                                    return _buildTranscriber(_asr, _asrSwap.LoadedModelName, settingsForStream2, notice =>
                                         _ = _toasts.ShowAsync(
                                             "Winpepper",
                                             "Cloud transcription unavailable — used local speech recognition instead.",
@@ -1446,7 +1421,7 @@ public sealed class PipelineHost : IDisposable
                             Array.Empty<Winpepper.Core.Notifications.ToastButton>(),
                             TimeSpan.FromSeconds(6));
                     // Finish the streaming session FIRST — before ANY TryEnsureAsrModel
-                    // call: the ensure's swap branch disposes the ParakeetSession the
+                    // call: the ensure's swap branch disposes the backup session the
                     // streaming transcriber still holds (no engine-state gating), so
                     // no ensure may run while a session is in flight. The factory's
                     // own ensure (start arm) ran before the session captured the
@@ -1503,7 +1478,7 @@ public sealed class PipelineHost : IDisposable
                         // completes instead of racing its in-flight native call.
                         var localReady2 = TryEnsureAsrModel(reportErrors: !cloudSelected2);
                         var asrNow2 = _asr;
-                        if ((!localReady2 && !cloudSelected2) || asrNow2 is null)
+                        if (!localReady2 && !cloudSelected2)
                         {
                             if (streaming2 is not null)
                             {
@@ -1512,14 +1487,6 @@ public sealed class PipelineHost : IDisposable
                             // Terminal-state early-exit (S2): never bare-return — drive
                             // the engine back so the next dictation can start.
                             _engine.Apply(SessionEvent.Failed);
-                            if (cloudSelected2 && asrNow2 is null)
-                            {
-                                // Cloud selected but no local session exists at all (the
-                                // fallback wrapper needs one): surface this rare case.
-                                _errorBus.Report(Winpepper.Core.Errors.ErrorStage.Asr,
-                                    new InvalidOperationException("Speech model unavailable; dictation aborted. Open the Models tab."),
-                                    Guid.Empty);
-                            }
                             _log.LogWarning("Local ASR unavailable for this dictation; session failed back to Idle");
                             timing2.Outcome = "failed";
                             timing2.AsrMs = (int)transcribeSw2.ElapsedMilliseconds;
@@ -1529,7 +1496,7 @@ public sealed class PipelineHost : IDisposable
                             EmitTimingSummary(timing2);
                             return;
                         }
-                        var transcriber2 = _buildTranscriber(asrNow2, _asrSwap.LoadedModelName!, settingsNow2, fallbackNotice2);
+                        var transcriber2 = _buildTranscriber(asrNow2, _asrSwap.LoadedModelName, settingsNow2, fallbackNotice2);
                         await using var lateSession2 = await transcriber2.StartSessionAsync(ct);
                         maybeTranscription2 = await lateSession2.FinishAsync(trimmed2, ct);
                     }
@@ -1540,12 +1507,12 @@ public sealed class PipelineHost : IDisposable
                     var producedModelName2 = transcription2.ProviderModelName;
                     timing2.AsrMs = (int)transcribeSw2.ElapsedMilliseconds;
                     StampStreamingFinishStats(timing2, streaming2, _dictStartTicks);
-                    // Mode from the model that ACTUALLY produced the result (not from
-                    // which code arm returned): nemotron const => true local streaming;
-                    // the assemblyai/ prefix => cloud (shares the batch budget); else
-                    // local batch (incl. every fallback path).
+                    // Streaming iff the produced name IS a known streaming layout name.
+                    // For() maps unknown names to English, so only exact streaming names
+                    // classify as streaming; "-batch" names stay batch.
+                    var isStreaming2 = Winpepper.Asr.TranscribeCpp.StreamingModelLayout.For(producedModelName2).Name == producedModelName2;
                     timing2.AsrMode =
-                        string.Equals(producedModelName2, Winpepper.Asr.TranscribeCpp.NemotronStreamingModel.Name, StringComparison.OrdinalIgnoreCase) ? "streaming"
+                        isStreaming2 ? "streaming"
                         : Winpepper.Asr.Transcription.CloudProvider.IsCloud(producedModelName2) ? "cloud"
                         : "batch";
                     timing2.AsrModel = producedModelName2;

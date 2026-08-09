@@ -931,7 +931,7 @@ public sealed class WorkerProcessEngine : ITranscribeCppEngine
 
   Supervision contract (binding): every RPC failure (timeout, process exit, EOF, protocol error) kills the worker, invalidates any open stream proxy (its later Feed/Finalize throw `TranscribeCppException`; its Dispose is a no-op), and throws `TranscribeCppException` to the caller. The NEXT engine call respawns + reloads lazily, subject to `WorkerRestartPolicy`. Worker `Error` frames whose type name is `TranscribeCppException` rethrow as `TranscribeCppException`; other worker exceptions rethrow as `TranscribeCppException` with the type name prefixed in the message. All RPCs are serialized under one client-side lock. Log lines (via the `log` callback): `"speech worker started"`, `"speech worker load ok ({model})"`, `"speech worker killed: {op} timed out after {ms} ms"`, `"speech worker died: {reason}"`, `"speech worker restart blocked by budget; next attempt after cooldown"`.
 
-  Additional contracts (2026-08-08 validation hardening): (a) **disposed stays dead** — `Dispose()` sets a `_disposed` latch under the RPC lock; `EnsureWorkerLocked` (and thus every later op) throws `ObjectDisposedException(nameof(WorkerProcessEngine))` and never respawns (a live dictation's captured old engine fails over through the batch ladder instead of resurrecting an old-layout worker). (b) **oversize pre-check** — `TranscribeBatch` checks the encoded floats payload against `WorkerWire.MaxPayloadBytes` BEFORE any RPC and throws `InvalidOperationException("dictation too long for the local batch engine (> ~17 minutes); shorten the recording")` without touching the worker (the ladder's `FallbackTranscriber` catches it → Parakeet when installed). (c) **length-aware batch deadline** — the batch RPC uses `max(BatchTimeout, 30 s + 2 s per audio-second)` instead of the fixed `BatchTimeout` (a cap-sized batch measured ~106 s on the dev host vs the fixed 120 s — only 1.13× headroom; 2 s/audio-second covers worst-case RTF≈2 low-end hardware). (d) **A1 residual, accepted**: killing a worker wedged in kernel-mode I/O may delay its actual exit and leak one blocked threadpool thread per kill — bounded by the restart budget (3 strikes → 60 s cooldown); the Task 6 job object reaps such zombies at app exit.
+  Additional contracts (2026-08-08 validation hardening): (a) **disposed stays dead** — `Dispose()` sets a `_disposed` latch under the RPC lock; `EnsureWorkerLocked` (and thus every later op) throws `ObjectDisposedException(nameof(WorkerProcessEngine))` and never respawns (a live dictation's captured old engine fails over through the batch ladder instead of resurrecting an old-layout worker). (b) **oversize pre-check** — `TranscribeBatch` checks the encoded floats payload against `WorkerWire.MaxPayloadBytes` BEFORE any RPC and throws `InvalidOperationException("dictation too long for the local batch engine (> ~17 minutes); shorten the recording")` without touching the worker (the ladder's `FallbackTranscriber` catches it → Parakeet when installed). (c) **length-aware batch deadline** — the batch RPC uses `max(BatchTimeout, 30 s + 2 s per audio-second)` instead of the fixed `BatchTimeout` (a cap-sized batch measured ~106 s on the dev host vs the fixed 120 s — only 1.13× headroom; 2 s/audio-second covers worst-case RTF≈2 low-end hardware). (d) **A1 residual, accepted (text corrected 2026-08-09)**: killing a worker wedged in kernel-mode I/O may delay its actual exit and leak one blocked threadpool thread per kill. The Task 6 Job Object does NOT reap such zombies at app exit — the supervised path closes the per-worker job handle at kill time (`KillLocked` → `ExeWorkerProcess.Dispose`), so KILL_ON_JOB_CLOSE fires then, and a kernel-wedged worker that survives it can linger until the kernel operation completes or the OS cleans up; the job's at-exit guarantee covers only parent CRASH (the kernel closes the orphaned handle). All job guarantees are conditional on the bind succeeding — bind failures are logged as of the 2026-08-09 fix batch. The respawn side is genuinely bounded as of the 2026-08-09 fix batch (`docs/plans/2026-08-09-nemotron-first-asr.md`): operation-phase kills and between-RPC worker deaths charge the 3-strike/60 s restart budget, and only a completed operation RPC (finished batch / finalized stream) resets it.
 
 - [ ] **Step 1: Write the in-process channel test double**
 
@@ -1552,6 +1552,14 @@ public sealed class ExeWorkerProcessFactory : IWorkerProcessFactory
     public IWorkerProcess Start();
 }
 ```
+
+> **Correction (2026-08-09):** the class comment in the listing above claims
+> the job binding "also reaps kernel-wedge zombies at app exit" — that is the
+> same false claim corrected in clause (d) (line 934): in the supervised path
+> the per-worker job handle is closed at kill time (`KillLocked` →
+> `ExeWorkerProcess.Dispose`), so KILL_ON_JOB_CLOSE fires then, not at app
+> exit; the job's at-exit guarantee covers only parent crash. The listing is
+> preserved verbatim as the historical record.
 
 - [ ] **Step 1: Write the failing tests** (portable: a long-sleeping child on both OSes)
 
@@ -4641,3 +4649,24 @@ Non-blocking recommendation (A6 residual, not a gate condition): before SHIPPING
 4. **A "Retry download" button exists on the Test-dictation step** — the prototype defines no error states (§9.6); the existing onboarding retry affordance is preserved in the new location.
 5. **Progress-line copy** fixes the prototype's doubled-"model" bug via explicit friendly names (its §2 copy-quirk note recommends exactly this).
 6. **Speech readiness includes a one-shot engine load probe** — the prototype's Step 3 promises only downloads; `SpeechModelReady` additionally requires a worker load probe (spawn→Load→dispose) plus the "Checking the speech engine…" status line, so "ready" can never precede a loadable engine (a missing VC++ x64 Redistributable, ABI mismatch, or spawn failure surfaces in onboarding with actionable copy instead of at the first dictation — V6/A16).
+
+### Residual label key (added 2026-08-09)
+
+The validation ledger for this branch (workflow logs, not committed to the
+repo) tracks assumptions as `A<n>` rows and validators as `V<n>`. The two
+labels that have been confused:
+
+- **A15 (evidence: validator V8)** — the accepted VC++-redistributable
+  DEPLOYMENT residual: the MSI does not chain `vc_redist.x64.exe`, so a
+  machine without the Microsoft Visual C++ x64 Redistributable hard-fails
+  local dictation (both transcribe.cpp and ONNX Runtime import the same
+  CRT). Recorded follow-up: chain the redist in a future MSI (see the
+  release-backlog note above).
+- **V6/A16** — the falsified-and-FIXED onboarding readiness assumption:
+  file verification alone was a lying readiness proxy; `SpeechModelReady`
+  additionally requires the one-shot engine load probe. The probe SURFACES
+  a missing redist; the A15 residual is that nothing INSTALLS it.
+
+An earlier recap filed the VC++-redist residual under the wrong id; read any
+`V6/A16` citation in this file as the probe fix, and the accepted redist
+residual as A15/V8. The 2026-08-09 evidence doc restates this key in-repo.

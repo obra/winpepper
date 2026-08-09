@@ -21,7 +21,8 @@ public class ModelsTabViewModelTests : IDisposable
         var vm = new ModelsTabViewModel(registry, _root, new FakeDownloader(),
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { });
 
         vm.AsrCard.SelectedName.ShouldBe("parakeet-tdt-0.6b-v3");
         vm.CleanupCard.SelectedName.ShouldBe("qwen2.5-0.5b-instruct-q4_k_m");
@@ -41,7 +42,8 @@ public class ModelsTabViewModelTests : IDisposable
 
         var vm = new ModelsTabViewModel(registry, _root, new FakeDownloader(),
             currentAsrName: d.Name, currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { });
 
         vm.AsrCard.IsSelectedInstalled.ShouldBeTrue();
         vm.CleanupCard.IsSelectedInstalled.ShouldBeFalse();
@@ -54,7 +56,8 @@ public class ModelsTabViewModelTests : IDisposable
         var vm = new ModelsTabViewModel(registry, _root, new FakeDownloader(),
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { });
 
         vm.CleanupCard.IsSelectedDownloadable.ShouldBeTrue();
 
@@ -76,7 +79,8 @@ public class ModelsTabViewModelTests : IDisposable
         var vm = new ModelsTabViewModel(registry, _root, new FakeDownloader(),
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
-            promoteAsr: _ => { }, promoteCleanup: _ => { },
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { },
             dispatch: dispatcher.Post,
             progressInterval: TimeSpan.Zero);
 
@@ -119,7 +123,8 @@ public class ModelsTabViewModelTests : IDisposable
         var vm = new ModelsTabViewModel(registry, _root, downloader,
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
-            promoteAsr: _ => { }, promoteCleanup: _ => { },
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { },
             dispatch: dispatcher.Post,
             progressInterval: TimeSpan.Zero);
         var asrPhases = new List<DownloadPhase>();
@@ -167,11 +172,13 @@ public class ModelsTabViewModelTests : IDisposable
         var firstVm = new ModelsTabViewModel(registry, _root, downloader,
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { });
         var secondVm = new ModelsTabViewModel(registry, _root, downloader,
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { });
 
         var first = firstVm.DownloadSelectedAsync(selected, CancellationToken.None);
         await downloader.BurstReported;
@@ -196,7 +203,8 @@ public class ModelsTabViewModelTests : IDisposable
         var vm = new ModelsTabViewModel(registry, _root, new FakeDownloader(),
             currentAsrName: "parakeet-tdt-0.6b-v3",
             currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
-            promoteAsr: n => promoted = n, promoteCleanup: _ => { });
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: n => promoted = n, promoteCleanup: _ => { }, promoteStreaming: _ => { });
 
         vm.AsrCard.SelectedName = "parakeet-tdt-0.6b-v3";
         vm.AsrCard.CommitSelection();

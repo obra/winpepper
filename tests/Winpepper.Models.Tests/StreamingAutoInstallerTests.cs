@@ -211,7 +211,8 @@ public class StreamingAutoInstallerTests : IDisposable
         var vm = new ModelsTabViewModel(new ModelRegistry(), _root, fake,
             currentAsrName: ModelRegistry.DefaultAsrName,
             currentCleanupName: ModelRegistry.DefaultCleanupName,
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { });
 
         var auto = installer.StartAsync(streamingEnabled: true, TestContext.Current.CancellationToken);
         await fake.Entered(1);

@@ -5,8 +5,8 @@ namespace Winpepper.Asr;
 /// Sits between the leading-silence gate and the mel extractor. Constants
 /// duplicated from SilenceTrimmer (KeepMsPerEdge=600, abs floor=0.002,
 /// SpeechCapFactor=0.15, 20 ms frames) because Winpepper.Asr does not reference
-/// Winpepper.Audio — same precedent as
-/// ParakeetStreamingSession.LeadingSilenceRmsFloor.
+/// Winpepper.Audio — the 0.002 RMS floor matches the leading-silence RMS floor
+/// the retired chunked-TDT streaming session used (2026-07-25 evidence).
 /// Deviation from batch (inherent to streaming): a fixed absolute threshold
 /// replaces batch's utterance-adaptive
 /// min(max(3*noiseFloor, 0.002), 0.15*speechLevel). Batch's speech-level cap

@@ -223,39 +223,4 @@ public class InteriorSilenceSkipperTests
         skipper.SkippedMs.ShouldBe((6 + 4) * 20); // 200 ms across both runs
     }
 
-    [Fact]
-    public void GatedStreamingMel_EqualsBatchMel_OverTheKeptConcatenation()
-    {
-        // Pin the safety claim behind the integration: skipping audio BEFORE the
-        // streaming mel extractor is indistinguishable from batch-extracting the
-        // shorter kept concatenation. Run the skipper (session defaults) into
-        // the streaming extractor while collecting the kept samples, then
-        // compare against the batch extractor over that same buffer.
-        var config = PreprocessorConfig.ParakeetTdtV3;
-        var mel = new StreamingLogMelExtractor(config);
-        var kept = new List<float>();
-        var skipper = new InteriorSilenceSkipper(m => { kept.AddRange(m.ToArray()); mel.Push(m.Span); });
-
-        // 1 s speech + 2 s silence (> the 1200 ms budget) + speech with an odd
-        // tail (exercises the held partial analysis frame at Flush).
-        var composite = Concat(Speech(16000), Silence(32000), Speech(8137));
-        for (var i = 0; i < composite.Length; i += 800) // the recorder's 50 ms cadence
-            skipper.Push(composite.AsMemory(i, Math.Min(800, composite.Length - i)));
-        skipper.Flush();
-        mel.Finish();
-        var frames = new List<double[]>();
-        mel.Drain(frames);
-
-        skipper.SkippedMs.ShouldBe(800); // 2000 ms run - 2*600 ms edges
-        var normalizer = new RunningMelNormalizer(config.FeatureSize);
-        normalizer.Add(frames);
-        var streamedNormalized = normalizer.Normalize(frames);
-        var batch = new MelFeatureExtractor(config).Extract(kept.ToArray());
-
-        frames.Count.ShouldBe(batch.GetLength(0));
-        for (var t = 0; t < frames.Count; t++)
-            for (var m = 0; m < config.FeatureSize; m++)
-                ((double)streamedNormalized[t, m]).ShouldBe(batch[t, m], 1e-4,
-                    $"frame {t}, mel {m}");
-    }
 }

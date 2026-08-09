@@ -307,10 +307,15 @@ public class SettingsStoreTests : IDisposable
         try
         {
             var path = Path.Combine(dir.FullName, "settings.json");
-            File.WriteAllText(path, """{ "schema": 1, "autostartEnabled": true }""");
+            // Include both legacy "autostartEnabled" (unknown member, should be ignored)
+            // and "onboardingCompleted" (known member). If the file is genuinely parsed,
+            // onboardingCompleted should be true. If it's treated as corrupt and defaults
+            // returned, onboardingCompleted would be false. This proves the file was
+            // actually deserialized, not discarded.
+            File.WriteAllText(path, """{ "schema": 1, "autostartEnabled": true, "onboardingCompleted": true }""");
             var store = new SettingsStore(path);
-            var s = store.Load(); // must not throw; field simply ignored
-            s.OnboardingCompleted.ShouldBeFalse();
+            var s = store.Load(); // must not throw; unknown field simply ignored
+            s.OnboardingCompleted.ShouldBeTrue(); // proves file was parsed, not treated as corrupt
         }
         finally { dir.Delete(recursive: true); }
     }

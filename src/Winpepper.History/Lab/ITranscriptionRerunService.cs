@@ -1,9 +1,9 @@
 namespace Winpepper.History.Lab;
 
 /// <summary>
-/// Runs Parakeet (or a fake) over an existing WAV file and returns the
-/// transcript. Stateless from the caller's perspective — every call constructs
-/// a fresh session against the supplied model directory.
+/// Reruns a locally installed speech model (or a fake) over an existing WAV
+/// file and returns the transcript. Stateless from the caller's perspective —
+/// each call resolves the requested model and transcribes independently.
 /// </summary>
 public interface ITranscriptionRerunService
 {

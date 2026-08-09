@@ -54,7 +54,8 @@ public sealed partial class HistoryDetailPage : Page
         var history = App.Shell!.HistoryServices;
         var models = App.Shell!.ModelsServices;
 
-        AvailableAsrModels = models.Registry.ByKind(ModelKind.Asr).ToList();
+        AvailableAsrModels = models.Registry.ByKind(ModelKind.Asr)
+            .Concat(models.Registry.ByKind(ModelKind.StreamingAsr)).ToList();
         AvailableCleanupModels = models.Registry.ByKind(ModelKind.Cleanup).ToList();
 
         ViewModel = new HistoryDetailViewModel(
@@ -113,6 +114,10 @@ public sealed partial class HistoryDetailPage : Page
             var models = App.Shell!.ModelsServices;
             ViewModel.TranscriptionPanel.SelectedModelDirectory =
                 Path.Combine(models.ModelsRoot, d.InstallDirRelative);
+            // Streaming models must never be published into AsrModelSelection
+            // (that slot holds batch/Parakeet names); the promote handler is
+            // guarded too, but disable the button so it's not an option.
+            PromoteAsrBtn.IsEnabled = d.Kind == ModelKind.Asr;
         }
     }
 
@@ -170,7 +175,13 @@ public sealed partial class HistoryDetailPage : Page
         await dlg.ShowAsync();
     }
 
-    private void OnPromoteAsr(object sender, RoutedEventArgs e) => ViewModel?.PromoteTranscriptionRerunAsDefault();
+    private void OnPromoteAsr(object sender, RoutedEventArgs e)
+    {
+        // Guarded to Asr kind: AsrModelSelection carries batch (Parakeet) names
+        // only — publishing a streaming name would corrupt the selection slot.
+        if (AsrModelPicker.SelectedItem is ModelDescriptor { Kind: ModelKind.Asr })
+            ViewModel?.PromoteTranscriptionRerunAsDefault();
+    }
     private void OnPromoteCleanup(object sender, RoutedEventArgs e) => ViewModel?.PromoteCleanupRerunAsDefault();
 
     private void InitializeAudioPlayer(MediaSource source)

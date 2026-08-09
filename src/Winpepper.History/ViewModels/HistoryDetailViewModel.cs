@@ -34,10 +34,21 @@ public sealed class HistoryDetailViewModel : INotifyPropertyChanged
             Baseline = entry.RawTranscript,
             Runner = async ct =>
             {
-                var r = await _transcriptionService.RerunAsync(
-                    WavAbsolutePath, TranscriptionPanel!.SelectedModelName,
-                    TranscriptionPanel!.SelectedModelDirectory, ct);
-                return r.Text;
+                // RerunPanelViewModel.RunAsync awaits this with no catch, and
+                // the page's Run handler is async void — an unhandled
+                // InvalidOperationException (model not installed / engine
+                // unavailable) would crash the app. Surface it inline instead.
+                try
+                {
+                    var r = await _transcriptionService.RerunAsync(
+                        WavAbsolutePath, TranscriptionPanel!.SelectedModelName,
+                        TranscriptionPanel!.SelectedModelDirectory, ct);
+                    return r.Text;
+                }
+                catch (InvalidOperationException e)
+                {
+                    return $"[{e.Message}]";
+                }
             },
         };
 

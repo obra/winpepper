@@ -292,7 +292,15 @@ public sealed class AppShell : IDisposable
         // (Winpepper.Cleanup.CleanupOptionsFactory.FromSettings), so Cleanup-tab
         // changes are live.
 
-        var historyServices = new Winpepper.App.Services.HistoryServices(AppPaths.HistoryRoot);
+        var historyServices = new Winpepper.App.Services.HistoryServices(
+            AppPaths.HistoryRoot,
+            new Winpepper.History.Lab.LocalTranscriptionRerunService(
+                name =>
+                {
+                    var engine = nemotronHolder.TryGet(); // serves the CURRENTLY SELECTED streaming model
+                    return Winpepper.History.Lab.RerunModelRouter.EngineServes(engine?.ModelName, name) ? engine : null;
+                },
+                name => modelsServices.Registry.Find(name)?.Kind == Winpepper.Models.ModelKind.StreamingAsr));
 
         var cancel = HotkeyChord.Parse("Esc");
         var hotkeyLog = factory.CreateLogger("Winpepper.App.Hotkeys");

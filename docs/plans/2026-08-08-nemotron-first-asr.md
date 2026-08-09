@@ -79,14 +79,14 @@ Deleted: `src/Winpepper.Asr/Transcription/ParakeetStreamingTranscriber.cs`, `Par
 
 ---
 
-### Task 1: Commit the design prototype and record the green baseline
+### Task 1: Verify the design prototype is tracked and record the green baseline
 
 **Files:**
-- Commit (untracked): `docs/designs/2026-08-08-model-picker-prototype.html`
+- Verify tracked: `docs/designs/2026-08-08-model-picker-prototype.html` (already committed on this branch)
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: the prototype tracked in git (later tasks reference it); a recorded baseline test count.
+- Produces: confirmation that the prototype is tracked in git (later tasks reference it); a recorded baseline test count.
 
 - [ ] **Step 1: Run the Linux suite to record the baseline**
 
@@ -96,13 +96,14 @@ cd /home/dan/code/winpepper/.worktrees/nemotron-first-asr && ./scripts/linux-tes
 ```
 Expected: final line `LINUX SUITE: GREEN`. Note the total test count (baseline ≈ 1790).
 
-- [ ] **Step 2: Commit the prototype**
+- [ ] **Step 2: Verify the prototype is tracked and the worktree is clean**
 
 ```bash
 cd /home/dan/code/winpepper/.worktrees/nemotron-first-asr
-git add docs/designs/2026-08-08-model-picker-prototype.html
-git commit -m "docs(designs): add onboarding model-picker prototype (authoritative visual spec)"
+git ls-files --error-unmatch docs/designs/2026-08-08-model-picker-prototype.html
+git status --porcelain
 ```
+Expected: the first command prints the path and exits 0 (the prototype was committed to this branch during plan review); the second prints nothing. If the first command fails, `git add` the file and commit it with `docs(designs): add onboarding model-picker prototype (authoritative visual spec)` before proceeding.
 
 ---
 
@@ -635,7 +636,8 @@ public static class TranscribeWorkerLoop
                 var ggufPath = WorkerWire.ReadString(r)!;
                 engine?.Dispose();
                 engine = engineFactory(runtimeDir, ggufPath);
-                return (WorkerOp.LoadOk, Build(w => WorkerWire.WriteString(w, engine.ModelName)));
+                var modelName = engine.ModelName; // copy to a local: `engine` is a ref parameter and cannot be captured in the lambda (CS1628)
+                return (WorkerOp.LoadOk, Build(w => WorkerWire.WriteString(w, modelName)));
             }
             case WorkerOp.BeginStream:
             {
@@ -4390,6 +4392,7 @@ git commit -m "feat(app): onboarding Step 3 model picker with background downloa
 - Modify: `src/Winpepper.Asr/InteriorSilenceSkipper.cs` (line 9 comment references `ParakeetStreamingSession.LeadingSilenceRmsFloor`)
 - Modify: `src/Winpepper.App/Hosting/AppShell.cs` (only if any comment referencing `ParakeetStreamingTranscriber` survived Task 13's rewrite of `BuildStreamingTranscriber` — grep and fix)
 - Conditionally delete (Step 2 decides): `src/Winpepper.Asr/StreamingLogMelExtractor.cs`, `src/Winpepper.Asr/RunningMelNormalizer.cs`, `tests/Winpepper.Asr.Tests/StreamingMelTests.cs`
+- Conditionally modify (Step 2 decides): `tests/Winpepper.Asr.Tests/InteriorSilenceSkipperTests.cs` — delete its single mel-using test method (it constructs both mel classes as a batch-equivalence oracle)
 - KEEP: `tests/Winpepper.Asr.Tests/FakeParakeetBackend.cs` (`TdtGreedyDecoderTests` needs it — 11 references)
 
 **Interfaces:**
@@ -4409,11 +4412,12 @@ git rm src/Winpepper.Asr/Transcription/ParakeetStreamingTranscriber.cs \
 ```bash
 grep -rn "StreamingLogMelExtractor\|RunningMelNormalizer" src/ tests/ --include=*.cs
 ```
-Expected after Step 1: hits only in `src/Winpepper.Asr/StreamingLogMelExtractor.cs`, `src/Winpepper.Asr/RunningMelNormalizer.cs` themselves, and `tests/Winpepper.Asr.Tests/StreamingMelTests.cs` (+ possibly `InteriorSilenceSkipperTests.cs` — inspect: if it merely uses `PreprocessorConfig.ParakeetTdtV3` and not the mel classes, it stays). If the expectation holds, the pair is production-dead (their only consumer was the deleted session):
+Expected after Step 1 (verified 2026-08-08): hits only in (a) `src/Winpepper.Asr/StreamingLogMelExtractor.cs` and `src/Winpepper.Asr/RunningMelNormalizer.cs` themselves, (b) `tests/Winpepper.Asr.Tests/StreamingMelTests.cs` (every test in that file exercises the mel pair — delete whole), and (c) `tests/Winpepper.Asr.Tests/InteriorSilenceSkipperTests.cs:~235,~250` — both inside the single test method `GatedStreamingMel_EqualsBatchMel_OverTheKeptConcatenation` (≈ lines 226–260), which uses the mel pair as an oracle to prove skip-before-mel equivalence for the chunked pipeline deleted in Step 1. If the expectation holds, the pair is production-dead (their only production consumer was the deleted session):
 ```bash
 git rm src/Winpepper.Asr/StreamingLogMelExtractor.cs src/Winpepper.Asr/RunningMelNormalizer.cs tests/Winpepper.Asr.Tests/StreamingMelTests.cs
 ```
-If ANY other `src/` consumer shows up, keep all three files and note the consumer in the commit message instead.
+Then edit `tests/Winpepper.Asr.Tests/InteriorSilenceSkipperTests.cs` and delete the entire `GatedStreamingMel_EqualsBatchMel_OverTheKeptConcatenation` test method (it cannot compile once the mel classes are gone; the file's other tests and all shared helpers stand alone without it — verified 2026-08-08). Do NOT remove any shared helper the method calls (`Concat`/`Speech`/`Silence` etc.) — each has other callers. Re-run the Step 2 grep afterwards; expected: zero hits.
+If ANY consumer other than (a)–(c) shows up in `src/` or `tests/`, keep all three files AND the test method, and note the consumer in the commit message instead.
 
 - [ ] **Step 3: Fix the two comment references**
 
@@ -4429,7 +4433,7 @@ dotnet build "$R/tests/Winpepper.Asr.Tests/Winpepper.Asr.Tests.csproj" -c Releas
 dotnet exec "$R/tests/Winpepper.Asr.Tests/bin/Release/net9.0/Winpepper.Asr.Tests.dll" -notrait "Platform=Windows"
 cd "$R" && ./scripts/linux-tests.sh
 ```
-Expected: green; total test count drops by the deleted files' fact count.
+Expected: green; total test count drops by the deleted tests' count (the deleted files' facts plus the one `InteriorSilenceSkipperTests` method removed in Step 2, if that branch was taken).
 
 - [ ] **Step 5: Commit**
 

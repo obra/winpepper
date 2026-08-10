@@ -14,6 +14,8 @@
   - On Linux, provision the .NET 9 SDK locally if needed (`/.dotnet` is gitignored). A green Linux run is necessary but not sufficient — Windows-only code (WinUI, NAudio, DPAPI) only compiles and runs on Windows.
   - Do not mix Linux- and Windows-side builds in the same `bin/`/`obj/`: clean them when switching sides (the helper scripts do this automatically), otherwise MSBuild incremental state corrupts and builds fail with CS0006.
 - **ASR model-level audio evidence:** `./scripts/run-bench-windows.sh` builds the latency bench
-  with the Windows dotnet, generates reference TTS WAVs on the host, and runs the real Parakeet
-  model batch-vs-streaming over them (transcripts, post-stop latency, word-level diff). Recorded
-  results: `docs/plans/2026-07-25-streaming-verification-evidence.md`.
+  with the Windows dotnet, generates reference TTS WAVs on the host, and runs real Parakeet
+  model batch transcription over them (transcripts, post-stop latency). Streaming evidence
+  comes from `./scripts/run-nemotron-bench-windows.sh` (`real-nemotron-stream`: transcripts,
+  post-stop latency, word-level diff). Recorded results:
+  `docs/plans/2026-07-25-streaming-verification-evidence.md`.

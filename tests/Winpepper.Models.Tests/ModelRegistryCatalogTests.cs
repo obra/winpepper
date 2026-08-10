@@ -162,10 +162,34 @@ public class ModelRegistryCatalogTests
             d => d.Kind == ModelKind.StreamingAsr);
 
     [Fact]
-    public void ResolveOrDefault_throws_for_StreamingAsr_kind_defaults()
-        // StreamingAsr deliberately has no default: it is never a resolvable
-        // AsrModelName (it auto-installs in the background but is not a batch
-        // ASR selection). This test documents that contract.
-        => Assert.Throws<ArgumentOutOfRangeException>(
-            () => new ModelRegistry().ResolveOrDefault(null, ModelKind.StreamingAsr));
+    public void ResolveOrDefault_StreamingAsr_DefaultsToEnglish()
+    {
+        var r = new ModelRegistry();
+        r.ResolveOrDefault(null, ModelKind.StreamingAsr).Name.ShouldBe(ModelRegistry.StreamingAsrName);
+        r.ResolveOrDefault("garbage-name", ModelKind.StreamingAsr).Name.ShouldBe(ModelRegistry.StreamingAsrName);
+        r.ResolveOrDefault(ModelRegistry.MultilingualStreamingAsrName, ModelKind.StreamingAsr)
+            .Name.ShouldBe(ModelRegistry.MultilingualStreamingAsrName);
+        // A streaming name is still never resolvable as a batch Asr selection:
+        r.ResolveOrDefault(ModelRegistry.MultilingualStreamingAsrName, ModelKind.Asr)
+            .Name.ShouldBe(ModelRegistry.DefaultAsrName);
+    }
+
+    [Fact]
+    public void Registry_contains_the_multilingual_nemotron_streaming_model()
+    {
+        var d = new ModelRegistry().Find(ModelRegistry.MultilingualStreamingAsrName);
+        d.ShouldNotBeNull();
+        d.Kind.ShouldBe(ModelKind.StreamingAsr);
+        d.InstallDirRelative.ShouldBe("nemotron-streaming-multi");
+        d.Files.Count.ShouldBe(2);
+        var gguf = d.Files[0];
+        gguf.RelativePath.ShouldBe("nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf");
+        gguf.SizeBytes.ShouldBe(751_094_240);
+        gguf.Sha256.ShouldBe("b94545b313b3223fda7b2857a52681da813935c2127643d1e9ff0c23d988089c");
+        gguf.Url.ShouldBe("https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf");
+        var runtime = d.Files[1];
+        runtime.ExtractToRelative.ShouldBe("runtime");
+        runtime.Url.ShouldStartWith("https://github.com/handy-computer/transcribe.cpp/releases/download/v0.1.3/");
+        runtime.SizeBytes.ShouldBe(25_957_910);
+    }
 }

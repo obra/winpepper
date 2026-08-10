@@ -14,6 +14,17 @@ public record AppSettings
     // ASR
     public string AsrModelName { get; init; } = "parakeet-tdt-0.6b-v3";
 
+    // Primary local speech model (StreamingAsr kind). Streams while you speak
+    // when StreamingEnabled; serves batch otherwise. Missing/unknown values
+    // resolve to the English default via ModelRegistry.ResolveOrDefault, so
+    // pre-2026-08 settings.json files (no field) keep today's behavior.
+    public string StreamingModelName { get; init; } = "nemotron-streaming-en";
+
+    // Onboarding model-picker choices (persisted at Step-3 advance so an
+    // interrupted first run resumes with the same download scope).
+    public bool OnboardingBackupModelChosen { get; init; } = false;
+    public bool OnboardingCleanupModelChosen { get; init; } = false;
+
     // ASR provider selection
     public string AsrProvider { get; init; } = "local"; // "local" | "assemblyai"
     // Default speech model id sent to AssemblyAI (in the plural speech_models
@@ -74,7 +85,6 @@ public record AppSettings
     public bool PlaySounds { get; init; } = true;
 
     // Plan 3 additions
-    public bool AutostartEnabled { get; init; } = false;
     public bool OnboardingCompleted { get; init; } = false;
     public bool SpeakerFilterEnabled { get; init; } = false;
 

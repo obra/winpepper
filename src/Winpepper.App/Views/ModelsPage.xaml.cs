@@ -43,6 +43,7 @@ public sealed partial class ModelsPage : Page
             models.Registry, models.ModelsRoot, models,
             currentAsrName: s.AsrModelName,
             currentCleanupName: s.CleanupModelName,
+            currentStreamingName: s.StreamingModelName,
             promoteAsr: name =>
             {
                 var shell = App.Shell!;
@@ -56,6 +57,12 @@ public sealed partial class ModelsPage : Page
                 shell.CleanupVm.RefreshModelCapabilities(); // honesty note tracks the ACTIVE selection live
                 shell.CleanupBackend.RequestPrewarm();     // background load so the next dictation doesn't pay it
                 _ = shell.SettingsWriter.QueueAndFlushAsync(s2 => s2 with { CleanupModelName = name }); // durability
+            },
+            promoteStreaming: name =>
+            {
+                var shell = App.Shell!;
+                shell.StreamingModelSelection.Publish(name);                     // effective on the next dictation (worker swap)
+                _ = shell.SettingsWriter.QueueAndFlushAsync(s2 => s2 with { StreamingModelName = name }); // durability
             },
             // The progress bridge requires an observable enqueue result: if
             // navigation/app shutdown has closed this queue, fail its drain
@@ -159,10 +166,6 @@ public sealed partial class ModelsPage : Page
     {
         if (StreamingCombo.SelectedItem is ModelDescriptor d)
         {
-            // Streaming has no selection slot and no setting: the registry
-            // pins the active streaming model, so the card's promote callback
-            // is a deliberate no-op. The combo exists so future registry
-            // entries appear automatically and feed the download button.
             ViewModel.StreamingCard.SelectedName = d.Name;
             ViewModel.StreamingCard.CommitSelection();
             UpdateInstalledLabels();

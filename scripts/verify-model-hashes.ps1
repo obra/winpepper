@@ -15,6 +15,7 @@ $files = @(
     @{ Name = "vocab.txt";                     Url = "https://huggingface.co/istupakov/parakeet-tdt-0.6b-v2-onnx/resolve/main/vocab.txt" },
     @{ Name = "qwen2.5-0.5b-instruct-q4_k_m.gguf"; Url = "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf" },
     @{ Name = "nemotron-speech-streaming-en-0.6b-Q8_0.gguf"; Url = "https://huggingface.co/handy-computer/nemotron-speech-streaming-en-0.6b-gguf/resolve/main/nemotron-speech-streaming-en-0.6b-Q8_0.gguf" },
+    @{ Name = "nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf"; Url = "https://huggingface.co/handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/resolve/main/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf" },
     @{ Name = "transcribe-native-0.1.3-windows-x86_64-cpu-vulkan.tar.gz"; Url = "https://github.com/handy-computer/transcribe.cpp/releases/download/v0.1.3/transcribe-native-0.1.3-windows-x86_64-cpu-vulkan.tar.gz" }
 )
 

@@ -64,7 +64,6 @@ public class SettingsStoreTests : IDisposable
     public void Defaults_Include_NewPlan3Fields()
     {
         var s = new SettingsStore(_path).Load();
-        s.AutostartEnabled.ShouldBeFalse();
         s.OnboardingCompleted.ShouldBeFalse();
         s.SpeakerFilterEnabled.ShouldBeFalse();
         s.LastVersionSeen.ShouldBe("");
@@ -76,14 +75,12 @@ public class SettingsStoreTests : IDisposable
         var store = new SettingsStore(_path);
         var s = store.Load() with
         {
-            AutostartEnabled = true,
             OnboardingCompleted = true,
             SpeakerFilterEnabled = true,
             LastVersionSeen = "0.3.0",
         };
         store.Save(s);
         var loaded = new SettingsStore(_path).Load();
-        loaded.AutostartEnabled.ShouldBeTrue();
         loaded.OnboardingCompleted.ShouldBeTrue();
         loaded.SpeakerFilterEnabled.ShouldBeTrue();
         loaded.LastVersionSeen.ShouldBe("0.3.0");
@@ -256,6 +253,71 @@ public class SettingsStoreTests : IDisposable
         store.Save(new AppSettings { InjectionChannels = new[] { "vkPacket" } });
 
         store.Load().InjectionChannels.ShouldBe(new[] { "vkPacket" });
+    }
+
+    [Fact]
+    public void Defaults_StreamingModelName_IsEnglishNemotron()
+    {
+        var s = new AppSettings();
+        s.StreamingModelName.ShouldBe("nemotron-streaming-en");
+        s.OnboardingBackupModelChosen.ShouldBeFalse();
+        s.OnboardingCleanupModelChosen.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void Load_LegacySettingsJson_WithoutStreamingModelName_DefaultsToEnglish()
+    {
+        // Upgrade path: a pre-nemotron-first settings.json has no
+        // streamingModelName key and MUST keep streaming with the English model.
+        File.WriteAllText(_path, """
+            {
+              "schema": 1,
+              "asrModelName": "parakeet-tdt-0.6b-v3",
+              "streamingEnabled": true,
+              "onboardingCompleted": true
+            }
+            """);
+        var store = new SettingsStore(_path);
+        var s = store.Load();
+        s.StreamingModelName.ShouldBe("nemotron-streaming-en");
+        s.AsrModelName.ShouldBe("parakeet-tdt-0.6b-v3"); // untouched
+        s.StreamingEnabled.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void RoundTrip_PersistsStreamingModelName_AndPickerChoices()
+    {
+        var store = new SettingsStore(_path);
+        store.Save(new AppSettings
+        {
+            StreamingModelName = "nemotron-streaming-multi",
+            OnboardingBackupModelChosen = true,
+            OnboardingCleanupModelChosen = true,
+        });
+        var loaded = store.Load();
+        loaded.StreamingModelName.ShouldBe("nemotron-streaming-multi");
+        loaded.OnboardingBackupModelChosen.ShouldBeTrue();
+        loaded.OnboardingCleanupModelChosen.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Load_LegacySettingsJson_WithAutostartEnabled_IsIgnoredNotFatal()
+    {
+        var dir = Directory.CreateTempSubdirectory("settings-autostart");
+        try
+        {
+            var path = Path.Combine(dir.FullName, "settings.json");
+            // Include both legacy "autostartEnabled" (unknown member, should be ignored)
+            // and "onboardingCompleted" (known member). If the file is genuinely parsed,
+            // onboardingCompleted should be true. If it's treated as corrupt and defaults
+            // returned, onboardingCompleted would be false. This proves the file was
+            // actually deserialized, not discarded.
+            File.WriteAllText(path, """{ "schema": 1, "autostartEnabled": true, "onboardingCompleted": true }""");
+            var store = new SettingsStore(path);
+            var s = store.Load(); // must not throw; unknown field simply ignored
+            s.OnboardingCompleted.ShouldBeTrue(); // proves file was parsed, not treated as corrupt
+        }
+        finally { dir.Delete(recursive: true); }
     }
 }
 

@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Winpepper — Onboarding Step 3 Prototype: Choose your models</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --accent: #005FB8;
+    --accent-hover: #0067C0;
+    --accent-soft: #E6F0FA;
+    --text: #1b1b1b;
+    --text-2: #5d5d5d;
+    --card-bg: #ffffff;
+    --card-border: #e0e0e0;
+    --card-border-checked: #005FB8;
+    --page-bg: linear-gradient(160deg, #f3f6fb 0%, #eef1f6 55%, #e9edf4 100%);
+    --radius: 8px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    background: var(--page-bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 16px;
+  }
+  .window {
+    width: 720px;
+    max-width: 100%;
+    background: rgba(255,255,255,0.72);
+    backdrop-filter: blur(20px);
+    border: 1px solid #d8dce3;
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.10);
+    padding: 36px 44px 32px;
+  }
+  .steps {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 28px;
+  }
+  .steps .dot {
+    height: 4px; flex: 1; border-radius: 2px;
+    background: #d0d5dd;
+  }
+  .steps .dot.done { background: var(--accent); opacity: .45; }
+  .steps .dot.active { background: var(--accent); }
+  h1 {
+    font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif;
+    font-size: 26px; font-weight: 600;
+    margin: 0 0 6px;
+  }
+  .subtitle {
+    color: var(--text-2);
+    font-size: 14px;
+    margin: 0 0 22px;
+    line-height: 1.5;
+  }
+  .section-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin: 0 0 8px;
+  }
+  .section-label span {
+    font-weight: 400;
+    color: var(--text-2);
+  }
+
+  /* --- streaming model toggle (pick one) --- */
+  .toggle-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 22px;
+  }
+  .radio-card {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    cursor: pointer;
+    transition: border-color .12s, background .12s, box-shadow .12s;
+    user-select: none;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .radio-card:hover { background: #fafbfd; }
+  .radio-card.checked {
+    border-color: var(--card-border-checked);
+    background: #fbfdff;
+    box-shadow: 0 0 0 1px var(--card-border-checked) inset;
+  }
+  .radio-card input { display: none; }
+  .radio-dot {
+    flex: none;
+    width: 18px; height: 18px;
+    margin-top: 2px;
+    border: 1.5px solid #8a8f98;
+    border-radius: 50%;
+    background: #fff;
+    display: grid; place-items: center;
+    transition: border-color .12s;
+  }
+  .radio-dot::after {
+    content: "";
+    width: 9px; height: 9px;
+    border-radius: 50%;
+    background: var(--accent);
+    transform: scale(0);
+    transition: transform .12s;
+  }
+  .radio-card.checked .radio-dot { border-color: var(--accent); }
+  .radio-card.checked .radio-dot::after { transform: scale(1); }
+
+  /* --- option checkboxes --- */
+  .model-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--radius);
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    cursor: pointer;
+    transition: border-color .12s, background .12s, box-shadow .12s;
+    user-select: none;
+  }
+  .model-card:hover { background: #fafbfd; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+  .model-card.checked {
+    border-color: var(--card-border-checked);
+    background: #fbfdff;
+    box-shadow: 0 0 0 1px var(--card-border-checked) inset;
+  }
+  .model-card input { display: none; }
+  .checkbox {
+    flex: none;
+    width: 20px; height: 20px;
+    margin-top: 2px;
+    border: 1.5px solid #8a8f98;
+    border-radius: 4px;
+    background: #fff;
+    display: grid; place-items: center;
+    transition: background .12s, border-color .12s;
+  }
+  .model-card.checked .checkbox {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .checkbox svg { opacity: 0; transition: opacity .1s; }
+  .model-card.checked .checkbox svg { opacity: 1; }
+
+  .model-body { flex: 1; }
+  .model-title-row {
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+    margin-bottom: 3px;
+  }
+  .model-name { font-size: 15px; font-weight: 600; }
+  .badge {
+    font-size: 11px; font-weight: 600;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 10px;
+    padding: 2px 9px;
+  }
+  .model-size {
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--text-2);
+    font-variant-numeric: tabular-nums;
+  }
+  .model-desc {
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.45;
+    margin: 0;
+  }
+  .footnote {
+    font-size: 12px;
+    color: var(--text-2);
+    margin: 16px 2px 0;
+  }
+  .footer {
+    display: flex;
+    align-items: center;
+    margin-top: 22px;
+    gap: 16px;
+  }
+  .total {
+    font-size: 14px;
+    color: var(--text);
+  }
+  .total b { font-variant-numeric: tabular-nums; }
+  button.primary {
+    margin-left: auto;
+    font-family: inherit;
+    font-size: 14px; font-weight: 600;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: 6px;
+    padding: 10px 26px;
+    cursor: pointer;
+    transition: background .12s;
+  }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+  button.primary:disabled { background: #b6bcc4; cursor: default; }
+
+  /* download demo state */
+  .progress-wrap { display: none; margin-top: 22px; }
+  .progress-wrap.visible { display: block; }
+  .progress-label {
+    display: flex; justify-content: space-between;
+    font-size: 13px; color: var(--text-2); margin-bottom: 8px;
+    font-variant-numeric: tabular-nums;
+  }
+  .progress-track {
+    height: 6px; border-radius: 3px; background: #dfe3e9; overflow: hidden;
+  }
+  .progress-fill {
+    height: 100%; width: 0%;
+    background: var(--accent);
+    border-radius: 3px;
+    transition: width .3s linear;
+  }
+  .proto-note {
+    text-align: center;
+    font-size: 11px;
+    color: #98a0ab;
+    margin-top: 18px;
+  }
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="steps">
+    <div class="dot done"></div>
+    <div class="dot done"></div>
+    <div class="dot active"></div>
+    <div class="dot"></div>
+  </div>
+
+  <h1>Choose your models</h1>
+  <p class="subtitle">Winpepper downloads speech models once, then works fully offline. You can change any of this later in Settings&nbsp;&rsaquo;&nbsp;Models.</p>
+
+  <p class="section-label">Speech model <span>— transcribes while you speak. Pick one.</span></p>
+  <div class="toggle-row">
+    <label class="radio-card checked" data-mb="722" id="radio-en">
+      <input type="radio" name="stream" checked>
+      <span class="radio-dot"></span>
+      <span class="model-body">
+        <span class="model-title-row">
+          <span class="model-name">English</span>
+          <span class="badge">Recommended</span>
+        </span>
+        <p class="model-desc">Best English accuracy.</p>
+        <p class="model-desc" style="margin-top:6px"><b style="color:var(--text)">~720 MB</b></p>
+      </span>
+    </label>
+
+    <label class="radio-card" data-mb="722" id="radio-multi">
+      <input type="radio" name="stream">
+      <span class="radio-dot"></span>
+      <span class="model-body">
+        <span class="model-title-row">
+          <span class="model-name">Multilingual</span>
+        </span>
+        <p class="model-desc">40 languages, auto-detected. Slightly lower English accuracy.</p>
+        <p class="model-desc" style="margin-top:6px"><b style="color:var(--text)">~720 MB</b></p>
+      </span>
+    </label>
+  </div>
+
+  <p class="section-label">Options</p>
+
+  <label class="model-card" data-mb="670" id="card-parakeet">
+    <input type="checkbox">
+    <span class="checkbox">
+      <svg width="12" height="10" viewBox="0 0 12 10" fill="none"><path d="M1 5.2 4.4 8.6 11 1.4" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </span>
+    <span class="model-body">
+      <span class="model-title-row">
+        <span class="model-name">Backup speech model</span>
+        <span class="model-size">~670 MB</span>
+      </span>
+      <p class="model-desc">Slower — transcribes after you stop speaking. Steps in automatically if the main speech engine ever has trouble.</p>
+    </span>
+  </label>
+
+  <label class="model-card" data-mb="469" id="card-cleanup">
+    <input type="checkbox">
+    <span class="checkbox">
+      <svg width="12" height="10" viewBox="0 0 12 10" fill="none"><path d="M1 5.2 4.4 8.6 11 1.4" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </span>
+    <span class="model-body">
+      <span class="model-title-row">
+        <span class="model-name">Text cleanup</span>
+        <span class="model-size">~470 MB</span>
+      </span>
+      <p class="model-desc">Tidies what you dictate — punctuation, capitalization, and filler words — before it's typed into your apps.</p>
+    </span>
+  </label>
+
+  <p class="footnote" id="footnote">Downloads happen in the background — you can keep setting up while they run.</p>
+
+  <div class="footer">
+    <span class="total" id="total"></span>
+    <button class="primary" id="downloadBtn">Download &amp; continue</button>
+  </div>
+
+  <div class="progress-wrap" id="progress">
+    <div class="progress-label">
+      <span id="progText">Downloading…</span>
+      <span id="progPct">0%</span>
+    </div>
+    <div class="progress-track"><div class="progress-fill" id="progFill"></div></div>
+  </div>
+
+  <div class="proto-note">Interactive HTML prototype — visual/behavior reference for the WinUI onboarding page. Not production code.</div>
+</div>
+
+<script>
+  const radios = [...document.querySelectorAll('.radio-card')];
+  const options = [...document.querySelectorAll('.model-card')];
+  const totalEl = document.getElementById('total');
+  const btn = document.getElementById('downloadBtn');
+
+  function fmt(mb) {
+    return mb >= 1000 ? (mb / 1024).toFixed(1) + ' GB' : mb + ' MB';
+  }
+
+  function update() {
+    let mb = 0;
+    for (const r of radios) {
+      const on = r.querySelector('input').checked;
+      r.classList.toggle('checked', on);
+      if (on) mb += +r.dataset.mb;
+    }
+    for (const c of options) {
+      const on = c.querySelector('input').checked;
+      c.classList.toggle('checked', on);
+      if (on) mb += +c.dataset.mb;
+    }
+    totalEl.innerHTML = 'Total download: <b>' + fmt(mb) + '</b>';
+  }
+
+  radios.forEach(r => r.querySelector('input').addEventListener('change', update));
+  options.forEach(c => c.querySelector('input').addEventListener('change', update));
+  update();
+
+  // demo download state
+  btn.addEventListener('click', () => {
+    btn.disabled = true;
+    [...radios, ...options].forEach(c => c.style.pointerEvents = 'none');
+    const prog = document.getElementById('progress');
+    const fill = document.getElementById('progFill');
+    const pct = document.getElementById('progPct');
+    const txt = document.getElementById('progText');
+    prog.classList.add('visible');
+    const names = [];
+    for (const r of radios) if (r.querySelector('input').checked)
+      names.push(r.querySelector('.model-name').textContent + ' speech');
+    for (const c of options) if (c.querySelector('input').checked)
+      names.push(c.querySelector('.model-name').textContent.toLowerCase());
+    let p = 0, ni = 0;
+    const t = setInterval(() => {
+      p += Math.random() * 4 + 1;
+      if (p > 100) p = 100;
+      const seg = 100 / names.length;
+      ni = Math.min(names.length - 1, Math.floor(p / seg));
+      txt.textContent = 'Downloading ' + names[ni] + ' model…';
+      fill.style.width = p + '%';
+      pct.textContent = Math.floor(p) + '%';
+      if (p >= 100) {
+        clearInterval(t);
+        txt.textContent = 'All models verified — ready to dictate.';
+        btn.textContent = 'Continue';
+        btn.disabled = false;
+      }
+    }, 120);
+  });
+</script>
+</body>
+</html>

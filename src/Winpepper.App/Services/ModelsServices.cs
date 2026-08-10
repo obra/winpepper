@@ -5,10 +5,8 @@ using Winpepper.Core.ViewModels;
 
 namespace Winpepper.App.Services;
 
-public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisioningService, IDisposable
+public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IDisposable
 {
-    private AsrProvisioningState _state = new(AsrProvisioningStatus.Missing);
-
     public ModelsServices(string modelsRoot, string? asrModelName = null)
     {
         ModelsRoot = modelsRoot;
@@ -17,16 +15,11 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
         _http = new HttpClientRangeClient();
         _downloader = new ModelDownloader(_http);
         _coordinator = new ModelProvisioningCoordinator(modelsRoot, _downloader.DownloadAsync);
-        _coordinator.StateChanged += OnCoordinatorStateChanged;
-        _state = MapState(_coordinator.State);
     }
 
     public string ModelsRoot { get; }
     public ModelRegistry Registry { get; }
     public ModelDescriptor AsrDescriptor { get; }
-    public AsrProvisioningState State => _state;
-
-    public event EventHandler<AsrProvisioningState>? StateChanged;
 
     private readonly HttpClientRangeClient _http;
     private readonly ModelDownloader _downloader;
@@ -57,9 +50,6 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
         }
     }
 
-    public Task EnsureReadyAsync(CancellationToken ct)
-        => _coordinator.EnsureReadyAsync(AsrDescriptor, ct);
-
     public async Task<bool> VerifyReadyAsync(CancellationToken ct)
     {
         var ready = await _coordinator.VerifyReadyAsync(AsrDescriptor, ct);
@@ -77,13 +67,13 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
     /// ModelProvisioningCoordinator.VerifyReadyAsync, which queues behind any
     /// in-flight download) for the CANONICAL model name — resolved per-name
     /// because <see cref="AsrDescriptor"/> is frozen at boot. The positive
-    /// result is CACHED per selection change: a full ~1.1 GB SHA-256 on every
+    /// result is CACHED per selection change: a full ~670 MB SHA-256 on every
     /// dictation start is too slow, so we re-verify only when the requested
     /// name differs from the last verified one. A negative result is never
     /// cached (missing files short-circuit cheaply, and the next dictation
     /// should pick up a completed download). Only the per-descriptor
     /// VerifyReadyAsync return is authoritative — the coordinator's global
-    /// <see cref="State"/> is not a per-model signal.
+    /// state is not a per-model signal.
     /// </summary>
     public bool VerifyAsrModelReady(string canonicalName)
     {
@@ -123,29 +113,36 @@ public sealed class ModelsServices : ModelsTabViewModel.IDownloader, IAsrProvisi
         return ready;
     }
 
-    private void OnCoordinatorStateChanged(object? sender, ModelProvisioningState state)
-    {
-        _state = MapState(state);
-        StateChanged?.Invoke(this, _state);
-    }
+    /// <summary>True when the named streaming model is fully installed with
+    /// its runtime archive extracted (descriptor check: files non-empty +
+    /// extraction marker) AND the engine layout's concrete runtime files are
+    /// present (layout check: gguf + transcribe.dll + contract.json).
+    /// Requiring BOTH keeps this gate in lockstep with the engine holder's
+    /// own predicate (StreamingModelLayout.IsInstalled): the gate can never
+    /// pass while NemotronEngineHolder.TryGet() would return null — e.g.
+    /// transcribe.dll/contract.json deleted post-install by AV quarantine or
+    /// manual cleanup, the sticky "verified but engine unavailable" state
+    /// (V6/A18). The REVERSE divergence (layout-true/descriptor-false, e.g. a
+    /// missing extraction marker) intentionally stays conservative — the
+    /// Models page repair path handles it.</summary>
+    public bool IsStreamingModelInstalled(string name)
+        => Registry.Find(name) is { Kind: ModelKind.StreamingAsr } d
+           && d.IsFullyInstalledAndExtracted(ModelsRoot)
+           && Winpepper.Asr.TranscribeCpp.StreamingModelLayout.For(name).IsInstalled(ModelsRoot);
 
-    private static AsrProvisioningState MapState(ModelProvisioningState state) => new(
-        state.Status switch
-        {
-            ModelProvisioningStatus.Missing => AsrProvisioningStatus.Missing,
-            ModelProvisioningStatus.Downloading => AsrProvisioningStatus.Downloading,
-            ModelProvisioningStatus.Verifying => AsrProvisioningStatus.Verifying,
-            ModelProvisioningStatus.Retrying => AsrProvisioningStatus.Retrying,
-            ModelProvisioningStatus.Ready => AsrProvisioningStatus.Ready,
-            ModelProvisioningStatus.Failed => AsrProvisioningStatus.Failed,
-            _ => AsrProvisioningStatus.Failed,
-        },
-        state.ProgressPercent,
-        state.ErrorMessage);
+    /// <summary>Boot/onboarding gate for nemotron-first: the PRIMARY speech
+    /// model is ready when the selected streaming model is installed+extracted,
+    /// OR the (optional, backup) Parakeet descriptor passes full size+SHA-256
+    /// verification. Preserves the invariant that a merely loadable stale
+    /// Parakeet cannot satisfy the gate.</summary>
+    public async Task<bool> VerifyPrimarySpeechReadyAsync(string streamingModelName, CancellationToken ct)
+    {
+        if (IsStreamingModelInstalled(streamingModelName)) return true;
+        return await VerifyReadyAsync(ct);
+    }
 
     public void Dispose()
     {
-        _coordinator.StateChanged -= OnCoordinatorStateChanged;
         _http.Dispose();
     }
 }

@@ -25,7 +25,8 @@ public class ModelsTabViewModelDownloadSelectedTests
         new(new ModelRegistry(), _root, downloader,
             currentAsrName: ModelRegistry.DefaultAsrName,
             currentCleanupName: ModelRegistry.DefaultCleanupName,
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { });
 
     [Fact]
     public async Task Downloads_Exactly_The_Given_Descriptors_In_Order()

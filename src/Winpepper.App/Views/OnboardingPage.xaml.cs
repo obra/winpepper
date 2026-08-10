@@ -22,15 +22,27 @@ public sealed partial class OnboardingPage : Page
         var shell = (AppShell)e.Parameter;
         _shell = shell;
         _lifetimeCts = new CancellationTokenSource();
-        // Upstream verified-provisioning wiring: ModelsServices implements
-        // IAsrProvisioningService (download + verify), and the VM starts the
-        // pipeline only after the model verifies. Our hydration/skip-resolved
-        // behavior lives below in InitializeFrom.
+        // Picker-era wiring: the VM owns picker state and drives background
+        // downloads through the shell-lifetime OnboardingProvisioner; the
+        // catalog carries registry facts (names + bytes) as plain data
+        // because Core has no Models reference by design. Our hydration/
+        // skip-resolved behavior lives below in InitializeFrom.
+        var registry = shell.ModelsServices.Registry;
+        var catalog = new ModelPickerCatalog(
+            Winpepper.Models.ModelRegistry.StreamingAsrName,
+            registry.Find(Winpepper.Models.ModelRegistry.StreamingAsrName)!.TotalSizeBytes,
+            Winpepper.Models.ModelRegistry.MultilingualStreamingAsrName,
+            registry.Find(Winpepper.Models.ModelRegistry.MultilingualStreamingAsrName)!.TotalSizeBytes,
+            Winpepper.Models.ModelRegistry.DefaultAsrName,
+            registry.Find(Winpepper.Models.ModelRegistry.DefaultAsrName)!.TotalSizeBytes,
+            Winpepper.Models.ModelRegistry.DefaultCleanupName,
+            registry.Find(Winpepper.Models.ModelRegistry.DefaultCleanupName)!.TotalSizeBytes);
         _vm = new OnboardingViewModel(
             shell.SettingsWriter,
-            shell.ModelsServices,
             shell.Pipeline.TryStart,
-            new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator());
+            new Winpepper.Platform.Hotkeys.PlatformHotkeyValidator(),
+            shell.OnboardingProvisioner,
+            catalog);
 
         var devices = DeviceEnumerator.List();
         MicCombo.ItemsSource = devices;
@@ -42,10 +54,11 @@ public sealed partial class OnboardingPage : Page
         var settings = shell.Settings;
         var persistedMicPresent = !string.IsNullOrEmpty(settings.MicDeviceId)
                                    && devices.Any(d => d.Id == settings.MicDeviceId);
+        var scope = new List<string> { settings.StreamingModelName };
+        if (settings.OnboardingBackupModelChosen) scope.Add(settings.AsrModelName);
+        if (settings.OnboardingCleanupModelChosen) scope.Add(settings.CleanupModelName);
         var missing = new Winpepper.Models.MissingModelsResolver().FindMissing(
-            shell.ModelsServices.Registry.All,
-            shell.ModelsServices.ModelsRoot,
-            new[] { settings.AsrModelName, settings.CleanupModelName });
+            shell.ModelsServices.Registry.All, shell.ModelsServices.ModelsRoot, scope);
         var modelsResolved = missing.Count == 0;
         _vm.InitializeFrom(settings, persistedMicPresent, modelsResolved);
 
@@ -86,6 +99,22 @@ public sealed partial class OnboardingPage : Page
         HoldBox.SetChord(_vm.HoldHotkey, _vm.HoldHotkeyError);
         ToggleBox.SetChord(_vm.ToggleHotkey, _vm.ToggleHotkeyError);
 
+        EnglishRadio.Checked      += (_, _) => { _vm.MultilingualSelected = false; };
+        MultilingualRadio.Checked += (_, _) => { _vm.MultilingualSelected = true; };
+        BackupCheck.Checked   += (_, _) => { _vm.BackupModelSelected = true; };
+        BackupCheck.Unchecked += (_, _) => { _vm.BackupModelSelected = false; };
+        CleanupCheck.Checked   += (_, _) => { _vm.CleanupModelSelected = true; };
+        CleanupCheck.Unchecked += (_, _) => { _vm.CleanupModelSelected = false; };
+        EnglishSizeText.Text = OnboardingViewModel.SizeLabel(catalog.EnglishBytes);
+        MultilingualSizeText.Text = OnboardingViewModel.SizeLabel(catalog.MultilingualBytes);
+        BackupSizeText.Text = OnboardingViewModel.SizeLabel(catalog.BackupBytes);
+        CleanupSizeText.Text = OnboardingViewModel.SizeLabel(catalog.CleanupBytes);
+        // Hydrate picker controls from the VM (InitializeFrom ran above):
+        MultilingualRadio.IsChecked = _vm.MultilingualSelected;
+        EnglishRadio.IsChecked = !_vm.MultilingualSelected;
+        BackupCheck.IsChecked = _vm.BackupModelSelected;
+        CleanupCheck.IsChecked = _vm.CleanupModelSelected;
+
         TestDoneCheck.Checked   += (_, _) => { _vm.TestDictationDone = true; RefreshButtons(); };
         TestDoneCheck.Unchecked += (_, _) => { _vm.TestDictationDone = false; RefreshButtons(); };
 
@@ -102,9 +131,14 @@ public sealed partial class OnboardingPage : Page
             HoldBox.CancelCapture("leaving hotkey step");
             ToggleBox.CancelCapture("leaving hotkey step");
         }
-        if (_vm.Step == OnboardingStep.DownloadModels)
+        if (_vm.Step == OnboardingStep.DownloadModels && _shell is not null)
         {
-            DownloadProgress.Visibility = Visibility.Visible;
+            // Publish the picked streaming model into the live slot BEFORE
+            // AdvanceAsync so the engine holder and the primary-ready gate see
+            // it immediately (the settings write inside AdvanceAsync is
+            // durability only — the slot is the cross-thread transport,
+            // exactly like ASR promote).
+            _shell.StreamingModelSelection.Publish(_vm.SelectedSpeechModelName);
         }
         try { await _vm.AdvanceAsync(_lifetimeCts?.Token ?? CancellationToken.None); }
         finally { RefreshButtons(); }
@@ -151,20 +185,22 @@ public sealed partial class OnboardingPage : Page
         AdvanceButton.Content = _vm.Step switch
         {
             OnboardingStep.TestDictation => "Finish",
-            OnboardingStep.DownloadModels when _vm.CanRetry => "Retry",
-            OnboardingStep.DownloadModels => "Download speech model",
+            OnboardingStep.DownloadModels => "Download & continue",
             _ => "Next",
         };
         AdvanceButton.IsEnabled = _vm.CanAdvance;
+        TotalDownloadText.Text = _vm.TotalDownloadText;
         DownloadProgress.Value = _vm.DownloadProgressPercent;
-        DownloadProgress.IsIndeterminate = _vm.IsBusy && _vm.DownloadProgressPercent <= 0;
-        DownloadProgress.Visibility = _vm.Step == OnboardingStep.DownloadModels && _vm.IsBusy
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        DownloadProgress.IsIndeterminate = false;
+        DownloadProgress.Visibility = _vm.Step == OnboardingStep.TestDictation && !_vm.SpeechModelVerified
+            ? Visibility.Visible : Visibility.Collapsed;
         DownloadStatusText.Text = _vm.DownloadStatus;
+        RetryDownloadButton.Visibility = _vm.CanRetry ? Visibility.Visible : Visibility.Collapsed;
         DownloadErrorText.Text = _vm.DownloadError ?? "";
         DownloadErrorText.Visibility = _vm.DownloadError is null ? Visibility.Collapsed : Visibility.Visible;
     }
+
+    private void OnRetryDownload(object sender, Microsoft.UI.Xaml.RoutedEventArgs e) => _vm?.RetryDownloads();
 
     private void RestartLevelMeter(string deviceId)
     {

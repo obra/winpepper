@@ -205,8 +205,8 @@
                     <StackPanel Orientation="Horizontal" Spacing="12">
                         <FontIcon Glyph="&#xE945;" FontSize="18" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" VerticalAlignment="Center" />
                         <StackPanel>
-                            <TextBlock Text="Live streaming model (optional)" Style="{ThemeResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="Nemotron Speech Streaming 0.6B (English only) with the transcribe.cpp runtime &#8212; about 720 MB. Enables live local streaming when 'Transcribe while you speak' is on. After your first streaming dictation the model stays loaded (about 1 GB of memory) until you close Winpepper. Model weights are under the NVIDIA Open Model License; downloaded from Hugging Face / GitHub on request. Requires the Microsoft Visual C++ x64 runtime (preinstalled on most PCs)."
+                            <TextBlock Text="Speech model" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="Nemotron Speech Streaming 0.6B (English or multilingual) with the transcribe.cpp runtime &#8212; each speech model is about 760&#8211;780 MB. Enables live local streaming when 'Transcribe while you speak' is on. After your first streaming dictation the model stays loaded (about 1 GB of memory) until you close Winpepper. Model weights are under the NVIDIA Open Model License (English model) or OpenMDW-1.1 (multilingual); downloaded from Hugging Face / GitHub on request. Requires the Microsoft Visual C++ x64 runtime (preinstalled on most PCs)."
                                        Style="{ThemeResource CaptionTextBlockStyle}"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                        TextWrapping="Wrap" />

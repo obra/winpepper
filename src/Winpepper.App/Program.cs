@@ -19,6 +19,37 @@ public static class Program
             return SelftestProbe.Run(Console.WriteLine);
         }
 
+        // Transcribe worker: hosts the native transcribe.cpp engine for the
+        // parent app so a wedged native call is killable and the engine
+        // restartable. Must run BEFORE WinRT/WinUI init: it is a plain
+        // console loop over stdin/stdout. The parent supplies runtime/model
+        // paths via the Load request; stderr carries worker logs.
+        if (args.Any(a => a.Equals("--transcribe-worker", StringComparison.OrdinalIgnoreCase)))
+        {
+            // Suppress WER UI: a native crash must exit the worker promptly
+            // (parent sees EOF -> kill/respawn) instead of wedging invisibly
+            // on an error dialog.
+            _ = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+
+            // Main is [STAThread]; the worker's blocking native loop must not
+            // inherit an STA — run it on a dedicated MTA foreground thread
+            // and join (SetApartmentState is a no-op where unsupported).
+            var exitCode = 0;
+            var loop = new Thread(() =>
+            {
+                exitCode = Winpepper.Asr.TranscribeCpp.Worker.TranscribeWorkerLoop.Run(
+                    Console.OpenStandardInput(),
+                    Console.OpenStandardOutput(),
+                    (runtimeDir, ggufPath) => Winpepper.Asr.TranscribeCpp.TranscribeCppEngine.Load(
+                        runtimeDir, ggufPath, msg => Console.Error.WriteLine($"[transcribe-worker] {msg}")),
+                    msg => Console.Error.WriteLine($"[transcribe-worker] {msg}"));
+            }) { IsBackground = false };
+            loop.SetApartmentState(System.Threading.ApartmentState.MTA);
+            loop.Start();
+            loop.Join();
+            return exitCode;
+        }
+
         // Autostart hand-off: --tray means start hidden to the tray.
         var startHidden = args.Any(a => a.Equals("--tray", StringComparison.OrdinalIgnoreCase));
         Environment.SetEnvironmentVariable("WINPEPPER_START_HIDDEN", startHidden ? "1" : "0");
@@ -72,4 +103,12 @@ public static class Program
         e.SetObserved();
         if (!keepAlive) Environment.Exit(1);
     }
+
+    // Worker-verb WER suppression: without it a native AV in transcribe.dll
+    // can pop an (invisible, CreateNoWindow) WER dialog and wedge the worker
+    // instead of exiting so the parent supervises it.
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern uint SetErrorMode(uint uMode);
+    private const uint SEM_FAILCRITICALERRORS = 0x0001;
+    private const uint SEM_NOGPFAULTERRORBOX = 0x0002;
 }

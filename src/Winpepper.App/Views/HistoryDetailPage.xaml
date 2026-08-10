@@ -110,7 +110,7 @@
                                   SelectionChanged="OnAsrSelectionChanged" />
                         <Button Content="Run" Click="OnRunTranscriptionRerun" Style="{StaticResource AccentButtonStyle}" MinWidth="100" />
                         <local:DiffSegmentsControl x:Name="TranscriptionDiff" />
-                        <Button Content="Use as default ASR" Click="OnPromoteAsr" />
+                        <Button x:Name="PromoteAsrBtn" Content="Use as default ASR" Click="OnPromoteAsr" />
                     </StackPanel>
                 </Border>
 

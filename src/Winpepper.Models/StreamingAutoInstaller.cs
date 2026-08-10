@@ -40,7 +40,7 @@ public enum StreamingAutoInstallStatus
 /// </summary>
 public sealed class StreamingAutoInstaller
 {
-    private readonly ModelDescriptor _descriptor;
+    private readonly ModelRegistry _registry;
     private readonly string _installRoot;
     private readonly ModelsTabViewModel.IDownloader _downloader;
     private readonly SemaphoreSlim _operationGate;
@@ -54,9 +54,13 @@ public sealed class StreamingAutoInstaller
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(installRoot);
         ArgumentNullException.ThrowIfNull(downloader);
-        _descriptor = registry.Find(ModelRegistry.StreamingAsrName)
+        // The English default is the fallback for every run, so its absence is
+        // a wiring bug worth failing fast on (the descriptor itself is
+        // re-resolved per run to honor the user's selected model).
+        _ = registry.Find(ModelRegistry.StreamingAsrName)
             ?? throw new InvalidOperationException(
                 $"Streaming model '{ModelRegistry.StreamingAsrName}' is absent from the registry.");
+        _registry = registry;
         _installRoot = installRoot;
         _downloader = downloader;
         _operationGate = ModelsTabViewModel.SharedOperationGateFor(downloader);
@@ -80,17 +84,23 @@ public sealed class StreamingAutoInstaller
     /// installed).
     /// </summary>
     public Task StartAsync(bool streamingEnabled, CancellationToken ct)
+        => StartAsync(streamingEnabled, selectedModelName: null, ct);
+
+    /// <summary>Begin or join. selectedModelName is the user's primary speech
+    /// model (AppSettings.StreamingModelName); unknown/null falls back to the
+    /// English default so upgrades never stall on a bad name.</summary>
+    public Task StartAsync(bool streamingEnabled, string? selectedModelName, CancellationToken ct)
     {
         lock (_gate)
         {
             if (_current is { IsCompleted: false }) return _current;
             if (_status == StreamingAutoInstallStatus.Installed) return Task.CompletedTask;
-            _current = RunAsync(streamingEnabled, ct);
+            _current = RunAsync(streamingEnabled, selectedModelName, ct);
             return _current;
         }
     }
 
-    private async Task RunAsync(bool streamingEnabled, CancellationToken ct)
+    private async Task RunAsync(bool streamingEnabled, string? selectedModelName, CancellationToken ct)
     {
         try
         {
@@ -100,7 +110,12 @@ public sealed class StreamingAutoInstaller
                 return;
             }
 
-            if (IsInstalledAndExtracted())
+            var descriptor =
+                _registry.Find(selectedModelName ?? "") is { Kind: ModelKind.StreamingAsr } found
+                    ? found
+                    : _registry.Find(ModelRegistry.StreamingAsrName)!;
+
+            if (IsInstalledAndExtracted(descriptor))
             {
                 SetStatus(StreamingAutoInstallStatus.Installed);
                 return;
@@ -110,7 +125,7 @@ public sealed class StreamingAutoInstaller
             await _operationGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                await _downloader.DownloadAsync(_descriptor, _installRoot, NullProgress.Instance, ct)
+                await _downloader.DownloadAsync(descriptor, _installRoot, NullProgress.Instance, ct)
                     .ConfigureAwait(false);
             }
             finally
@@ -131,10 +146,10 @@ public sealed class StreamingAutoInstaller
     /// <summary>Cheap per-launch health check: every file at its exact declared
     /// size, and every archive carrying a completed-extraction marker for its
     /// pinned SHA-256 plus the extracted tree.</summary>
-    private bool IsInstalledAndExtracted()
+    private bool IsInstalledAndExtracted(ModelDescriptor descriptor)
     {
-        var modelDir = Path.Combine(_installRoot, _descriptor.InstallDirRelative);
-        foreach (var f in _descriptor.Files)
+        var modelDir = Path.Combine(_installRoot, descriptor.InstallDirRelative);
+        foreach (var f in descriptor.Files)
         {
             var path = Path.Combine(modelDir, f.RelativePath);
             if (!File.Exists(path) || new FileInfo(path).Length != f.SizeBytes) return false;

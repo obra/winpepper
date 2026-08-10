@@ -19,8 +19,8 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
     private readonly SemaphoreSlim _downloadGate;
 
     public ModelsTabViewModel(ModelRegistry registry, string installRoot, IDownloader downloader,
-                              string currentAsrName, string currentCleanupName,
-                              Action<string> promoteAsr, Action<string> promoteCleanup,
+                              string currentAsrName, string currentCleanupName, string currentStreamingName,
+                              Action<string> promoteAsr, Action<string> promoteCleanup, Action<string> promoteStreaming,
                               Action<Action>? dispatch = null,
                               TimeSpan? progressInterval = null,
                               Func<TimeSpan, Task>? progressDelay = null)
@@ -39,11 +39,8 @@ public sealed class ModelsTabViewModel : INotifyPropertyChanged
         CleanupCard = new ModelCardViewModel(ModelKind.Cleanup,
             registry.ByKind(ModelKind.Cleanup), installRoot, currentCleanupName, promoteCleanup,
             dispatch, progressInterval, progressDelay);
-        // The streaming model is a single fixed descriptor: there is no
-        // selection to promote, so the card pins the one name and the promote
-        // callback is a no-op.
         StreamingCard = new ModelCardViewModel(ModelKind.StreamingAsr,
-            registry.ByKind(ModelKind.StreamingAsr), installRoot, ModelRegistry.StreamingAsrName, _ => { },
+            registry.ByKind(ModelKind.StreamingAsr), installRoot, currentStreamingName, promoteStreaming,
             dispatch, progressInterval, progressDelay);
     }
 

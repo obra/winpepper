@@ -10,11 +10,11 @@ namespace Winpepper.App.Services;
 /// </summary>
 public sealed class HistoryServices
 {
-    public HistoryServices(string historyRoot)
+    public HistoryServices(string historyRoot, ITranscriptionRerunService transcriptionRerun)
     {
         Store = new HistoryStore(historyRoot);
         Archiver = new HistoryArchiver(Store);
-        TranscriptionRerun = new ParakeetTranscriptionRerunService();
+        TranscriptionRerun = transcriptionRerun;
         CleanupRerun = new LlamaCleanupRerunService();
         HistoryRoot = historyRoot;
     }

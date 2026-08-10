@@ -1,3 +1,4 @@
+using Shouldly;
 using Winpepper.Models.Tests.ViewModels;
 using Winpepper.Models.ViewModels;
 using Xunit;
@@ -16,18 +17,45 @@ public class ModelsTabViewModelStreamingTests : IDisposable
 
     public void Dispose() { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }
 
-    private ModelsTabViewModel CreateVm(ModelsTabViewModel.IDownloader downloader) =>
+    private ModelsTabViewModel CreateVm(
+        ModelsTabViewModel.IDownloader downloader,
+        string? currentStreamingName = null,
+        Action<string>? promoteStreaming = null) =>
         new(new ModelRegistry(), _root, downloader,
             currentAsrName: ModelRegistry.DefaultAsrName,
             currentCleanupName: ModelRegistry.DefaultCleanupName,
-            promoteAsr: _ => { }, promoteCleanup: _ => { });
+            currentStreamingName: currentStreamingName ?? ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, 
+            promoteCleanup: _ => { },
+            promoteStreaming: promoteStreaming ?? (_ => { }));
 
     [Fact]
-    public void StreamingCard_lists_exactly_the_nemotron_descriptor()
+    public void StreamingCard_ListsBothNemotronModels_AndSelectsTheCurrentOne()
+    {
+        var vm = CreateVm(new FakeDownloader(), currentStreamingName: ModelRegistry.MultilingualStreamingAsrName);
+        vm.StreamingCard.Available.Select(d => d.Name).ShouldBe(
+            new[] { ModelRegistry.StreamingAsrName, ModelRegistry.MultilingualStreamingAsrName });
+        vm.StreamingCard.SelectedName.ShouldBe(ModelRegistry.MultilingualStreamingAsrName);
+    }
+
+    [Fact]
+    public void StreamingCard_CommitSelection_InvokesThePromoteCallback()
+    {
+        string? promoted = null;
+        var vm = CreateVm(new FakeDownloader(), promoteStreaming: n => promoted = n);
+        vm.StreamingCard.SelectedName = ModelRegistry.MultilingualStreamingAsrName;
+        vm.StreamingCard.CommitSelection();
+        promoted.ShouldBe(ModelRegistry.MultilingualStreamingAsrName);
+    }
+
+    [Fact]
+    public void StreamingCard_lists_exactly_the_nemotron_descriptors()
     {
         var vm = CreateVm(new FakeDownloader());
         var names = vm.StreamingCard.Available.Select(d => d.Name).ToList();
-        Assert.Equal(new[] { ModelRegistry.StreamingAsrName }, names);
+        Assert.Equal(
+            new[] { ModelRegistry.StreamingAsrName, ModelRegistry.MultilingualStreamingAsrName },
+            names);
     }
 
     [Fact]

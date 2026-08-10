@@ -26,6 +26,10 @@ for proj in "${PROJECTS[@]}"; do
   dotnet build "$HERE/tests/$proj/$proj.csproj" -c Release -f net9.0 -p:EnableWindowsTargeting=true
 done
 
+# Compile gate for the ASR latency bench: its Program.cs is in no test project
+# (top-level statements), so without this build the bench can silently break.
+dotnet build "$HERE/scripts/asr-latency-bench/AsrLatencyBench.csproj" -c Release --nologo -v q
+
 fail=0
 grand_total=0
 for proj in "${PROJECTS[@]}"; do

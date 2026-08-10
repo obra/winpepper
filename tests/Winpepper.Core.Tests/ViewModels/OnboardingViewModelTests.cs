@@ -5,55 +5,56 @@ using Xunit;
 
 namespace Winpepper.Core.Tests.ViewModels;
 
+/// <summary>Shared by <see cref="OnboardingViewModelTests"/> and
+/// <see cref="OnboardingModelPickerTests"/>. Captures queued mutators so tests
+/// can fold them over a seed via <see cref="Applied"/>.</summary>
+internal sealed class FakeWriter : ISettingsWriter
+{
+    public AppSettings Current = new();
+    public int Flushes;
+    private readonly List<Func<AppSettings, AppSettings>> _mutators = new();
+
+    public void Queue(Func<AppSettings, AppSettings> m)
+    {
+        _mutators.Add(m);
+        Current = m(Current);
+    }
+
+    public Task FlushAsync() { Flushes++; return Task.CompletedTask; }
+
+    /// <summary>Folds every captured mutator over <paramref name="seed"/>.</summary>
+    public AppSettings Applied(AppSettings seed)
+    {
+        var s = seed;
+        foreach (var m in _mutators) s = m(s);
+        return s;
+    }
+}
+
+internal sealed class PermissiveValidator : IHotkeyValidator
+{
+    public string? Validate(string chord, bool allowLongPressSpace = false) => null;
+    public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
+}
+
 [Trait("Layer", "ViewModel")]
 public class OnboardingViewModelTests
 {
-    private sealed class FakeProvisioner : IAsrProvisioningService
+    private static readonly ModelPickerCatalog Catalog = new(
+        EnglishName: "nemotron-streaming-en", EnglishBytes: 755_608_086,
+        MultilingualName: "nemotron-streaming-multi", MultilingualBytes: 777_052_150,
+        BackupName: "parakeet-tdt-0.6b-v3", BackupBytes: 670_479_942,
+        CleanupName: "qwen2.5-0.5b-instruct-q4_k_m", CleanupBytes: 491_400_032);
+
+    private sealed class FakeProvisioner : IOnboardingModelProvisioner
     {
-        public AsrProvisioningState State { get; private set; } = new(AsrProvisioningStatus.Missing);
-        public bool VerificationResult { get; set; } = true;
-        public Exception? EnsureError { get; set; }
-        public int EnsureCalls { get; private set; }
-        public int VerifyCalls { get; private set; }
-
-        public event EventHandler<AsrProvisioningState>? StateChanged;
-
-        public Task EnsureReadyAsync(CancellationToken ct)
-        {
-            EnsureCalls++;
-            if (EnsureError is not null) throw EnsureError;
-            Publish(new AsrProvisioningState(AsrProvisioningStatus.Ready, 100));
-            return Task.CompletedTask;
-        }
-
-        public Task<bool> VerifyReadyAsync(CancellationToken ct)
-        {
-            VerifyCalls++;
-            Publish(new AsrProvisioningState(
-                VerificationResult ? AsrProvisioningStatus.Ready : AsrProvisioningStatus.Missing,
-                VerificationResult ? 100 : 0));
-            return Task.FromResult(VerificationResult);
-        }
-
-        public void Publish(AsrProvisioningState state)
-        {
-            State = state;
-            StateChanged?.Invoke(this, state);
-        }
-    }
-
-    private sealed class FakeWriter : ISettingsWriter
-    {
-        public AppSettings Current = new();
-        public int Flushes;
-        public void Queue(Func<AppSettings, AppSettings> m) => Current = m(Current);
-        public Task FlushAsync() { Flushes++; return Task.CompletedTask; }
-    }
-
-    private sealed class PermissiveValidator : IHotkeyValidator
-    {
-        public string? Validate(string chord, bool allowLongPressSpace = false) => null;
-        public bool Clash(string a, string b) => string.Equals(a, b, StringComparison.Ordinal);
+        public OnboardingDownloadState State { get; private set; } =
+            new(0, "Waiting", null, SpeechModelReady: false);
+        public event EventHandler<OnboardingDownloadState>? StateChanged;
+        public List<(IReadOnlyList<string> Names, string Speech)> Starts { get; } = new();
+        public void StartDownloads(IReadOnlyList<string> modelNames, string speechModelName)
+            => Starts.Add((modelNames, speechModelName));
+        public void Publish(OnboardingDownloadState s) { State = s; StateChanged?.Invoke(this, s); }
     }
 
     private sealed class FakeValidator : IHotkeyValidator
@@ -120,114 +121,22 @@ public class OnboardingViewModelTests
         vm.CanAdvance.ShouldBeTrue();
     }
 
-    [Fact]
-    public async Task DownloadModels_AdvancesOnlyAfterVerifiedReadinessAndPipelineStart()
-    {
-        var provisioner = new FakeProvisioner();
-        var pipelineStarts = 0;
-        var vm = CreateViewModel(provisioner: provisioner, tryStartPipeline: () =>
-        {
-            pipelineStarts++;
-            return true;
-        });
-        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        provisioner.EnsureCalls.ShouldBe(1);
-        provisioner.VerifyCalls.ShouldBe(1);
-        pipelineStarts.ShouldBe(1);
-        vm.Step.ShouldBe(OnboardingStep.TestDictation);
-    }
-
-    [Fact]
-    public async Task DownloadFailure_StaysOnDownloadStep_AndOffersRetry()
-    {
-        var provisioner = new FakeProvisioner { EnsureError = new IOException("offline") };
-        var vm = CreateViewModel(provisioner: provisioner);
-        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-
-        vm.Step.ShouldBe(OnboardingStep.DownloadModels);
-        vm.DownloadError!.ShouldContain("offline");
-        vm.CanRetry.ShouldBeTrue();
-    }
-
-    // Ported from our (now-removed) OnboardingDownloadErrorTests: the Download
-    // button doubles as Retry. After a failure a fresh Advance must clear the
-    // inline error and, once provisioning succeeds, move to Test Dictation.
-    [Fact]
-    public async Task Retry_AfterFailureThenSuccess_ClearsErrorAndAdvances()
-    {
-        var provisioner = new FakeProvisioner { EnsureError = new IOException("first fails") };
-        var vm = CreateViewModel(provisioner: provisioner);
-        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken); // -> DownloadModels
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken); // fails
-
-        vm.HasDownloadError.ShouldBeTrue();
-        vm.Step.ShouldBe(OnboardingStep.DownloadModels);
-
-        provisioner.EnsureError = null;                              // recover
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken); // retry succeeds
-
-        vm.HasDownloadError.ShouldBeFalse();
-        vm.Step.ShouldBe(OnboardingStep.TestDictation);
-    }
-
-    [Fact]
-    public async Task DownloadModels_CannotSkipIntoTestDictation()
-    {
-        var vm = CreateViewModel();
-        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-
-        vm.CanSkip.ShouldBeFalse();
-        vm.Skip();
-        vm.Step.ShouldBe(OnboardingStep.DownloadModels);
-    }
-
-    [Fact]
-    public async Task FreshVerificationFailure_BlocksTestAndDoesNotStartPipeline()
-    {
-        var provisioner = new FakeProvisioner { VerificationResult = false };
-        var pipelineStarts = 0;
-        var vm = CreateViewModel(provisioner: provisioner, tryStartPipeline: () =>
-        {
-            pipelineStarts++;
-            return true;
-        });
-        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-
-        vm.Step.ShouldBe(OnboardingStep.DownloadModels);
-        vm.DownloadError.ShouldNotBeNull();
-        pipelineStarts.ShouldBe(0);
-    }
-
-    [Fact]
-    public async Task PipelineStartFailure_BlocksTestDictation()
-    {
-        var vm = CreateViewModel(tryStartPipeline: () => false);
-        vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-
-        vm.Step.ShouldBe(OnboardingStep.DownloadModels);
-        vm.DownloadError!.ShouldContain("could not start");
-    }
+    // NOTE: the old DownloadModels-behavior tests (advance-after-verify,
+    // download-failure/retry, verify-false, pipeline-false, cannot-skip) are
+    // superseded by OnboardingModelPickerTests: downloads now start in the
+    // BACKGROUND when leaving the Download step and Test Dictation gates on
+    // SpeechModelVerified + pipeline start instead.
 
     [Fact]
     public async Task Finish_Sets_OnboardingCompleted()
     {
         var w = new FakeWriter();
-        var vm = CreateViewModel(writer: w);
+        var provisioner = new FakeProvisioner();
+        var vm = CreateViewModel(writer: w, provisioner: provisioner);
         vm.SelectedMicDeviceId = "x"; await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
-        await vm.AdvanceAsync(TestContext.Current.CancellationToken);
+        await vm.AdvanceAsync(TestContext.Current.CancellationToken); // PickHotkeys -> DownloadModels
+        await vm.AdvanceAsync(TestContext.Current.CancellationToken); // DownloadModels -> TestDictation (background downloads)
+        provisioner.Publish(new OnboardingDownloadState(100, "ready", null, SpeechModelReady: true));
         vm.TestDictationDone = true;
         await vm.AdvanceAsync(TestContext.Current.CancellationToken);
         vm.Step.ShouldBe(OnboardingStep.Done);
@@ -238,9 +147,8 @@ public class OnboardingViewModelTests
     // Skip_From_DownloadModels_Advances_Without_Running_Stub,
     // DownloadModels_Step_Awaits_Stub_And_Advances) are intentionally dropped:
     // they are superseded by the upstream verified-provisioning requirement.
-    // Skipping the model download can no longer complete onboarding
-    // (DownloadModels_CannotSkipIntoTestDictation covers the new behavior), and
-    // the stub downloader was replaced by IAsrProvisioningService. Our
+    // Skipping the model download can no longer complete onboarding, and the
+    // stub downloader was replaced by IOnboardingModelProvisioner. Our
     // hydration / skip-resolved-step behavior is retained below via InitializeFrom.
 
     [Fact]
@@ -324,7 +232,8 @@ public class OnboardingViewModelTests
         IHotkeyValidator? validator = null)
         => new(
             writer ?? new FakeWriter(),
-            provisioner ?? new FakeProvisioner(),
             tryStartPipeline ?? (() => true),
-            validator ?? new PermissiveValidator());
+            validator ?? new PermissiveValidator(),
+            provisioner ?? new FakeProvisioner(),
+            Catalog);
 }

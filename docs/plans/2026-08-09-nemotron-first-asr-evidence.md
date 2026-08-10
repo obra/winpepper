@@ -19,7 +19,9 @@ Run date: 2026-08-09. Ran against commit `5fa2ae9`
 (`git rev-parse --short HEAD`, stamped immediately before launching the gate —
 the gate logs themselves contain no SHA).
 
-**The gate is BLOCKED-ENVIRONMENTAL, not GREEN.** Three full attempts were made
+**The gate is BLOCKED-ENVIRONMENTAL, not GREEN.** *(Superseded 2026-08-09
+evening: a single all-GREEN run was later obtained at `476c2ac` — see
+"Gate GREEN at 476c2ac" below.)* Three full attempts were made
 at `5fa2ae9` (the SHA stamp was re-recorded before every run; HEAD did not move
 between runs); all three went RED on a WSL→Windows interop (vsock) outage, not
 on any code failure. Zero CS errors appeared in any build log across all 3 runs.
@@ -82,6 +84,59 @@ net9.0-windows, 2+2 Platform — all self-skips). Remediation for the user: run
 (this kills every WSL session, so it cannot be run from inside WSL).
 Commits after the gate SHA are docs-only — verified: `git diff --stat
 5fa2ae9..HEAD` touches only docs/plans/*.
+
+### Gate GREEN at 476c2ac (2026-08-09 evening — supersedes BLOCKED status)
+
+Four further full gate runs were made at `476c2ac` (SHA stamped via
+`git rev-parse --short HEAD` before each run; HEAD did not move; worktree
+clean) without restarting WSL:
+
+- RUN 4 (~17:5x–18:1x): GATE: RED. Asr.Tests + Audio.Tests build stages hit the
+  67-byte vsock log (`UtilAcceptVsock:271: accept4 failed 110`), their runs
+  exit-129 downstream. All other stages OK. One genuine test failure:
+  `ModelCardViewModelDispatchTests.ReportProgress_LateByteReportCannotOvertakeQueuedComplete`
+  — `System.TimeoutException: The progress bridge did not drain through the
+  manual dispatcher` (Models.Tests net9.0: 159 total, 1 failed). Flake
+  determination below.
+- RUN 5: GATE: RED. Only Audio.Tests build hit the vsock error (runs exit-129
+  downstream); all 10 executed test runs OK — 2433 tests, 0 failures
+  (Models.Tests 159/0: the RUN 4 failure did not reproduce).
+- RUN 6: GATE: RED. Platform.Tests build + Corrections/History run stages hit
+  the vsock error; all other stages OK — 1822 tests, 0 failures.
+- RUN 7 (~18:5x–19:1x): **GATE: GREEN.** All 12 project/TFM runs OK —
+  **2705 tests, 0 errors, 0 failures**, Skipped: 50 (45 Cleanup
+  net9.0-windows, 1 Audio net9.0-windows, 2+2 Platform — all self-skips).
+  Winpepper.App build OK.
+
+Flake note (backlog): the RUN 4 `ReportProgress_LateByteReportCannotOvertakeQueuedComplete`
+failure was re-run in isolation on the Windows host 3× at the same SHA
+(`dotnet exec Winpepper.Models.Tests.dll -method ...`): 3/3 PASS (0.83–0.93 s),
+and it passed inside full runs 5, 6, and 7. Classified as a load-sensitive
+timing flake in the test's ManualDispatcher drain wait, not a product defect.
+Tightening the test's drain deadline handling is a recorded backlog item.
+
+Verbatim RUN 7 summary block:
+
+```
+================ windows-gate summary ================
+Winpepper.App build: OK
+Winpepper.Asr.Tests (net9.0): OK     Winpepper.Asr.Tests  Total: 374, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 11.157s
+Winpepper.Audio.Tests (net9.0): OK     Winpepper.Audio.Tests  Total: 135, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.642s
+Winpepper.Audio.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Audio.Tests  Total: 137, Errors: 0, Failed: 0, Skipped: 1, Not Run: 0, Time: 0.790s
+Winpepper.Cleanup.Tests (net9.0): OK     Winpepper.Cleanup.Tests  Total: 222, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.300s
+Winpepper.Cleanup.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Cleanup.Tests  Total: 296, Errors: 0, Failed: 0, Skipped: 45, Not Run: 0, Time: 19.785s
+Winpepper.Core.Tests (net9.0): OK     Winpepper.Core.Tests  Total: 495, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 2.107s
+Winpepper.Corrections.Tests (net9.0): OK     Winpepper.Corrections.Tests  Total: 31, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 0.860s
+Winpepper.History.Tests (net9.0): OK     Winpepper.History.Tests  Total: 52, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.487s
+Winpepper.IntegrationTests (net9.0): OK     Winpepper.IntegrationTests  Total: 4, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.522s
+Winpepper.Models.Tests (net9.0): OK     Winpepper.Models.Tests  Total: 159, Errors: 0, Failed: 0, Skipped: 0, Not Run: 0, Time: 1.594s
+Winpepper.Platform.Tests (net9.0): OK     Winpepper.Platform.Tests  Total: 398, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 1.608s
+Winpepper.Platform.Tests (net9.0-windows10.0.19041.0): OK     Winpepper.Platform.Tests  Total: 402, Errors: 0, Failed: 0, Skipped: 2, Not Run: 0, Time: 7.209s
+GATE: GREEN
+```
+
+The pre-push/merge precondition (one all-GREEN gate run at final HEAD) is
+satisfied at `476c2ac`.
 
 ## Review-claims record (corrected 2026-08-09)
 

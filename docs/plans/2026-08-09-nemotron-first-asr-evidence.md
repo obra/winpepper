@@ -33,8 +33,9 @@ on any code failure. Zero CS errors appeared in any build log across all 3 runs.
   IntegrationTests net9.0) FAILED with 67-byte logs, all verbatim
   `UtilAcceptVsock:271: accept4 failed 110`; 2261 tests passed across the OK
   runs, 0 failures.
-- RUN 3 (16:37–16:44): GATE: RED. Total interop outage: every build stage
-  FAILED with the same 67-byte vsock log; all 12 runs exit 129
+- RUN 3 (16:37–16:44): GATE: RED. Total interop outage: the App build completed
+  OK before the outage took hold; every test-project build stage then FAILED with
+  the same 67-byte vsock log; all 12 runs exit 129
   `<no summary line>` (Set-Location PathNotFound — downstream of unbuilt DLLs);
   grand total 0 tests.
 
@@ -145,7 +146,7 @@ LastWriteTime `08/07/2026 09:26:48`.
 
 | Check | Status | Evidence |
 |---|---|---|
-| smoke-windows.ps1 -RunSelftest | FAIL (2 launch-dependent checks; 11 PASS incl. Selftest) | `RESULT: FAIL (2 failed check(s))` — the 2 FAILs (`LogFreshness`: newest log 344.1 min old; `HotkeyHookLogged`: startup line not in today's rotated log) depend on a fresh app launch, which was deliberately not performed (`-SkipLaunch`, pre-existing user instance PID 60588); they reflect the user's 2-day-old session, not the code under test. All install/registry/selftest/state checks PASS, incl. `Selftest PASS — WINPEPPER_SELFTEST_OK token emitted` (against installed build `0.7.0.262-alpha+080e4f10f1`, which predates this branch). |
+| smoke-windows.ps1 -RunSelftest -SkipLaunch | FAIL (2 launch-dependent checks; 11 PASS incl. Selftest) | `RESULT: FAIL (2 failed check(s))` — the 2 FAILs (`LogFreshness`: newest log 344.1 min old; `HotkeyHookLogged`: startup line not in today's rotated log) depend on a fresh app launch, which was deliberately not performed (`-SkipLaunch`, pre-existing user instance PID 60588); they reflect the user's 2-day-old session, not the code under test. All install/registry/selftest/state checks PASS, incl. `Selftest PASS — WINPEPPER_SELFTEST_OK token emitted` (against installed build `0.7.0.262-alpha+080e4f10f1`, which predates this branch). |
 | Fresh-profile onboarding | MANUAL | No MSI artifact (`ls artifacts/winpepper-*-x64.msi` → no match, exit 2) / Sandbox feature unavailable (`Get-WindowsOptionalFeature`: verbatim `The requested operation requires elevation.`); what remains: install on a fresh profile, complete the model picker, verify 'ready to dictate'. Not built just for this (out of scope). |
 | Real dictation | MANUAL | Requires mic + interactive desktop; not claimed. |
 | Kill app → worker dies (job reap) | MANUAL | Needs one real dictation first; script provided at `/tmp/reap-check.ps1`; not claimed. Not run against the pre-existing user instance (never touch a Winpepper.exe this task did not launch). |

@@ -17,14 +17,16 @@
 #      (-m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true).
 #      -m:1 schedules the whole project graph on one MSBuild node, so targets
 #      run in strict dependency order and no two tool processes (per-project
-#      csc.exe children, XamlCompiler.exe, the mt shim) probe or write the 9P
-#      share concurrently inside the measured 5–43 ms cross-process
-#      visibility-lag windows. Compiles still run out-of-process and -m:1
-#      implies no timing guarantee — it is a risk reducer, which is why the
-#      retry layer exists. UseSharedCompilation=false retires the long-lived
-#      Roslyn server, removing cross-invocation server state from the retry
-#      story. The flags are byte-identical to scripts/windows-gate.sh, so the
-#      gate stays the canary for this recipe.
+#      csc.exe children, XamlCompiler.exe, the mt shim) ever hit the 9P share
+#      concurrently — the reproduced transient fault (a 9P "unexpected network
+#      error" write failure inside XamlCompiler under concurrent-build
+#      contention) tracks with traffic contention, and contention is what
+#      serialization minimizes. It implies no timing guarantee and no
+#      visibility-window magic — it is a risk reducer, which is why the retry
+#      layer exists. UseSharedCompilation=false retires the long-lived Roslyn
+#      server, removing cross-invocation server state from the retry story.
+#      The flags are byte-identical to scripts/windows-gate.sh, so the gate
+#      stays the canary for this recipe.
 #   3. Bounded retry (default 5 attempts — the kata's recorded worst-case
 #      transient chain) that fires ONLY on the observed transient signatures
 #      (CS0006 | WMC1006 | unexpected network error). Any other failure stops
@@ -180,12 +182,15 @@ while true; do
   echo "build-app-windows-from-wsl: attempt $attempt of $ATTEMPTS (log: $log)"
   rc=0
   # Tee the attempt output (users see live progress on multi-minute builds)
-  # while preserving the build's exit status from the pipeline head.
+  # while preserving the build's exit status from the pipeline head. A tee
+  # failure means the evidence log is missing/truncated — never certify the
+  # run: exit 1 immediately (logging-integrity failure, not retried).
   timeout --foreground "$TIMEOUT_S" bash -c "$BUILD_CMD" 2>&1 | tee "$log" || {
     parts=("${PIPESTATUS[@]}")
     rc="${parts[0]}"
     if [[ "${parts[1]:-0}" -ne 0 ]]; then
-      echo "build-app-windows-from-wsl: WARNING: tee to $log failed" >&2
+      echo "build-app-windows-from-wsl: attempt $attempt failed: tee to $log failed — build result not trusted (logging-integrity failure; not retried)" >&2
+      exit 1
     fi
   }
   if [[ $rc -eq 0 ]]; then

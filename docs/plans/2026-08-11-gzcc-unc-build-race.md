@@ -56,29 +56,30 @@ Windows .NET SDK 9.0.3xx on the host, WSL2.
 ## Rationale (candidate evaluation, from Phase-1 evidence)
 
 Phase-1 report (absolute): `/home/dan/code/winpepper/.worktrees/.the-usual-logs/gzcc-unc-build-race/reports/phase1-systematic-debugging.md`
-(scratch evidence under `/tmp/gzcc-repro/logs`). Summary:
+(scratch evidence under `/tmp/gzcc-repro/logs`, incl. retained probe-v2 raw rows). Summary:
 
-- 9P cross-process file-visibility lag measured systematic: 98–100% of 800 writes ≥5 ms
-  (≤43 ms observed); under concurrent-build contention the share also throws outright transport
-  write errors — reproduced live as a WMC-family XAML compiler failure
-  (`XamlCompiler: Failed to write output file: An unexpected network error occurred`), which
-  passed on the next identical run.
-- **Adopt** `-m:1 -p:UseSharedCompilation=false` — mechanism, stated accurately: the flags do
-  NOT make the build one OS process (Roslyn always compiles out-of-proc — the shared
-  VBCSCompiler server, or a per-project csc.exe child when `UseSharedCompilation=false`), and
-  `-m:1` imposes NO guaranteed settle delay. What it does: schedule the whole graph on one
-  MSBuild node, so projects' targets run in strict dependency order with no two tool processes
-  (CSC children, XamlCompiler.exe, mt shim) ever probing/writing the share CONCURRENTLY inside
-  the measured 5–43 ms lag windows — the dependent project's targets start only after the
-  upstream project's build target has completed (its compiler process reaped). Residual exposure
-  is the ms-scale handoff from one finished process to the next reader, which is exactly what
-  the retry layer covers. `UseSharedCompilation=false` additionally retires the long-lived
+- What is hard evidence: under concurrent-build contention the 9P share throws outright
+  transport faults — reproduced live as `XamlCompiler: Failed to write output file: An
+  unexpected network error occurred` with WMC-family follow-on errors, passing on the next
+  identical run. What is NOT true, despite v1 appearing to show it: systematic cross-process
+  *visibility lag* — probe v1 conflated per-op UNC latency with invisibility windows (found in
+  delta review); the corrected probe v2 (first-attempt miss field + local-disk control, raw rows
+  retained) shows 0/300 first-attempt misses on 9P, idle AND under twin-build contention, zero
+  open retries — only per-op latency (p99 53–64 ms contended vs 0 local). The kata's exact
+  CS0006/WMC1006 codes are inferred members of this transient-I/O class, never fresh-reproduced;
+  every recorded historical CS0006 also had the confounded, since-fixed cross-OS obj-mixing
+  mechanism in play.
+- **Adopt** `-m:1 -p:UseSharedCompilation=false` as the contention reducer and determinism aid:
+  one MSBuild node, strictly ordered project targets, per-project csc.exe children and
+  XamlCompiler.exe never overlapping each other on the share. It is not a process-coherence or
+  visibility-window fix (none proved necessary) and imposes no timing guarantee: its value is
+  minimal concurrent 9P traffic (the variable the reproduced fault tracks with) and a graph
+  order that makes bounded retry converge. `UseSharedCompilation=false` retires the long-lived
   Roslyn server, removing cross-invocation server state from the retry story.
-  Evidence: parallel twins under matched 2×-concurrent-app-build contention: 1 failure in 6
-  builds (the PX1b iter 2 WMC-family repro); serialized twins under the same contention:
-  app-SS1 3/3, app-SS2 2/2-builds OK (one interop outage, no build), zero transient signatures;
-  serialized solo: 6/6 OK in 210–318 s vs 167–234 s parallel. The flag is a risk reducer,
-  not a guarantee — hence the retry layer.
+  Evidence: parallel twins under matched 2×-concurrent-app-build contention: 1 fault in 6
+  builds; serialized twins same contention: app-SS1 3/3, app-SS2 2/2-builds OK, zero transient
+  signatures; serialized solo: 6/6 OK in 210–318 s vs 167–234 s parallel. Small N — the flag is
+  a risk reducer, not a guarantee; the retry layer exists accordingly.
 - **Adopt** the documented retry wrapper as the delivery vehicle: XamlCompiler.exe, per-project
   csc.exe children, and the mt-unc-shim Exec cross 9P process boundaries no matter what; a
   bounded retry on transient signatures (`CS0006|WMC1006|unexpected network error`) matches the
@@ -182,6 +183,11 @@ with a fake `src/Winpepper.App/Winpepper.App.csproj` placeholder):
    build (the empty-override guard keeps a failed `mktemp` upstream from pointing the pre-clean
    at the real checkout; the selftest's own setup also aborts hard when a disposable root cannot
    be created and validates it lives under /tmp).
+9. *logging integrity (added in delta round 1):* a PATH-shadowed fake `tee` that exits nonzero
+   while the fake build exits 0 → the wrapper must exit 1 with a logging-integrity message and
+   never print BUILD OK (a logging failure must not certify a run whose evidence log is
+   missing/truncated; the production branch treats a tee failure as a non-retried immediate
+   stop).
 Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `run-*` dirs).
 
 **Files:**
@@ -283,15 +289,16 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 - `docs/testing-windows-from-wsl.md` gains a `## Building the app from WSL` section after the
   "One command" section: the wrapper command; one honest paragraph why — reproduced live under
   concurrent-build contention: the XAML compiler failed writing to the share ("An unexpected
-  network error occurred") with follow-on WMC-family XAML errors, and cross-process 9P
-  visibility lag measured systematic (98–100% of 800 probes ≥5 ms, max 43 ms); the kata's exact
-  CS0006/WMC1006 ref-assembly codes are *inferred* members of the same 9P coherence/transport
-  class (every historically recorded CS0006 trace also had the confounded, since-fixed cross-OS
-  obj-mixing mechanism in play) — the docs must say exactly that and not claim fresh CS0006
-  reproduction; pre-clean kills the deterministic cross-OS CS0006; `-m:1` keeps the graph
-  single-node so no two tool processes race each other on the share (compiles still run as child
-  processes; no timing guarantee is implied) and the bounded retry covers the residual; pointer
-  that the gate uses the same recipe.
+  network error occurred") with follow-on WMC-family XAML errors; and the corrected probe v2
+  result — cross-process file reads on 9P showed zero first-attempt misses (600 pairs, half
+  under contention), only stretched per-op latency (p99 ≈ 53–64 ms contended vs ~0 ms locally),
+  i.e. docs must NOT claim a visibility-lag window; the kata's exact CS0006/WMC1006 ref-assembly
+  codes are *inferred* members of the same transient-I/O class (every historically recorded
+  CS0006 trace also had the confounded, since-fixed cross-OS obj-mixing mechanism in play) — the
+  docs must say exactly that and not claim fresh CS0006 reproduction; pre-clean kills the
+  deterministic cross-OS CS0006; `-m:1` keeps the graph single-node so no two tool processes
+  race each other on the share (compiles still run as child processes; no timing guarantee is
+  implied) and the bounded retry covers the residual; pointer that the gate uses the same recipe.
 - `docs/DEVELOPMENT.md`: the "Building from source" WSL paragraph (lines ~51-56) gains one
   sentence routing WSL2-checkout app builds through `scripts/build-app-windows-from-wsl.sh`
   (from a WSL shell), noting it hardens the documented `dotnet build` command against the
@@ -308,7 +315,9 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 - Modify (only if it documents WSL hand app builds): `README.md`
 
 **Interfaces:**
-- Consumes: Phase-1 numbers (lag 5–43 ms; repro PX1b iter 2; app-S 6/6; wrapper evidence Task 3).
+- Consumes: Phase-1 numbers (probe v2: 0/300 first-attempt misses on 9P incl. contention,
+  p99 ≈ 53–64 ms contended latency; repro PX1b iter 2 transport fault; app-S 6/6;
+  wrapper evidence Task 3).
 - Produces: no code interfaces.
 
 **Test cases:**
@@ -330,8 +339,10 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 - [ ] **Step 3: Add the minimal production implementation**
 
   Write the doc section, the DEVELOPMENT.md sentence, and the AGENTS.md sentence per Behavior.
-  Numbers quoted in docs must match Phase-1 evidence (5–43 ms probe range; repro under
-  contention = PX1b iter 2; retry default 5; serialized-build wall-clock 210–318 s).
+  Numbers quoted in docs must match Phase-1 evidence (probe v2: first-attempt 0/300 misses on
+  9P incl. contention, p99 ≈ 53–64 ms contended latency — no visibility claim; repro under
+  contention = PX1b iter 2 transport fault; retry default 5; serialized-build wall-clock
+  210–318 s vs parallel 167–234 s).
   Use "single-node/serialized scheduling" wording — never "single process".
 
 - [ ] **Step 4: Run the focused test**

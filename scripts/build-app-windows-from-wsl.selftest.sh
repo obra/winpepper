@@ -33,6 +33,8 @@
 #     and a set-but-empty WINPEPPER_APP_ROOT_OVERRIDE each exit 2 without
 #     running a build (the empty-override guard keeps a failed mktemp upstream
 #     from ever pointing the pre-clean at the real checkout).
+#   9 logging integrity: a PATH-shadowed failing tee with a 0-exit build must
+#     exit 1 with a logging-integrity message and never print BUILD OK.
 # Cases 1, 2 and 5 also assert run-dir uniqueness across two invocations.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -222,6 +224,21 @@ if [[ $rc_a -eq 2 && $rc_b -eq 2 && $rc_c -eq 2 && $rc_d -eq 2 && ! -e "$marker"
   ok 8 "'--attempts 0', '--attempts abc', trailing positional, and a set-but-empty root override each print usage/error and exit 2; no build ran"
 else
   bad 8 "rc_a=$rc_a rc_b=$rc_b rc_c=$rc_c rc_d=$rc_d(want 2 2 2 2) marker=$([[ -e $marker ]] && echo present || echo absent)"
+fi
+
+# --- Case 9: logging integrity — a failing tee must never certify a run -------
+r="$(make_root)"; roots+=("$r")
+mkdir -p "$r/fakebin"
+printf '#!/usr/bin/env bash\ncat > /dev/null\nexit 1\n' >"$r/fakebin/tee"
+chmod +x "$r/fakebin/tee"
+rc1=0
+PATH="$r/fakebin:$PATH" WINPEPPER_APP_BUILD_CMD="exit 0" WINPEPPER_APP_ROOT_OVERRIDE="$r" \
+  bash "$WRAPPER" --attempts 5 >"$r/out1" 2>&1 || rc1=$?
+if [[ $rc1 -eq 1 ]] && ! grep -q 'BUILD OK' "$r/out1" \
+  && grep -q 'tee .* failed' "$r/out1"; then
+  ok 9 "PATH-shadowed failing tee with a 0-exit build → exit 1, no BUILD OK, logging-integrity message (a build can never certify past a lost attempt log)"
+else
+  bad 9 "rc1=$rc1(want 1) | $(grep -m1 -E 'BUILD OK|tee|logging' "$r/out1" || true)"
 fi
 
 # --- Summary ------------------------------------------------------------------

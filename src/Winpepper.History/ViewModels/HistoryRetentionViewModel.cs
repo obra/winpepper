@@ -17,7 +17,7 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
     private double _maxEntries;
     private double _maxAgeDays;
     private bool _keepForever;
-    private string _diskUsageDisplay = "";
+    private string _diskUsageDisplay;
     private bool _lastCommitPersisted = true;
     private bool _lastApplyHadIndexFailure;
 
@@ -39,7 +39,8 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         _keepForever = policy.MaxAgeDays is null;
         _maxAgeDays = Math.Clamp(
             policy.MaxAgeDays ?? DefaultMaxAgeDays, 1, 36_500);
-        _diskUsageDisplay = FormatDiskUsage(_store.ComputeAudioDiskUsageBytes());
+        _diskUsageDisplay = "Saved audio: scanning…";
+        _ = InitializeUsageAsync();
     }
 
     public bool StoreAudioEnabled
@@ -155,6 +156,13 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         return result;
     }
 
+    private async Task InitializeUsageAsync()
+    {
+        var display = await Task.Run(
+            () => FormatDiskUsage(_store.ComputeAudioDiskUsageBytes()));
+        DiskUsageDisplay = display;
+    }
+
     private void PublishAndCommit(
         Func<AppSettings, AppSettings> mutator,
         Action<PublishedHistoryRetentionSlot, HistoryRetentionPolicy> publish)
@@ -182,7 +190,11 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         {
             LastCommitPersisted = await flush;
             var prune = await Task.Run(() => _store.Prune(committedPolicy));
-            LastApplyHadIndexFailure = prune.IndexSaveFailed;
+            // A recording kept after a failed delete also maps to the existing
+            // warning channel so the page never presents an over-limit apply as complete.
+            LastApplyHadIndexFailure = prune.IndexSaveFailed ||
+                                       prune.LoadFailed ||
+                                       prune.RetainedAfterFailedDelete > 0;
             var display = await Task.Run(
                 () => FormatDiskUsage(_store.ComputeAudioDiskUsageBytes()));
             DiskUsageDisplay = display;

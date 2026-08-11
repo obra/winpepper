@@ -169,19 +169,25 @@ public sealed class HistoryStore
     {
         lock (_gate)
         {
-            if (!TryLoadStrictUnlocked(out var index)) return new HistoryPruneResult();
+            if (!TryLoadStrictUnlocked(out var index))
+                return new HistoryPruneResult { LoadFailed = true };
 
             var applied = ApplyPolicy(index.Entries, policyOverride ?? _policyProvider());
             try
             {
                 Save(new HistoryIndex { Entries = applied.Entries });
-                return new HistoryPruneResult { DroppedCount = applied.DroppedCount };
+                return new HistoryPruneResult
+                {
+                    DroppedCount = applied.DroppedCount,
+                    RetainedAfterFailedDelete = applied.RetainedAfterFailedDelete,
+                };
             }
             catch
             {
                 return new HistoryPruneResult
                 {
                     DroppedCount = applied.DroppedCount,
+                    RetainedAfterFailedDelete = applied.RetainedAfterFailedDelete,
                     IndexSaveFailed = true,
                 };
             }
@@ -352,15 +358,21 @@ public sealed class HistoryStore
         candidates.AddRange(fresh.Skip(maxEntries));
 
         var droppedCount = 0;
+        var retainedAfterFailedDelete = 0;
         foreach (var candidate in candidates)
         {
             if (TryDeleteWav(candidate.WavRelativePath)) droppedCount++;
-            else keep.Add(candidate);
+            else
+            {
+                keep.Add(candidate);
+                retainedAfterFailedDelete++;
+            }
         }
 
         return new AppliedPolicy(
             keep.OrderByDescending(e => e.CreatedAtUtc).ToList(),
-            droppedCount);
+            droppedCount,
+            retainedAfterFailedDelete);
     }
 
     private void Save(HistoryIndex index)
@@ -481,5 +493,8 @@ public sealed class HistoryStore
         ? StringComparison.OrdinalIgnoreCase
         : StringComparison.Ordinal;
 
-    private sealed record AppliedPolicy(List<HistoryEntry> Entries, int DroppedCount);
+    private sealed record AppliedPolicy(
+        List<HistoryEntry> Entries,
+        int DroppedCount,
+        int RetainedAfterFailedDelete);
 }

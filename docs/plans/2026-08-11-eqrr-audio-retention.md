@@ -1,3 +1,18 @@
+> **Addendum — execution amendments (2026-08-11, recorded for doc/code parity after review):**
+>
+> The plan below tells the story faithfully but evolved heavily under review. Where
+> intermediate text disagrees with the final code, THE CODE WINS; key final-shape deltas:
+> (1) `PublishedHistoryRetentionSlot` exposes component-wise `PublishAudio`/`PublishPolicy`
+> + atomic `GetSnapshot()` — no caller ever republishes a component it didn't change;
+> (2) `HistoryRetentionViewModel(store, writer, slot)` is 3-arg and slot-sourced;
+> (3) `HistoryPruneResult` carries `DroppedCount, IndexSaveFailed, LoadFailed,
+> RetainedAfterFailedDelete` so a privacy action never reports silent success;
+> (4) disk-usage text populates asynchronously after VM construction (no UI-thread
+> recursive enumeration); (5) the Windows gate's single-script `GATE: GREEN` was not
+> achievable intact in this session (WSL↔Windows interop outage mid-run) — every gate
+> component instead passed separately on the Windows host at final HEAD (receipt:
+> `.worktrees/.the-usual-logs/eqrr-audio-retention/reports/verification-receipt.md`).
+
 # User-Configurable Audio History Retention Implementation Plan
 
 > **For agentic workers:** Execute this plan task by task with a fresh
@@ -267,7 +282,7 @@
   - `Task<bool> ISettingsWriter.TryQueueAndFlushAsync(Func<AppSettings, AppSettings> mutator)` (default member)
   - `public HistoryPruneResult HistoryStore.Prune(HistoryRetentionPolicy? policyOverride = null)`
   - `public sealed class HistoryRetentionViewModel : INotifyPropertyChanged`
-    - ctor `(AppSettings initial, HistoryStore store, ISettingsWriter writer, PublishedHistoryRetentionSlot slot)`
+    - ctor `(HistoryStore store, ISettingsWriter writer, PublishedHistoryRetentionSlot slot)` — **amended after whole-branch review:** initial state comes atomically from the slot (`slot.GetSnapshot()`), NOT from an `AppSettings` snapshot (a stale disk snapshot could otherwise be republished over the runtime gate after a failed save)
     - `bool StoreAudioEnabled`, `double MaxEntries`, `double MaxAgeDays`, `bool KeepForever` (setters publish to the slot synchronously, then kick off the ordered, serialized D8/D11/D13 commit chain)
     - `string DiskUsageDisplay` (populated in ctor + refreshed after each apply), `bool LastCommitPersisted`, `bool LastApplyHadIndexFailure` (read-only, notified)
     - `event EventHandler? RetentionApplied`
@@ -344,7 +359,7 @@
 - Modify: `src/Winpepper.App/Views/HistoryPage.xaml.cs` (build VM, wire events, confirm dialog, subscribe `RetentionApplied`, refresh list)
 
 **Interfaces:**
-- Consumes: `HistoryRetentionViewModel` incl. `RetentionApplied` + `LastCommitPersisted` + slot-fed ctor (Task 3), `App.Shell.HistoryServices.Store`, `App.Shell.HistoryServices.RetentionSlot`, `App.Shell.SettingsStore.Load()` (freshest snapshot for VM init), `App.Shell.SettingsWriter`, existing card style from `RecordingPage.xaml` (`CardBackgroundFillColorDefaultBrush` borders, `ToggleSwitch`, caption TextBlocks), `ContentDialog` with `XamlRoot`.
+- Consumes: `HistoryRetentionViewModel` incl. `RetentionApplied` + `LastCommitPersisted` + slot-fed ctor (Task 3), `App.Shell.HistoryServices.Store`, `App.Shell.HistoryServices.RetentionSlot`, `App.Shell.SettingsWriter`, existing card style from `RecordingPage.xaml` (`CardBackgroundFillColorDefaultBrush` borders, `ToggleSwitch`, caption TextBlocks), `ContentDialog` with `XamlRoot`. (Amended: the page no longer reads `App.Shell.SettingsStore.Load()` for VM init — the slot carries runtime truth.)
 
 **Test cases:**
 - Windows gate compiles the new XAML and runs all test projects (authoritative check).
@@ -359,7 +374,7 @@
 
 - [ ] **Step 3: Add the minimal production implementation**
 
-  XAML: wrap the existing `Grid` content in a `ScrollViewer`; keep title/subtitle rows; insert a new `Auto` grid row before the list row; set the ListView's row to `Auto` and give the ListView `MaxHeight="480"`. Add one `Border` card containing: `ToggleSwitch x:Name="StoreAudioToggle" Header="Save audio recordings of your dictations"`, a caption TextBlock stating "When off, Winpepper keeps transcripts and timings in history but saves no audio. Dictations dismissed as silent are not archived — without audio there is nothing to recover — and Lab replay/re-transcribe needs audio.", a NumberBox `x:Name="MaxEntriesBox"` (`Minimum=1`, `Maximum=10000`) with header "Keep at most this many dictations", a NumberBox `x:Name="MaxAgeBox"` (`Minimum=1`, `Maximum=36500`) with header "Delete dictations older than (days)", a CheckBox `x:Name="KeepForeverCheck" Content="Keep forever — never delete by age (for building an eval corpus)"`, a TextBlock `x:Name="DiskUsageText"`, and a Button `x:Name="DeleteAllAudioButton" Content="Delete all saved audio now"`. Code-behind: in `OnNavigatedTo` build `new HistoryRetentionViewModel(App.Shell.SettingsStore.Load(), services.Store, App.Shell.SettingsWriter, services.RetentionSlot)`, initialize control state from it INCLUDING `DiskUsageText.Text = vm.DiskUsageDisplay` (populated by the VM ctor), wire `Toggled`/`ValueChanged` (NaN-guarded)/`Checked`/`Unchecked` to the VM setters, keep `MaxAgeBox.IsEnabled = !vm.KeepForever` synced from both the checkbox handler and the VM, subscribe `vm.RetentionApplied += (_, _) => { ViewModel.Refresh(); DiskUsageText.Text = vm.DiskUsageDisplay; };` (and surface `vm.LastCommitPersisted == false` as "Setting could not be saved right now; it will be retried." plus `vm.LastApplyHadIndexFailure` as "The history index could not be updated; retry to finish applying the limit." in a small inline info text). Delete button shows a `ContentDialog` ("Delete all saved audio? Recordings are deleted; transcripts are kept. This cannot be undone.", Primary="Delete", Close="Cancel") before `var r = await vm.DeleteAllAudioAsync();`, then shows the truthful result from the structured counts ("N recordings deleted." +, when `r.FailedCount > 0`, " M could not be deleted (file in use) — press again to retry." +, when `r.EnumerationFailed`, " Part of the history folder could not be scanned; the result above is incomplete." +, when `r.IndexSaveFailed`, " The history index could not be updated; your entry list may still show audio paths until the next cleanup.").
+  XAML: wrap the existing `Grid` content in a `ScrollViewer`; keep title/subtitle rows; insert a new `Auto` grid row before the list row; set the ListView's row to `Auto` and give the ListView `MaxHeight="480"`. Add one `Border` card containing: `ToggleSwitch x:Name="StoreAudioToggle" Header="Save audio recordings of your dictations"`, a caption TextBlock stating "When off, Winpepper keeps transcripts and timings in history but saves no audio. Dictations dismissed as silent are not archived — without audio there is nothing to recover — and Lab replay/re-transcribe needs audio.", a NumberBox `x:Name="MaxEntriesBox"` (`Minimum=1`, `Maximum=10000`) with header "Keep at most this many dictations", a NumberBox `x:Name="MaxAgeBox"` (`Minimum=1`, `Maximum=36500`) with header "Delete dictations older than (days)", a CheckBox `x:Name="KeepForeverCheck" Content="Keep forever — never delete by age (for building an eval corpus)"`, a TextBlock `x:Name="DiskUsageText"`, and a Button `x:Name="DeleteAllAudioButton" Content="Delete all saved audio now"`. Code-behind: in `OnNavigatedTo` build `new HistoryRetentionViewModel(services.Store, App.Shell.SettingsWriter, services.RetentionSlot) /* amended after whole-branch review: ctor sources state from the slot, not disk */`, initialize control state from it INCLUDING `DiskUsageText.Text = vm.DiskUsageDisplay` (the ctor starts async usage population; text updates when it lands), wire `Toggled`/`ValueChanged` (NaN-guarded)/`Checked`/`Unchecked` to the VM setters, keep `MaxAgeBox.IsEnabled = !vm.KeepForever` synced from both the checkbox handler and the VM, subscribe `vm.RetentionApplied += (_, _) => { ViewModel.Refresh(); DiskUsageText.Text = vm.DiskUsageDisplay; };` (and surface `vm.LastCommitPersisted == false` as "Setting could not be saved right now; it will be retried." plus `vm.LastApplyHadIndexFailure` as "The history index could not be updated; retry to finish applying the limit." in a small inline info text). Delete button shows a `ContentDialog` ("Delete all saved audio? Recordings are deleted; transcripts are kept. This cannot be undone.", Primary="Delete", Close="Cancel") before `var r = await vm.DeleteAllAudioAsync();`, then shows the truthful result from the structured counts ("N recordings deleted." +, when `r.FailedCount > 0`, " M could not be deleted (file in use) — press again to retry." +, when `r.EnumerationFailed`, " Part of the history folder could not be scanned; the result above is incomplete." +, when `r.IndexSaveFailed`, " The history index could not be updated; your entry list may still show audio paths until the next cleanup.").
 
 - [ ] **Step 4: Run the Windows-side compile+test verification**
 

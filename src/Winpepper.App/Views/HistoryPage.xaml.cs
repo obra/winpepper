@@ -1,4 +1,5 @@
 #if WINDOWS
+using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Navigation;
@@ -29,13 +30,17 @@ public sealed partial class HistoryPage : Page
         ViewModel.Refresh();
 
         if (_retentionViewModel is not null)
+        {
             _retentionViewModel.RetentionApplied -= OnRetentionApplied;
+            _retentionViewModel.PropertyChanged -= OnRetentionPropertyChanged;
+        }
 
         var retentionViewModel = new HistoryRetentionViewModel(
             services.Store,
             shell.SettingsWriter,
             services.RetentionSlot);
         _retentionViewModel = retentionViewModel;
+        retentionViewModel.PropertyChanged += OnRetentionPropertyChanged;
 
         _updatingRetentionControls = true;
         try
@@ -59,7 +64,10 @@ public sealed partial class HistoryPage : Page
     protected override void OnNavigatedFrom(NavigationEventArgs e)
     {
         if (_retentionViewModel is not null)
+        {
             _retentionViewModel.RetentionApplied -= OnRetentionApplied;
+            _retentionViewModel.PropertyChanged -= OnRetentionPropertyChanged;
+        }
 
         base.OnNavigatedFrom(e);
     }
@@ -113,6 +121,14 @@ public sealed partial class HistoryPage : Page
         }
 
         RetentionStatusText.Text = status;
+    }
+
+    private void OnRetentionPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(HistoryRetentionViewModel.DiskUsageDisplay) &&
+            sender is HistoryRetentionViewModel retentionViewModel &&
+            ReferenceEquals(retentionViewModel, _retentionViewModel))
+            DiskUsageText.Text = retentionViewModel.DiskUsageDisplay;
     }
 
     private async void OnDeleteAllAudio(object sender, RoutedEventArgs e)

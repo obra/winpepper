@@ -342,7 +342,7 @@ public class HistoryStoreTests : IDisposable
 
         var result = store.Prune();
 
-        result.ShouldBe(new HistoryPruneResult());
+        result.ShouldBe(new HistoryPruneResult { LoadFailed = true });
         File.ReadAllText(indexPath).ShouldBe(corrupt);
     }
 
@@ -358,6 +358,7 @@ public class HistoryStoreTests : IDisposable
 
         result.DroppedCount.ShouldBe(0);
         result.IndexSaveFailed.ShouldBeFalse();
+        result.LoadFailed.ShouldBeTrue();
         File.ReadAllBytes(indexPath).ShouldBe(originalBytes);
     }
 
@@ -371,7 +372,7 @@ public class HistoryStoreTests : IDisposable
 
         var result = store.Prune();
 
-        result.ShouldBe(new HistoryPruneResult());
+        result.ShouldBe(new HistoryPruneResult { LoadFailed = true });
         File.ReadAllBytes(indexPath).ShouldBe(originalBytes);
     }
 
@@ -393,7 +394,7 @@ public class HistoryStoreTests : IDisposable
 
             var result = store.Prune();
 
-            result.ShouldBe(new HistoryPruneResult());
+            result.ShouldBe(new HistoryPruneResult { LoadFailed = true });
         }
         finally
         {
@@ -433,6 +434,67 @@ public class HistoryStoreTests : IDisposable
         result.DroppedCount.ShouldBe(3);
         result.IndexSaveFailed.ShouldBeTrue();
         File.ReadAllText(indexPath).ShouldBe(originalIndex);
+    }
+
+    [Fact]
+    public void Prune_ResistingWav_IsReportedKeptAndRetriedTruthfully()
+    {
+        var policy = new HistoryRetentionPolicy { MaxEntries = 3, MaxAgeDays = null };
+        var store = new HistoryStore(_root, () => policy);
+        var resistingRel = "prune-resisting/blocked.wav";
+        var resistingPath = CreateWav(resistingRel, "blocked");
+        store.Append(new HistoryEntry
+        {
+            Id = "oldest",
+            CreatedAtUtc = DateTime.UtcNow.AddMinutes(-2),
+            WavRelativePath = resistingRel,
+        });
+        store.Append(new HistoryEntry
+        {
+            Id = "middle",
+            CreatedAtUtc = DateTime.UtcNow.AddMinutes(-1),
+        });
+        store.Append(new HistoryEntry { Id = "newest", CreatedAtUtc = DateTime.UtcNow });
+
+        var resistingDirectory = Path.GetDirectoryName(resistingPath)!;
+        var probePath = Path.Combine(resistingDirectory, "probe.tmp");
+        File.WriteAllText(probePath, "probe");
+        Assert.SkipUnless(TryGetUnixMode(resistingDirectory, out var originalDirectoryMode),
+            "Unix permission controls are unavailable on this platform.");
+        var originalFileMode = File.GetUnixFileMode(resistingPath);
+        HistoryPruneResult? first = null;
+        policy = policy with { MaxEntries = 2 };
+
+        try
+        {
+            File.SetUnixFileMode(resistingPath, UnixFileMode.UserRead);
+            File.SetUnixFileMode(resistingDirectory,
+                UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            Assert.SkipUnless(!TryDeleteExistingFile(probePath),
+                "The current user can still delete files from a read-only directory.");
+
+            first = store.Prune();
+        }
+        finally
+        {
+            File.SetUnixFileMode(resistingDirectory, originalDirectoryMode);
+            if (File.Exists(resistingPath)) File.SetUnixFileMode(resistingPath, originalFileMode);
+        }
+
+        first.ShouldNotBeNull();
+        first.DroppedCount.ShouldBe(0);
+        first.RetainedAfterFailedDelete.ShouldBe(1);
+        first.IndexSaveFailed.ShouldBeFalse();
+        store.Load().Entries.Select(e => e.Id).ShouldBe(["newest", "middle", "oldest"]);
+        File.Exists(resistingPath).ShouldBeTrue();
+
+        var second = store.Prune();
+
+        second.DroppedCount.ShouldBe(1);
+        second.RetainedAfterFailedDelete.ShouldBe(0);
+        second.IndexSaveFailed.ShouldBeFalse();
+        store.Load().Entries.Select(e => e.Id).ShouldBe(["newest", "middle"]);
+        File.Exists(resistingPath).ShouldBeFalse();
     }
 
     [Fact]

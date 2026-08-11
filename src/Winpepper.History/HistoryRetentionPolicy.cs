@@ -38,5 +38,7 @@ public sealed record HistoryAudioCleanupResult
 public sealed record HistoryPruneResult
 {
     public int DroppedCount { get; init; }
+    public int RetainedAfterFailedDelete { get; init; }
     public bool IndexSaveFailed { get; init; }
+    public bool LoadFailed { get; init; }
 }

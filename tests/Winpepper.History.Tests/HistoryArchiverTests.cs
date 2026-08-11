@@ -217,7 +217,10 @@ public class HistoryArchiverTests : IDisposable
 
         entry.ShouldNotBeNull();
         var wavFile = Directory.EnumerateFiles(_root, "*.wav", SearchOption.AllDirectories).ShouldHaveSingleItem();
-        wavFile.ShouldBe(Path.Combine(_root, entry!.WavRelativePath));
+        // GetFullPath normalizes separators: WavRelativePath uses '/' while
+        // EnumerateFiles yields platform separators ('\\' on Windows, where raw
+        // string equality fails on the mixed shape) — the gate caught exactly that.
+        Path.GetFullPath(wavFile).ShouldBe(Path.GetFullPath(Path.Combine(_root, entry!.WavRelativePath)));
         store.Load().Entries.ShouldHaveSingleItem().Id.ShouldBe(entry!.Id);
     }
 }

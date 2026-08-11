@@ -66,9 +66,20 @@
 # timeout); 2 = usage or environment error.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ROOT="${WINPEPPER_APP_ROOT_OVERRIDE:-$HERE}"
 
 usage() { echo "Usage: scripts/build-app-windows-from-wsl.sh [--attempts N]" >&2; }
+# A set root override must be a non-empty, existing directory; a set-but-empty
+# spelling must never silently fall back to the real checkout (review: a failed
+# mktemp upstream once made the override empty, which would have pointed the
+# pre-clean at the real tree).
+if [[ -n "${WINPEPPER_APP_ROOT_OVERRIDE+x}" ]]; then
+  if [[ -z "${WINPEPPER_APP_ROOT_OVERRIDE}" || ! -d "${WINPEPPER_APP_ROOT_OVERRIDE}" ]]; then
+    echo "build-app-windows-from-wsl: WINPEPPER_APP_ROOT_OVERRIDE is empty or not a directory: '${WINPEPPER_APP_ROOT_OVERRIDE}'" >&2
+    usage
+    exit 2
+  fi
+fi
+ROOT="${WINPEPPER_APP_ROOT_OVERRIDE:-$HERE}"
 
 # --attempts parsing: a positive integer, and no trailing arguments. Plain
 # if/then (never `[[ ]] && { }`) so a failed test routes to usage instead of
@@ -145,8 +156,9 @@ kill_orphans() {
     # followed by a path separator (\ or /) — an unbounded substring would also
     # match a prefix-named sibling checkout (e.g. tag ...\gzcc vs ...\gzcc2) ...
     if [[ "$cmd" != *"$tag"\\* && "$cmd" != *"$tag"/* ]]; then continue; fi
-    # ... and never a worktree nested under it (<tag>\.worktrees\...).
-    [[ "$cmd" != *"$needle"* ]] || continue
+    # ... and never a worktree nested under it (<tag>\.worktrees\ or the
+    # forward-slash spelling — command lines may use either).
+    [[ "$cmd" != *"$needle"* && "$cmd" != *"$tag"/.worktrees/* ]] || continue
     echo "build-app-windows-from-wsl: killing orphaned dotnet.exe PID $pid"
     if [[ -n "${WINPEPPER_APP_ORPHAN_KILL_CMD:-}" ]]; then
       bash -c "$WINPEPPER_APP_ORPHAN_KILL_CMD" kill "$pid" || true

@@ -24,12 +24,14 @@
 #     WINPEPPER_APP_BUILD_TIMEOUT_S=2 → exit 124 path; the orphan filter must
 #     kill only the row whose CommandLine carries this tree's full tag followed
 #     by a path separator (rejecting a different checkout under the parent's
-#     .worktrees\, a nested <tag>\.worktrees\ row, and a prefix-named sibling
-#     <tag>2\...).
+#     .worktrees\, a nested <tag>\.worktrees\ row, a prefix-named sibling
+#     <tag>2\..., and a forward-slash nested <tag>/.worktrees/...).
 #   7 pre-clean always runs against the effective root: seeded
 #     src/Seed/{bin,obj} sentinels must be gone before the fake build runs.
-#   8 usage validation: "--attempts 0", "--attempts abc", and a trailing
-#     positional argument each print usage and exit 2 without running a build.
+#   8 usage validation: "--attempts 0", "--attempts abc", a trailing positional,
+#     and a set-but-empty WINPEPPER_APP_ROOT_OVERRIDE each exit 2 without
+#     running a build (the empty-override guard keeps a failed mktemp upstream
+#     from ever pointing the pre-clean at the real checkout).
 # Cases 1, 2 and 5 also assert run-dir uniqueness across two invocations.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,10 +43,19 @@ ok()  { printf 'case %s: PASS — %s\n' "$1" "$2"; }
 bad() { printf 'case %s: FAIL — %s\n' "$1" "$2" >&2; failures=$((failures + 1)); }
 
 make_root() {
+  # Fail hard and loudly: an empty result must never flow into
+  # WINPEPPER_APP_ROOT_OVERRIDE (the wrapper also defends itself, case-hardened).
   local r
-  r="$(mktemp -d /tmp/winpepper-app-build-selftest.XXXXXX)"
-  mkdir -p "$r/src/Winpepper.App"
-  printf '<Project Sdk="Microsoft.NET.Sdk" />\n' >"$r/src/Winpepper.App/Winpepper.App.csproj"
+  if ! r="$(mktemp -d /tmp/winpepper-app-build-selftest.XXXXXX)"; then
+    echo "SELFTEST SETUP FAILURE: mktemp -d failed" >&2
+    exit 1
+  fi
+  if [[ -z "$r" || "$r" != /tmp/* ]]; then
+    echo "SELFTEST SETUP FAILURE: suspicious root '$r'" >&2
+    exit 1
+  fi
+  mkdir -p "$r/src/Winpepper.App" || { echo "SELFTEST SETUP FAILURE: mkdir $r" >&2; exit 1; }
+  printf '<Project Sdk="Microsoft.NET.Sdk" />\n' >"$r/src/Winpepper.App/Winpepper.App.csproj" || { echo "SELFTEST SETUP FAILURE: seed csproj" >&2; exit 1; }
   printf '%s\n' "$r"
 }
 
@@ -145,11 +156,12 @@ r="$(make_root)"; roots+=("$r")
 tag="$(wslpath -w "$r" 2>/dev/null || printf '%s' "$r")"
 tag="${tag%$'\r'}"
 parent="${tag%\\*}"
-printf '%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' \
+printf '%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' \
   1111 "dotnet build ${tag}\\src\\Winpepper.App\\Winpepper.App.csproj -c Release" \
   2222 "dotnet build ${parent}\\.worktrees\\other-agent\\src\\Other\\Other.csproj" \
   3333 "dotnet build ${tag}\\.worktrees\\nested-agent\\src\\Nested\\Nested.csproj" \
   4444 "dotnet build ${tag}2\\src\\PrefixSibling\\PrefixSibling.csproj" \
+  5555 "dotnet build ${tag}/.worktrees/forward-nested/src/Nested/Nested.csproj" \
   >"$r/procs.tsv"
 rc1=0
 WINPEPPER_APP_BUILD_CMD="sleep 30" WINPEPPER_APP_ROOT_OVERRIDE="$r" \
@@ -197,12 +209,16 @@ WINPEPPER_APP_BUILD_CMD="$fake" WINPEPPER_APP_ROOT_OVERRIDE="$r" \
 rc_c=0
 WINPEPPER_APP_BUILD_CMD="$fake" WINPEPPER_APP_ROOT_OVERRIDE="$r" \
   bash "$WRAPPER" --attempts 3 extra >"$r/out_c" 2>&1 || rc_c=$?
+rc_d=0
+WINPEPPER_APP_BUILD_CMD="$fake" WINPEPPER_APP_ROOT_OVERRIDE="" \
+  bash "$WRAPPER" >"$r/out_d" 2>&1 || rc_d=$?
 usage='Usage: scripts/build-app-windows-from-wsl.sh \[--attempts N\]'
-if [[ $rc_a -eq 2 && $rc_b -eq 2 && $rc_c -eq 2 && ! -e "$marker" ]] \
-  && grep -q "$usage" "$r/out_a" && grep -q "$usage" "$r/out_b" && grep -q "$usage" "$r/out_c"; then
-  ok 8 "'--attempts 0', '--attempts abc', and trailing positional each print usage and exit 2; no build ran"
+if [[ $rc_a -eq 2 && $rc_b -eq 2 && $rc_c -eq 2 && $rc_d -eq 2 && ! -e "$marker" ]] \
+  && grep -q "$usage" "$r/out_a" && grep -q "$usage" "$r/out_b" && grep -q "$usage" "$r/out_c" \
+  && grep -q 'WINPEPPER_APP_ROOT_OVERRIDE is empty or not a directory' "$r/out_d"; then
+  ok 8 "'--attempts 0', '--attempts abc', trailing positional, and a set-but-empty root override each print usage/error and exit 2; no build ran"
 else
-  bad 8 "rc_a=$rc_a rc_b=$rc_b rc_c=$rc_c(want 2 2 2) marker=$([[ -e $marker ]] && echo present || echo absent)"
+  bad 8 "rc_a=$rc_a rc_b=$rc_b rc_c=$rc_c rc_d=$rc_d(want 2 2 2 2) marker=$([[ -e $marker ]] && echo present || echo absent)"
 fi
 
 # --- Summary ------------------------------------------------------------------

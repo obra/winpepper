@@ -151,6 +151,13 @@ public class WindowContextPrefetchAsrContentionTests
             layout.RuntimeDir(ModelsRoot), layout.GgufPath(ModelsRoot), layout.Name,
             log: msg => _log.WriteLine($"[worker] {msg}"));
 
+        // Warmup arm: the FIRST session on a fresh worker pays the worker-side model
+        // load + first BeginStream (observed on the gate: a single 1741 ms cold call
+        // landing in whichever measured arm ran first). Pay it here so both measured
+        // arms run against a warm worker — the same reason the app pre-warms. Its
+        // numbers are discarded.
+        _ = await RunArmAsync(engine, audio, hwnd, fireBursts: false);
+
         // Control arm: identical stream with NO burst.
         var control = await RunArmAsync(engine, audio, hwnd, fireBursts: false);
         // Burst arm: three real prefetch bursts overlap the live stream (the exact

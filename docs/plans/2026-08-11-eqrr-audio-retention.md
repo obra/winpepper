@@ -9,10 +9,10 @@
 > RetainedAfterFailedDelete` so a privacy action never reports silent success;
 > (4) disk-usage text populates asynchronously after VM construction (no UI-thread
 > enumeration). Verification: the hardened `scripts/windows-gate.sh` (single-call start
-> per build/run, 120×5s polling) completed one contiguous pass — exit 0, `GATE: GREEN` —
-> at each post-review fix HEAD: `c388725` (2773/2773) and final HEAD `aaaa8e5` (2776/2776,
-> every build 0 Errors). Durable verdict logs: `artifacts/windows-gate/gate-final-c388725.log`
-> and `artifacts/windows-gate/gate-final-aaaa8e5.log`; receipt:
+> per build/run, 120×5s polling) completed a contiguous, exit-0 `GATE: GREEN` pass at
+> every post-review fix HEAD — `c388725` (2773/2773), `aaaa8e5` (2776/2776), and later
+> fix HEADs (see receipt). Durable verdict logs: `artifacts/windows-gate/gate-final-*.log`;
+> running receipt of record:
 > `.worktrees/.the-usual-logs/eqrr-audio-retention/reports/verification-receipt.md`.
 
 # User-Configurable Audio History Retention Implementation Plan

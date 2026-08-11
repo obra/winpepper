@@ -142,6 +142,7 @@ public sealed class HistoryStore
     private static HistoryIndex DeserializeAndSort(string json)
     {
         var loaded = JsonSerializer.Deserialize<HistoryIndex>(json, JsonOptions) ?? new HistoryIndex();
+        if (loaded.Entries is null) throw new JsonException("index.json has null entries");
         return loaded with
         {
             Entries = loaded.Entries.OrderByDescending(e => e.CreatedAtUtc).ToList(),
@@ -195,25 +196,26 @@ public sealed class HistoryStore
             var failedCount = 0;
             var enumerationFailed = false;
 
-            if (Directory.Exists(_root))
+            try
             {
-                try
+                foreach (var wavPath in Directory.EnumerateFiles(
+                             _root, "*.wav", WavEnumerationOptions))
                 {
-                    foreach (var wavPath in Directory.EnumerateFiles(
-                                 _root, "*.wav", WavEnumerationOptions))
-                    {
-                        if (TryDeleteContainedFile(wavPath, pathIsAbsolute: true)) deletedCount++;
-                        else failedCount++;
-                    }
+                    if (TryDeleteContainedFile(wavPath, pathIsAbsolute: true)) deletedCount++;
+                    else failedCount++;
                 }
-                catch (IOException)
-                {
-                    enumerationFailed = true;
-                }
-                catch (UnauthorizedAccessException)
-                {
-                    enumerationFailed = true;
-                }
+            }
+            catch (DirectoryNotFoundException)
+            {
+                // The root was deleted wholesale after construction, so no audio remains.
+            }
+            catch (IOException)
+            {
+                enumerationFailed = true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                enumerationFailed = true;
             }
 
             if (!TryLoadStrictUnlocked(out var index))

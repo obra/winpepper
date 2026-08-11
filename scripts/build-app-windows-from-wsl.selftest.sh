@@ -35,6 +35,9 @@
 #     from ever pointing the pre-clean at the real checkout).
 #   9 logging integrity: a PATH-shadowed failing tee with a 0-exit build must
 #     exit 1 with a logging-integrity message and never print BUILD OK.
+#  10 cleanup path is timeout-capped: build times out (124) and the orphan LIST
+#     command hangs (`sleep 120`, capped at 60 s by the wrapper) — the wrapper
+#     must still reach its exit 1 TIMEOUT result rather than hang forever.
 # Cases 1, 2 and 5 also assert run-dir uniqueness across two invocations.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -241,11 +244,27 @@ else
   bad 9 "rc1=$rc1(want 1) | $(grep -m1 -E 'BUILD OK|tee|logging' "$r/out1" || true)"
 fi
 
+# --- Case 10: cleanup path is timeout-capped (no hang on stalled interop) -----
+r="$(make_root)"; roots+=("$r")
+start=$SECONDS
+rc1=0
+WINPEPPER_APP_BUILD_CMD="sleep 30" WINPEPPER_APP_ROOT_OVERRIDE="$r" \
+  WINPEPPER_APP_BUILD_TIMEOUT_S=2 \
+  WINPEPPER_APP_ORPHAN_LIST_CMD="sleep 120" \
+  bash "$WRAPPER" --attempts 5 >"$r/out1" 2>&1 || rc1=$?
+elapsed=$((SECONDS - start))
+if [[ $rc1 -eq 1 && $elapsed -lt 100 ]] \
+  && grep -q 'TIMEOUT' "$r/out1"; then
+  ok 10 "build 124 + orphan list hanging (sleep 120 capped at 60 s) → wrapper reached exit 1 TIMEOUT in ${elapsed}s (<100 s) instead of hanging"
+else
+  bad 10 "rc1=$rc1(want 1) elapsed=${elapsed}s(want <100) | $(grep -m1 -E 'TIMEOUT|No such file' "$r/out1" || true)"
+fi
+
 # --- Summary ------------------------------------------------------------------
 if [[ $failures -eq 0 ]]; then
   rm -rf "${roots[@]}"
   echo "SELFTEST: PASS"
   exit 0
 fi
-echo "SELFTEST: FAIL — $failures of 8 cases failed (disposable roots kept: ${roots[*]})" >&2
+echo "SELFTEST: FAIL — $failures of 10 cases failed (disposable roots kept: ${roots[*]})" >&2
 exit 1

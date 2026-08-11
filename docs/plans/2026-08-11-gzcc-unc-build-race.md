@@ -188,6 +188,10 @@ with a fake `src/Winpepper.App/Winpepper.App.csproj` placeholder):
    never print BUILD OK (a logging failure must not certify a run whose evidence log is
    missing/truncated; the production branch treats a tee failure as a non-retried immediate
    stop).
+10. *cleanup timeout caps (added in delta round 2):* build times out (124) while the orphan-list
+    command hangs (`sleep 120`; the wrapper caps the list at 60 s and each kill at 30 s, seam
+    path included) → the wrapper must still reach its exit-1 TIMEOUT result in bounded time
+    rather than hang on the same stalled interop that wedged the build.
 Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `run-*` dirs).
 
 **Files:**
@@ -215,7 +219,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
 - [ ] **Step 1: Write the failing behavioral test**
 
-  Create `scripts/build-app-windows-from-wsl.selftest.sh` per the eight cases above (the fake
+  Create `scripts/build-app-windows-from-wsl.selftest.sh` per the ten cases above (the fake
   build command is a small inline bash snippet passed via the seam env var; the wrapper captures
   its stdout/stderr to the attempt log exactly as it captures the real build, so no path handoff
   is needed).
@@ -253,7 +257,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
   Run: `bash -n scripts/build-app-windows-from-wsl.sh scripts/build-app-windows-from-wsl.selftest.sh && bash scripts/build-app-windows-from-wsl.selftest.sh`
 
-  Expected: syntax clean; `SELFTEST: PASS` (all eight cases green).
+  Expected: syntax clean; `SELFTEST: PASS` (all ten cases green).
 
 - [ ] **Step 5: Refactor while green**
 

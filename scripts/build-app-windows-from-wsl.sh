@@ -149,11 +149,13 @@ kill_orphans() {
   local tagN="${tag//\\//}"
   local needleN="$tagN/.worktrees/"
   local rows
+  # Each interop call is timeout-capped: if the WSL channel itself is what
+  # stalled, cleanup must not hang the documented exit-1 timeout result.
   if [[ -n "${WINPEPPER_APP_ORPHAN_LIST_CMD:-}" ]]; then
-    rows="$(bash -c "$WINPEPPER_APP_ORPHAN_LIST_CMD" || true)"
+    rows="$(timeout --foreground 60 bash -c "$WINPEPPER_APP_ORPHAN_LIST_CMD" || true)"
   else
     # shellcheck disable=SC2016 # the $() and backtick-t are PowerShell-side, not bash
-    rows="$("$PS" -NoProfile -Command 'Get-CimInstance Win32_Process -Filter "Name='"'"'dotnet.exe'"'"'" | ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }' 2>/dev/null || true)"
+    rows="$(timeout --foreground 60 "$PS" -NoProfile -Command 'Get-CimInstance Win32_Process -Filter "Name='"'"'dotnet.exe'"'"'" | ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }' 2>/dev/null || true)"
   fi
   local pid cmd cmdN
   while IFS=$'\t' read -r pid cmd; do
@@ -169,9 +171,9 @@ kill_orphans() {
     [[ "$cmdN" != *"$needleN"* ]] || continue
     echo "build-app-windows-from-wsl: killing orphaned dotnet.exe PID $pid"
     if [[ -n "${WINPEPPER_APP_ORPHAN_KILL_CMD:-}" ]]; then
-      bash -c "$WINPEPPER_APP_ORPHAN_KILL_CMD" kill "$pid" || true
+      timeout --foreground 30 bash -c "$WINPEPPER_APP_ORPHAN_KILL_CMD" kill "$pid" || true
     else
-      "$PS" -NoProfile -Command "Stop-Process -Id $pid -Force" >/dev/null 2>&1 || true
+      timeout --foreground 30 "$PS" -NoProfile -Command "Stop-Process -Id $pid -Force" >/dev/null 2>&1 || true
     fi
   done <<< "$rows"
 }

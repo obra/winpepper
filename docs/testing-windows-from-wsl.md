@@ -129,11 +129,11 @@ wrapper adds the bounded retry the gate does not have:
    -p:UseXamlCompilerExecutable=true`): the whole project graph is scheduled
    on one MSBuild node, so targets run in strict dependency order and no two
    tool processes (per-project `csc.exe` children, `XamlCompiler.exe`, the mt
-   shim) ever probe or write the share concurrently inside the measured lag
-   windows. Compiles still run as child processes, and `-m:1` implies no
-   timing guarantee — the residual handoff exposure is the retry layer's
-   job. Cost check: serialized clean builds take 210–318 s vs 167–234 s
-   parallel.
+   shim) ever hit the share concurrently — minimal 9P traffic contention,
+   which is the variable the reproduced transport fault tracks with. Compiles
+   still run as child processes, and `-m:1` implies no timing guarantee — it
+   is a contention reducer, and the residual tail is the retry layer's job.
+   Cost check: serialized clean builds take 210–318 s vs 167–234 s parallel.
 3. **Bounded retry** (default `--attempts 5`, the recorded worst-case
    transient chain) fires only on the observed transient signatures
    (`CS0006`, `WMC1006`, `unexpected network error`); any other failure

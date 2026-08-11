@@ -96,11 +96,12 @@ scripts/build-app-windows-from-wsl.sh [--attempts N]   # default N=5
 
 The wrapper prints its run-log directory
 (`artifacts/build-app-windows/run-<UTC-timestamp>-<pid>/`, one
-`attempt<N>.log` per attempt) at start and end. Exit 0 = `BUILD OK`; exit 1 =
-build failed (non-transient error, attempts exhausted, or timed out —
-timeouts are never retried); exit 2 = usage or environment error. Like the
-gate, it never installs the MSI, never launches or kills `Winpepper.exe`,
-and never writes `%LOCALAPPDATA%\winpepper`.
+`attempt<N>.log` per attempt) at start and end of every build attempt (a
+usage/environment exit 2 happens before any run directory exists). Exit 0 =
+`BUILD OK`; exit 1 = build failed (non-transient error, attempts exhausted,
+or timed out — timeouts are never retried). Like the gate, it never installs
+the MSI, never launches or kills `Winpepper.exe`, and never writes
+`%LOCALAPPDATA%\winpepper`.
 
 Why the wrapper exists: building the App over the `\\wsl.localhost` share is
 exposed to transient 9P filesystem races. Cross-process file-visibility lag
@@ -115,8 +116,9 @@ the same 9P coherence/transport class — every historically recorded CS0006
 trace also had the (since-fixed) cross-OS obj-mixing mechanism in play, so a
 fresh isolated CS0006 reproduction has never been observed.
 
-The three mitigations, byte-for-byte the gate's recipe
-(`scripts/windows-gate.sh` stays the canary for this build):
+The three mitigations — the build flags are byte-for-byte the gate's app-build
+recipe (`scripts/windows-gate.sh` stays the canary for this build), and the
+wrapper adds the bounded retry the gate does not have:
 
 1. **Always-on pre-clean** (`rm -rf src/*/bin src/*/obj`) removes leftover
    Linux-built intermediates — the deterministic cross-OS CS0006 covered in
@@ -143,9 +145,10 @@ Windows builds run on top of Linux-built `obj/` state. MSBuild's
 IncrementalClean reads the previous `*.FileListAbsolute.txt` (Linux-style
 paths), decides those outputs are orphans, and deletes them — which on a UNC
 cwd resolves to the very files the build just wrote. The fix is exactly what
-the script does: wipe `bin/`+`obj/` under `src/` and `tests/` whenever the
-previous build was made by the other OS. (`--no-clean` skips the wipe and is
-safe only for back-to-back Windows-side runs.)
+`test-windows-from-wsl.sh` does: wipe `bin/`+`obj/` under `src/` and `tests/`
+whenever the previous build was made by the other OS. (Its `--no-clean` skips
+the wipe and is safe only for back-to-back Windows-side runs; the app wrapper
+above always wipes and only under `src/`.)
 
 Consequence in the other direction: after a Windows-side run, the next
 **Linux** build should also start from clean `bin/`/`obj/` (or at least expect

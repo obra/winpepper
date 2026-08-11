@@ -60,6 +60,9 @@
 #                                  must print "<pid>\t<command line>" rows.
 #   WINPEPPER_APP_ORPHAN_KILL_CMD  replaces the powershell per-PID kill; run
 #                                  as bash -c "<cmd>" kill <pid> (pid = $1).
+#   WINPEPPER_APP_PRINT_BUILD_CMD  production path only: print the assembled
+#                                  -Command string and exit 0 (lets the
+#                                  self-test pin the preflight/guard text).
 #
 # Logs: every invocation gets a unique
 #   <root>/artifacts/build-app-windows/run-<UTC-YYYYMMDDTHHMMSSZ>-<pid>/
@@ -135,9 +138,20 @@ else
   # PowerShell single-quoted strings escape an apostrophe by doubling it.
   APP_PROJ_PS="${APP_PROJ//\'/\'\'}"
   # %q-quote the real invocation into a re-evaluatable command string so both
-  # the seam and the real path run through the same timeout wrapper.
+  # the seam and the real path run through the same timeout wrapper. The
+  # command string guards two false-BUILD-OK shapes (delta round 5): a missing
+  # Windows dotnet raises CommandNotFoundException, after which PowerShell
+  # CONTINUES to `exit $LASTEXITCODE`; that variable is only set by native
+  # programs, so an unset one converts to 0 — the wrapper must never see
+  # success when no build ran. The Get-Command preflight fails fast (exit 2),
+  # and the $null guard converts a missing native exit code to exit 1.
   BUILD_CMD="$(printf '%q ' "$PS" -NoProfile -ExecutionPolicy Bypass \
-    -Command "dotnet build '$APP_PROJ_PS' -c Release -m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true; exit \$LASTEXITCODE")"
+    -Command "if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { Write-Error 'build-app-windows-from-wsl: Windows dotnet not resolvable on the host PATH'; exit 2 }; dotnet build '$APP_PROJ_PS' -c Release -m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true; if (\$null -eq \$LASTEXITCODE) { exit 1 }; exit \$LASTEXITCODE")"
+  # Self-test inspection seam: print the assembled production command and exit.
+  if [[ -n "${WINPEPPER_APP_PRINT_BUILD_CMD:-}" ]]; then
+    printf '%s\n' "$BUILD_CMD"
+    exit 0
+  fi
 fi
 
 RUN_DIR="$ROOT/artifacts/build-app-windows/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -212,7 +226,7 @@ while true; do
     exit 0
   fi
   if [[ $rc -eq 124 ]]; then
-    echo "build-app-windows-from-wsl: attempt $attempt TIMEOUT after ${TIMEOUT_S}s — timeouts are not retried; running checkout-scoped orphan cleanup"
+    echo "build-app-windows-from-wsl: attempt $attempt TIMEOUT after ${TIMEOUT_S} (GNU timeout duration as configured) — timeouts are not retried; running checkout-scoped orphan cleanup"
     kill_orphans
     echo "build-app-windows-from-wsl: aborting after TIMEOUT (run log: $RUN_DIR)" >&2
     exit 1

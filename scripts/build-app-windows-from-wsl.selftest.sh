@@ -48,6 +48,12 @@
 #     (`sleep 120`, capped at 30 s by the wrapper) — the kill path must be
 #     reached (kill line printed for the fake PID) and the wrapper must still
 #     reach exit 1 TIMEOUT in bounded time.
+#  13 production command content (via WINPEPPER_APP_PRINT_BUILD_CMD): the
+#     assembled -Command must include the Get-Command dotnet preflight with
+#     exit 2, the `if ($null -eq $LASTEXITCODE) { exit 1 }` guard against a
+#     missing native exit code (CommandNotFoundException continues to `exit
+#     $LASTEXITCODE`, and an unset $LASTEXITCODE converts to 0 — a false BUILD
+#     OK), and the gate-identical build flags.
 # Cases 1, 2 and 5 also assert run-dir uniqueness across two invocations.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -313,11 +319,28 @@ else
   bad 12 "rc1=$rc1(want 1) elapsed=${elapsed}s(want <60) | $(grep -m1 -E 'TIMEOUT|killing|No such file' "$r/out1" || true)"
 fi
 
+# --- Case 13: production command carries the dotnet preflight + exit-code guard
+# (the assembled command is %q-escaped — every space appears as '\ ' — so strip
+# backslashes before matching the literal PowerShell text.)
+cmd="$(WINPEPPER_APP_PRINT_BUILD_CMD=1 bash "$WRAPPER")"
+cmdn="${cmd//\\/}"
+dollar='$'
+if grep -q 'Get-Command dotnet' <<<"$cmdn" \
+  && grep -q 'exit 2' <<<"$cmdn" \
+  && grep -qF "null -eq ${dollar}LASTEXITCODE" <<<"$cmdn" \
+  && grep -q 'exit 1' <<<"$cmdn" \
+  && grep -qF "exit ${dollar}LASTEXITCODE" <<<"$cmdn" \
+  && grep -q -- '-m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true' <<<"$cmdn"; then
+  ok 13 "assembled production -Command includes the Get-Command dotnet preflight (exit 2), the unset-\$LASTEXITCODE→exit-1 guard, and the gate-identical flags"
+else
+  bad 13 "assembled command missing preflight/guard/flags: $cmdn"
+fi
+
 # --- Summary ------------------------------------------------------------------
 if [[ $failures -eq 0 ]]; then
   rm -rf "${roots[@]}"
   echo "SELFTEST: PASS"
   exit 0
 fi
-echo "SELFTEST: FAIL — $failures of 12 cases failed (disposable roots kept: ${roots[*]})" >&2
+echo "SELFTEST: FAIL — $failures of 13 cases failed (disposable roots kept: ${roots[*]})" >&2
 exit 1

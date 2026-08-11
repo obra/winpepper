@@ -86,9 +86,10 @@ probe re-run with complete retained raw rows; see PROVENANCE.md there). Summary:
   csc.exe children, and the mt-unc-shim Exec cross 9P process boundaries no matter what; a
   bounded retry on transient signatures (`CS0006|WMC1006|unexpected network error`) matches the
   manual recovery users already perform ("retry the identical command").
-- **Reject** `-nr:false` (parallel node-reuse disable) alone: fresh processes show the same lag
-  (probe), so it neither removes the race nor reduces process fan-out; no observed failure had a
-  stale-node-cache signature.
+- **Reject** `-nr:false` (parallel node-reuse disable) alone: cold-host iterations with fresh
+  MSBuild nodes behaved identically to warm ones, and the one reproduced failure was a transport
+  write fault, not a stale-node-cache artifact — node-reuse disable neither explains the race nor
+  reduces process fan-out (it keeps maximal concurrent 9P traffic).
 - **Reject** "pre-build the library graph first": its protective effect equals `-m:1` with extra
   choreography and unchanged library-internal edges; strictly worse.
 
@@ -203,6 +204,12 @@ with a fake `src/Winpepper.App/Winpepper.App.csproj` placeholder):
     list returns one matching row promptly, and the kill seam hangs (`sleep 120`, capped at
     30 s) → the kill path is reached (kill line for the fake PID) and the wrapper still exits
     1 TIMEOUT in bounded time (together with case 10, both cleanup caps are exercised).
+13. *production command content (added in delta round 5, post-cap):* via the
+    `WINPEPPER_APP_PRINT_BUILD_CMD` inspection seam, the assembled production `-Command` must
+    carry the `Get-Command dotnet` preflight (`exit 2`), the `if ($null -eq $LASTEXITCODE) {
+    exit 1 }` guard (a missing Windows dotnet raises CommandNotFoundException, PowerShell
+    continues to `exit $LASTEXITCODE`, and an unset `$LASTEXITCODE` converts to exit 0 — a
+    false BUILD OK, premise reproduced live on the host), and the gate-identical flags.
 Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `run-*` dirs).
 
 **Files:**
@@ -230,7 +237,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
 - [x] **Step 1: Write the failing behavioral test**
 
-  Create `scripts/build-app-windows-from-wsl.selftest.sh` per the twelve cases above (the fake
+  Create `scripts/build-app-windows-from-wsl.selftest.sh` per the thirteen cases above (the fake
   build command is a small inline bash snippet passed via the seam env var; the wrapper captures
   its stdout/stderr to the attempt log exactly as it captures the real build, so no path handoff
   is needed).
@@ -268,7 +275,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
   Run: `bash -n scripts/build-app-windows-from-wsl.sh scripts/build-app-windows-from-wsl.selftest.sh && bash scripts/build-app-windows-from-wsl.selftest.sh`
 
-  Expected: syntax clean; `SELFTEST: PASS` (all twelve cases green).
+  Expected: syntax clean; `SELFTEST: PASS` (all thirteen cases green).
 
 - [x] **Step 5: Refactor while green**
 

@@ -31,6 +31,15 @@ public sealed class PublishedHistoryRetentionSlot
         }
     }
 
+    public (bool StoreAudio, HistoryRetentionPolicy Policy) GetSnapshot()
+    {
+        lock (_gate)
+        {
+            var s = _snapshot;
+            return (s.StoreAudio, s.Policy);
+        }
+    }
+
     public void Publish(bool storeAudio, HistoryRetentionPolicy policy)
     {
         ArgumentNullException.ThrowIfNull(policy);

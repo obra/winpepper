@@ -33,8 +33,8 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         _store = store;
         _writer = writer;
         _slot = slot;
-        _storeAudioEnabled = slot.StoreAudio;
-        var policy = slot.Policy;
+        var (storeAudio, policy) = slot.GetSnapshot();
+        _storeAudioEnabled = storeAudio;
         _maxEntries = Math.Clamp(policy.MaxEntries, 1, 10_000);
         _keepForever = policy.MaxAgeDays is null;
         _maxAgeDays = Math.Clamp(

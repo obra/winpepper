@@ -161,5 +161,12 @@ Other issues encountered / to watch for:
 - **Interop dead** (`dotnet.exe: cannot execute binary file`): WSL interop is
   disabled; check `/etc/wsl.conf` `[interop] enabled=true` and restart the
   distro. The script fails loudly on this.
+- **Transient interop outage** (attempt logs contain only `UtilAcceptVsock ...
+  accept4 failed 110`, ~70-byte logs, and every build/test run fails within
+  seconds): the WSL→Windows channel flapped. It self-heals within roughly ten
+  minutes — wait and re-run the identical command. The app wrapper reports
+  this as a non-transient failure on purpose (the build never started);
+  rerunning after the heal is the documented recovery. Never claim a green
+  gate/build from a runlog full of these.
 - **Slow builds**: everything crosses the 9P `\\wsl.localhost` boundary;
   ~60–90 s per project build is normal. Don't kill it early.

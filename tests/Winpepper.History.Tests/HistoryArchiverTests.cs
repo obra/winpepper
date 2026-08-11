@@ -173,10 +173,18 @@ public class HistoryArchiverTests : IDisposable
     public async Task Archive_BlockedByExclusiveLock_CompletesAfterRelease()
     {
         var store = new HistoryStore(_root);
-        var archiver = new HistoryArchiver(store, storeAudio: () => true);
         using var gateHeld = new ManualResetEventSlim();
+        using var archiveStarted = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
         var cancellationToken = TestContext.Current.CancellationToken;
+        var storeAudioInvocations = 0;
+        Func<bool> storeAudio = () =>
+        {
+            if (Interlocked.Increment(ref storeAudioInvocations) == 1)
+                archiveStarted.Set();
+            return true;
+        };
+        var archiver = new HistoryArchiver(store, storeAudio: storeAudio);
 
         var lockTask = Task.Run(() => store.WithExclusiveLock(() =>
         {
@@ -194,8 +202,10 @@ public class HistoryArchiverTests : IDisposable
         }), cancellationToken);
         try
         {
+            archiveStarted.Wait(TimeSpan.FromSeconds(5), cancellationToken).ShouldBeTrue();
             await Task.Delay(250, cancellationToken);
             archiveTask.IsCompleted.ShouldBeFalse();
+            Directory.EnumerateFiles(_root, "*.wav", SearchOption.AllDirectories).ShouldBeEmpty();
         }
         finally
         {
@@ -206,7 +216,8 @@ public class HistoryArchiverTests : IDisposable
         await lockTask.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
 
         entry.ShouldNotBeNull();
-        File.Exists(Path.Combine(_root, entry!.WavRelativePath)).ShouldBeTrue();
+        var wavFile = Directory.EnumerateFiles(_root, "*.wav", SearchOption.AllDirectories).ShouldHaveSingleItem();
+        wavFile.ShouldBe(Path.Combine(_root, entry!.WavRelativePath));
         store.Load().Entries.ShouldHaveSingleItem().Id.ShouldBe(entry!.Id);
     }
 }

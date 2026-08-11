@@ -239,8 +239,13 @@ load; the lower bounds carry the signal):**
   `WindowContextWaitMs < 250` (signal: far below any realistic prefetch remainder),
   consumed true.
 - CleanupRunner: FAULTED context task (a task that throws before the budget) →
-  `ConsumedWindowContext == false`, `WindowContextWaitMs` non-null (≈0 — the wait
-  resolved immediately through the exception branch), result is the raw transcript.
+  `ConsumedWindowContext == true` (documented semantics: WhenAny selects the
+  faulted-but-complete task so the runner "consumed" it within budget; the caller's
+  `WindowContextStamp` then resolves it to `none` via `IsCompletedSuccessfully` —
+  do NOT change this behavior), `WindowContextWaitMs` non-null and ≈0 (the wait
+  resolved immediately through the exception branch — recorded because the stopwatch
+  stops right after `WhenAny` and before the throwing `await`), and the cleaned result
+  is the raw transcript (context excluded after the fault).
 - CleanupRunner: fallback AFTER the wait is stamped correctly — fake backend THROWS;
   context task completes after ~120 ms, budget 2 s → path `FallbackBackendError` carries
   `WindowContextWaitMs` in [20, 1500] (proves the `with`-site propagation on the
@@ -457,15 +462,24 @@ git commit -m "feat(cleanup,core): ctx_wait telemetry — measure the bounded wi
       ("tbc0: ≈0 once the prefetch launches at listen-start"). Catch paths: no stamp
       (matches ctx_src).
 
-  11. `Dispose` (:1945-1995): inside the lifecycle-gate body, right after
-      `_hotkeyReadiness.Disable();` (:1947), add:
+  11. `Dispose` (:1945-1995): inside the lifecycle-gate body AFTER the run-loop join
+      (after the `try { RunLoopJoined = ...; } catch { RunLoopJoined = true; }` block,
+      :1955-1956) — NOT right after `_hotkeyReadiness.Disable()`: a start arm already
+      past the readiness gate could otherwise publish a fresh handle after teardown
+      cleared the fields, leaving an OCR burst running during shutdown. Add:
 
       ```csharp
       // tbc0: with listen-start launch, a teardown mid-recording would otherwise
       // leave a running prefetch burst (stop-launch left one only stop→consume).
+      // Placed AFTER the run-loop join above so no still-landing start arm can
+      // publish a handle after the clear.
       _ctxCoordinator?.CancelAndClear();
       _ctxSequencer?.Clear();
       ```
+
+      Structural order pin (task report): `grep -n "RunLoopJoined = " src/Winpepper.App/Hosting/PipelineHost.cs`
+      vs `grep -n "_ctxSequencer?.Clear()" ...` — every Dispose-side Clear line number
+      must exceed the join line numbers.
 
   12. Coordinator docstrings (pure file, no #if): update the two STALE timing
       statements: class `<summary>` ("after the move to recording-stop" → listen-start
@@ -577,6 +591,23 @@ assertions listed above; paste outputs into the task report. Then self-review th
 exclusively for: both-arms symmetry, no `settingsAtStop(2)` left, downstream locals
 (`ctxPrefetch`/`ctxPrefetch2`) intact, no accidental drift of neighbor lines.
 
+- [ ] **Step 6: Run the pre-commit suite**
+
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd /home/dan/code/winpepper/.worktrees/tbc0-ocr-listen-start
+./scripts/linux-tests.sh
+```
+Expected: exit 0, `LINUX SUITE: GREEN` (1854 baseline + Task-1's 6 + Task-2's ~7 +
+Task-3's 5). Commit only when green.
+
+- [ ] **Step 7: Commit the task**
+
+```bash
+git add src/Winpepper.Platform/WindowContext/WindowContextListenStartSequencer.cs src/Winpepper.App/Hosting/PipelineHost.cs src/Winpepper.Platform/WindowContext/WindowContextPrefetchCoordinator.cs tests/Winpepper.Platform.Tests/WindowContext/WindowContextListenStartSequencerTests.cs
+git commit -m "feat(app,platform): launch window-context prefetch at listen-start via pure sequencer (both hotkey arms) (kata tbc0)"
+```
+
 ---
 
 ### Task 4: Regime-measured wait evidence + full verification + acceptance note
@@ -602,18 +633,43 @@ exclusively for: both-arms symmetry, no `settingsAtStop(2)` left, downstream loc
     regime THROUGH the sequencer — `RecordingStarted(true, hwnd)` with a 700 ms task,
     `await Task.Delay(1850)` (utterance + finish), `RecordingStopped()` → runner →
     consumed true; `WindowContextWaitMs < 250`.
-  - `StopLaunchRegime_FastFinish_DropsContextAfterBudget`: 700 ms task launched at "stop",
-    350 ms finish, wait budget 400 ms → consumed false; `WindowContextWaitMs` in
-    [300, 1500] (today's bounded wait-and-drop tail).
+  - `StopLaunchRegime_FastFinish_DropsContextAfterBudget`: 700 ms task launched at
+    "stop", 350 ms finish (≈350 ms of prefetch remains at cleanup start), wait budget
+    **200 ms** (expires at 200 ms, before the task's 350 ms remainder) → consumed false;
+    `WindowContextWaitMs` ≈ 200; assert [150, 1200]. (A 400 ms budget would expire at
+    400 > 350 and CONSUME the context — verified arithmetic; the 200 ms budget is what
+    actually exercises the wait-and-drop branch.)
   The deltas (≈350 ms → <250 ms; the dropped-context case eliminated whenever the
-  utterance outlives the prefetch) are the mechanism-level measured reduction. Honest
-  framing for the note: an agent cannot dictate into the live app, so the end-to-end
-  confirmation is the owner's timing-line readout (procedure included), and these numbers
-  are the mechanism measurement on production code.
+  utterance outlives the prefetch) are the mechanism-level measured reduction.
+- New Windows-real test class
+  `tests/Winpepper.Platform.Tests/WindowContext/WindowContextListenStartRealPrefetchTests.cs`
+  (`#if WINDOWS`, `[Trait("Platform", "Windows")]` — excluded on Linux by `-notrait`,
+  RUN on the windows gate, which applies no trait filter; same seam as the existing
+  `OcrIntegrationTests`/`UiaIntegrationTests`). It drives a REAL `WindowContextPrefetch`
+  built from the real `UiaTreeReader` + `OcrFallback` (constructed directly with the
+  same lambda shape `WindowContextPrefetch.CreateWindows` uses) against the REAL
+  foreground window (`ForegroundWindow.Handle()`), through the real coordinator,
+  sequencer, and CleanupRunner (EchoBackend):
+  - stop-launch regime: launch via the coordinator at "stop", `await Task.Delay(350)`,
+    run the runner (budget 2 s) → assert `ConsumedWindowContext == true`; record the
+    real prefetch duration (Stopwatch around the handle's Task) and `WindowContextWaitMs`;
+  - listen-start regime: `RecordingStarted(true, hwnd)`, `await Task.Delay(350 +
+    <real duration measured by the previous test>)`, `RecordingStopped()`, run the
+    runner → consumed == true and `WindowContextWaitMs` <= the first regime's
+    `WindowContextWaitMs` (same real burst, strictly more head start);
+  - both tests `ITestOutputHelper`-log the real durations; a degenerate VM screen
+    (empty UIA text, blank OCR) still exercises the real code path — empty context is
+    a valid real burst for timing purposes (record it as such).
+  This is the production-reality check for the changed launch moment on the gate
+  machine: a real UIA walk + real WinRT OCR running inside the real
+  coordinator/sequencer plumbing. Contention with live ASR (native_max/native_over250)
+  remains the owner's live readout — no dictation harness exists; stated plainly.
 - Then the complete verification receipt + the acceptance-evidence note.
 
 **Files:**
 - Test: `tests/Winpepper.IntegrationTests/WindowContextListenStartLatencyTests.cs`
+- Test: `tests/Winpepper.Platform.Tests/WindowContext/WindowContextListenStartRealPrefetchTests.cs`
+- Probe (NOT committed): `/tmp/opencode/tbc0-probe/` scratch console project (Step 2)
 - Logs (not committed): `<logs>/reports/acceptance-evidence.md`
 
 **Interfaces:**
@@ -628,12 +684,12 @@ exclusively for: both-arms symmetry, no `settingsAtStop(2)` left, downstream loc
 
 - [ ] **Step 1: Write the measurement tests**
 
-Write `WindowContextListenStartLatencyTests.cs` with the three regime tests. Raw
-transcripts ≥4 words; backend output shares their content words (passes the runner's
-plausibility gates); `WindowContextEnabled = true`; explicit `WindowContextWait` per
-case (2 s / 2 s / 400 ms).
+Write BOTH test files: `WindowContextListenStartLatencyTests.cs` (three regime tests;
+raw transcripts ≥4 words; backend output shares content words; `WindowContextEnabled =
+true`; explicit `WindowContextWait` per case — 2 s / 2 s / **200 ms**) and the
+Windows-real `WindowContextListenStartRealPrefetchTests.cs`.
 
-- [ ] **Step 2: Run the measurement tests**
+- [ ] **Step 2: Run the tests and capture the numbers via a stdout probe**
 
 ```bash
 export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
@@ -641,12 +697,29 @@ cd /home/dan/code/winpepper/.worktrees/tbc0-ocr-listen-start
 dotnet build tests/Winpepper.IntegrationTests/Winpepper.IntegrationTests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
 dotnet exec tests/Winpepper.IntegrationTests/bin/Release/net9.0/Winpepper.IntegrationTests.dll -class Winpepper.IntegrationTests.WindowContextListenStartLatencyTests
 ```
-Expected: build OK + 3 passing; capture the three measured waits from the test output
-(fallback if `-class` errors: whole assembly with `-notrait "Platform=Windows"`;
-baseline 4 + 3 = 7). Anti-vacuity (state in the task report): every assertion is a
-numeric bound on the runner-measured `WindowContextWaitMs`; without Task 2/3 the file
-doesn't compile, and a broken measurement (null) falls outside every bound — the tests
-cannot pass vacuously.
+Expected: 3 passing (fallback if `-class` errors: whole assembly with
+`-notrait "Platform=Windows"`; baseline 4 + 3 = 7). Anti-vacuity (state in the task
+report): assertions are numeric bounds on the runner-measured `WindowContextWaitMs`;
+without Tasks 2/3 the files don't compile; a null measurement falls outside every bound.
+
+(The Windows-Trait file does not execute on Linux; its net9.0 TFM compiles to an empty
+class via its `#if WINDOWS` guard; the gate runs it for real.)
+
+THEN build the number-producing probe (passing xUnit tests suppress console output, so
+the measured values are captured by a scratch probe, not the tests):
+create `/tmp/opencode/tbc0-probe/` with a `probe.csproj` (`<Project Sdk="Microsoft.NET.Sdk">`,
+net9.0, `<Nullable>disable</Nullable>`, ProjectReferences to the worktree's
+`src/Winpepper.Cleanup`, `src/Winpepper.Platform`, `src/Winpepper.Corrections`, and
+`src/Winpepper.Core` csprojs — this rebuilds the repo dependencies in place, which is
+fine: bin/obj are gitignored) and a `Program.cs` that drives the SAME production
+classes (sequencer + coordinator + real `CleanupRunner`/EchoBackend) through the same
+three regimes with `Stopwatch` timing and `Console.WriteLine`s one line per regime:
+`stop-launch wait=<ms> consumed=<bool>`, `listen-start wait=<ms> consumed=<bool>`,
+`stop-launch-drop wait=<ms> consumed=<bool>`.
+Run: `cd /tmp/opencode/tbc0-probe && dotnet run -c Release`.
+Expected output shape: stop-launch ≈ 350 ms consumed=true; listen-start < ~50 ms
+consumed=true; drop ≈ 200 ms consumed=false. Copy the exact lines into the task report
+and the acceptance-evidence note. The probe directory is scratch — never committed.
 
 - [ ] **Step 3: Write the acceptance-evidence note** to
 `/home/dan/code/winpepper/.worktrees/.the-usual-logs/tbc0-ocr-listen-start/reports/acceptance-evidence.md`
@@ -654,13 +727,18 @@ mapping kata tbc0 acceptance → evidence:
 (1) OCR begins at listening start: the [INF] launch line; sequencer behavior tests
 (launch recorded during RecordingStarted, none during RecordingStopped); region greps
 pinning both arms' delegations; gate-compiled wiring;
-(2) measured reduction: the three regime numbers, plus the owner live-dictation readout
+(2) measured reduction: the three regime numbers FROM THE PROBE (verbatim stdout), plus
+the Windows-real test's invariant check on the gate (real UIA/OCR burst inside the real
+plumbing; see the test file), plus the owner live-dictation readout
 procedure (grep `dictation timing` for `ctx_wait=` ≈ 0 with cleanup+context enabled;
-confirm `native_max <= 250` / `native_over250 = 0` unchanged);
+confirm `native_max <= 250` / `native_over250 = 0` unchanged). State the limits plainly:
+the controlled regimes use Task.Delay-shaped bursts (real OCR can't run on Linux); the
+gate machine validates the real-burst invariants; live end-to-end + contention
+confirmation is the owner's timing-line readout;
 (3) no OCR when cleanup disabled: Task-1 cleanup-false policy case + sequencer
 start-false-launches-nothing test + delegated `WindowContextPrefetchGate`;
 and the recorded R4 rulings/side effects (start-time gate evaluation, hwnd-zero ctx_src
-omission, silent-tap burst, dispose hygiene).
+omission, silent-tap burst, post-join dispose hygiene).
 
 - [ ] **Step 4: Run the Linux suite (pre-commit gate for this task's commit)**
 
@@ -675,8 +753,8 @@ when green.
 - [ ] **Step 5: Commit the measurement tests**
 
 ```bash
-git add tests/Winpepper.IntegrationTests/WindowContextListenStartLatencyTests.cs
-git commit -m "test(integration): measure window-context wait under stop-launch vs listen-start regimes (kata tbc0)"
+git add tests/Winpepper.IntegrationTests/WindowContextListenStartLatencyTests.cs tests/Winpepper.Platform.Tests/WindowContext/WindowContextListenStartRealPrefetchTests.cs
+git commit -m "test(integration,platform): measure window-context wait under stop-launch vs listen-start regimes, incl. real-UIA/OCR Windows invariants (kata tbc0)"
 ```
 
 - [ ] **Step 6: Run both gates against the committed HEAD**
@@ -701,10 +779,13 @@ here must equal the HEAD the final delta review inspects.)
   as the no-useful-Red exception.
 - Known internal consistency: Task 3 depends on Task 1 (`ShouldStart`) and Task 2
   (`WindowContextWaitMs`, `CtxWaitMs`); Task 4 depends on all three. Execute in order.
-- Review-round-1/round-2 fixes folded in: SDK-prefixed self-contained commands; full
-  suite required before EVERY commit (incl. docs commits and Task 4); nullable-safe
-  helper (coordinator-null check in wiring, not the policy); sequencing moved into pure
-  `WindowContextListenStartSequencer` with real behavioral tests; measured regime
-  before/after evidence through real production objects; generous upper timer bounds
-  (lower bounds carry the signal); hwnd-zero `ctx_src` omission recorded deliberately.
+- Review-round-1/round-2/round-3 fixes folded in: SDK-prefixed self-contained absolute
+  commands; full suite required before EVERY commit; nullable-safe helper; pure
+  behavior-tested `WindowContextListenStartSequencer`; probe-based stdout measurement
+  (passing xUnit tests suppress console output); corrected faulted-task expectation
+  (CleanupRunner's documented faulted-but-complete semantics: consumed==true, ctx_src
+  resolves to none); corrected budget-drop arithmetic (200 ms budget, not 400);
+  Windows-real UIA/OCR invariant test on the gate (platform trait, unfiltered there);
+  post-join Dispose placement against the late-publishing-start race; restored Task-3
+  commit step; generous upper timer bounds; hwnd-zero `ctx_src` omission recorded.
 UNRESOLVED COVERAGE GAPS: none.

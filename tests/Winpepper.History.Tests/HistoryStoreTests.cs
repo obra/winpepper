@@ -606,27 +606,38 @@ public class HistoryStoreTests : IDisposable
     [Fact]
     public void DeleteAllAudio_InaccessibleRoot_ReportsEnumerationFailure()
     {
-        var store = new HistoryStore(_root);
-        Assert.SkipUnless(TryGetUnixMode(_root, out var originalMode),
-            "Unix permission controls are unavailable on this platform.");
-        HistoryAudioCleanupResult? result = null;
+        var parent = Path.Combine(Path.GetTempPath(), $"winpepper-history-parent-{Guid.NewGuid():N}");
+        var historyRoot = Path.Combine(parent, "history");
+        Directory.CreateDirectory(parent);
 
         try
         {
-            File.SetUnixFileMode(_root, UnixFileMode.None);
-            Assert.SkipUnless(!CanEnumerateDirectory(_root),
-                "The current user can still enumerate a chmod 000 directory.");
+            var store = new HistoryStore(historyRoot);
+            Assert.SkipUnless(TryGetUnixMode(parent, out var originalMode),
+                "Unix permission controls are unavailable on this platform.");
+            HistoryAudioCleanupResult? result = null;
 
-            result = store.DeleteAllAudio();
+            try
+            {
+                File.SetUnixFileMode(parent, UnixFileMode.None);
+                Assert.SkipUnless(!Directory.Exists(historyRoot) && !CanEnumerateDirectory(historyRoot),
+                    "The current user can still access a directory through a chmod 000 parent.");
+
+                result = store.DeleteAllAudio();
+            }
+            finally
+            {
+                File.SetUnixFileMode(parent, originalMode);
+            }
+
+            result.ShouldNotBeNull();
+            result.EnumerationFailed.ShouldBeTrue();
+            result.ShouldNotBe(new HistoryAudioCleanupResult());
         }
         finally
         {
-            File.SetUnixFileMode(_root, originalMode);
+            if (Directory.Exists(parent)) Directory.Delete(parent, recursive: true);
         }
-
-        result.ShouldNotBeNull();
-        result.EnumerationFailed.ShouldBeTrue();
-        result.ShouldNotBe(new HistoryAudioCleanupResult());
     }
 
     [Fact]

@@ -101,9 +101,14 @@ public sealed class PipelineHost : IDisposable
     // settings provider (CleanupOptionsFactory.FromSettings) so Cleanup-tab
     // changes — including the Enabled toggle — take effect immediately.
     private readonly Winpepper.Corrections.CorrectionStore? _corrections; // PLAN2-TYPE
-    // 1a: prefetch launched at recording STOP; lifecycle (per-dictation CTS,
-    // cancellation ruling) owned by the coordinator. Hwnd captured at START.
+    // tbc0: prefetch launched at LISTEN-START via the sequencer (both hotkey
+    // arms); lifecycle (per-dictation CTS, cancel-prior, cancel-on-drop) stays
+    // owned by the coordinator. Hwnd captured at START, content now too.
     private readonly Winpepper.Platform.WindowContext.WindowContextPrefetchCoordinator? _ctxCoordinator;
+    // tbc0: per-dictation listen-start launch/consume book over _ctxCoordinator
+    // (null when the coordinator is absent). Both arms delegate; the sequencing
+    // behavior is Linux-tested in WindowContextListenStartSequencerTests.
+    private readonly Winpepper.Platform.WindowContext.WindowContextListenStartSequencer? _ctxSequencer;
     private IntPtr _ctxHwndAtStart = IntPtr.Zero;
 
     private readonly Winpepper.History.HistoryArchiver _archiver;
@@ -211,6 +216,7 @@ public sealed class PipelineHost : IDisposable
         _ctxCoordinator = windowContext is null
             ? null
             : new Winpepper.Platform.WindowContext.WindowContextPrefetchCoordinator(windowContext.StartAsync);
+        _ctxSequencer = _ctxCoordinator is null ? null : new(_ctxCoordinator);
         _clipboardFallback = clipboardFallback;
         _toasts = toasts;
         _buildTranscriber = transcriberFactory;
@@ -472,6 +478,24 @@ public sealed class PipelineHost : IDisposable
         };
     }
 
+    /// <summary>tbc0: evaluate the listen-start policy on the start-time settings
+    /// snapshot and delegate the launch (+book) to the sequencer. Call ONLY after
+    /// _ctxCoordinator?.OnRecordingStart() and the _ctxHwndAtStart capture. The
+    /// single launch LogInformation lives here (one site, R1 evidence).</summary>
+    private void LaunchPrefetchAtListenStart(AppSettings settingsAtStart)
+    {
+        if (_ctxSequencer is null) return;
+        var handle = _ctxSequencer.RecordingStarted(
+            Winpepper.Cleanup.WindowContextListenStartPolicy.ShouldStart(
+                settingsAtStart.CleanupEnabled,
+                settingsAtStart.CleanupWindowContextEnabled,
+                _activeCleanupPromptFormat?.Invoke(),
+                _ctxHwndAtStart != IntPtr.Zero),
+            _ctxHwndAtStart);
+        if (handle is not null)
+            _log.LogInformation("window-context prefetch started at listen-start {SessionId}", _currentSessionId);
+    }
+
     /// <summary>
     /// Paste the held pending text into whatever field is focused NOW (the
     /// user's explicit choice via the pill click). Uses the normal injection
@@ -673,6 +697,8 @@ public sealed class PipelineHost : IDisposable
                 // prefetch (at stop) must read THIS window, not whatever has
                 // focus by then.
                 _ctxHwndAtStart = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
+                // tbc0: launch at listen-start (supersedes 1a's stop-launch) — see LaunchPrefetchAtListenStart.
+                LaunchPrefetchAtListenStart(settingsForStream);
                 break;
             case HotkeyEventKind.HoldUp:
                 if (_engine.State != SessionState.Recording) return;
@@ -703,23 +729,8 @@ public sealed class PipelineHost : IDisposable
                         st1.Kernel100ns - st0.Kernel100ns,
                         st1.User100ns - st0.User100ns);
 
-                // 1a: launch the window-context prefetch AT STOP — it now
-                // overlaps mic-stop, trimming, and transcription finish
-                // instead of competing with live streaming ASR. Gated on LIVE
-                // settings so a Cleanup-tab change applies to this dictation.
-                Winpepper.Platform.WindowContext.WindowContextPrefetchHandle? ctxPrefetch = null;
-                var settingsAtStop = _settingsProvider();
-                // Gated on LIVE settings AND the ACTIVE model's prompt format: a raw-io
-                // model discards the system prompt, so no context gathering runs for it
-                // (no UIA walk, no waits; ctx_src omitted as when the feature is off).
-                if (_ctxCoordinator is not null
-                    && Winpepper.Cleanup.WindowContextPrefetchGate.ShouldPrefetch(
-                        settingsAtStop.CleanupEnabled,
-                        settingsAtStop.CleanupWindowContextEnabled,
-                        _activeCleanupPromptFormat?.Invoke()))
-                {
-                    ctxPrefetch = _ctxCoordinator.Start(_ctxHwndAtStart);
-                }
+                // tbc0: the prefetch was launched at listen-start (start arm); consume it here.
+                var ctxPrefetch = _ctxSequencer?.RecordingStopped();
 
                 var micStopSw = System.Diagnostics.Stopwatch.StartNew();
                 var samples = _warmRecorder!.StopSession();
@@ -764,6 +775,7 @@ public sealed class PipelineHost : IDisposable
                     _engine.Apply(SessionEvent.TranscriptReady);
                     _engine.Apply(SessionEvent.InjectionCompleted);
                     _ctxCoordinator?.CancelAndClear();
+                    _ctxSequencer?.Clear();
                     if (_streamingSession is not null)
                     {
                         var droppedStreaming = _streamingSession;
@@ -969,6 +981,8 @@ public sealed class PipelineHost : IDisposable
                         // stamp (see WindowContextStamp).
                         timing.CtxSrc = Winpepper.Platform.WindowContext.WindowContextStamp.CtxSrc(
                             result.ConsumedWindowContext, ctxPrefetch?.Task);
+                        // tbc0: ≈0 once the prefetch launches at listen-start
+                        timing.CtxWaitMs = result.WindowContextWaitMs;
                     }
                     catch (Exception ex)
                     {
@@ -1167,6 +1181,7 @@ public sealed class PipelineHost : IDisposable
                 _lastStopHotkeyUtc = evt.Timestamp;
                 _engine.Apply(SessionEvent.CancelRequested);
                 _ctxCoordinator?.CancelAndClear();
+                _ctxSequencer?.Clear();
                 _log.LogInformation("Session cancelled {SessionId}", _currentSessionId);
                 _ = _warmRecorder?.StopSession();
                 if (_streamingSession is not null)
@@ -1300,6 +1315,8 @@ public sealed class PipelineHost : IDisposable
                     // prefetch (at stop) must read THIS window, not whatever has
                     // focus by then.
                     _ctxHwndAtStart = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
+                    // tbc0: launch at listen-start (supersedes 1a's stop-launch) — see LaunchPrefetchAtListenStart.
+                    LaunchPrefetchAtListenStart(settingsForStream2);
                 }
                 else if (_engine.State == SessionState.Recording)
                 {
@@ -1330,23 +1347,8 @@ public sealed class PipelineHost : IDisposable
                             st1_2.Kernel100ns - st0_2.Kernel100ns,
                             st1_2.User100ns - st0_2.User100ns);
 
-                    // 1a: launch the window-context prefetch AT STOP — it now
-                    // overlaps mic-stop, trimming, and transcription finish
-                    // instead of competing with live streaming ASR. Gated on LIVE
-                    // settings so a Cleanup-tab change applies to this dictation.
-                    Winpepper.Platform.WindowContext.WindowContextPrefetchHandle? ctxPrefetch2 = null;
-                    var settingsAtStop2 = _settingsProvider();
-                    // Gated on LIVE settings AND the ACTIVE model's prompt format: a raw-io
-                    // model discards the system prompt, so no context gathering runs for it
-                    // (no UIA walk, no waits; ctx_src omitted as when the feature is off).
-                    if (_ctxCoordinator is not null
-                        && Winpepper.Cleanup.WindowContextPrefetchGate.ShouldPrefetch(
-                            settingsAtStop2.CleanupEnabled,
-                            settingsAtStop2.CleanupWindowContextEnabled,
-                            _activeCleanupPromptFormat?.Invoke()))
-                    {
-                        ctxPrefetch2 = _ctxCoordinator.Start(_ctxHwndAtStart);
-                    }
+                    // tbc0: the prefetch was launched at listen-start (start arm); consume it here.
+                    var ctxPrefetch2 = _ctxSequencer?.RecordingStopped();
 
                     var micStopSw2 = System.Diagnostics.Stopwatch.StartNew();
                     var samples2 = _warmRecorder!.StopSession();
@@ -1390,6 +1392,7 @@ public sealed class PipelineHost : IDisposable
                         _engine.Apply(SessionEvent.TranscriptReady);
                         _engine.Apply(SessionEvent.InjectionCompleted);
                         _ctxCoordinator?.CancelAndClear();
+                        _ctxSequencer?.Clear();
                         if (_streamingSession is not null)
                         {
                             var droppedStreaming2 = _streamingSession;
@@ -1592,6 +1595,8 @@ public sealed class PipelineHost : IDisposable
                             // stamp (see WindowContextStamp).
                             timing2.CtxSrc = Winpepper.Platform.WindowContext.WindowContextStamp.CtxSrc(
                                 result2.ConsumedWindowContext, ctxPrefetch2?.Task);
+                            // tbc0: ≈0 once the prefetch launches at listen-start
+                            timing2.CtxWaitMs = result2.WindowContextWaitMs;
                         }
                         catch (Exception ex)
                         {
@@ -1954,6 +1959,12 @@ public sealed class PipelineHost : IDisposable
             // a completed join.
             try { RunLoopJoined = _runTask?.Wait(TimeSpan.FromSeconds(2)) ?? true; }
             catch { RunLoopJoined = true; }
+            // tbc0: with listen-start launch, a teardown mid-recording would otherwise
+            // leave a running prefetch burst (stop-launch left one only stop→consume).
+            // Placed AFTER the run-loop join above so no still-landing start arm can
+            // publish a handle after the clear.
+            _ctxCoordinator?.CancelAndClear();
+            _ctxSequencer?.Clear();
             _hook.Dispose();
             // An in-flight streaming session (app shut down mid-dictation) holds a
             // live pump + inner socket; dispose it here or it leaks at teardown.

@@ -76,7 +76,7 @@ usage() { echo "Usage: scripts/build-app-windows-from-wsl.sh [--attempts N]" >&2
 ATTEMPTS=5
 if [[ $# -eq 0 ]]; then
   :
-elif [[ $# -eq 2 && $1 == "--attempts" && $2 =~ ^[0-9]+$ ]] && (( 10#$2 >= 1 )); then
+elif [[ $# -eq 2 && $1 == "--attempts" && $2 =~ ^[0-9]{1,3}$ ]] && (( 10#$2 >= 1 )); then
   ATTEMPTS=$((10#$2))
 else
   usage
@@ -104,10 +104,12 @@ else
   fi
   UNC_ROOT="$(wslpath -w "$ROOT")"
   APP_PROJ="$UNC_ROOT"'\src\Winpepper.App\Winpepper.App.csproj'
+  # PowerShell single-quoted strings escape an apostrophe by doubling it.
+  APP_PROJ_PS="${APP_PROJ//\'/\'\'}"
   # %q-quote the real invocation into a re-evaluatable command string so both
   # the seam and the real path run through the same timeout wrapper.
   BUILD_CMD="$(printf '%q ' "$PS" -NoProfile -ExecutionPolicy Bypass \
-    -Command "dotnet build '$APP_PROJ' -c Release -m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true; exit \$LASTEXITCODE")"
+    -Command "dotnet build '$APP_PROJ_PS' -c Release -m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true; exit \$LASTEXITCODE")"
 fi
 
 RUN_DIR="$ROOT/artifacts/build-app-windows/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -139,8 +141,10 @@ kill_orphans() {
     pid="${pid%$'\r'}"
     cmd="${cmd%$'\r'}"
     [[ -n "$pid" && -n "$cmd" ]] || continue
-    # Keep only rows for THIS checkout: the full effective-root tag ...
-    [[ "$cmd" == *"$tag"* ]] || continue
+    # Keep only rows for THIS checkout: the full effective-root tag immediately
+    # followed by a path separator (\ or /) — an unbounded substring would also
+    # match a prefix-named sibling checkout (e.g. tag ...\gzcc vs ...\gzcc2) ...
+    if [[ "$cmd" != *"$tag"\\* && "$cmd" != *"$tag"/* ]]; then continue; fi
     # ... and never a worktree nested under it (<tag>\.worktrees\...).
     [[ "$cmd" != *"$needle"* ]] || continue
     echo "build-app-windows-from-wsl: killing orphaned dotnet.exe PID $pid"
@@ -157,7 +161,15 @@ while true; do
   log="$RUN_DIR/attempt$attempt.log"
   echo "build-app-windows-from-wsl: attempt $attempt of $ATTEMPTS (log: $log)"
   rc=0
-  timeout --foreground "$TIMEOUT_S" bash -c "$BUILD_CMD" >"$log" 2>&1 || rc=$?
+  # Tee the attempt output (users see live progress on multi-minute builds)
+  # while preserving the build's exit status from the pipeline head.
+  timeout --foreground "$TIMEOUT_S" bash -c "$BUILD_CMD" 2>&1 | tee "$log" || {
+    parts=("${PIPESTATUS[@]}")
+    rc="${parts[0]}"
+    if [[ "${parts[1]:-0}" -ne 0 ]]; then
+      echo "build-app-windows-from-wsl: WARNING: tee to $log failed" >&2
+    fi
+  }
   if [[ $rc -eq 0 ]]; then
     echo "BUILD OK on attempt $attempt (run log: $RUN_DIR)"
     exit 0

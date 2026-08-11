@@ -22,9 +22,10 @@
 #   5 clean first try → exit 0 on attempt 1, no retry lines.
 #   6 timeout + kill scoping: sleep-based fake under
 #     WINPEPPER_APP_BUILD_TIMEOUT_S=2 → exit 124 path; the orphan filter must
-#     kill only the row whose CommandLine carries this tree's full tag
-#     (rejecting a different checkout under the parent's .worktrees\ and a
-#     nested <tag>\.worktrees\ row).
+#     kill only the row whose CommandLine carries this tree's full tag followed
+#     by a path separator (rejecting a different checkout under the parent's
+#     .worktrees\, a nested <tag>\.worktrees\ row, and a prefix-named sibling
+#     <tag>2\...).
 #   7 pre-clean always runs against the effective root: seeded
 #     src/Seed/{bin,obj} sentinels must be gone before the fake build runs.
 #   8 usage validation: "--attempts 0", "--attempts abc", and a trailing
@@ -144,10 +145,11 @@ r="$(make_root)"; roots+=("$r")
 tag="$(wslpath -w "$r" 2>/dev/null || printf '%s' "$r")"
 tag="${tag%$'\r'}"
 parent="${tag%\\*}"
-printf '%s\t%s\n%s\t%s\n%s\t%s\n' \
+printf '%s\t%s\n%s\t%s\n%s\t%s\n%s\t%s\n' \
   1111 "dotnet build ${tag}\\src\\Winpepper.App\\Winpepper.App.csproj -c Release" \
   2222 "dotnet build ${parent}\\.worktrees\\other-agent\\src\\Other\\Other.csproj" \
   3333 "dotnet build ${tag}\\.worktrees\\nested-agent\\src\\Nested\\Nested.csproj" \
+  4444 "dotnet build ${tag}2\\src\\PrefixSibling\\PrefixSibling.csproj" \
   >"$r/procs.tsv"
 rc1=0
 WINPEPPER_APP_BUILD_CMD="sleep 30" WINPEPPER_APP_ROOT_OVERRIDE="$r" \
@@ -162,9 +164,9 @@ killed="$(cat "$r/killed" 2>/dev/null || true)"
 if [[ $rc1 -eq 1 && "$logs1" -eq 1 && "$t1" -eq 0 && "$killed" == "1111" ]] \
   && grep -q 'TIMEOUT' "$r/out1" \
   && grep -q 'killing orphaned dotnet.exe PID 1111' "$r/out1"; then
-  ok 6 "2s timeout on a sleeping build → TIMEOUT stop (exit 1, 1 attempt, no retry); bash full-path filter killed only this tree's PID 1111"
+  ok 6 "2s timeout on a sleeping build → TIMEOUT stop (exit 1, 1 attempt, no retry); bash boundary-aware full-path filter killed only this tree's PID 1111 (parent .worktrees, nested .worktrees, and prefix-sibling rows all rejected)"
 else
-  bad 6 "rc1=$rc1(want 1) attemptlogs=$logs1(want 1) transient=$t1(want 0) killed='${killed:-<none>}'(want 1111) | $(grep -m1 -E 'TIMEOUT|No such file' "$r/out1" || true)"
+  bad 6 "rc1=$rc1(want 1) attemptlogs=$logs1(want 1) transient=$t1(want 0) killed='${killed:-<none>}'(want exactly 1111) | $(grep -m1 -E 'TIMEOUT|No such file' "$r/out1" || true)"
 fi
 
 # --- Case 7: pre-clean always runs against the effective root ----------------

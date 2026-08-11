@@ -485,4 +485,33 @@ public class DictationTimingSummaryTests
         var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold", Outcome = "empty" };
         t.FormatLine().ShouldNotContain("inject_via");
     }
+
+    // --- ctx_wait telemetry (kata tbc0, Task 2) ---
+
+    [Fact]
+    public void FormatLine_OmitsCtxWait_WhenNull()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold" };
+        t.CtxSrc = "uia";
+        var line = t.FormatLine();
+
+        line.ShouldContain("ctx_src=uia");
+        line.ShouldNotContain("ctx_wait=");
+    }
+
+    [Fact]
+    public void FormatLine_RendersCtxWaitMs_AfterCtxSrc_WhenBothPresent()
+    {
+        var t = new DictationTimingSummary { SessionId = Guid.Empty, Kind = "hold" };
+        t.CtxSrc = "uia";
+        t.CtxWaitMs = 37;
+        var line = t.FormatLine();
+
+        var ctxSrcAt = line.IndexOf("ctx_src=uia", StringComparison.Ordinal);
+        var ctxWaitAt = line.IndexOf(" ctx_wait=37ms", StringComparison.Ordinal);
+
+        ctxSrcAt.ShouldBeGreaterThanOrEqualTo(0);
+        ctxWaitAt.ShouldBeGreaterThan(ctxSrcAt);
+        line.ShouldContain(" ctx_wait=37ms");
+    }
 }

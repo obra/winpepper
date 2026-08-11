@@ -16,6 +16,13 @@ public sealed record CleanupResult(
     /// the prompt build (a faulted-but-complete task still counts — the caller
     /// resolves faults to "none" via IsCompletedSuccessfully).</summary>
     public bool? ConsumedWindowContext { get; init; }
+
+    /// <summary>ms the runner actually waited inside the bounded window-context
+    /// wait (CleanupOptions.WindowContextWait); null when no wait ran (no context
+    /// task supplied, feature disabled, or bypass before the wait). Consume-time
+    /// sibling of <see cref="ConsumedWindowContext"/> — ≈0 once the prefetch
+    /// launches at listen-start (kata tbc0).</summary>
+    public int? WindowContextWaitMs { get; init; }
 }
 
 /// <summary>Which branch the runner took. Surfaced in the History detail later.</summary>

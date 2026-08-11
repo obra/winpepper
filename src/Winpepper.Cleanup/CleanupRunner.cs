@@ -54,6 +54,7 @@ public sealed class CleanupRunner
     {
         var sw = Stopwatch.StartNew();
         bool? consumedWindowContext = null;
+        int? ctxWaitMs = null;
 
         // 0) Bypass decision — the SAME predicate PipelineHost consults to pick
         //    the engine event, so pill state and runner behavior cannot diverge.
@@ -71,7 +72,7 @@ public sealed class CleanupRunner
                     : CleanupPath.BypassShort;   // 1-3 word utterance (spec fix-(iii))
             _log.LogDebug("Bypassing LLM cleanup ({Path})", path);
             return Finalize(rawTranscript, "", corrections, assembledPrompt: "", path, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
         }
 
         // 1) Resolve window context with a bounded wait.
@@ -81,9 +82,16 @@ public sealed class CleanupRunner
             consumedWindowContext = false;
             try
             {
+                // tbc0: measure ONLY the bounded wait. Stop the watch right
+                // after WhenAny completes, before inspecting which task won,
+                // so the exception path (faulted-but-complete context task)
+                // records its ≈0 wait too.
+                var ctxWaitSw = Stopwatch.StartNew();
                 var completed = await Task.WhenAny(windowContextTask,
                                                    Task.Delay(options.WindowContextWait, ct))
                                           .ConfigureAwait(false);
+                ctxWaitSw.Stop();
+                ctxWaitMs = (int)ctxWaitSw.ElapsedMilliseconds;
                 if (completed == windowContextTask)
                 {
                     consumedWindowContext = true;
@@ -136,13 +144,13 @@ public sealed class CleanupRunner
             _log.LogWarning("Cleanup LLM timed out after {Timeout}ms; falling back to correction-only path",
                 options.Timeout.TotalMilliseconds);
             return Finalize(rawTranscript, "", corrections, assembled, CleanupPath.FallbackTimeout, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
         }
         catch (Exception ex)
         {
             _log.LogError(ex, "Cleanup backend threw; falling back to correction-only path");
             return Finalize(rawTranscript, "", corrections, assembled, CleanupPath.FallbackBackendError, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
         }
 
         // 5) Sanitize <think> blocks.
@@ -151,11 +159,11 @@ public sealed class CleanupRunner
         // 6) Empty or "..." → fallback.
         if (string.IsNullOrWhiteSpace(sanitized))
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackEmpty, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
 
         if (sanitized.Trim() == "...")
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackEllipsis, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
 
         // 6.5) Implausible output -> fallback. A small cleanup model fed an
         // out-of-distribution prompt can go into open-ended completion mode,
@@ -170,14 +178,14 @@ public sealed class CleanupRunner
             _log.LogWarning("Cleanup output contains prompt-scaffold markers absent from the transcript; falling back. Output preview: {Preview}",
                 sanitized.Length > 120 ? sanitized[..120] : sanitized);
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
         }
         if (sanitized.Length > rawTranscript.Length * 2 + 64)
         {
             _log.LogWarning("Cleanup output implausibly long ({OutLen} chars from {InLen}-char transcript); falling back",
                 sanitized.Length, rawTranscript.Length);
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
         }
 
         // 6.5b) Content-similarity floor (spec fix-(i)/(ii)). A legitimate
@@ -194,20 +202,20 @@ public sealed class CleanupRunner
         {
             _log.LogWarning("Cleanup output shares no content words with the transcript (wholesale replacement); falling back");
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
         }
         if (rawWordCount > 6 && retention < 0.40)
         {
             _log.LogWarning("Cleanup output retains only {Retention:P0} of a {Words}-word transcript (severe truncation); falling back",
                 retention, rawWordCount);
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
         }
         if (retention < 0.40 && MatchesKnownExample(sanitized))
         {
             _log.LogWarning("Cleanup output matches a known few-shot example with low transcript overlap; falling back");
             return Finalize(rawTranscript, raw, corrections, assembled, CleanupPath.FallbackImplausible, sw)
-                with { ConsumedWindowContext = consumedWindowContext };
+                with { ConsumedWindowContext = consumedWindowContext, WindowContextWaitMs = ctxWaitMs };
         }
 
         // 7) Apply deterministic correction post-pass (user corrections, then
@@ -223,6 +231,7 @@ public sealed class CleanupRunner
             Elapsed: sw.Elapsed)
         {
             ConsumedWindowContext = consumedWindowContext,
+            WindowContextWaitMs = ctxWaitMs,
         };
     }
 

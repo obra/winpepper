@@ -514,6 +514,8 @@ public class CleanupRunnerTests
             CorrectionsData.Empty, null, DefaultOptions(), CancellationToken.None);
 
         result.ConsumedWindowContext.ShouldBeNull();
+        // No wait ran (no context task supplied) → no wait telemetry.
+        result.WindowContextWaitMs.ShouldBeNull();
     }
 
     [Fact]
@@ -606,6 +608,171 @@ public class CleanupRunnerTests
 
         result.Path.ShouldBe(CleanupPath.BypassShort);
         result.ConsumedWindowContext.ShouldBeNull();
+    }
+
+    // --- ctx_wait telemetry (kata tbc0, Task 2) ---
+    // Every raw transcript here is >= 4 words and every Output shares content
+    // words with it so the runner's plausibility gates do not fire — these
+    // tests isolate the wait-measurement telemetry. UPPER bounds deliberately
+    // generous (scheduler tolerance); lower bounds carry the signal.
+
+    private const string CtxWaitTranscript = "hello my name is crispy how are you";
+    private const string CtxWaitOutput = "Hello, my name is Crispy. How are you?";
+
+    [Fact]
+    public async Task Run_WindowContextWaitMs_MeasuresConsumedWait_WhenTaskCompletesWithinBudget()
+    {
+        // Context task completing after ~250 ms with a 2 s budget → consumed
+        // true; the wait lasts roughly the task's completion time.
+        var backend = new FakeLlamaCleanupBackend { Output = CtxWaitOutput };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromSeconds(2),
+        };
+        var contextTask = Task.Run(async () =>
+        {
+            await Task.Delay(250);
+            return (string?)"the foreground window says hello";
+        });
+
+        var result = await runner.RunAsync(CtxWaitTranscript,
+            CorrectionsData.Empty, contextTask, opts, CancellationToken.None);
+
+        result.ConsumedWindowContext.ShouldBe(true);
+        result.WindowContextWaitMs.ShouldNotBeNull();
+        result.WindowContextWaitMs!.Value.ShouldBeInRange(50, 1500);
+    }
+
+    [Fact]
+    public async Task Run_WindowContextWaitMs_MeasuresFullBudget_WhenTaskNeverCompletes()
+    {
+        // Never-completing task with a 500 ms budget → consumed false; the wait
+        // lasts the full budget (± scheduler generosity).
+        var tcs = new TaskCompletionSource<string?>();
+        var backend = new FakeLlamaCleanupBackend { Output = CtxWaitOutput };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromMilliseconds(500),
+        };
+
+        var result = await runner.RunAsync(CtxWaitTranscript,
+            CorrectionsData.Empty, tcs.Task, opts, CancellationToken.None);
+
+        result.ConsumedWindowContext.ShouldBe(false);
+        result.WindowContextWaitMs.ShouldNotBeNull();
+        result.WindowContextWaitMs!.Value.ShouldBeInRange(400, 1500);
+    }
+
+    [Fact]
+    public async Task Run_WindowContextWaitMs_IsNearZero_WhenTaskAlreadyComplete()
+    {
+        // Already-complete context task → WhenAny resolves immediately; the
+        // wait measurement is far below any realistic prefetch remainder.
+        var ready = Task.FromResult<string?>("the foreground window says hello");
+        var backend = new FakeLlamaCleanupBackend { Output = CtxWaitOutput };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromMilliseconds(500),
+        };
+
+        var result = await runner.RunAsync(CtxWaitTranscript,
+            CorrectionsData.Empty, ready, opts, CancellationToken.None);
+
+        result.ConsumedWindowContext.ShouldBe(true);
+        result.WindowContextWaitMs.ShouldNotBeNull();
+        result.WindowContextWaitMs!.Value.ShouldBeLessThan(250);
+    }
+
+    [Fact]
+    public async Task Run_WindowContextWaitMs_RecordsFaultedTaskWait_WithoutChangingConsumedSemantics()
+    {
+        // FAULTED context task (throws before the budget): WhenAny selects the
+        // faulted-but-complete task, so consumed == true (documented
+        // semantics — the caller's WindowContextStamp resolves it to "none"
+        // via IsCompletedSuccessfully). The watch stops right after WhenAny
+        // and BEFORE the throwing await, so the wait is non-null and ≈0.
+        // The context is excluded after the fault: the prompt must NOT carry
+        // the WINDOW-OCR-CONTENT scaffolding (the faulted await threw, so
+        // windowContext stayed null).
+        var faulted = Task.FromException<string?>(new InvalidOperationException("ctx-fault"));
+        var backend = new FakeLlamaCleanupBackend { Output = CtxWaitOutput };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromSeconds(2),
+        };
+
+        var result = await runner.RunAsync(CtxWaitTranscript,
+            CorrectionsData.Empty, faulted, opts, CancellationToken.None);
+
+        result.ConsumedWindowContext.ShouldBe(true);
+        result.WindowContextWaitMs.ShouldNotBeNull();
+        result.WindowContextWaitMs!.Value.ShouldBeLessThan(250);
+        backend.LastSystemPrompt.ShouldNotBeNull();
+        backend.LastSystemPrompt!.ShouldNotContain("<WINDOW-OCR-CONTENT>");
+    }
+
+    [Fact]
+    public async Task Run_WindowContextWaitMs_PropagatesThroughFallbackBackendError()
+    {
+        // Fallback after the wait: backend THROWS; context task completes
+        // ~120 ms in; 2 s budget → the exception-return's `with`-site carries
+        // the measured wait (proves propagation on the fallback path).
+        var backend = new FakeLlamaCleanupBackend
+        {
+            Output = "unused",
+            Throw = new InvalidOperationException("kaboom"),
+        };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromSeconds(2),
+        };
+        var contextTask = Task.Run(async () =>
+        {
+            await Task.Delay(120);
+            return (string?)"the foreground window says hello";
+        });
+
+        var result = await runner.RunAsync(CtxWaitTranscript,
+            CorrectionsData.Empty, contextTask, opts, CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.FallbackBackendError);
+        result.WindowContextWaitMs.ShouldNotBeNull();
+        result.WindowContextWaitMs!.Value.ShouldBeInRange(20, 1500);
+    }
+
+    [Fact]
+    public async Task Run_WindowContextWaitMs_IsNull_WhenCleanupDisabledEvenWithTask()
+    {
+        // options.Enabled=false with a context task supplied → the top-level
+        // bypass fires BEFORE the wait, so WindowContextWaitMs == null
+        // (alongside ConsumedWindowContext == null).
+        var ready = Task.FromResult<string?>("the foreground window says hello");
+        var backend = new FakeLlamaCleanupBackend { Output = "ignored" };
+        var runner = NewRunner(backend);
+        var opts = DefaultOptions() with
+        {
+            Enabled = false,
+            WindowContextEnabled = true,
+            WindowContextWait = TimeSpan.FromMilliseconds(500),
+        };
+
+        var result = await runner.RunAsync(CtxWaitTranscript,
+            CorrectionsData.Empty, ready, opts, CancellationToken.None);
+
+        result.Path.ShouldBe(CleanupPath.BypassDisabled);
+        result.ConsumedWindowContext.ShouldBeNull();
+        result.WindowContextWaitMs.ShouldBeNull();
+        backend.CallCount.ShouldBe(0);
     }
 
     [Fact]

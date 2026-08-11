@@ -93,6 +93,11 @@ public sealed class DictationTimingSummary
     public IReadOnlyList<int>? Over250AtMs { get; set; }   // 0b: ms offsets from recording start of native calls >= 250 ms; capped upstream at 16 entries
     public int? Over250Overflow { get; set; }              // 0b: over-250 events beyond the 16-entry cap
     public string? CtxSrc { get; set; }                    // 0b: window context the cleanup LLM ACTUALLY consumed: uia|ocr|none (consume-time semantics)
+
+    /// <summary>ms cleanup actually waited for the window-context prefetch inside
+    /// its 500 ms budget; null when no context task was supplied or cleanup never
+    /// ran; ≈0 once the prefetch launches at listen-start — kata tbc0.</summary>
+    public int? CtxWaitMs { get; set; }
     public int? ProcCpuMs { get; set; }                    // 0b: Process.TotalProcessorTime delta, recording start -> StopRequested (NOT emit)
     public int? PageFaults { get; set; }   // B1: page-fault count delta, recording start -> StopRequested
     public int? MemPrivMb { get; set; }    // B2: private bytes MB, sampled once at recording start
@@ -169,6 +174,7 @@ public sealed class DictationTimingSummary
         AppendOptStr(sb, "cleanup_path", CleanupPath);
         AppendOptStr(sb, "cleanup_model", CleanupModel);
         AppendOptStr(sb, "ctx_src", CtxSrc);
+        AppendOptMs(sb, "ctx_wait", CtxWaitMs);
         AppendCoreMs(sb, "inject", InjectMs);
         AppendOptNum(sb, "inject_chars", InjectChars);
         if (InjectChunksSent is not null || InjectChunksTotal is not null)

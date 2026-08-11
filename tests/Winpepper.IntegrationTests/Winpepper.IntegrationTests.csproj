@@ -4,6 +4,10 @@
     <IsTestProject>true</IsTestProject>
     <!-- tbc0: dual-target so the real-Windows contention test (WindowContextPrefetchAsrContentionTests,
          #if WINDOWS) runs on the gate's windows TFM; net9.0 keeps the Linux-visible tests. -->
+    <!-- Directory.Build.props sets TargetFramework=net9.0 BEFORE this file's body is read;
+         clear it first (same convention as Winpepper.Platform.Tests) or a bare
+         `dotnet build` only builds net9.0. -->
+    <TargetFramework></TargetFramework>
     <TargetFrameworks>net9.0;net9.0-windows10.0.19041.0</TargetFrameworks>
   </PropertyGroup>
   <ItemGroup>

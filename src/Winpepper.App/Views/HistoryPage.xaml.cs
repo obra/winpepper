@@ -32,7 +32,6 @@ public sealed partial class HistoryPage : Page
             _retentionViewModel.RetentionApplied -= OnRetentionApplied;
 
         var retentionViewModel = new HistoryRetentionViewModel(
-            shell.SettingsStore.Load(),
             services.Store,
             shell.SettingsWriter,
             services.RetentionSlot);

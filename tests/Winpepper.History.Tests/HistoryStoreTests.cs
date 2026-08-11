@@ -145,6 +145,16 @@ public class HistoryStoreTests : IDisposable
     }
 
     [Fact]
+    public void Load_NullEntryElement_ReturnsEmptyIndex()
+    {
+        var indexPath = Path.Combine(_root, "index.json");
+        File.WriteAllText(indexPath, "{\"entries\":[null]}");
+        var store = new HistoryStore(_root);
+
+        store.Load().Entries.ShouldBeEmpty();
+    }
+
+    [Fact]
     public void Delete_RemovesEntryAndWav()
     {
         var store = new HistoryStore(_root);
@@ -352,6 +362,20 @@ public class HistoryStoreTests : IDisposable
     }
 
     [Fact]
+    public void Prune_NullEntryElement_BailsWithoutWriting()
+    {
+        var indexPath = Path.Combine(_root, "index.json");
+        File.WriteAllText(indexPath, "{\"entries\":[null]}");
+        var originalBytes = File.ReadAllBytes(indexPath);
+        var store = new HistoryStore(_root);
+
+        var result = store.Prune();
+
+        result.ShouldBe(new HistoryPruneResult());
+        File.ReadAllBytes(indexPath).ShouldBe(originalBytes);
+    }
+
+    [Fact]
     public void Prune_UnreadableIndex_ReturnsZerosAndLeavesFileUntouched()
     {
         var indexPath = Path.Combine(_root, "index.json");
@@ -466,6 +490,25 @@ public class HistoryStoreTests : IDisposable
         var wavPath = CreateWav("null-entries/orphan.wav", "orphan");
         var indexPath = Path.Combine(_root, "index.json");
         File.WriteAllText(indexPath, "{\"entries\": null}");
+        var originalBytes = File.ReadAllBytes(indexPath);
+        var store = new HistoryStore(_root);
+
+        var result = store.DeleteAllAudio();
+
+        result.DeletedCount.ShouldBe(1);
+        result.FailedCount.ShouldBe(0);
+        result.IndexSaveFailed.ShouldBeFalse();
+        result.EnumerationFailed.ShouldBeFalse();
+        File.Exists(wavPath).ShouldBeFalse();
+        File.ReadAllBytes(indexPath).ShouldBe(originalBytes);
+    }
+
+    [Fact]
+    public void DeleteAllAudio_NullEntryElement_SweepsButDoesNotThrowAndDoesNotRewrite()
+    {
+        var wavPath = CreateWav("null-entry/orphan.wav", "orphan");
+        var indexPath = Path.Combine(_root, "index.json");
+        File.WriteAllText(indexPath, "{\"entries\":[null]}");
         var originalBytes = File.ReadAllBytes(indexPath);
         var store = new HistoryStore(_root);
 

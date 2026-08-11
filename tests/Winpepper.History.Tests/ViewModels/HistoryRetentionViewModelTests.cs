@@ -27,7 +27,7 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         var initial = new AppSettings();
         var slot = PublishedHistoryRetentionSlot.FromSettings(initial);
         var writer = new GateableWriter(initial);
-        var vm = new HistoryRetentionViewModel(initial, new HistoryStore(_root), writer, slot);
+        var vm = new HistoryRetentionViewModel(new HistoryStore(_root), writer, slot);
         var appliedCount = 0;
         var applied = WaitForEventsAsync(vm, 1, () => appliedCount++);
 
@@ -121,7 +121,7 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         var initial = new AppSettings();
         var writer = new GateableWriter(initial);
         var slot = PublishedHistoryRetentionSlot.FromSettings(initial);
-        var vm = new HistoryRetentionViewModel(initial, new HistoryStore(_root), writer, slot);
+        var vm = new HistoryRetentionViewModel(new HistoryStore(_root), writer, slot);
         var applied = WaitForEventsAsync(vm, 3);
 
         vm.KeepForever = true;
@@ -256,7 +256,7 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         var slot = PublishedHistoryRetentionSlot.FromSettings(initial);
         var store = new HistoryStore(_root, () => slot.Policy);
         var writer = new GateableWriter(initial);
-        var vm = new HistoryRetentionViewModel(initial, store, writer, slot);
+        var vm = new HistoryRetentionViewModel(store, writer, slot);
         var archiver = new HistoryArchiver(store, storeAudio: () => slot.StoreAudio);
         var applied = WaitForEventsAsync(vm, 1);
 
@@ -284,10 +284,33 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         await applied;
     }
 
+    [Fact]
+    public async Task ReopenedViewModel_UsesPublishedSlotWhilePersistenceIsPending()
+    {
+        var staleOnSettings = new AppSettings { HistoryStoreAudioEnabled = true };
+        var slot = PublishedHistoryRetentionSlot.FromSettings(staleOnSettings);
+        var writer = new GateableWriter(staleOnSettings);
+        var store = new HistoryStore(_root);
+        var vmA = new HistoryRetentionViewModel(store, writer, slot);
+
+        vmA.StoreAudioEnabled = false;
+
+        var vmB = new HistoryRetentionViewModel(store, writer, slot);
+        vmB.StoreAudioEnabled.ShouldBeFalse();
+
+        vmB.MaxEntries = 123;
+        slot.StoreAudio.ShouldBeFalse();
+
+        var appliedA = WaitForEventsAsync(vmA, 1);
+        var appliedB = WaitForEventsAsync(vmB, 1);
+        writer.CompleteAll(true, true);
+        await Task.WhenAll(appliedA, appliedB);
+    }
+
     private HistoryRetentionViewModel CreateViewModel(AppSettings initial, GateableWriter writer)
     {
         var slot = PublishedHistoryRetentionSlot.FromSettings(initial);
-        return new HistoryRetentionViewModel(initial, new HistoryStore(_root), writer, slot);
+        return new HistoryRetentionViewModel(new HistoryStore(_root), writer, slot);
     }
 
     private List<string> SeedEntries(int count)

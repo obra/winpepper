@@ -22,12 +22,10 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
     private bool _lastApplyHadIndexFailure;
 
     public HistoryRetentionViewModel(
-        AppSettings initial,
         HistoryStore store,
         ISettingsWriter writer,
         PublishedHistoryRetentionSlot slot)
     {
-        ArgumentNullException.ThrowIfNull(initial);
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(writer);
         ArgumentNullException.ThrowIfNull(slot);
@@ -35,11 +33,12 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         _store = store;
         _writer = writer;
         _slot = slot;
-        _storeAudioEnabled = initial.HistoryStoreAudioEnabled;
-        _maxEntries = Math.Clamp(initial.HistoryMaxEntries, 1, 10_000);
-        _keepForever = initial.HistoryMaxAgeDays is null;
+        _storeAudioEnabled = slot.StoreAudio;
+        var policy = slot.Policy;
+        _maxEntries = Math.Clamp(policy.MaxEntries, 1, 10_000);
+        _keepForever = policy.MaxAgeDays is null;
         _maxAgeDays = Math.Clamp(
-            initial.HistoryMaxAgeDays ?? DefaultMaxAgeDays, 1, 36_500);
+            policy.MaxAgeDays ?? DefaultMaxAgeDays, 1, 36_500);
         _diskUsageDisplay = FormatDiskUsage(_store.ComputeAudioDiskUsageBytes());
     }
 

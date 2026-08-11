@@ -98,11 +98,16 @@ Phase-1 report (absolute): `/home/dan/code/winpepper/.worktrees/.the-usual-logs/
 **Behavior:**
 - `Usage: scripts/build-app-windows-from-wsl.sh [--attempts N]` (default N=5 — the kata records
   transient chains needing up to 5 attempts; the default must cover the recorded worst case).
+  Argument validation: if `--attempts` is present its value must be a positive integer and no
+  trailing arguments may remain; any violation prints usage and exits 2.
 - Env checks (fail exit 2 with a clear message): running under WSL (`WSL_DISTRO_NAME` set),
   `powershell.exe` executable at `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`,
   `wslpath` resolvable.
-- Prints and performs a WSL-side `rm -rf src/*/bin src/*/obj` pre-clean (cross-OS build state is
-  not shareable — the deterministic CS0006 guard; see docs/testing-windows-from-wsl.md).
+- Prints and performs a WSL-side `rm -rf <root>/src/*/bin <root>/src/*/obj` pre-clean (cross-OS
+  build state is not shareable — the deterministic CS0006 guard; see
+  docs/testing-windows-from-wsl.md). The pre-clean ALWAYS runs against the effective root
+  `<root>` (normally the repo checkout; see `WINPEPPER_APP_ROOT_OVERRIDE`) — it is never
+  silently skipped, because R3's "clean build" evidence depends on it.
 - Creates a unique per-invocation log directory
   `artifacts/build-app-windows/run-<UTC-YYYYMMDDTHHMMSSZ>-<pid>/` (printed at start and end) and
   tees every attempt's output to `attempt<N>.log` inside it, so evidence from consecutive runs
@@ -111,27 +116,42 @@ Phase-1 report (absolute): `/home/dan/code/winpepper/.worktrees/.the-usual-logs/
   '<UNC>\src\Winpepper.App\Winpepper.App.csproj' -c Release -m:1 -p:UseSharedCompilation=false
   -p:UseXamlCompilerExecutable=true; exit \$LASTEXITCODE"` under `timeout --foreground 2400`.
 - Success → print `BUILD OK on attempt N (run log: <dir>)` + exit 0.
-- Failure classification: exit 124 → TIMEOUT: run the checkout-name-scoped orphan kill (exact
-  `kill_orphans` pattern from scripts/windows-gate.sh:82-91, tag = basename of repo root
-  computed the same way as the gate's `HERE`), then stop with exit 1 (timeouts are not retried:
-  a wedged build needs human eyes). Non-timeout failures: retry only if the attempt log matches
+- Failure classification: exit 124 → TIMEOUT: run the checkout-path-scoped orphan cleanup
+  (below), then stop with exit 1 (timeouts are not retried: a wedged build needs human eyes).
+  Non-timeout failures: retry only if the attempt log matches
   `CS0006|WMC1006|unexpected network error`; print the matched signature; any other failure
   exits 1 immediately naming the attempt log.
 - After N failed attempts → exit 1 naming the run directory.
+- **Timeout orphan cleanup, correctly scoped (deviation from the gate's basename pattern):**
+  listing and filtering are separated so the filter lives in bash and is self-testable —
+  1. list: `dotnet.exe` processes as `PID<TAB>CommandLine` rows (default:
+     powershell `Get-CimInstance Win32_Process -Filter "Name='dotnet.exe'" |%{
+     "$($_.ProcessId)`t$($_.CommandLine)"}`; overridable via `WINPEPPER_APP_ORPHAN_LIST_CMD`),
+  2. filter in bash: keep a row only when its command line contains the FULL effective-root tag
+     (the `wslpath -w` UNC spelling of `<root>`, or Linux spelling as fallback) AND does not
+     contain `<tag>\.worktrees\` — full path, never a basename: from the main checkout the bare
+     basename `winpepper` is a substring of every nested worktree path
+     (`...\winpepper\.worktrees\<other-agent>\...`), so a basename match can kill other agents'
+     builds under the expected concurrent-agent workload (found by round-3 fresh eyes);
+  3. kill only the kept PIDs (default: powershell `Stop-Process -Id <pid> -Force` per PID;
+     overridable via `WINPEPPER_APP_ORPHAN_KILL_CMD`), printing each PID.
 - Self-test seams (documented in the script header; each changes nothing when unset):
-  `WINPEPPER_APP_BUILD_CMD` — replaces the powershell build invocation entirely and skips the
-  pre-clean and the WSL/powershell prereq checks; `WINPEPPER_APP_BUILD_TIMEOUT_S` — overrides
-  the default 2400 s per-attempt timeout; `WINPEPPER_APP_ORPHAN_KILL_CMD` — replaces the
-  powershell orphan-kill invocation in the timeout branch. The seams exist so
-  `scripts/build-app-windows-from-wsl.selftest.sh` can drive the retry / exhaustion /
-  classification / timeout logic deterministically with injected fake commands.
+  `WINPEPPER_APP_BUILD_CMD` — replaces the powershell build invocation and skips the
+  WSL/powershell prereq checks; `WINPEPPER_APP_ROOT_OVERRIDE` — replaces the effective root for
+  the pre-clean and kill tag (only meaningful with the build-cmd seam; lets the selftest use a
+  disposable tree); `WINPEPPER_APP_BUILD_TIMEOUT_S` — overrides the 2400 s timeout;
+  `WINPEPPER_APP_ORPHAN_LIST_CMD` / `WINPEPPER_APP_ORPHAN_KILL_CMD` — replace the powershell
+  list/kill invocations. The seams exist so the self-test can drive every branch
+  deterministically with injected fake commands.
 
 Self-test (`scripts/build-app-windows-from-wsl.selftest.sh`, pure bash, no Windows interop;
-returns exit 0 only when every case passes, printing `SELFTEST: PASS` / per-case lines):
-1. *transient-then-success-at-the-boundary:* fake command writes a canned log containing
+returns exit 0 only when every case passes, printing `SELFTEST: PASS` / per-case lines).
+All runs use the build-cmd seam plus a disposable `WINPEPPER_APP_ROOT_OVERRIDE` (mktemp dir
+with a fake `src/Winpepper.App/Winpepper.App.csproj` placeholder):
+1. *transient-then-success-at-the-boundary:* fake command prints a canned log containing
    `error CS0006` and exits 1 on calls 1–4, exits 0 on call 5 (attempt counter in a mktemp
-   state file); run the wrapper with the build-cmd seam and `--attempts 5` → wrapper exits 0,
-   prints `BUILD OK on attempt 5`, and four `transient signature` lines appear.
+   state file); run the wrapper with `--attempts 5` → wrapper exits 0, prints
+   `BUILD OK on attempt 5`, and four `transient signature` lines appear.
 2. *exhaustion:* fake always fails with a `WMC1006` log → wrapper exits 1 after exactly 5
    attempts (five attempt logs exist in a unique run dir).
 3. *non-transient:* fake fails with a permanent `error CS1234` → wrapper exits 1 after exactly
@@ -139,10 +159,20 @@ returns exit 0 only when every case passes, printing `SELFTEST: PASS` / per-case
 4. *transport signature:* fake fails twice with `An unexpected network error occurred` then
    succeeds → wrapper exits 0 on attempt 3 (signature matched, not treated as permanent).
 5. *clean first try:* fake succeeds immediately → exit 0 on attempt 1, no retry lines.
-6. *timeout path:* fake build command is `sleep`-based and
-   `WINPEPPER_APP_BUILD_TIMEOUT_S=2` makes `timeout` return 124; orphan-kill seam points at a
-   fake that appends to a marker file → wrapper exits 1 after exactly 1 attempt (no retry),
-   prints a TIMEOUT line, and the marker file proves the scoped orphan-kill branch fired.
+6. *timeout path + kill scoping:* fake build is `sleep`-based with
+   `WINPEPPER_APP_BUILD_TIMEOUT_S=2` (→ exit 124); `WINPEPPER_APP_ORPHAN_LIST_CMD` fakes three
+   rows — (a) a CommandLine containing the disposable root's tag, (b) one containing a DIFFERENT
+   checkout under `<main>\.worktrees\other-agent\...`, (c) one containing a `<tag>\.worktrees\`
+   nested path for the SAME tag; `WINPEPPER_APP_ORPHAN_KILL_CMD` records the PIDs it receives.
+   → wrapper exits 1 after exactly 1 attempt (no retry), prints a TIMEOUT line, and the kill
+   record contains ONLY PID (a) (bash-side full-path filter with the `.worktrees\` exclusion
+   provably selects own-checkout command lines and rejects both other-checkout rows).
+7. *pre-clean runs against the effective root:* seed `<disposable>/src/Seed/bin/` and
+   `.../obj/` sentinel files; the fake build command asserts both are already gone at call
+   time (failing the run if present); after the wrapper exits 0, the sentinels are absent from
+   disk — the "clean build" claim of Task 3 rests on this, never on assumption.
+8. *usage validation:* `--attempts 0`, `--attempts abc`, and a trailing positional argument each
+   print usage and exit 2 without running any build.
 Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `run-*` dirs).
 
 **Files:**
@@ -150,11 +180,14 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 - Test: `scripts/build-app-windows-from-wsl.selftest.sh`
 
 **Interfaces:**
-- Consumes: repo layout `src/Winpepper.App/Winpepper.App.csproj`; interop pattern and the
-  `kill_orphans` body from `scripts/windows-gate.sh`; `wslpath`, `powershell.exe`.
+- Consumes: repo layout `src/Winpepper.App/Winpepper.App.csproj`; the interop pattern from
+  `scripts/windows-gate.sh` (run_ps/timeout structure — NOT its basename kill filter);
+  `wslpath`, `powershell.exe`.
 - Produces: exit codes 0/1/2; `artifacts/build-app-windows/run-*/attempt<N>.log` under the
   gitignored `artifacts/`; stdout progress lines; env-seam contract
-  (`WINPEPPER_APP_BUILD_CMD`, `WINPEPPER_APP_BUILD_TIMEOUT_S`, `WINPEPPER_APP_ORPHAN_KILL_CMD`).
+  (`WINPEPPER_APP_BUILD_CMD`, `WINPEPPER_APP_ROOT_OVERRIDE`,
+  `WINPEPPER_APP_BUILD_TIMEOUT_S`, `WINPEPPER_APP_ORPHAN_LIST_CMD`,
+  `WINPEPPER_APP_ORPHAN_KILL_CMD`).
 
 **Test cases:**
 - `bash -n` on both scripts → syntax clean.
@@ -167,11 +200,10 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
 - [ ] **Step 1: Write the failing behavioral test**
 
-  Create `scripts/build-app-windows-from-wsl.selftest.sh` per the five cases above (the fake
-  build command is a small inline bash function exported via the seam env var; canned log
-  snippets are written to the attempt-log path the wrapper hands the command — simplest: the
-  fake builder prints to stdout/stderr and the wrapper captures it exactly as it captures the
-  real build, so no path handoff is needed).
+  Create `scripts/build-app-windows-from-wsl.selftest.sh` per the eight cases above (the fake
+  build command is a small inline bash snippet passed via the seam env var; the wrapper captures
+  its stdout/stderr to the attempt log exactly as it captures the real build, so no path handoff
+  is needed).
 
 - [ ] **Step 2: Run the test and verify the intended failure**
 
@@ -185,19 +217,24 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
   Create `scripts/build-app-windows-from-wsl.sh` with exactly the Behavior above. Structure:
   header comment (purpose; the three mitigations with accurate single-node wording from
-  Rationale; safety invariants; self-test seam contract for all three seams); `set -euo
-  pipefail`; `HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"`; env checks (skipped when
-  the build-cmd seam is set); `ATTEMPTS` default 5 parsed with a plain `if [[ ... ]]; then`
-  (never `[[ ]] && { }` under `set -e`); unique run dir; pre-clean (skipped under seam);
-  attempt loop with `run_attempt` (timeout-wrapped command string) + the classification rules
-  above; kill_orphans verbatim from the gate, routed through `WINPEPPER_APP_ORPHAN_KILL_CMD`
-  when set. `chmod +x` both scripts.
+  Rationale; safety invariants; self-test seam contract for all five seams); `set -euo
+  pipefail`; `HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"`; effective root
+  `ROOT="${WINPEPPER_APP_ROOT_OVERRIDE:-$HERE}"`; env checks (skipped when the build-cmd seam is
+  set); `--attempts` parsing with positive-integer validation in a plain `if ...; then`
+  (never `[[ ]] && { }` under `set -e`); unique run dir
+  `$ROOT/artifacts/build-app-windows/run-<UTC>-<pid>/` (uniform for real and seam runs — in real
+  use `$ROOT` is the checkout so logs land in the gitignored `artifacts/`; in the selftest it is
+  the mktemp disposable root); pre-clean against `$ROOT` (always, never skipped); attempt loop
+  with `run_attempt` (timeout-wrapped command string: the real powershell build, or the seam
+  cmd) + the classification rules above; timeout branch = list (seam-able) → bash filter on the
+  full-path tag with the `.worktrees\` exclusion → kill only kept PIDs (seam-able).
+  `chmod +x` both scripts.
 
 - [ ] **Step 4: Run the focused test**
 
   Run: `bash -n scripts/build-app-windows-from-wsl.sh scripts/build-app-windows-from-wsl.selftest.sh && bash scripts/build-app-windows-from-wsl.selftest.sh`
 
-  Expected: syntax clean; `SELFTEST: PASS` (all five cases green).
+  Expected: syntax clean; `SELFTEST: PASS` (all eight cases green).
 
 - [ ] **Step 5: Refactor while green**
 
@@ -231,12 +268,17 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
 **Behavior:**
 - `docs/testing-windows-from-wsl.md` gains a `## Building the app from WSL` section after the
-  "One command" section: the wrapper command; one paragraph why (9P cross-process visibility lag
-  measured 5–43 ms + transport write errors under contention → CS0006/WMC1006; pre-clean kills
-  the deterministic cross-OS CS0006; `-m:1` keeps the graph single-node so no two tool processes
-  ever race each other on the share — compiles still run as child processes and no timing
-  guarantee is implied, so the residual handoff exposure is covered by the bounded retry);
-  pointer that the gate uses the same recipe.
+  "One command" section: the wrapper command; one honest paragraph why — reproduced live under
+  concurrent-build contention: the XAML compiler failed writing to the share ("An unexpected
+  network error occurred") with follow-on WMC-family XAML errors, and cross-process 9P
+  visibility lag measured systematic (98–100% of 800 probes ≥5 ms, max 43 ms); the kata's exact
+  CS0006/WMC1006 ref-assembly codes are *inferred* members of the same 9P coherence/transport
+  class (every historically recorded CS0006 trace also had the confounded, since-fixed cross-OS
+  obj-mixing mechanism in play) — the docs must say exactly that and not claim fresh CS0006
+  reproduction; pre-clean kills the deterministic cross-OS CS0006; `-m:1` keeps the graph
+  single-node so no two tool processes race each other on the share (compiles still run as child
+  processes; no timing guarantee is implied) and the bounded retry covers the residual; pointer
+  that the gate uses the same recipe.
 - `docs/DEVELOPMENT.md`: the "Building from source" WSL paragraph (lines ~51-56) gains one
   sentence routing WSL2-checkout app builds through `scripts/build-app-windows-from-wsl.sh`
   (from a WSL shell), noting it hardens the documented `dotnet build` command against the

@@ -56,7 +56,9 @@ Windows .NET SDK 9.0.3xx on the host, WSL2.
 ## Rationale (candidate evaluation, from Phase-1 evidence)
 
 Phase-1 report (absolute): `/home/dan/code/winpepper/.worktrees/.the-usual-logs/gzcc-unc-build-race/reports/phase1-systematic-debugging.md`
-(scratch evidence under `/tmp/gzcc-repro/logs`, incl. retained probe-v2 raw rows). Summary:
+(evidence preserved at `/home/dan/code/winpepper/.worktrees/.the-usual-logs/gzcc-unc-build-race/reports/phase1-evidence/` —
+original /tmp scratch was lost to host /tmp cleanup; recovered verbatim from the delta round-2 review transcript,
+probe re-run with complete retained raw rows; see PROVENANCE.md there). Summary:
 
 - What is hard evidence: under concurrent-build contention the 9P share throws outright
   transport faults — reproduced live as `XamlCompiler: Failed to write output file: An
@@ -65,7 +67,7 @@ Phase-1 report (absolute): `/home/dan/code/winpepper/.worktrees/.the-usual-logs/
   *visibility lag* — probe v1 conflated per-op UNC latency with invisibility windows (found in
   delta review); the corrected probe v2 (first-attempt miss field + local-disk control, raw rows
   retained) shows 0/300 first-attempt misses on 9P, idle AND under twin-build contention, zero
-  open retries — only per-op latency (p99 53–64 ms contended vs 0 local). The kata's exact
+  open retries — only per-op latency (p99 53 ms, max 64 ms contended vs 0 local). The kata's exact
   CS0006/WMC1006 codes are inferred members of this transient-I/O class, never fresh-reproduced;
   every recorded historical CS0006 also had the confounded, since-fixed cross-OS obj-mixing
   mechanism in play.
@@ -295,7 +297,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   concurrent-build contention: the XAML compiler failed writing to the share ("An unexpected
   network error occurred") with follow-on WMC-family XAML errors; and the corrected probe v2
   result — cross-process file reads on 9P showed zero first-attempt misses (600 pairs, half
-  under contention), only stretched per-op latency (p99 ≈ 53–64 ms contended vs ~0 ms locally),
+  under contention), only stretched per-op latency (p99 53 ms, max 64 ms contended vs ~0 ms locally),
   i.e. docs must NOT claim a visibility-lag window; the kata's exact CS0006/WMC1006 ref-assembly
   codes are *inferred* members of the same transient-I/O class (every historically recorded
   CS0006 trace also had the confounded, since-fixed cross-OS obj-mixing mechanism in play) — the
@@ -320,7 +322,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
 **Interfaces:**
 - Consumes: Phase-1 numbers (probe v2: 0/300 first-attempt misses on 9P incl. contention,
-  p99 ≈ 53–64 ms contended latency; repro PX1b iter 2 transport fault; app-S 6/6;
+  p99 53 ms, max 64 ms contended latency; repro PX1b iter 2 transport fault; app-S 6/6;
   wrapper evidence Task 3).
 - Produces: no code interfaces.
 
@@ -344,7 +346,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
   Write the doc section, the DEVELOPMENT.md sentence, and the AGENTS.md sentence per Behavior.
   Numbers quoted in docs must match Phase-1 evidence (probe v2: first-attempt 0/300 misses on
-  9P incl. contention, p99 ≈ 53–64 ms contended latency — no visibility claim; repro under
+  9P incl. contention, p99 53 ms / max 64 ms contended latency — no visibility claim; repro under
   contention = PX1b iter 2 transport fault; retry default 5; serialized-build wall-clock
   210–318 s vs parallel 167–234 s).
   Use "single-node/serialized scheduling" wording — never "single process".
@@ -400,7 +402,8 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   `<logs-dir>/reports/`.
 
 **Interfaces:**
-- Consumes: Task 1 script (committed), Phase-1 CSVs at `/tmp/gzcc-repro/logs/*.csv`.
+- Consumes: Task 1 script (committed), Phase-1 CSVs preserved at `reports/phase1-evidence/*.csv`
+  (originals lost with /tmp; verbatim recovery — see its PROVENANCE.md).
 - Produces: the verification table for the kata comment and recap.
 
 **Test cases:**

@@ -111,7 +111,7 @@ the share ("An unexpected network error occurred") with follow-on WMC-family
 XAML errors, then passed on the next identical run. A controlled probe of
 cross-process write→read pairs (600 samples, half mid concurrent App build)
 found *no* file-visibility windows — first-attempt reads saw every write —
-only stretched per-operation latency (p99 ≈ 53–64 ms contended vs ~0 ms
+only stretched per-operation latency (p99 53 ms, max 64 ms contended vs ~0 ms
 locally). The CS0006/WMC1006 ref-assembly codes this command defends against
 are *inferred* members of the same transient-I/O class — every historically
 recorded CS0006 trace also had the (since-fixed) cross-OS obj-mixing

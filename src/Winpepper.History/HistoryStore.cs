@@ -170,6 +170,11 @@ public sealed class HistoryStore
     {
         lock (_gate)
         {
+            // Fail closed: a reparse-point history root could point this destructive op at
+            // an external target. Refuse before ANY load/save/delete IO.
+            if (RootIsReparsePoint())
+                return new HistoryPruneResult { LoadFailed = true };
+
             if (!TryLoadStrictUnlocked(out var index))
                 return new HistoryPruneResult { LoadFailed = true };
 
@@ -200,6 +205,11 @@ public sealed class HistoryStore
     {
         lock (_gate)
         {
+            // Fail closed: a reparse-point history root could point this sweep at an
+            // external target. Refuse before ANY enumeration/delete/save IO.
+            if (RootIsReparsePoint())
+                return new HistoryAudioCleanupResult { EnumerationFailed = true };
+
             var deletedCount = 0;
             var failedCount = 0;
             var enumerationFailed = false;
@@ -458,6 +468,31 @@ public sealed class HistoryStore
         catch
         {
             return false;
+        }
+    }
+
+    /// <summary>
+    /// True when the history root itself is a reparse point (junction/symlink). A missing
+    /// root is NOT unsafe (first run), but any attribute-read failure means we cannot prove
+    /// safety and must fail closed.
+    /// </summary>
+    private bool RootIsReparsePoint()
+    {
+        try
+        {
+            return (File.GetAttributes(_rootFullPath) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (FileNotFoundException)
+        {
+            return false;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return false;
+        }
+        catch
+        {
+            return true;
         }
     }
 

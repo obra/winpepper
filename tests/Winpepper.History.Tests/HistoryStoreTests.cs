@@ -863,7 +863,8 @@ public class HistoryStoreTests : IDisposable
     public void DeleteAllAudio_RefusesWhenRootItselfIsSymlink()
     {
         // D6 physical-safety boundary must include the root: a junctioned/symlinked
-        // history root must fail closed, never delete through to the external target.
+        // history root must fail closed for every destructive op — no WAV deletion AND
+        // no external index.json mutation (no create, no replace).
         var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-rootsymlink-{Guid.NewGuid():N}");
         Directory.CreateDirectory(outsideRoot);
         var outsideWav = Path.Combine(outsideRoot, "outside.wav");
@@ -888,7 +889,7 @@ public class HistoryStoreTests : IDisposable
 
             File.Exists(outsideWav).ShouldBeTrue();
             result.DeletedCount.ShouldBe(0);
-            result.FailedCount.ShouldBe(1);
+            Directory.GetFileSystemEntries(outsideRoot).ShouldBe([outsideWav]);
         }
         finally
         {
@@ -904,6 +905,14 @@ public class HistoryStoreTests : IDisposable
         Directory.CreateDirectory(outsideRoot);
         var outsideWav = Path.Combine(outsideRoot, "outside.wav");
         File.WriteAllText(outsideWav, "outside");
+        // Seed the external index directly (never through the store) so the test proves
+        // that no destructive op mutates the external target at all.
+        var indexPath = Path.Combine(outsideRoot, "index.json");
+        const string indexJson =
+            "{\"entries\":[" +
+            "{\"id\":\"old\",\"createdAtUtc\":\"2020-01-01T00:00:00Z\",\"wavRelativePath\":\"outside.wav\"}," +
+            "{\"id\":\"new\",\"createdAtUtc\":\"2026-01-01T00:00:00Z\"}]}";
+        File.WriteAllText(indexPath, indexJson);
         var linkRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-rootlink-{Guid.NewGuid():N}");
         var linkCreated = false;
 
@@ -925,19 +934,14 @@ public class HistoryStoreTests : IDisposable
                 MaxEntries = 1,
                 MaxAgeDays = null,
             });
-            store.Append(new HistoryEntry
-            {
-                Id = "old",
-                CreatedAtUtc = DateTime.UtcNow.AddMinutes(-1),
-                WavRelativePath = "outside.wav",
-            });
-            store.Append(new HistoryEntry { Id = "new", CreatedAtUtc = DateTime.UtcNow });
 
             var result = store.Prune();
 
-            File.Exists(outsideWav).ShouldBeTrue();
+            result.LoadFailed.ShouldBeTrue();
             result.DroppedCount.ShouldBe(0);
-            result.RetainedAfterFailedDelete.ShouldBe(1);
+            File.Exists(outsideWav).ShouldBeTrue();
+            File.ReadAllText(indexPath).ShouldBe(indexJson);
+            Directory.GetFileSystemEntries(outsideRoot).OrderBy(p => p).ShouldBe([indexPath, outsideWav]);
         }
         finally
         {

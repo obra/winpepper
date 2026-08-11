@@ -49,6 +49,9 @@ Windows .NET SDK 9.0.3xx on the host, WSL2.
 - **R3 — Evidence:** ≥5 consecutive wrapper runs from clean state, every run exit-0, with
   per-attempt logs under `artifacts/build-app-windows/`; Linux suite green before the commit;
   fresh-eyes reviews of plan and delta.
+- **R4 — Reporting:** post `kata comment gzcc` with root cause, fix implemented, worktree/branch,
+  verification evidence (consecutive clean-build counts), fresh-eyes verdicts, and what remains;
+  never close the issue.
 
 ## Rationale (candidate evaluation, from Phase-1 evidence)
 
@@ -62,17 +65,20 @@ Phase-1 report (absolute): `/home/dan/code/winpepper/.worktrees/.the-usual-logs/
   passed on the next identical run.
 - **Adopt** `-m:1 -p:UseSharedCompilation=false` — mechanism, stated accurately: the flags do
   NOT make the build one OS process (Roslyn always compiles out-of-proc — the shared
-  VBCSCompiler server, or a per-project csc.exe child when `UseSharedCompilation=false`).
-  `-m:1` makes MSBuild schedule the whole graph on ONE node, so targets run strictly in order:
-  every tool process (CSC child, XamlCompiler.exe, mt shim) has exited and its 9P writes have
-  settled for seconds-to-minutes before any dependent tool starts — versus parallel defaults,
-  where independent nodes' compiler processes write and probe the share concurrently, inside
-  the measured 5–43 ms lag windows. `UseSharedCompilation=false` additionally retires the
-  long-lived Roslyn server, removing cross-invocation server state from the retry story.
+  VBCSCompiler server, or a per-project csc.exe child when `UseSharedCompilation=false`), and
+  `-m:1` imposes NO guaranteed settle delay. What it does: schedule the whole graph on one
+  MSBuild node, so projects' targets run in strict dependency order with no two tool processes
+  (CSC children, XamlCompiler.exe, mt shim) ever probing/writing the share CONCURRENTLY inside
+  the measured 5–43 ms lag windows — the dependent project's targets start only after the
+  upstream project's build target has completed (its compiler process reaped). Residual exposure
+  is the ms-scale handoff from one finished process to the next reader, which is exactly what
+  the retry layer covers. `UseSharedCompilation=false` additionally retires the long-lived
+  Roslyn server, removing cross-invocation server state from the retry story.
   Evidence: parallel twins under matched 2×-concurrent-app-build contention: 1 failure in 6
   builds (the PX1b iter 2 WMC-family repro); serialized twins under the same contention:
-  app-SS1/app-SS2 arms (see Verification); serialized solo: 6/6 OK in 210–318 s vs 167–234 s
-  parallel. The flag is a risk reducer, not a guarantee — hence the retry layer.
+  app-SS1 3/3, app-SS2 2/2-builds OK (one interop outage, no build), zero transient signatures;
+  serialized solo: 6/6 OK in 210–318 s vs 167–234 s parallel. The flag is a risk reducer,
+  not a guarantee — hence the retry layer.
 - **Adopt** the documented retry wrapper as the delivery vehicle: XamlCompiler.exe, per-project
   csc.exe children, and the mt-unc-shim Exec cross 9P process boundaries no matter what; a
   bounded retry on transient signatures (`CS0006|WMC1006|unexpected network error`) matches the
@@ -90,7 +96,8 @@ Phase-1 report (absolute): `/home/dan/code/winpepper/.worktrees/.the-usual-logs/
 **Requirements served:** R1, R2
 
 **Behavior:**
-- `Usage: scripts/build-app-windows-from-wsl.sh [--attempts N]` (default N=3).
+- `Usage: scripts/build-app-windows-from-wsl.sh [--attempts N]` (default N=5 — the kata records
+  transient chains needing up to 5 attempts; the default must cover the recorded worst case).
 - Env checks (fail exit 2 with a clear message): running under WSL (`WSL_DISTRO_NAME` set),
   `powershell.exe` executable at `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe`,
   `wslpath` resolvable.
@@ -111,28 +118,32 @@ Phase-1 report (absolute): `/home/dan/code/winpepper/.worktrees/.the-usual-logs/
   `CS0006|WMC1006|unexpected network error`; print the matched signature; any other failure
   exits 1 immediately naming the attempt log.
 - After N failed attempts → exit 1 naming the run directory.
-- Self-test seam (documented in the script header): when `WINPEPPER_APP_BUILD_CMD` is set, it
-  replaces the powershell build invocation entirely, the pre-clean and the WSL/powershell prereq
-  checks are skipped, and `WINPEPPER_APP_BUILD_TIMEOUT_S` overrides the default 2400 s timeout.
-  The seam exists so `scripts/build-app-windows-from-wsl.selftest.sh` can drive the retry /
-  exhaustion / classification logic with an injected fake build command, and it changes nothing
-  when unset.
+- Self-test seams (documented in the script header; each changes nothing when unset):
+  `WINPEPPER_APP_BUILD_CMD` — replaces the powershell build invocation entirely and skips the
+  pre-clean and the WSL/powershell prereq checks; `WINPEPPER_APP_BUILD_TIMEOUT_S` — overrides
+  the default 2400 s per-attempt timeout; `WINPEPPER_APP_ORPHAN_KILL_CMD` — replaces the
+  powershell orphan-kill invocation in the timeout branch. The seams exist so
+  `scripts/build-app-windows-from-wsl.selftest.sh` can drive the retry / exhaustion /
+  classification / timeout logic deterministically with injected fake commands.
 
 Self-test (`scripts/build-app-windows-from-wsl.selftest.sh`, pure bash, no Windows interop;
 returns exit 0 only when every case passes, printing `SELFTEST: PASS` / per-case lines):
-1. *transient-then-success:* fake command writes a canned log containing `error CS0006` and
-   exits 1 on calls 1–2, exits 0 on call 3 (attempt counter in a mktemp state file); run the
-   wrapper with the seam and `--attempts 3` → wrapper exits 0, prints
-   `BUILD OK on attempt 3`, and two `transient signature` lines appear.
-2. *exhaustion:* fake always fails with a `WMC1006` log → wrapper exits 1 after exactly 3
-   attempts (three attempt logs exist in a unique run dir).
+1. *transient-then-success-at-the-boundary:* fake command writes a canned log containing
+   `error CS0006` and exits 1 on calls 1–4, exits 0 on call 5 (attempt counter in a mktemp
+   state file); run the wrapper with the build-cmd seam and `--attempts 5` → wrapper exits 0,
+   prints `BUILD OK on attempt 5`, and four `transient signature` lines appear.
+2. *exhaustion:* fake always fails with a `WMC1006` log → wrapper exits 1 after exactly 5
+   attempts (five attempt logs exist in a unique run dir).
 3. *non-transient:* fake fails with a permanent `error CS1234` → wrapper exits 1 after exactly
    1 attempt (only `attempt1.log` exists), with no retry line.
 4. *transport signature:* fake fails twice with `An unexpected network error occurred` then
    succeeds → wrapper exits 0 on attempt 3 (signature matched, not treated as permanent).
 5. *clean first try:* fake succeeds immediately → exit 0 on attempt 1, no retry lines.
-Each case also asserts on the wrapper's printed run-dir uniqueness (two runs → two distinct
-run dirs).
+6. *timeout path:* fake build command is `sleep`-based and
+   `WINPEPPER_APP_BUILD_TIMEOUT_S=2` makes `timeout` return 124; orphan-kill seam points at a
+   fake that appends to a marker file → wrapper exits 1 after exactly 1 attempt (no retry),
+   prints a TIMEOUT line, and the marker file proves the scoped orphan-kill branch fired.
+Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `run-*` dirs).
 
 **Files:**
 - Create: `scripts/build-app-windows-from-wsl.sh`
@@ -143,13 +154,14 @@ run dirs).
   `kill_orphans` body from `scripts/windows-gate.sh`; `wslpath`, `powershell.exe`.
 - Produces: exit codes 0/1/2; `artifacts/build-app-windows/run-*/attempt<N>.log` under the
   gitignored `artifacts/`; stdout progress lines; env-seam contract
-  (`WINPEPPER_APP_BUILD_CMD`, `WINPEPPER_APP_BUILD_TIMEOUT_S`).
+  (`WINPEPPER_APP_BUILD_CMD`, `WINPEPPER_APP_BUILD_TIMEOUT_S`, `WINPEPPER_APP_ORPHAN_KILL_CMD`).
 
 **Test cases:**
 - `bash -n` on both scripts → syntax clean.
 - `shellcheck` on both scripts if shellcheck is installed → no findings; if not installed,
   record `Not run (shellcheck unavailable)` and rely on review.
-- Self-test → `SELFTEST: PASS` (covers every classification branch deterministically).
+- Self-test → `SELFTEST: PASS` (covers every classification branch deterministically:
+  retryable CS0006/WMC1006/transport, non-transient, exhaustion at N=5, timeout+orphan-kill).
 - One real clean run `--attempts 1` → exit 0 `BUILD OK on attempt 1` (happy path; transient
   branches are covered deterministically by the self-test, statistically by Task 3's battery).
 
@@ -173,12 +185,13 @@ run dirs).
 
   Create `scripts/build-app-windows-from-wsl.sh` with exactly the Behavior above. Structure:
   header comment (purpose; the three mitigations with accurate single-node wording from
-  Rationale; safety invariants; self-test seam contract); `set -euo pipefail`;
-  `HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"`; env checks (skipped when the seam
-  is set); `ATTEMPTS` default 3 parsed with a plain `if [[ ... ]]; then` (never `[[ ]] && { }`
-  under `set -e`); unique run dir; pre-clean (skipped under seam); attempt loop with
-  `run_attempt` (timeout-wrapped command string) + the classification rules above; kill_orphans
-  verbatim from the gate. `chmod +x` both scripts.
+  Rationale; safety invariants; self-test seam contract for all three seams); `set -euo
+  pipefail`; `HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"`; env checks (skipped when
+  the build-cmd seam is set); `ATTEMPTS` default 5 parsed with a plain `if [[ ... ]]; then`
+  (never `[[ ]] && { }` under `set -e`); unique run dir; pre-clean (skipped under seam);
+  attempt loop with `run_attempt` (timeout-wrapped command string) + the classification rules
+  above; kill_orphans verbatim from the gate, routed through `WINPEPPER_APP_ORPHAN_KILL_CMD`
+  when set. `chmod +x` both scripts.
 
 - [ ] **Step 4: Run the focused test**
 
@@ -194,11 +207,16 @@ run dirs).
 
 - [ ] **Step 6: Run broader verification**
 
-  Run: `scripts/build-app-windows-from-wsl.sh --attempts 1` (one real serialized clean build
-  over UNC), then `./scripts/linux-tests.sh`.
+  Order matters — never let Windows-built `obj` state leak into a Linux build (AGENTS.md
+  cross-OS rule). Run the Linux suite FIRST (its own clean conditions), then the real wrapper
+  run (the wrapper pre-cleans `src/**/{bin,obj}` itself, so stale Linux `src` state from the
+  suite is removed by design):
 
-  Expected: `BUILD OK on attempt 1` (exit 0); `LINUX SUITE: GREEN` (repo rule: green run before
-  the commit).
+  Run: `find src tests -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} + && ./scripts/linux-tests.sh && scripts/build-app-windows-from-wsl.sh --attempts 1`
+
+  Expected: `LINUX SUITE: GREEN` (repo rule: green run before the commit), then
+  `BUILD OK on attempt 1` (exit 0), run log directory printed. Note: after this step the tree's
+  `src/**` state is Windows-built — any later Linux run must wipe first (AGENTS.md).
 
 - [ ] **Step 7: Commit the task**
 
@@ -215,9 +233,10 @@ run dirs).
 - `docs/testing-windows-from-wsl.md` gains a `## Building the app from WSL` section after the
   "One command" section: the wrapper command; one paragraph why (9P cross-process visibility lag
   measured 5–43 ms + transport write errors under contention → CS0006/WMC1006; pre-clean kills
-  the deterministic cross-OS CS0006; `-m:1` keeps the graph single-NODE so every tool's writes
-  settle before the next tool starts — compiles themselves still run as child processes; bounded
-  retry covers the XamlCompiler/mt-shim edges); pointer that the gate uses the same recipe.
+  the deterministic cross-OS CS0006; `-m:1` keeps the graph single-node so no two tool processes
+  ever race each other on the share — compiles still run as child processes and no timing
+  guarantee is implied, so the residual handoff exposure is covered by the bounded retry);
+  pointer that the gate uses the same recipe.
 - `docs/DEVELOPMENT.md`: the "Building from source" WSL paragraph (lines ~51-56) gains one
   sentence routing WSL2-checkout app builds through `scripts/build-app-windows-from-wsl.sh`
   (from a WSL shell), noting it hardens the documented `dotnet build` command against the
@@ -257,7 +276,7 @@ run dirs).
 
   Write the doc section, the DEVELOPMENT.md sentence, and the AGENTS.md sentence per Behavior.
   Numbers quoted in docs must match Phase-1 evidence (5–43 ms probe range; repro under
-  contention = PX1b iter 2; retry default 3; serialized-build wall-clock 210–318 s).
+  contention = PX1b iter 2; retry default 5; serialized-build wall-clock 210–318 s).
   Use "single-node/serialized scheduling" wording — never "single process".
 
 - [ ] **Step 4: Run the focused test**
@@ -274,15 +293,17 @@ run dirs).
 
 - [ ] **Step 6: Run broader verification**
 
-  Run: `./scripts/linux-tests.sh` (repo pre-commit rule applies to every commit)
+  Task 1's Windows run left Windows-built `src/**` state — wipe before any Linux build
+  (AGENTS.md cross-OS rule; linux-tests.sh does not pre-clean).
 
-  Expected: `LINUX SUITE: GREEN`. (Runs together with Task 1's run if Task 1 hasn't committed
-  yet; each commit gets its own preceding green run.)
+  Run: `find src tests -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} + && ./scripts/linux-tests.sh`
+
+  Expected: `LINUX SUITE: GREEN` (repo pre-commit rule applies to every commit).
 
 - [ ] **Step 7: Commit the task**
 
   ```bash
-  git add docs/testing-windows-from-wsl.md AGENTS.md
+  git add docs/testing-windows-from-wsl.md docs/DEVELOPMENT.md AGENTS.md
   git commit -m "docs(build): teach build-app-windows-from-wsl.sh for WSL app builds (kata gzcc)"
   ```
 
@@ -342,19 +363,62 @@ run dirs).
 
 - [ ] **Step 6: Run broader verification**
 
-  Run: `./scripts/linux-tests.sh` at final HEAD + confirm `git status` clean.
+  Cross-OS order (AGENTS.md rule): wipe → Linux suite → gate (the gate pre-cleans `src` and
+  `tests` itself).
 
-  Expected: `LINUX SUITE: GREEN`; clean tree.
+  Run: `find src tests -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} + && ./scripts/linux-tests.sh && ./scripts/windows-gate.sh`
 
-  Additionally: one full `./scripts/windows-gate.sh` run at final HEAD as the whole-suite Windows
-  confirmation (20–30 min timeout; the host is expected to be loaded by other agents — record
-  wall-clock honestly). If the gate cannot complete for environmental reasons (interop outages),
-  record `GATE: BLOCKED-ENVIRONMENTAL` with verbatim log lines — never claim GREEN without the
-  summary.
+  Expected: `LINUX SUITE: GREEN` at final HEAD (count recorded); then one full gate run
+  (`GATE: GREEN`), 20–30 min timeout budget — the host is expected to be loaded by other
+  agents, record wall-clock honestly. If the gate cannot complete for environmental reasons
+  (e.g. the documented `UtilAcceptVsock accept4 failed 110` interop outages), record
+  `GATE: BLOCKED-ENVIRONMENTAL` with verbatim log lines — never claim GREEN without the summary.
+  Finally confirm `git status` clean.
 
 - [ ] **Step 7: Commit the task**
 
   No commit (no tracked changes). Record evidence paths in the run ledger.
+
+### Task 4: Report back to kata gzcc (no close)
+
+**Requirements served:** R4
+
+**Behavior:**
+- Post one `kata comment gzcc --body ...` from the main checkout (`cd /home/dan/code/winpepper`)
+  containing: root cause (≤3 sentences + reproduction status), the fix (script/flags/docs),
+  worktree + branch + final SHAs, verification evidence (consecutive clean-build counts across
+  the wrapper battery and Phase-1 arms), fresh-eyes plan/delta verdicts and rounds, and what
+  remains. The issue stays OPEN.
+- Write the run recap artifacts under `<logs-dir>/reports/` (final evidence table, test-status
+  ledger) before the comment so the comment can cite them.
+
+**Files:**
+- No repo files.
+
+**Interfaces:**
+- Consumes: run-state.md, plan/delta review logs, Task 3 evidence table.
+- Produces: the kata comment (visible via `kata show gzcc`).
+
+**Test cases:**
+- `kata show gzcc` afterwards shows the new comment and the issue still open.
+
+- [ ] **Step 1: Write the failing behavioral test** — N/A (reporting task; no code). The "red"
+  statement: `kata show gzcc` currently has no comment from this run.
+
+- [ ] **Step 2: Run the test and verify the intended failure** — Run `kata show gzcc`; expect
+  zero comments from this run.
+
+- [ ] **Step 3: Add the minimal production implementation** — compose and post the comment
+  (content per Behavior; cite run-state SHAs and the evidence table).
+
+- [ ] **Step 4: Run the focused test** — `kata show gzcc` → comment present, issue open.
+
+- [ ] **Step 5: Refactor while green** — N/A.
+
+- [ ] **Step 6: Run broader verification** — N/A (after the final delta fresh-eyes round;
+  nothing to build).
+
+- [ ] **Step 7: Commit the task** — No commit.
 
 ## Verification (complete, final HEAD)
 

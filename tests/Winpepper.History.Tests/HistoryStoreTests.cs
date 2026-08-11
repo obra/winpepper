@@ -860,6 +860,93 @@ public class HistoryStoreTests : IDisposable
     }
 
     [Fact]
+    public void DeleteAllAudio_RefusesWhenRootItselfIsSymlink()
+    {
+        // D6 physical-safety boundary must include the root: a junctioned/symlinked
+        // history root must fail closed, never delete through to the external target.
+        var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-rootsymlink-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideRoot);
+        var outsideWav = Path.Combine(outsideRoot, "outside.wav");
+        File.WriteAllText(outsideWav, "outside");
+        var linkRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-rootlink-{Guid.NewGuid():N}");
+        var linkCreated = false;
+
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkRoot, outsideRoot);
+                linkCreated = true;
+            }
+            catch (Exception)
+            {
+                // Assert below reports this as an environment skip.
+            }
+            Assert.SkipUnless(linkCreated, "Directory symlink creation is unavailable.");
+
+            var result = new HistoryStore(linkRoot).DeleteAllAudio();
+
+            File.Exists(outsideWav).ShouldBeTrue();
+            result.DeletedCount.ShouldBe(0);
+            result.FailedCount.ShouldBe(1);
+        }
+        finally
+        {
+            if (Directory.Exists(linkRoot)) Directory.Delete(linkRoot);
+            if (Directory.Exists(outsideRoot)) Directory.Delete(outsideRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Prune_DoesNotDeleteThroughSymlinkedRoot()
+    {
+        var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-rootsymlink-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideRoot);
+        var outsideWav = Path.Combine(outsideRoot, "outside.wav");
+        File.WriteAllText(outsideWav, "outside");
+        var linkRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-rootlink-{Guid.NewGuid():N}");
+        var linkCreated = false;
+
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkRoot, outsideRoot);
+                linkCreated = true;
+            }
+            catch (Exception)
+            {
+                // Assert below reports this as an environment skip.
+            }
+            Assert.SkipUnless(linkCreated, "Directory symlink creation is unavailable.");
+
+            var store = new HistoryStore(linkRoot, () => new HistoryRetentionPolicy
+            {
+                MaxEntries = 1,
+                MaxAgeDays = null,
+            });
+            store.Append(new HistoryEntry
+            {
+                Id = "old",
+                CreatedAtUtc = DateTime.UtcNow.AddMinutes(-1),
+                WavRelativePath = "outside.wav",
+            });
+            store.Append(new HistoryEntry { Id = "new", CreatedAtUtc = DateTime.UtcNow });
+
+            var result = store.Prune();
+
+            File.Exists(outsideWav).ShouldBeTrue();
+            result.DroppedCount.ShouldBe(0);
+            result.RetainedAfterFailedDelete.ShouldBe(1);
+        }
+        finally
+        {
+            if (Directory.Exists(linkRoot)) Directory.Delete(linkRoot);
+            if (Directory.Exists(outsideRoot)) Directory.Delete(outsideRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void TraversalWavPath_IsRefusedAndEntryRetainedByAppendPruneAndPrune()
     {
         var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-outside-{Guid.NewGuid():N}");

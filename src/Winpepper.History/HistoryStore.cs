@@ -463,13 +463,16 @@ public sealed class HistoryStore
 
     private bool HasReparsePointAncestor(string fullPath)
     {
+        // The walk INCLUDES the root: a junctioned/symlinked history root must fail
+        // closed for every destructive path, never delete through to an external target.
         var current = Path.GetDirectoryName(fullPath);
-        while (current is not null && !string.Equals(current, _rootFullPath, PathComparison))
+        while (current is not null)
         {
             if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return true;
+            if (string.Equals(current, _rootFullPath, PathComparison)) return false;
             current = Path.GetDirectoryName(current);
         }
-        return current is null;
+        return true;
     }
 
     private bool TryGetContainedPath(string path, bool pathIsAbsolute, out string fullPath)

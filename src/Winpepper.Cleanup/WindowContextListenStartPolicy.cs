@@ -22,10 +22,10 @@ namespace Winpepper.Cleanup;
 /// invalidate the snapshotted context; the at-stop regime's re-snapshot step
 /// is dropped entirely. This is a deliberate correctness invariant, not a
 /// latency optimization.</item>
-/// <item>hwnd-zero telemetry note -- when no foreground task was supplied
-/// (hwndAtStartNonZero == false), the prefetch does not run and the timing
-/// line emits ctx_src OMITTED rather than the at-stop regime's "none". This
-/// is a deliberate diagnostic-only change: OMITTED distinguishes "policy
+/// <item>hwnd-zero telemetry note -- when no foreground window was captured
+/// (hwndAtStartNonZero == false), no context task is supplied at all, and the
+/// timing line emits ctx_src OMITTED rather than the at-stop regime's "none".
+/// This is a deliberate diagnostic-only change: OMITTED distinguishes "policy
 /// declined, no contributor" from "contributor ran but produced nothing",
 /// which the "none" token could never disambiguate.</item>
 /// <item>Cleanup-disabled / raw-io skips are inherited from

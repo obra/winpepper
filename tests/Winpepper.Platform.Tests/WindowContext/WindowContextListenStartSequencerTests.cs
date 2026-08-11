@@ -15,7 +15,6 @@ public class WindowContextListenStartSequencerTests
     {
         var spyLog = new List<string>();
         var calls = 0;
-        WindowContextPrefetchHandle? firstReturned = null;
         var coordinator = new WindowContextPrefetchCoordinator((hwnd, ct) =>
         {
             calls++;
@@ -25,9 +24,7 @@ public class WindowContextListenStartSequencerTests
         var sequencer = new WindowContextListenStartSequencer(coordinator);
 
         var handle = sequencer.RecordingStarted(startPrefetch: true, new IntPtr(7));
-        firstReturned = handle;
         handle.ShouldNotBeNull();
-        handle.ShouldBeSameAs(firstReturned);
         calls.ShouldBe(1);                       // spy ran exactly once at start
         spyLog.ShouldContain("start-called");
         spyLog.Count.ShouldBe(1);                // no extra invocations

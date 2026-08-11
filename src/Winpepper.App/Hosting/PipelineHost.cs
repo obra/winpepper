@@ -693,9 +693,8 @@ public sealed class PipelineHost : IDisposable
                 // stale context fetch; the prior dictation stamps
                 // ctx_src=none, an accepted counted loss.
                 _ctxCoordinator?.OnRecordingStart();
-                // 1a(b): capture the dictated-into window NOW; the relocated
-                // prefetch (at stop) must read THIS window, not whatever has
-                // focus by then.
+                // 1a(b): capture the dictated-into window NOW; the listen-start
+                // prefetch reads THIS window, not whatever has focus by then.
                 _ctxHwndAtStart = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
                 // tbc0: launch at listen-start (supersedes 1a's stop-launch) — see LaunchPrefetchAtListenStart.
                 LaunchPrefetchAtListenStart(settingsForStream);
@@ -1311,9 +1310,8 @@ public sealed class PipelineHost : IDisposable
                     // stale context fetch; the prior dictation stamps
                     // ctx_src=none, an accepted counted loss.
                     _ctxCoordinator?.OnRecordingStart();
-                    // 1a(b): capture the dictated-into window NOW; the relocated
-                    // prefetch (at stop) must read THIS window, not whatever has
-                    // focus by then.
+                    // 1a(b): capture the dictated-into window NOW; the listen-start
+                    // prefetch reads THIS window, not whatever has focus by then.
                     _ctxHwndAtStart = Winpepper.Platform.WindowContext.ForegroundWindow.Handle();
                     // tbc0: launch at listen-start (supersedes 1a's stop-launch) — see LaunchPrefetchAtListenStart.
                     LaunchPrefetchAtListenStart(settingsForStream2);
@@ -1961,8 +1959,10 @@ public sealed class PipelineHost : IDisposable
             catch { RunLoopJoined = true; }
             // tbc0: with listen-start launch, a teardown mid-recording would otherwise
             // leave a running prefetch burst (stop-launch left one only stop→consume).
-            // Placed AFTER the run-loop join above so no still-landing start arm can
-            // publish a handle after the clear.
+            // Placed AFTER the bounded run-loop join above so no still-landing start
+            // arm can publish a handle after the clear when the join succeeded; a
+            // timed-out join means the loop is orphaned with the process exiting
+            // (RunLoopJoined=false — same tolerated-leak regime as the cleanup holder).
             _ctxCoordinator?.CancelAndClear();
             _ctxSequencer?.Clear();
             _hook.Dispose();

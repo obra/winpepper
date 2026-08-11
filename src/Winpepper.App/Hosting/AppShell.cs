@@ -334,7 +334,8 @@ public sealed class AppShell : IDisposable
                     var engine = nemotronHolder.TryGet(); // serves the CURRENTLY SELECTED streaming model
                     return Winpepper.History.Lab.RerunModelRouter.EngineServes(engine?.ModelName, name) ? engine : null;
                 },
-                name => modelsServices.Registry.Find(name)?.Kind == Winpepper.Models.ModelKind.StreamingAsr));
+                name => modelsServices.Registry.Find(name)?.Kind == Winpepper.Models.ModelKind.StreamingAsr),
+            () => store.Load());
 
         var cancel = HotkeyChord.Parse("Esc");
         var hotkeyLog = factory.CreateLogger("Winpepper.App.Hotkeys");

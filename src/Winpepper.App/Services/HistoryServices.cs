@@ -10,16 +10,21 @@ namespace Winpepper.App.Services;
 /// </summary>
 public sealed class HistoryServices
 {
-    public HistoryServices(string historyRoot, ITranscriptionRerunService transcriptionRerun)
+    public HistoryServices(
+        string historyRoot,
+        ITranscriptionRerunService transcriptionRerun,
+        Func<Winpepper.Core.Settings.AppSettings> settingsProvider)
     {
-        Store = new HistoryStore(historyRoot);
-        Archiver = new HistoryArchiver(Store);
+        RetentionSlot = PublishedHistoryRetentionSlot.FromSettings(settingsProvider());
+        Store = new HistoryStore(historyRoot, () => RetentionSlot.Policy);
+        Archiver = new HistoryArchiver(Store, storeAudio: () => RetentionSlot.StoreAudio);
         TranscriptionRerun = transcriptionRerun;
         CleanupRerun = new LlamaCleanupRerunService();
         HistoryRoot = historyRoot;
     }
 
     public string HistoryRoot { get; }
+    public PublishedHistoryRetentionSlot RetentionSlot { get; }
     public HistoryStore Store { get; }
     public HistoryArchiver Archiver { get; }
     public ITranscriptionRerunService TranscriptionRerun { get; }

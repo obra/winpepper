@@ -36,16 +36,16 @@ public class HistoryArchiverTests : IDisposable
 
         var entry = archiver.Archive(input);
 
-        entry.RawTranscript.ShouldBe("hello world");
-        entry.CleanedText.ShouldBe("Hello, world.");
-        entry.WavRelativePath.ShouldBe($"{now:yyyy-MM-dd}/{entry.Id}.wav");
-        entry.DurationMs.ShouldBe(1000); // 16000 samples / 16 kHz = 1 second
+        entry!.RawTranscript.ShouldBe("hello world");
+        entry!.CleanedText.ShouldBe("Hello, world.");
+        entry!.WavRelativePath.ShouldBe($"{now:yyyy-MM-dd}/{entry!.Id}.wav");
+        entry!.DurationMs.ShouldBe(1000); // 16000 samples / 16 kHz = 1 second
 
         // WAV exists on disk
-        File.Exists(Path.Combine(_root, entry.WavRelativePath)).ShouldBeTrue();
+        File.Exists(Path.Combine(_root, entry!.WavRelativePath)).ShouldBeTrue();
 
         // Persisted in the index
-        store.Load().Entries.Single().Id.ShouldBe(entry.Id);
+        store.Load().Entries.Single().Id.ShouldBe(entry!.Id);
     }
 
     [Fact]
@@ -59,7 +59,7 @@ public class HistoryArchiverTests : IDisposable
             RawTranscript = "",
             CleanedText = "",
         });
-        entry.DurationMs.ShouldBe(500);
+        entry!.DurationMs.ShouldBe(500);
     }
 
     [Fact]
@@ -74,7 +74,139 @@ public class HistoryArchiverTests : IDisposable
         var e1 = archiver.Archive(new HistoryArchiveInput { Samples16k = new float[16] });
         var e2 = archiver.Archive(new HistoryArchiveInput { Samples16k = new float[16] });
 
-        e1.WavRelativePath.ShouldStartWith("2026-05-14/");
-        e2.WavRelativePath.ShouldStartWith("2026-05-15/");
+        e1!.WavRelativePath.ShouldStartWith("2026-05-14/");
+        e2!.WavRelativePath.ShouldStartWith("2026-05-15/");
+    }
+
+    [Fact]
+    public void Archive_StoreAudioOff_WritesNoWav_PersistsTextOnlyEntry()
+    {
+        var store = new HistoryStore(_root);
+        var archiver = new HistoryArchiver(store, storeAudio: () => false);
+
+        var entry = archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+            RawTranscript = "hello world",
+            CleanedText = "Hello, world.",
+        });
+
+        entry.ShouldNotBeNull();
+        entry!.WavRelativePath.ShouldBeEmpty();
+        entry!.DurationMs.ShouldBe(1000);
+        Directory.EnumerateFiles(_root, "*.wav", SearchOption.AllDirectories).ShouldBeEmpty();
+
+        var persisted = store.Load().Entries.ShouldHaveSingleItem();
+        persisted.Id.ShouldBe(entry!.Id);
+        persisted.WavRelativePath.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Archive_StoreAudioOff_SilentDrop_SkipsArchiveEntirely()
+    {
+        var store = new HistoryStore(_root);
+        var archiver = new HistoryArchiver(store, storeAudio: () => false);
+
+        var entry = archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+            IsSilentDrop = true,
+        });
+
+        entry.ShouldBeNull();
+        Directory.EnumerateFiles(_root, "*.wav", SearchOption.AllDirectories).ShouldBeEmpty();
+        store.Load().Entries.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void Archive_StoreAudioOn_SilentDrop_ArchivesWithWav()
+    {
+        var store = new HistoryStore(_root);
+        var archiver = new HistoryArchiver(store, storeAudio: () => true);
+
+        var entry = archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+            IsSilentDrop = true,
+        });
+
+        entry.ShouldNotBeNull();
+        File.Exists(Path.Combine(_root, entry!.WavRelativePath)).ShouldBeTrue();
+        store.Load().Entries.ShouldHaveSingleItem().Id.ShouldBe(entry!.Id);
+    }
+
+    [Fact]
+    public void Archive_StoreAudioGate_ReadLive_PerCall()
+    {
+        var storeAudio = true;
+        var store = new HistoryStore(_root);
+        var archiver = new HistoryArchiver(store, storeAudio: () => storeAudio);
+
+        var first = archiver.Archive(new HistoryArchiveInput { Samples16k = new float[16] });
+        storeAudio = false;
+        var second = archiver.Archive(new HistoryArchiveInput { Samples16k = new float[16] });
+
+        first.ShouldNotBeNull();
+        second.ShouldNotBeNull();
+        File.Exists(Path.Combine(_root, first!.WavRelativePath)).ShouldBeTrue();
+        second!.WavRelativePath.ShouldBeEmpty();
+        Directory.EnumerateFiles(_root, "*.wav", SearchOption.AllDirectories).Count().ShouldBe(1);
+    }
+
+    [Fact]
+    public void Archive_StoreAudioGate_SampledOncePerCall()
+    {
+        var sampleCount = 0;
+        var store = new HistoryStore(_root);
+        var archiver = new HistoryArchiver(store, storeAudio: () =>
+        {
+            sampleCount++;
+            return true;
+        });
+
+        archiver.Archive(new HistoryArchiveInput { Samples16k = new float[16] });
+
+        sampleCount.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Archive_BlockedByExclusiveLock_CompletesAfterRelease()
+    {
+        var store = new HistoryStore(_root);
+        var archiver = new HistoryArchiver(store, storeAudio: () => true);
+        using var gateHeld = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var cancellationToken = TestContext.Current.CancellationToken;
+
+        var lockTask = Task.Run(() => store.WithExclusiveLock(() =>
+        {
+            gateHeld.Set();
+            release.Wait(TimeSpan.FromSeconds(5), cancellationToken).ShouldBeTrue();
+        }), cancellationToken);
+
+        var held = gateHeld.Wait(TimeSpan.FromSeconds(5), cancellationToken);
+        if (!held) release.Set();
+        held.ShouldBeTrue();
+
+        var archiveTask = Task.Run<HistoryEntry?>(() => archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+        }), cancellationToken);
+        try
+        {
+            await Task.Delay(250, cancellationToken);
+            archiveTask.IsCompleted.ShouldBeFalse();
+        }
+        finally
+        {
+            release.Set();
+        }
+
+        var entry = await archiveTask.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+        await lockTask.WaitAsync(TimeSpan.FromSeconds(5), cancellationToken);
+
+        entry.ShouldNotBeNull();
+        File.Exists(Path.Combine(_root, entry!.WavRelativePath)).ShouldBeTrue();
+        store.Load().Entries.ShouldHaveSingleItem().Id.ShouldBe(entry!.Id);
     }
 }

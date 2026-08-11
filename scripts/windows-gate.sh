@@ -6,7 +6,7 @@
 # 3b1903e: mt-unc-shim + RuntimeIdentifiers, merged from main):
 #   [1/3] dotnet build src/Winpepper.App -c Release -p:UseXamlCompilerExecutable=true
 #   [2/3] dotnet build all 9 test projects -c Release (dual-TFM projects build both)
-#   [3/3] dotnet exec every project/TFM test DLL -- 12 runs, xUnit v3 in-process
+#   [3/3] dotnet exec every project/TFM test DLL -- 13 runs, xUnit v3 in-process
 #         (never `dotnet test`; the VSTest host is unreliable on some machines)
 #
 # Safety (the user's Winpepper may be RUNNING on the host):
@@ -50,7 +50,7 @@
 # depending on a responsive host.
 #
 # Usage: ./scripts/windows-gate.sh
-# Exit:  0 and "GATE: GREEN" iff the app builds and all 12 runs are green.
+# Exit:  0 and "GATE: GREEN" iff the app builds and all 13 runs are green.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -102,7 +102,9 @@ PROJECTS=(
   Winpepper.Platform.Tests
 )
 
-# 9 projects, 3 dual-TFM (Audio, Cleanup, Platform) => 12 runs.
+# 9 projects, 4 dual-TFM (Audio, Cleanup, Platform, IntegrationTests) => 13 runs.
+# (IntegrationTests dual-targets since tbc0: its windows TFM hosts the real
+# worker + real prefetch-burst contention test.)
 RUNS=(
   "Winpepper.Asr.Tests|net9.0"
   "Winpepper.Audio.Tests|net9.0"
@@ -113,6 +115,7 @@ RUNS=(
   "Winpepper.Corrections.Tests|net9.0"
   "Winpepper.History.Tests|net9.0"
   "Winpepper.IntegrationTests|net9.0"
+  "Winpepper.IntegrationTests|net9.0-windows10.0.19041.0"
   "Winpepper.Models.Tests|net9.0"
   "Winpepper.Platform.Tests|net9.0"
   "Winpepper.Platform.Tests|net9.0-windows10.0.19041.0"
@@ -150,7 +153,7 @@ for proj in "${PROJECTS[@]}"; do
   fi
 done
 
-echo "=== [3/3] Run the 12 project/TFM test DLLs ==="
+echo "=== [3/3] Run the 13 project/TFM test DLLs ==="
 grand_total=0
 for entry in "${RUNS[@]}"; do
   proj="${entry%%|*}"; tfm="${entry##*|}"
@@ -178,7 +181,7 @@ done
 echo
 echo "================ windows-gate summary ================"
 printf '%s\n' "${summary[@]}"
-echo "grand total tests: $grand_total (cross-check only; roughly ~1300+ across 12 runs -- record the actual number)"
+echo "grand total tests: $grand_total (cross-check only; roughly ~1300+ across 13 runs -- record the actual number)"
 if [[ $fail -ne 0 ]]; then
   echo "GATE: RED"
   exit 1

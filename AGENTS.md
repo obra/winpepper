@@ -5,7 +5,7 @@
   - Before pushing: the FULL suite (all 9 test projects, including Windows-only TFMs) must pass on the Windows SDK. This CAN and MUST be done from a WSL2 session — a Windows host session is NOT required.
   - From WSL, THE way to satisfy the Windows pre-push rule is `./scripts/windows-gate.sh`:
     it builds `Winpepper.App` (Release, `-p:UseXamlCompilerExecutable=true`) and builds + runs
-    all 9 test projects (12 project/TFM runs) on the Windows host via `powershell.exe` interop
+    all 9 test projects (13 project/TFM runs) on the Windows host via `powershell.exe` interop
     over the `\\wsl.localhost` UNC path. Exit 0 with `GATE: GREEN` = pass. It never installs
     the MSI, never launches or kills `Winpepper.exe`, and never writes to
     `%LOCALAPPDATA%\winpepper`.

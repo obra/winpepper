@@ -94,9 +94,10 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         var initial = new AppSettings();
         var writer = new GateableWriter(initial);
         var vm = CreateViewModel(initial, writer);
-        var observedPersistence = new List<bool>();
+        var store = new HistoryStore(_root);
+        var observedEntryCounts = new System.Collections.Concurrent.ConcurrentQueue<int>();
         var applied = WaitForEventsAsync(vm, 3,
-            () => observedPersistence.Add(vm.LastCommitPersisted));
+            () => observedEntryCounts.Enqueue(store.Load().Entries.Count));
 
         vm.MaxEntries = 4;
         vm.MaxEntries = 3;
@@ -107,9 +108,9 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         writer.Complete(0, persisted: false);
         await applied;
 
-        observedPersistence.ShouldBe(new[] { false, true, false });
+        observedEntryCounts.ToArray().ShouldBe(new[] { 4, 3, 2 });
         writer.Current.HistoryMaxEntries.ShouldBe(2);
-        new HistoryStore(_root).Load().Entries.Count.ShouldBe(2);
+        store.Load().Entries.Count.ShouldBe(2);
         vm.LastCommitPersisted.ShouldBeFalse();
         vm.DiskUsageDisplay.ShouldContain("2 bytes");
     }

@@ -58,8 +58,14 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
 
     public async Task<bool> TryQueueAndFlushAsync(Func<AppSettings, AppSettings> mutator)
     {
-        Queue(mutator);
-        return await FlushWithOutcomeAsync();
+        var applied = false;
+        Queue(settings =>
+        {
+            var result = mutator(settings);
+            applied = true;
+            return result;
+        });
+        return await FlushWithOutcomeAsync() && applied;
     }
 
     private async Task<bool> FlushWithOutcomeAsync()

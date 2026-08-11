@@ -82,6 +82,20 @@ public class DebouncedSettingsWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task TryQueueAndFlushAsync_ReturnsFalse_WhenItsMutatorThrows_AndAppliesHealthyNeighbor()
+    {
+        var store = new SettingsStore(_path);
+        using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+        writer.Queue(s => s with { WindowWidth = 424 });
+
+        var persisted = await writer.TryQueueAndFlushAsync(
+            s => throw new InvalidOperationException("boom"));
+
+        persisted.ShouldBeFalse();
+        store.Load().WindowWidth.ShouldBe(424);
+    }
+
+    [Fact]
     public async Task TryQueueAndFlushAsync_ReturnsFalseAndRequeues_WhenSaveFails()
     {
         var directory = Path.Combine(Path.GetTempPath(), $"settings-dir-{Guid.NewGuid():N}");

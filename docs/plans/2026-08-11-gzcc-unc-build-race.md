@@ -227,17 +227,21 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   Create `scripts/build-app-windows-from-wsl.sh` with exactly the Behavior above. Structure:
   header comment (purpose; the three mitigations with accurate single-node wording from
   Rationale; safety invariants; self-test seam contract for all five seams); `set -euo
-  pipefail`; `HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"`; effective root
-  `ROOT="${WINPEPPER_APP_ROOT_OVERRIDE:-$HERE}"`; env checks (skipped when the build-cmd seam is
-  set); `--attempts` parsing with positive-integer validation in a plain `if ...; then`
+  pipefail`; `HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"`; `usage()` defined before
+  any call site; the root-override guard (a SET-but-empty or non-directory
+  `WINPEPPER_APP_ROOT_OVERRIDE` prints the error + usage and exits 2 — never silently falls
+  back to the real checkout) evaluated BEFORE `ROOT="${WINPEPPER_APP_ROOT_OVERRIDE:-$HERE}"` is
+  allowed to take effect; env checks (skipped when the build-cmd seam is set); `--attempts`
+  parsing with 1–3-digit positive-integer validation in a plain `if ...; then`
   (never `[[ ]] && { }` under `set -e`); unique run dir
   `$ROOT/artifacts/build-app-windows/run-<UTC>-<pid>/` (uniform for real and seam runs — in real
   use `$ROOT` is the checkout so logs land in the gitignored `artifacts/`; in the selftest it is
   the mktemp disposable root); pre-clean against `$ROOT` (always, never skipped); attempt loop
-  with `run_attempt` (timeout-wrapped command string: the real powershell build, or the seam
-  cmd) + the classification rules above; timeout branch = list (seam-able) → bash filter on the
-  full-path tag with the `.worktrees\` exclusion → kill only kept PIDs (seam-able).
-  `chmod +x` both scripts.
+  with `run_attempt` (timeout-wrapped command string, output teed to the attempt log with the
+  build's exit status preserved from the pipeline head) + the classification rules above;
+  timeout branch = list (seam-able) → bash filter on separator-normalized command lines
+  (full-path tag + separator boundary + `.worktrees/` exclusion) → kill only kept PIDs
+  (seam-able). `chmod +x` both scripts.
 
 - [ ] **Step 4: Run the focused test**
 

@@ -38,6 +38,16 @@
 #  10 cleanup path is timeout-capped: build times out (124) and the orphan LIST
 #     command hangs (`sleep 120`, capped at 60 s by the wrapper) — the wrapper
 #     must still reach its exit 1 TIMEOUT result rather than hang forever.
+#  11 timeout-override validation: option-like/nonnumeric/zero
+#     WINPEPPER_APP_BUILD_TIMEOUT_S values (--help, --version, -k, abc, 0)
+#     must exit 2 with usage and never run or certify a build (a leading '-'
+#     lands in GNU timeout's option position and would exit 0 without
+#     building); a valid override still builds.
+#  12 hanging orphan KILL is capped: build times out (124), the orphan list
+#     returns one matching row promptly, and the kill seam hangs
+#     (`sleep 120`, capped at 30 s by the wrapper) — the kill path must be
+#     reached (kill line printed for the fake PID) and the wrapper must still
+#     reach exit 1 TIMEOUT in bounded time.
 # Cases 1, 2 and 5 also assert run-dir uniqueness across two invocations.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -260,11 +270,54 @@ else
   bad 10 "rc1=$rc1(want 1) elapsed=${elapsed}s(want <100) | $(grep -m1 -E 'TIMEOUT|No such file' "$r/out1" || true)"
 fi
 
+# --- Case 11: timeout-override validation (option injection can never certify) -
+r="$(make_root)"; roots+=("$r")
+bad11=""
+for t in --help --version -k abc 0; do
+  rc1=0
+  WINPEPPER_APP_BUILD_CMD="echo NEVER-RAN; exit 0" WINPEPPER_APP_ROOT_OVERRIDE="$r" \
+    WINPEPPER_APP_BUILD_TIMEOUT_S="$t" \
+    bash "$WRAPPER" --attempts 1 >"$r/out_$t" 2>&1 || rc1=$?
+  if [[ $rc1 -ne 2 ]] || grep -q 'NEVER-RAN\|BUILD OK' "$r/out_$t"; then
+    bad11="$bad11 $t(rc=$rc1)"
+  fi
+done
+rc1=0
+WINPEPPER_APP_BUILD_CMD="echo RAN-FINE; exit 0" WINPEPPER_APP_ROOT_OVERRIDE="$r" \
+  WINPEPPER_APP_BUILD_TIMEOUT_S=30 \
+  bash "$WRAPPER" --attempts 1 >"$r/out_ok" 2>&1 || rc1=$?
+if [[ -z "$bad11" && $rc1 -eq 0 ]] && grep -q 'BUILD OK on attempt 1' "$r/out_ok"; then
+  ok 11 "--help/--version/-k/abc/0 timeout overrides each exit 2 without running or certifying a build; valid override 30 builds green"
+else
+  bad 11 "bad:$bad11 valid-override rc=$rc1(want 0) | $(grep -m1 -E 'BUILD OK|NEVER-RAN' "$r/out_ok" || true)"
+fi
+
+# --- Case 12: hanging orphan KILL is capped at 30 s (kill path reached) --------
+r="$(make_root)"; roots+=("$r")
+tag="$(wslpath -w "$r" 2>/dev/null || printf '%s' "$r")"
+tag="${tag%$'\r'}"
+printf '%s\t%s\n' 4321 "dotnet exec ${tag}\\src\\Fake.dll" >"$r/procs12.tsv"
+start=$SECONDS
+rc1=0
+WINPEPPER_APP_BUILD_CMD="sleep 30" WINPEPPER_APP_ROOT_OVERRIDE="$r" \
+  WINPEPPER_APP_BUILD_TIMEOUT_S=2 \
+  WINPEPPER_APP_ORPHAN_LIST_CMD="cat $r/procs12.tsv" \
+  WINPEPPER_APP_ORPHAN_KILL_CMD="sleep 120" \
+  bash "$WRAPPER" --attempts 5 >"$r/out1" 2>&1 || rc1=$?
+elapsed=$((SECONDS - start))
+if [[ $rc1 -eq 1 && $elapsed -lt 60 ]] \
+  && grep -q 'killing orphaned dotnet.exe PID 4321' "$r/out1" \
+  && grep -q 'TIMEOUT' "$r/out1"; then
+  ok 12 "build 124 + matching orphan row + hanging kill (sleep 120 capped at 30 s) → kill path reached (PID 4321 line) and exit 1 TIMEOUT in ${elapsed}s (<60 s)"
+else
+  bad 12 "rc1=$rc1(want 1) elapsed=${elapsed}s(want <60) | $(grep -m1 -E 'TIMEOUT|killing|No such file' "$r/out1" || true)"
+fi
+
 # --- Summary ------------------------------------------------------------------
 if [[ $failures -eq 0 ]]; then
   rm -rf "${roots[@]}"
   echo "SELFTEST: PASS"
   exit 0
 fi
-echo "SELFTEST: FAIL — $failures of 10 cases failed (disposable roots kept: ${roots[*]})" >&2
+echo "SELFTEST: FAIL — $failures of 12 cases failed (disposable roots kept: ${roots[*]})" >&2
 exit 1

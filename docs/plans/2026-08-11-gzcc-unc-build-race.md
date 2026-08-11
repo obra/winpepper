@@ -194,6 +194,15 @@ with a fake `src/Winpepper.App/Winpepper.App.csproj` placeholder):
     command hangs (`sleep 120`; the wrapper caps the list at 60 s and each kill at 30 s, seam
     path included) → the wrapper must still reach its exit-1 TIMEOUT result in bounded time
     rather than hang on the same stalled interop that wedged the build.
+11. *timeout-override validation (added in delta round 4):* option-like/nonnumeric/zero
+    `WINPEPPER_APP_BUILD_TIMEOUT_S` values (`--help`, `--version`, `-k`, `abc`, `0`) must
+    exit 2 with usage before any run dir exists and never run or certify a build (a leading
+    `-` lands in GNU `timeout`'s option position and would exit 0 without building — a false
+    BUILD OK); a valid override still builds.
+12. *hanging kill cap coverage (added in delta round 4):* build times out (124), the orphan
+    list returns one matching row promptly, and the kill seam hangs (`sleep 120`, capped at
+    30 s) → the kill path is reached (kill line for the fake PID) and the wrapper still exits
+    1 TIMEOUT in bounded time (together with case 10, both cleanup caps are exercised).
 Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `run-*` dirs).
 
 **Files:**
@@ -221,7 +230,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
 - [x] **Step 1: Write the failing behavioral test**
 
-  Create `scripts/build-app-windows-from-wsl.selftest.sh` per the ten cases above (the fake
+  Create `scripts/build-app-windows-from-wsl.selftest.sh` per the twelve cases above (the fake
   build command is a small inline bash snippet passed via the seam env var; the wrapper captures
   its stdout/stderr to the attempt log exactly as it captures the real build, so no path handoff
   is needed).
@@ -259,7 +268,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
   Run: `bash -n scripts/build-app-windows-from-wsl.sh scripts/build-app-windows-from-wsl.selftest.sh && bash scripts/build-app-windows-from-wsl.selftest.sh`
 
-  Expected: syntax clean; `SELFTEST: PASS` (all ten cases green).
+  Expected: syntax clean; `SELFTEST: PASS` (all twelve cases green).
 
 - [x] **Step 5: Refactor while green**
 

@@ -101,6 +101,18 @@ fi
 
 PS="/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
 TIMEOUT_S="${WINPEPPER_APP_BUILD_TIMEOUT_S:-2400}"
+# Validate the timeout BEFORE anything else (incl. run-dir creation): it sits in
+# option position of GNU `timeout`, where a value starting with '-' (e.g.
+# --help/--version) makes timeout exit 0 WITHOUT running the build — a false
+# BUILD OK — and zero/nonnumeric durations either never run the build or error
+# out confusingly. Positive numeric durations only (optional s/m/h/d suffix).
+_timeout_num="${TIMEOUT_S%[smhd]}"
+if [[ ! "$TIMEOUT_S" =~ ^[0-9]+([.][0-9]+)?[smhd]?$ ]] \
+  || [[ "$_timeout_num" =~ ^0+([.]0+)?$ ]]; then
+  echo "build-app-windows-from-wsl: WINPEPPER_APP_BUILD_TIMEOUT_S must be a positive numeric duration in seconds (optional s/m/h/d suffix); got '$TIMEOUT_S'" >&2
+  usage
+  exit 2
+fi
 
 if [[ -n "${WINPEPPER_APP_BUILD_CMD:-}" ]]; then
   # Self-test seam: replaces the build and skips the interop prereq checks.

@@ -34,6 +34,9 @@ public sealed class HistoryDetailViewModel : INotifyPropertyChanged
             Baseline = entry.RawTranscript,
             Runner = async ct =>
             {
+                if (string.IsNullOrEmpty(Entry.WavRelativePath))
+                    return "[No audio was saved for this history entry.]";
+
                 // RerunPanelViewModel.RunAsync awaits this with no catch, and
                 // the page's Run handler is async void — an unhandled
                 // InvalidOperationException (model not installed / engine
@@ -48,6 +51,10 @@ public sealed class HistoryDetailViewModel : INotifyPropertyChanged
                 catch (InvalidOperationException e)
                 {
                     return $"[{e.Message}]";
+                }
+                catch (FileNotFoundException)
+                {
+                    return "[The saved audio file is no longer available.]";
                 }
             },
         };

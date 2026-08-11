@@ -163,14 +163,14 @@ public sealed class HistoryStore
         }
     }
 
-    /// <summary>Apply the current retention policy to existing entries.</summary>
-    public HistoryPruneResult Prune()
+    /// <summary>Apply an explicit or current retention policy to existing entries.</summary>
+    public HistoryPruneResult Prune(HistoryRetentionPolicy? policyOverride = null)
     {
         lock (_gate)
         {
             if (!TryLoadStrictUnlocked(out var index)) return new HistoryPruneResult();
 
-            var applied = ApplyPolicy(index.Entries, _policyProvider());
+            var applied = ApplyPolicy(index.Entries, policyOverride ?? _policyProvider());
             try
             {
                 Save(new HistoryIndex { Entries = applied.Entries });

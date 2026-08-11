@@ -69,6 +69,89 @@ public class DebouncedSettingsWriterTests : IDisposable
     }
 
     [Fact]
+    public async Task TryQueueAndFlushAsync_ReturnsTrue_WhenWritePersists()
+    {
+        var store = new SettingsStore(_path);
+        using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+
+        var persisted = await writer.TryQueueAndFlushAsync(
+            s => s with { MicDeviceId = "persisted" });
+
+        persisted.ShouldBeTrue();
+        store.Load().MicDeviceId.ShouldBe("persisted");
+    }
+
+    [Fact]
+    public async Task TryQueueAndFlushAsync_ReturnsFalseAndRequeues_WhenSaveFails()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), $"settings-dir-{Guid.NewGuid():N}");
+        var path = Path.Combine(directory, "settings.json");
+        Directory.CreateDirectory(directory);
+        var store = new SettingsStore(path);
+        store.Save(new AppSettings());
+        var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+        var canRestoreMode = TryGetUnixMode(directory, out var originalMode);
+
+        try
+        {
+            Assert.SkipUnless(canRestoreMode,
+                "Unix permission semantics are required for this test.");
+            File.SetUnixFileMode(directory,
+                UnixFileMode.UserRead | UnixFileMode.UserExecute |
+                UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+                UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+            Assert.SkipUnless(!CanCreateFile(directory),
+                "The current user can still write in a chmod 555 directory.");
+
+            var persisted = await writer.TryQueueAndFlushAsync(
+                s => s with { MicDeviceId = "retry-me" });
+
+            persisted.ShouldBeFalse();
+            store.Load().MicDeviceId.ShouldBe("");
+
+            File.SetUnixFileMode(directory, originalMode);
+            await writer.FlushAsync();
+            store.Load().MicDeviceId.ShouldBe("retry-me");
+        }
+        finally
+        {
+            if (canRestoreMode) File.SetUnixFileMode(directory, originalMode);
+            writer.Dispose();
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TryQueueAndFlushAsync_ReturnsFalseAndRequeues_WhenLoadIsDegraded()
+    {
+        var store = new SettingsStore(_path);
+        store.Save(new AppSettings());
+        Assert.SkipUnless(TryGetUnixMode(_path, out var originalMode),
+            "Unix permission semantics are required for this test.");
+        using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30));
+
+        try
+        {
+            File.SetUnixFileMode(_path, UnixFileMode.None);
+            Assert.SkipUnless(!CanReadFile(_path),
+                "The current user can still read a chmod 000 file.");
+
+            var persisted = await writer.TryQueueAndFlushAsync(
+                s => s with { MicDeviceId = "retry-after-read" });
+
+            persisted.ShouldBeFalse();
+
+            File.SetUnixFileMode(_path, originalMode);
+            await writer.FlushAsync();
+            store.Load().MicDeviceId.ShouldBe("retry-after-read");
+        }
+        finally
+        {
+            File.SetUnixFileMode(_path, originalMode);
+        }
+    }
+
+    [Fact]
     public async Task Dispose_Flushes_Pending_Writes()
     {
         var store = new SettingsStore(_path);
@@ -275,6 +358,57 @@ public class DebouncedSettingsWriterTests : IDisposable
             Exception? exception, Func<TState, Exception?, string> formatter)
         {
             lock (Lines) Lines.Add($"{logLevel}:{formatter(state, exception)}");
+        }
+    }
+
+    private static bool TryGetUnixMode(string path, out UnixFileMode mode)
+    {
+        mode = default;
+        if (OperatingSystem.IsWindows()) return false;
+        try
+        {
+            mode = File.GetUnixFileMode(path);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static bool CanCreateFile(string directory)
+    {
+        var path = Path.Combine(directory, $"write-probe-{Guid.NewGuid():N}");
+        try
+        {
+            File.WriteAllText(path, "probe");
+            File.Delete(path);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static bool CanReadFile(string path)
+    {
+        try
+        {
+            _ = File.ReadAllText(path);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
         }
     }
 }

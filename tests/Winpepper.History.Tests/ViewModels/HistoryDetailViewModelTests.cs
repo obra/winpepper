@@ -50,6 +50,32 @@ public class HistoryDetailViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task RunTranscriptionRerun_WavWasNotSaved_ShowsInlineMessage()
+    {
+        var entry = NewEntry() with { WavRelativePath = "" };
+        var vm = new HistoryDetailViewModel(entry, _root,
+            new FakeTranscriptionRerunService(), new FakeCleanupRerunService(),
+            promoteAsrDefault: _ => { }, promoteCleanupDefault: _ => { });
+
+        await vm.TranscriptionPanel.RunAsync(CancellationToken.None);
+
+        vm.TranscriptionPanel.RerunText.ShouldBe("[No audio was saved for this history entry.]");
+    }
+
+    [Fact]
+    public async Task RunTranscriptionRerun_WavFileIsMissing_ShowsInlineMessage()
+    {
+        var entry = NewEntry() with { WavRelativePath = "missing.wav" };
+        var vm = new HistoryDetailViewModel(entry, _root,
+            new FakeTranscriptionRerunService(), new FakeCleanupRerunService(),
+            promoteAsrDefault: _ => { }, promoteCleanupDefault: _ => { });
+
+        await vm.TranscriptionPanel.RunAsync(CancellationToken.None);
+
+        vm.TranscriptionPanel.RerunText.ShouldBe("[The saved audio file is no longer available.]");
+    }
+
+    [Fact]
     public async Task RunCleanupRerun_PopulatesCleanedText_PromptAndRawOutput()
     {
         var entry = NewEntry();

@@ -16,4 +16,15 @@ public interface ISettingsWriter
         Queue(mutator);
         return FlushAsync();
     }
+
+    /// <summary>
+    /// Applies and flushes <paramref name="mutator"/>, returning whether the
+    /// change was durably persisted. Implementations without outcome tracking
+    /// retain the historical assumption that a completed flush succeeded.
+    /// </summary>
+    async Task<bool> TryQueueAndFlushAsync(Func<AppSettings, AppSettings> mutator)
+    {
+        await QueueAndFlushAsync(mutator);
+        return true;
+    }
 }

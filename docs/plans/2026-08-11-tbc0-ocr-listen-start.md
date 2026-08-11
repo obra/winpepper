@@ -23,9 +23,13 @@ reduction directly measurable per dictation.
 ## Global Constraints
 
 - AGENTS.md: before EVERY commit the Linux pure-managed suite must be green
-  (`scripts/linux-tests.sh` with `DOTNET_ROOT=/.dotnet`; builds `-c Release`, runs via
-  `dotnet exec <built test dll>` — NEVER `dotnet test`). Before finishing, the Windows
-  gate (`scripts/windows-gate.sh`, 20–30 min timeout) must exit 0 with `GATE: GREEN`.
+  (`scripts/linux-tests.sh`; builds `-c Release`, runs via `dotnet exec <built test
+  dll>` — NEVER `dotnet test`) — this includes docs-only commits (a fresh green run must
+  exist against the tree being committed). Before finishing, the Windows gate
+  (`scripts/windows-gate.sh`, 20–30 min timeout) must exit 0 with `GATE: GREEN`.
+- SDK: bare `dotnet` is NOT on this environment's PATH. Every command block below starts
+  with the two exports; run each block as a whole (or export once per shell):
+  `export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH`
 - `PipelineHost.cs` is `#if WINDOWS`: Linux never compiles it; pure decision logic lives
   in cross-target projects (Winpepper.Cleanup, Winpepper.Core, Winpepper.Platform) and is
   unit-tested on Linux (precedent: `WindowContextPrefetchGate`, 0bbeceb).
@@ -61,6 +65,10 @@ reduction directly measurable per dictation.
   accidental silent tap may launch one prefetch burst that trim-drop then cancels
   (existing `CancelAndClear`), a CPU-only cost consistent with "recording time is free
   concurrency".
+  Diagnostic-only telemetry change, recorded deliberately (review round 1): a start with
+  NO foreground window (hwnd == 0) now supplies NO context task, so `ctx_src` is OMITTED
+  where the at-stop launch used to supply an instantly-completed Empty task and stamp
+  `ctx_src=none`. Both spellings mean "no context"; the skip avoids a wasted task.
 - **R5 — Constraint:** Linux-testable pure decision logic; surgical Windows wiring;
   no dedup of the hold/toggle bodies (233p owns that).
 
@@ -76,20 +84,24 @@ reduction directly measurable per dictation.
 
   ```csharp
   public static bool ShouldStart(
-      bool coordinatorAvailable,
       bool cleanupEnabled,
       bool windowContextEnabled,
       string? activePromptFormat,
       bool hwndAtStartNonZero)
-      => coordinatorAvailable
-         && hwndAtStartNonZero
+      => hwndAtStartNonZero
          && WindowContextPrefetchGate.ShouldPrefetch(cleanupEnabled, windowContextEnabled, activePromptFormat);
   ```
 
+  (The coordinator-null concern is NOT in the policy: it stays in the wiring as an
+  inline `_ctxCoordinator is not null` check — see Task 3 — so the C# nullable-flow
+  analysis (WarningsAsErrors=nullable per Directory.Build.props) can prove the launch
+  site's `_ctxCoordinator.Start(...)` is safe.)
+
 - Docstring records the sequencing ruling (launch exactly once per dictation, at
-  listen-start; never at stop), the staleness ruling (R4), and that the
-  cleanup-disabled / raw-io skips are inherited from `WindowContextPrefetchGate`
-  (single policy home — 8kg3's gate semantics are preserved by delegation, not copied).
+  listen-start; never at stop), the staleness ruling (R4) INCLUDING the hwnd-zero
+  telemetry note (no task supplied → `ctx_src` omitted rather than `none`), and that
+  the cleanup-disabled / raw-io skips are inherited from `WindowContextPrefetchGate`
+  by delegation (single policy home — 8kg3's gate semantics are preserved, not copied).
 
 **Files:**
 - Create: `src/Winpepper.Cleanup/WindowContextListenStartPolicy.cs`
@@ -99,33 +111,36 @@ reduction directly measurable per dictation.
 - Consumes: `Winpepper.Cleanup.WindowContextPrefetchGate.ShouldPrefetch(bool, bool,
   string?)` (existing, src/Winpepper.Cleanup/WindowContextPrefetchGate.cs:14-18),
   `PromptFormatCapabilities.CarriesSystemPrompt` (transitively).
-- Produces: `WindowContextListenStartPolicy.ShouldStart(bool, bool, bool, string?, bool)`
+- Produces: `WindowContextListenStartPolicy.ShouldStart(bool, bool, string?, bool)`
   → Task 3's wiring.
 
 **Test cases (file `WindowContextListenStartPolicyTests.cs`, xUnit `[Fact]`s; classes
 namespace `Winpepper.Cleanup.Tests`):**
-- all-enabled (`true, true, true, "chatml", true`) → `true`.
-- cleanup disabled (…, `cleanupEnabled: false`, …) → `false`  *(8kg3 skip)*.
-- window-context disabled (`windowContextEnabled: false`) → `false`.
-- raw-io prompt format (`activePromptFormat: "raw-io"` — verify the exact raw-io token
-  from `PromptFormatCapabilities` and use whatever constant/casing that class treats as
-  raw-io) → `false`.
-- null prompt format → allowed (`true`) — today's null-behaves-as-allowed semantics.
-- coordinator unavailable (`coordinatorAvailable: false`, all else enabled) → `false`.
+- all-enabled (`cleanupEnabled: true, windowContextEnabled: true, "chatml", true`) → `true`.
+- cleanup disabled (`cleanupEnabled: false`, rest enabled) → `false`  *(8kg3 skip)*.
+- window-context disabled → `false`.
+- raw-io prompt format (`activePromptFormat: CleanupPromptFormatter.RawIo` — the
+  constant, value "raw-io", CleanupPromptFormatter.cs:43) → `false`.
+- null prompt format → `true` (null behaves as allowed — PromptFormatCapabilities docs).
 - hwnd zero (`hwndAtStartNonZero: false`, all else enabled) → `false`.
 
 - [ ] **Step 1: Write the failing behavioral test**
 
-Write `WindowContextListenStartPolicyTests.cs` with the seven cases above. Read
-`src/Winpepper.Cleanup/PromptFormatCapabilities.cs` first and use its actual raw-io
-token in the raw-io case (if the class exposes a constant, use it).
+Write `WindowContextListenStartPolicyTests.cs` with the six cases above.
 
 - [ ] **Step 2: Run the test and verify the intended failure**
 
-Run: `cd <worktree> && dotnet build tests/Winpepper.Cleanup.Tests/Winpepper.Cleanup.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true && dotnet exec tests/Winpepper.Cleanup.Tests/bin/Release/net9.0/Winpepper.Cleanup.Tests.dll -class Winpepper.Cleanup.Tests.WindowContextListenStartPolicyTests`
+Run:
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd <worktree>
+dotnet build tests/Winpepper.Cleanup.Tests/Winpepper.Cleanup.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Cleanup.Tests/bin/Release/net9.0/Winpepper.Cleanup.Tests.dll -class Winpepper.Cleanup.Tests.WindowContextListenStartPolicyTests
+```
 
 Expected: FAIL to build/run — `WindowContextListenStartPolicy` does not exist (CS0103);
-this proves the tests reference genuinely missing behavior.
+this proves the tests reference genuinely missing behavior. (If `-class` filtering errors,
+run the whole assembly: append `-notrait "Platform=Windows"` without `-class`.)
 
 - [ ] **Step 3: Add the minimal production implementation**
 
@@ -134,19 +149,25 @@ above (no #if guards — pure, cross-target), including the ruling docstring.
 
 - [ ] **Step 4: Run the focused test**
 
-Same command as Step 2. Expected: PASS (7/7 within the class; whole assembly
-`Errors: 0, Failed: 0`).
+Same command block as Step 2. Expected: build OK, 6/6 within the class (or the whole
+assembly with `-notrait` showing 0 failures).
 
 - [ ] **Step 5: Refactor while green**
 
 None needed — the method is a single composed predicate (the gate stays the single
 policy home; no new abstraction).
 
-- [ ] **Step 6: Run broader verification**
+- [ ] **Step 6: Run broader verification (the pre-commit suite the AGENTS rule requires)**
 
-Run: `dotnet exec tests/Winpepper.Cleanup.Tests/bin/Release/net9.0/Winpepper.Cleanup.Tests.dll -notrait "Platform=Windows"`
+Run:
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd <worktree>
+./scripts/linux-tests.sh
+```
 
-Expected: PASS, 0 failures (baseline assembly count 222 + 7 new = 229).
+Expected: exit 0, `LINUX SUITE: GREEN` (baseline 1854 + 6 new policy tests = 1860).
+Commit only when green.
 
 - [ ] **Step 7: Commit the task**
 
@@ -227,7 +248,12 @@ tests already construct one) and its `CleanupOptions` construction.
 
 - [ ] **Step 2: Run the test and verify the intended failure**
 
-Run: `dotnet build tests/Winpepper.Cleanup.Tests/Winpepper.Cleanup.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true && dotnet exec tests/Winpepper.Cleanup.Tests/bin/Release/net9.0/Winpepper.Cleanup.Tests.dll -notrait "Platform=Windows"`
+Run:
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd <worktree>
+dotnet build tests/Winpepper.Cleanup.Tests/Winpepper.Cleanup.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+```
 
 Expected: build FAIL (CS1061: CleanupResult has no `WindowContextWaitMs`) — missing
 behavior, not a setup accident. (If the DictationTimingSummary tests were written first,
@@ -242,8 +268,14 @@ stopwatch + `with`-site property; DictationTimingSummary property + one FormatLi
 - [ ] **Step 4: Run the focused test**
 
 Run: build both test projects, then
-`dotnet exec tests/Winpepper.Cleanup.Tests/bin/Release/net9.0/Winpepper.Cleanup.Tests.dll -notrait "Platform=Windows"` and
-`dotnet exec tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll -notrait "Platform=Windows"`
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd <worktree>
+dotnet build tests/Winpepper.Cleanup.Tests/Winpepper.Cleanup.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet build tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Cleanup.Tests/bin/Release/net9.0/Winpepper.Cleanup.Tests.dll -notrait "Platform=Windows"
+dotnet exec tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll -notrait "Platform=Windows"
+```
 
 Expected: PASS, 0 failures both.
 
@@ -254,9 +286,15 @@ otherwise no refactor — the diff is deliberately mechanical.
 
 - [ ] **Step 6: Run broader verification**
 
-Run: `DOTNET_ROOT=/.dotnet PATH=/.dotnet:$PATH ./scripts/linux-tests.sh`
+Run:
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd <worktree>
+./scripts/linux-tests.sh
+```
 
-Expected: exit 0, `LINUX SUITE: GREEN` (1854 baseline + this task's new tests).
+Expected: exit 0, `LINUX SUITE: GREEN` (1854 baseline + Task-1's 6 + this task's new tests).
+Commit only when green.
 
 - [ ] **Step 7: Commit the task**
 
@@ -272,54 +310,70 @@ git commit -m "feat(cleanup,core): ctx_wait telemetry — measure the bounded wi
 **Requirements served:** R1, R2, R4, R5
 
 **Behavior:**
+
 - `PipelineHost` (src/Winpepper.App/Hosting/PipelineHost.cs, #if WINDOWS) gains one
-  per-dictation field beside `_ctxHwndAtStart` (:107):
+  per-dictation field beside `_ctxHwndAtStart` (:107), plus ONE private helper (single
+  home for the launch so the two start arms cannot drift — review-round-1 hardening):
 
   ```csharp
   // tbc0: the listen-start-launched prefetch for THIS dictation (null when the
-  // policy skipped). BOTH start arms assign it; BOTH stop arms + the cancel arm
-  // clear it (same both-arms discipline as _lastSessionPrerollMs).
-  private WindowContextPrefetchHandle? _ctxPrefetchAtStart;
+  // policy skipped). BOTH start arms assign it (via TryLaunchListenStartPrefetch);
+  // BOTH stop arms + the cancel arm clear it — same discipline as
+  // _lastSessionPrerollMs.
+  private Winpepper.Platform.WindowContext.WindowContextPrefetchHandle? _ctxPrefetchAtStart;
+
+  /// <summary>tbc0: launch this dictation's window-context prefetch AT LISTEN-START
+  /// (supersedes 1a's stop-launch; primary ASR runs in the subprocess worker since
+  /// fb1f538, so the burst no longer starves in-process native calls). The gate —
+  /// including the cleanup-disabled skip — is evaluated HERE on start-time
+  /// settings; a mid-dictation settings change applies from the next dictation
+  /// (staleness ruling, kata tbc0). Call ONLY after
+  /// _ctxCoordinator?.OnRecordingStart() and the _ctxHwndAtStart capture, so the
+  /// new handle is not cancelled by its own dictation's start and reads the
+  /// right window. Returns null when the coordinator is absent or the policy
+  /// skips (ctx_src/ctx_wait stay omitted, exactly as when the feature is off).
+  /// </summary>
+  private Winpepper.Platform.WindowContext.WindowContextPrefetchHandle? StartListenStartPrefetch(
+      AppSettings settingsAtStart)
+  {
+      if (_ctxCoordinator is null
+          || !Winpepper.Cleanup.WindowContextListenStartPolicy.ShouldStart(
+              settingsAtStart.CleanupEnabled,
+              settingsAtStart.CleanupWindowContextEnabled,
+              _activeCleanupPromptFormat?.Invoke(),
+              _ctxHwndAtStart != IntPtr.Zero))
+      {
+          return null;
+      }
+      var handle = _ctxCoordinator.Start(_ctxHwndAtStart);
+      _log.LogInformation("window-context prefetch started at listen-start {SessionId}", _currentSessionId);
+      return handle;
+  }
   ```
 
-  (use the fully-qualified `Winpepper.Platform.WindowContext.WindowContextPrefetchHandle?`
-  spelling this file uses at :710 if the short name doesn't resolve).
+  `AppSettings` resolves via the existing `using Winpepper.Core.Settings;` (:8). The
+  `_ctxCoordinator is null` check lives HERE (not in the policy) so nullable-flow
+  analysis proves the `_ctxCoordinator.Start(...)` deref safe
+  (Directory.Build.props promotes nullable warnings to errors).
 
-- HOLD start arm — after `_ctxHwndAtStart = ...ForegroundWindow.Handle();` (:675), reusing
-  the arm's existing settings snapshot (`settingsForStream`, :590) and the existing
-  `_activeCleanupPromptFormat?.Invoke()`:
+- HOLD start arm — after `_ctxHwndAtStart = ...ForegroundWindow.Handle();` (:675),
+  reusing the arm's existing settings snapshot (`settingsForStream`, :590):
 
   ```csharp
-  // tbc0: launch the window-context prefetch AT LISTEN-START (supersedes 1a's
-  // stop-launch; primary ASR is subprocess-isolated since fb1f538, so the burst
-  // no longer starves in-process native calls). The gate predicate — including
-  // the cleanup-disabled skip — is evaluated HERE on start-time settings; a
-  // mid-dictation settings change applies from the next dictation (R4 ruling).
-  _ctxPrefetchAtStart = Winpepper.Cleanup.WindowContextListenStartPolicy.ShouldStart(
-      _ctxCoordinator is not null,
-      settingsForStream.CleanupEnabled,
-      settingsForStream.CleanupWindowContextEnabled,
-      _activeCleanupPromptFormat?.Invoke(),
-      _ctxHwndAtStart != IntPtr.Zero)
-      ? _ctxCoordinator.Start(_ctxHwndAtStart)
-      : null;
-  if (_ctxPrefetchAtStart is not null)
-      _log.LogInformation("window-context prefetch started at listen-start {SessionId}", _currentSessionId);
+  // tbc0: listen-start launch (supersedes 1a's stop-launch) — see StartListenStartPrefetch.
+  _ctxPrefetchAtStart = StartListenStartPrefetch(settingsForStream);
   ```
 
-  Ordering invariant: this stays AFTER `_ctxCoordinator?.OnRecordingStart()` (:671) so the
-  new handle is not cancelled by its own dictation's start.
-
-- TOGGLE start arm — identical block after `_ctxHwndAtStart = ...` (:1302), using
-  `settingsForStream2` (:1217). Comment may say "see hold arm" in one line plus the same
-  code (the file's existing keep-parallel convention).
+- TOGGLE start arm — identical one-liner after `_ctxHwndAtStart = ...` (:1302), passing
+  `settingsForStream2` (:1217).
 
 - Cancel arm (:1166-1185): next to `_ctxCoordinator?.CancelAndClear();` (:1169) add
   `_ctxPrefetchAtStart = null;` (handle is dead; field must not leak into the next
   dictation).
 
-- HOLD stop arm: replace the at-stop launch block (:706-722 — comment, `ctxPrefetch = null`,
-  `settingsAtStop` read, gate `if`, `_ctxCoordinator.Start`) with:
+- HOLD stop arm: replace the at-stop launch block (:706-722 — the "1a: launch the
+  window-context prefetch AT STOP" comment, `ctxPrefetch = null`, the `settingsAtStop`
+  read, the prompt-format comment, the gate `if` + `_ctxCoordinator.Start`) with:
 
   ```csharp
   // tbc0: the prefetch was launched at listen-start (start arm); consume it here.
@@ -339,17 +393,25 @@ git commit -m "feat(cleanup,core): ctx_wait telemetry — measure the bounded wi
   comment ("tbc0: ≈0 once the prefetch launches at listen-start"). Catch paths: no stamp
   (matches ctx_src behavior).
 
-- `Dispose` (:1945-1995): inside the lifecycle-gate body, before or near the streaming
-  teardown, add `_ctxCoordinator?.CancelAndClear();` — with start-launch a teardown
-  mid-recording would otherwise leave a running burst (today's stop-launch regime could
-  leave one only between stop and consume). This is teardown hygiene created by the new
-  timing; keep it to that one line.
+- Also update the stale NOTE comment at :103-106 next to `_ctxCoordinator` ("prefetch
+  launched at recording STOP") to state the new listen-start launch truthfully
+  (lifecycle still owned by the coordinator).
+
+- `Dispose` (:1945-1995): inside the lifecycle-gate body, right after
+  `_hotkeyReadiness.Disable();`, add:
+
+  ```csharp
+  // tbc0: with listen-start launch, a teardown mid-recording would otherwise
+  // leave a running prefetch burst (stop-launch left one only stop→consume).
+  _ctxCoordinator?.CancelAndClear();
+  ```
 
 - Coordinator docs (pure file, compiles on Linux — no #if): update the two STALE timing
   statements to the new contract: `WindowContextPrefetchCoordinator` class summary
   ("after the move to recording-stop" → listen-start launch per kata tbc0) and `Start`'s
   docstring ("Call at recording STOP" → "Call at recording START, after OnRecordingStart,
-  against the start-captured hwnd; consume the returned handle at stop"). No API change.
+  against the start-captured hwnd; the returned handle is consumed at stop"). No API
+  change.
 
 **Files:**
 - Modify: `src/Winpepper.App/Hosting/PipelineHost.cs` (#if WINDOWS — verified by the
@@ -359,64 +421,102 @@ git commit -m "feat(cleanup,core): ctx_wait telemetry — measure the bounded wi
 - Test: `tests/Winpepper.Platform.Tests/WindowContext/WindowContextPrefetchCoordinatorTests.cs`
 
 **Interfaces:**
-- Consumes: `WindowContextListenStartPolicy.ShouldStart` (Task 1);
-  `CleanupResult.WindowContextWaitMs` + `DictationTimingSummary.CtxWaitMs` (Task 2);
-  existing `_ctxCoordinator`, `_ctxHwndAtStart`, `settingsForStream(2)`,
+- Consumes: `WindowContextListenStartPolicy.ShouldStart(bool, bool, string?, bool)`
+  (Task 1); `CleanupResult.WindowContextWaitMs` + `DictationTimingSummary.CtxWaitMs`
+  (Task 2); existing `_ctxCoordinator`, `_ctxHwndAtStart`, `settingsForStream(2)`,
   `_activeCleanupPromptFormat` (:135), `ForegroundWindow.Handle()`.
-- Produces: `_ctxPrefetchAtStart` field discipline; the listen-start launch
-  `LogInformation` line (acceptance evidence for R1).
+- Produces: `_ctxPrefetchAtStart` field discipline; `StartListenStartPrefetch(AppSettings)`;
+  the listen-start launch `LogInformation` line (acceptance evidence for R1).
 
 **Test cases:**
-- New named Linux test in WindowContextPrefetchCoordinatorTests pinning the NEW wiring
-  contract: `OnRecordingStart()` → `Start(hwnd)` (listen-start order) → later consume:
-  the handle's task is NOT cancelled by its own dictation's start, completes, and
-  `WindowContextStamp.CtxSrc(consumedWindowContext: true, task)` ≈ "uia". Also pin the
-  ruling comment: a second `OnRecordingStart()` still cancels the first still-running
-  prefetch (existing behavior, preserved under the new launch point).
+- New named Linux tests in `WindowContextPrefetchCoordinatorTests.cs` pinning the NEW wiring
+  contract (these pass against the unchanged coordinator — it is timing-agnostic; their
+  value is pinning the wiring contract, see the documented no-Linux-RED exception below):
+  - `StartLaunchedAtRecordingStart_IsNotCancelledByOwnStart_AndStampsUia`:
+    `OnRecordingStart()` → `Start(hwnd)` (listen-start order) → consume:
+    `handle.CancellationRequested == false`, `coordinator.Current` is the handle, the task
+    completes, and `WindowContextStamp.CtxSrc(consumedWindowContext: true, handle.Task)`
+    == `"uia"`.
+  - `StartLaunchedAtRecordingStart_NextRecordingStartStillCancelsIt`: the first
+    (never-completing) prefetch is cancelled by the SECOND `OnRecordingStart()`
+    (1a ruling preserved under the new launch point).
 - Existing coordinator tests must pass unchanged (their OnRecordingStart→Start… sequences
   remain legal lifecycle shapes).
+- Structural wiring assertions (executable static checks compensating the un-Linux-testable
+  arms — run in Task 3 Step 5, evidence in the task report):
+  - `grep -c "StartListenStartPrefetch(" src/Winpepper.App/Hosting/PipelineHost.cs` == 3
+    (helper definition + BOTH start-arm calls);
+  - `grep -c "_ctxPrefetchAtStart = " src/.../PipelineHost.cs` == 5 (2 start assigns,
+    2 stop clears, 1 cancel clear);
+  - `grep -n "settingsAtStop" src/.../PipelineHost.cs` → NO matches (stop-time gate reads
+    gone from both arms);
+  - `grep -c "_ctxCoordinator.Start(" src/.../PipelineHost.cs` == 1 (only inside the helper);
+  - `grep -c "CtxWaitMs = " src/.../PipelineHost.cs` == 2 (both stop arms stamp);
+  - `grep -c "window-context prefetch started at listen-start" src/.../PipelineHost.cs` == 1
+    (one log site, inside the helper).
+
+**Why the arms are not runtime-tested on Linux (documented exception):** PipelineHost is
+`#if WINDOWS`, constructs a real `HotkeyHook`, and no existing test constructs it (no
+precedent); the repo's established verification for this exact file and these exact arms
+(precedent: ca20aa2, which moved the launch the other way) is pure lifecycle/policy tests
++ review + the Windows gate. This plan adds: the single-home helper (both arms call it,
+so the drift-prone edit cannot diverge), executable structural greps, and owner
+live-dictation timing-line readout (Task 4).
 
 - [ ] **Step 1: Write the failing behavioral test**
 
-Add the new coordinator test to `WindowContextPrefetchCoordinatorTests.cs`
-(`StartLaunchedAtRecordingStart_IsNotCancelledByOwnStart_AndStampsUia`). It exercises
-only the pure coordinator — it should PASS against the current code (the coordinator is
-timing-agnostic); its value is pinning the wiring contract. Since RED is unavailable for
-a pure wiring change (PipelineHost is #if WINDOWS), record this explicitly in the
-implementer report and rely on the Windows gate for the wiring's compile+correctness
-evidence (per usual-test-driven-development's documented exception for changes with no
-useful Linux Red step).
+Add the two coordinator contract tests listed above. They exercise only the pure
+coordinator — they PASS against the current code; their value is pinning the wiring
+contract. Since RED is unavailable for a pure wiring change (PipelineHost is #if WINDOWS),
+record this explicitly in the implementer report and rely on the Windows gate + structural
+greps for the wiring's evidence (usual-test-driven-development's documented exception for
+changes with no useful Linux Red step).
 
 - [ ] **Step 2: Run the test**
 
-Run: `dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true && dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform.Tests.dll -class Winpepper.Platform.Tests.WindowContext.WindowContextPrefetchCoordinatorTests`
+Run:
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd <worktree>
+dotnet build tests/Winpepper.Platform.Tests/Winpepper.Platform.Tests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.Platform.Tests/bin/Release/net9.0/Winpepper.Platform.Tests.dll -class Winpepper.Platform.Tests.WindowContext.WindowContextPrefetchCoordinatorTests
+```
 
-Expected: PASS (contract pin; documented no-RED exception).
+Expected: PASS (contract pin; documented no-RED exception). Fallback if `-class` errors:
+run the whole assembly with `-notrait "Platform=Windows"` (383 baseline + 2 = 385).
 
 - [ ] **Step 3: Add the minimal production implementation**
 
-Apply the PipelineHost edits exactly as enumerated above (field, both start-arm blocks,
-cancel line, both stop-arm replacements, both `CtxWaitMs` stamps, Dispose hygiene) and
-the two coordinator docstring updates. Do NOT touch anything else in the pipeline bodies
-(233p overlap). Diff budget for PipelineHost.cs: roughly +45/−25 lines.
+Apply the PipelineHost edits exactly as enumerated above (field, `StartListenStartPrefetch`
+helper, both start-arm one-liners, cancel line, both stop-arm replacements, both
+`CtxWaitMs` stamps, stale NOTE comment at :103-106, Dispose hygiene) and the two
+coordinator docstring updates. Do NOT touch anything else in the pipeline bodies
+(233p overlap). Diff budget for PipelineHost.cs: roughly +55/−30 lines.
 
 - [ ] **Step 4: Run the focused test**
 
-Same command as Step 2. Expected: PASS, 0 failures.
+Same command block as Step 2. Expected: PASS, 0 failures.
 
-- [ ] **Step 5: Refactor while green**
+- [ ] **Step 5: Refactor + verify structure while green**
 
-None — surgical by constraint (R5). Self-review the diff exclusively for: both-arms
-symmetry, no `settingsAtStop(2)` uses left outside their removed block, downstream
-locals (`ctxPrefetch`/`ctxPrefetch2`) intact, no accidental drift of neighbor lines
-(this maximizes 233p/8kg3 merge hygiene).
+No behavior refactor — surgical by constraint (R5). Instead, RUN the structural wiring
+assertions from the Test cases section (the six greps) and paste their output into the
+task report, then self-review the diff exclusively for: both-arms symmetry, no
+`settingsAtStop(2)` uses left, downstream locals (`ctxPrefetch`/`ctxPrefetch2`) intact,
+no accidental drift of neighbor lines (maximizes 233p/8kg3 merge hygiene).
 
-- [ ] **Step 6: Run broader verification**
+- [ ] **Step 6: Run broader verification (pre-commit suite)**
 
-Run: `DOTNET_ROOT=/.dotnet PATH=/.dotnet:$PATH ./scripts/linux-tests.sh`
+Run:
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd <worktree>
+./scripts/linux-tests.sh
+```
 
 Expected: exit 0, `LINUX SUITE: GREEN`. (PipelineHost changes are invisible to Linux;
-green proves the shared-file edits — coordinator docstrings, all Task-1/2 code — are clean.)
+green proves the shared-file edits — coordinator docstrings, all Task-1/2 code — are
+clean.) Commit only when green.
 
 - [ ] **Step 7: Commit the task**
 
@@ -427,44 +527,101 @@ git commit -m "feat(app): launch window-context prefetch at listen-start, consum
 
 ---
 
-### Task 4: Full verification (Linux suite + Windows gate) and acceptance evidence
+### Task 4: Full verification, measured before/after wait evidence, acceptance note
 
 **Requirements served:** R1, R2, R3, R4, R5
 
-**Behavior:** no behavior change — the complete verification receipt against the final
-committed HEAD, plus the acceptance-evidence summary.
+**Behavior:**
+- New IntegrationTests file `tests/Winpepper.IntegrationTests/WindowContextListenStartLatencyTests.cs`
+  (Linux-runnable; real code path: real `WindowContextPrefetchCoordinator` + real
+  `CleanupRunner` with the fake backend pattern from WindowContextConsumedStampTests)
+  MEASURES the wait the change removes, in the two timing shapes — this is the
+  mechanism-level "measured reduction" evidence for acceptance #2 (end-to-end live
+  confirmation stays with the owner's timing lines, procedure stated in the evidence
+  note; an agent cannot dictate into the live app):
+  - `StopLaunchShape_ContextOutlivesAsrFinish_CleanupWaitsTheRemainder`: context task
+    completing 400 ms after RunAsync entry (today's shape: prefetch (~hundreds of ms)
+    launched at stop still running past a fast streaming finish), generous wait budget
+    → consumed true; record `WindowContextWaitMs` (expect ≈400 ms; assert [300, 600]).
+  - `ListenStartShape_ContextReadyAtCleanupStart_CleanupWaitsNothing`: context task
+    completed before RunAsync entry (the new shape: launched at listen-start, utterance
+    outlived it) → consumed true; record + assert `WindowContextWaitMs < 50`.
+  - `StopLaunchShape_TightBudget_ContextDropped`: 400 ms-late task with the production
+    500 ms budget cut short (e.g. 200 ms — a streaming finish faster than the prefetch)
+    → consumed false (ctx_src=none today); record `WindowContextWaitMs` ≈ 200.
+  Each test writes its measured wait via `ITestOutputHelper`; the implementer copies the
+  three numbers into the acceptance evidence note.
+- Then the complete verification receipt + the acceptance-evidence note.
 
-**Files:** none (evidence only; receipts live in the run logs directory).
+**Files:**
+- Test: `tests/Winpepper.IntegrationTests/WindowContextListenStartLatencyTests.cs`
+- Logs (not committed): `<logs>/reports/acceptance-evidence.md`
 
-**Test cases:** the complete planned verification:
+**Interfaces:**
+- Consumes: Task 2's `WindowContextWaitMs`; the existing EchoBackend pattern in
+  `tests/Winpepper.IntegrationTests/WindowContextConsumedStampTests.cs`.
+- Produces: pursuit-level numbers for R3's acceptance evidence.
 
-- Linux: `DOTNET_ROOT=/.dotnet PATH=/.dotnet:$PATH ./scripts/linux-tests.sh` → exit 0,
-  `LINUX SUITE: GREEN`, with counts recorded.
-- Windows: `./scripts/windows-gate.sh` from the worktree → exit 0, `GATE: GREEN`
-  (compiles the #if WINDOWS wiring — including PipelineHost.cs — and runs all 9 test
-  projects on the Windows host).
+**Test cases:** the three latency-shape tests above, plus the complete verification:
+- Linux: `./scripts/linux-tests.sh` → exit 0, `LINUX SUITE: GREEN`, counts recorded.
+- Windows: `./scripts/windows-gate.sh` from the worktree → exit 0 + `GATE: GREEN`.
 
-- [ ] **Step 1: Run the Linux suite against committed HEAD** — command above; record the
-  commit SHA and counts in the task report.
+- [ ] **Step 1: Write the failing measurement tests**
 
-- [ ] **Step 2: Run the Windows gate against the same committed HEAD** —
-  `cd <worktree> && ./scripts/windows-gate.sh` (20–30 min timeout; it resets the Windows
-  side itself). Expected: exit 0, `GATE: GREEN`.
+Write `WindowContextListenStartLatencyTests.cs` with the three tests. Use
+`WindowContextPrefetchCoordinator` driven in the listen-start/stop of the simulated
+shapes and a real `CleanupRunner` whose fake backend echoes the transcript (mirror
+WindowContextConsumedStampTests); supply the delayed/ready tasks as `RunAsync`'s
+`windowContextTask` directly (pure `Task<string?>`s — the shapes capture the TIMING,
+exactly what the wiring change alters).
 
-- [ ] **Step 3: Write the acceptance-evidence note** to the run logs
-  (`reports/acceptance-evidence.md`): map each Acceptance item to evidence —
-  (1) OCR begins at listening start: [INF] launch line + policy/coordinator tests +
-  gate-compiled wiring; (2) measured latency reduction: `ctx_wait=` field exists and is
-  ≈0 whenever the utterance outlived the prefetch (unit-evidenced), with the owner-facing
-  live-dictation readout procedure stated (grep `dictation timing` for `ctx_wait=` and
-  verify `native_max <= 250` / `native_over250 = 0` unchanged); (3) no OCR when cleanup
-  disabled: `WindowContextListenStartPolicyTests` cleanup-false case + delegated gate.
+- [ ] **Step 2: Run the measurement tests**
 
-- [ ] **Step 4: Commit any evidence doc that belongs in the repo** — none planned inside
-  the tracked tree (evidence lives in the run logs); skip if nothing to commit.
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd <worktree>
+dotnet build tests/Winpepper.IntegrationTests/Winpepper.IntegrationTests.csproj -c Release -f net9.0 -p:EnableWindowsTargeting=true
+dotnet exec tests/Winpepper.IntegrationTests/bin/Release/net9.0/Winpepper.IntegrationTests.dll -class Winpepper.IntegrationTests.WindowContextListenStartLatencyTests
+```
+Expected: build OK + 3 PASSING tests (Task 2 already landed the property).
+Anti-vacuity (state in the task report): every assertion is a numeric bound on
+`WindowContextWaitMs`; if the Task-2 measurement were absent/broken the property would
+be null and the bounds assertions would fail — the tests cannot pass vacuously.
 
-- [ ] **Step 5: If any doc/test changed in Steps 1–3, rerun the Linux suite and gate**
-  before finishing; otherwise reuse the Task-4 receipts from Steps 1–2.
+- [ ] **Step 3: Record the measured numbers**
+
+Run the three tests with `-class` (fallback: whole assembly), capture each measured wait
+from the test output, and write `<logs>/reports/acceptance-evidence.md`: map each kata
+acceptance item to evidence — (1) OCR begins at listening start: the [INF] launch line
+(grep name + one example), policy + coordinator contract tests, gate-compiled wiring;
+(2) measured reduction: the three shape numbers (before-shape wait ≈400 ms / budget-miss
+≈200 ms; after-shape wait <50 ms), and the owner live-dictation readout procedure: verify
+`ctx_wait=` ≈ 0 on real `dictation timing` lines with cleanup+context enabled, with
+`native_max <= 250` / `native_over250 = 0` unchanged; (3) no OCR when cleanup disabled:
+`WindowContextListenStartPolicyTests` cleanup-false case + delegation to
+`WindowContextPrefetchGate`; plus the recorded R4 side effects (start-time gate
+evaluation, hwnd-zero ctx_src omission, silent-tap burst).
+
+- [ ] **Step 4: Commit the measurement tests** (so both gates verify the exact committed
+  HEAD the final delta review inspects):
+
+```bash
+git add tests/Winpepper.IntegrationTests/WindowContextListenStartLatencyTests.cs
+git commit -m "test(integration): measure window-context wait under stop-launch vs listen-start timing shapes (kata tbc0)"
+```
+
+- [ ] **Step 5: Run the Linux suite against committed HEAD**
+
+```bash
+export DOTNET_ROOT=/.dotnet; export PATH=/.dotnet:$PATH
+cd <worktree>
+./scripts/linux-tests.sh
+```
+Expected: exit 0, `LINUX SUITE: GREEN`; record HEAD SHA + all counts in the task report.
+
+- [ ] **Step 6: Run the Windows gate against the same committed HEAD**
+`./scripts/windows-gate.sh` (20–30 min). Expected: exit 0 + `GATE: GREEN`. Record receipts.
+(The acceptance-evidence note lives in the logs, uncommitted.)
 
 ---
 

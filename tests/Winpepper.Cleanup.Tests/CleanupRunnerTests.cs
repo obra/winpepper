@@ -717,6 +717,10 @@ public class CleanupRunnerTests
         result.WindowContextWaitMs!.Value.ShouldBeLessThan(250);
         backend.LastSystemPrompt.ShouldNotBeNull();
         backend.LastSystemPrompt!.ShouldNotContain("<WINDOW-OCR-CONTENT>");
+        // The plan's "result is the transcript's cleaned form" expectation, pinned
+        // exactly: the runner's normal plausible cleanup output, with context
+        // excluded by the fault (the suspect path is the prompt, asserted above).
+        result.CleanedText.ShouldBe(CtxWaitOutput);
     }
 
     [Fact]

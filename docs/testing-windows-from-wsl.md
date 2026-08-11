@@ -96,8 +96,9 @@ scripts/build-app-windows-from-wsl.sh [--attempts N]   # default N=5
 
 The wrapper prints its run-log directory
 (`artifacts/build-app-windows/run-<UTC-timestamp>-<pid>/`, one
-`attempt<N>.log` per attempt) at start and end of every build attempt (a
-usage/environment exit 2 happens before any run directory exists). Exit 0 =
+`attempt<N>.log` per attempt) at the start of each run and again with the
+final verdict (a usage/environment exit 2 happens before any run directory
+exists; each attempt's log path is printed at that attempt's start). Exit 0 =
 `BUILD OK`; exit 1 = build failed (non-transient error, attempts exhausted,
 or timed out — timeouts are never retried). Like the gate, it never installs
 the MSI, never launches or kills `Winpepper.exe`, and never writes

@@ -15,10 +15,13 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Winpepper.Platform\Winpepper.Platform.csproj" />
-    <!-- tbc0 Task 4: real-UIA/OCR regime test drives the real WindowContextPrefetch
-         through WindowContextListenStartSequencer + WindowContextPrefetchCoordinator
-         + CleanupRunner(EchoBackend) to assert ConsumedWindowContext / WindowContextWaitMs
-         invariants under the real burst. Only reachable on the WINDOWS TFM. -->
+  </ItemGroup>
+  <!-- tbc0 Task 4: the real-UIA/OCR regime test (WindowContextListenStartRealPrefetchTests)
+       drives the real WindowContextPrefetch through WindowContextListenStartSequencer +
+       WindowContextPrefetchCoordinator + CleanupRunner(EchoBackend). That test is
+       #if WINDOWS-guarded, so the references are conditioned on the Windows TFM to keep
+       the net9.0 restore/build graph unchanged (whole-branch review F4). -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">
     <ProjectReference Include="..\..\src\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
     <ProjectReference Include="..\..\src\Winpepper.Corrections\Winpepper.Corrections.csproj" />
   </ItemGroup>

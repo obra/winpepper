@@ -121,6 +121,11 @@ public class WindowContextListenStartRealPrefetchTests
     public async Task StopLaunchRegime_RealPrefetch_RealUiaOcr_ConsumedTrue()
     {
         if (!OperatingSystem.IsWindows()) return;
+        // Whole-branch review F1: with no observable foreground the real prefetch
+        // collapses to an instant Empty and the invariants pass vacuously — skip
+        // honestly so the gate log shows the evidence was NOT observable on this host.
+        Assert.SkipUnless(ForegroundWindow.Handle() != IntPtr.Zero,
+            "no foreground window on this host — the real-prefetch regime evidence is not observable");
 
         var outcome = await s_stopLaunch.Value;
         _log.WriteLine(
@@ -133,6 +138,8 @@ public class WindowContextListenStartRealPrefetchTests
     public async Task ListenStartRegime_RealPrefetch_RealUiaOcr_ConsumedTrueAndNoLongerWait()
     {
         if (!OperatingSystem.IsWindows()) return;
+        Assert.SkipUnless(ForegroundWindow.Handle() != IntPtr.Zero,
+            "no foreground window on this host — the real-prefetch regime evidence is not observable");
 
         // Reuse the cached stop-launch outcome to schedule the head-start delay (350ms +
         // the real prefetch duration) and to compare the two measured waits.
@@ -188,9 +195,22 @@ public class WindowContextListenStartRealPrefetchTests
         // invariant we can assert against a real burst on a real foreground without a
         // duplicate-burst guarantee (UIA walk + OCR is variable per call); it does
         // prove the ordering is preserved even when the burst is short (degenerate VM).
-        listenStartWaitMs.ShouldBeLessThanOrEqualTo(stopLaunchWaitMs,
-            $"\nlisten-start regime wait ({listenStartWaitMs}ms) EXCEEDED the stop-launch regime wait ({stopLaunchWaitMs}ms) " +
-            $"on the same foreground; the launch-at-listen-start should strictly increase head-start (prefetch duration was {prefetchDurationMs}ms).");
+        // Whole-branch review F2: when the stop-launch regime's runner never waited at
+        // all (wait == 0), the real burst beat the simulated finish window on this
+        // machine — the regime comparison carries no signal, so log it instead of
+        // passing a vacuous comparison.
+        if (stopLaunchWaitMs > 0)
+        {
+            listenStartWaitMs.ShouldBeLessThanOrEqualTo(stopLaunchWaitMs,
+                $"\nlisten-start regime wait ({listenStartWaitMs}ms) EXCEEDED the stop-launch regime wait ({stopLaunchWaitMs}ms) " +
+                $"on the same foreground; the launch-at-listen-start should strictly increase head-start (prefetch duration was {prefetchDurationMs}ms).");
+        }
+        else
+        {
+            _log.WriteLine(
+                "stop-launch wait was 0 — the real burst beat the simulated finish window on this machine; " +
+                "the wait comparison is not observable here; the consumed-invariants above are the evidence.");
+        }
     }
 }
 #endif

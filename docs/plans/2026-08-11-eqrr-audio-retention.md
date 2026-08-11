@@ -42,6 +42,16 @@
 - **D3 — policy is read live through a provider seam** (`Func<HistoryRetentionPolicy>`), so a settings save applies to the very next `Append` without rebuilding the singleton store; `Prune()` applies it to existing entries on save (R3).
 - **D4 — "Delete all saved audio now" deletes WAVs only**; entries and their transcripts stay, `WavRelativePath` cleared. Coherent with D1's split.
 
+- **D5 — destructive ops use a strict load and a truthful delete protocol** (finder F2–F4). `Prune()` and `DeleteAllAudio()` read the index through a strict loader that bails (returns 0, writes nothing) when the index is corrupt or unreadable — a lenient "empty on error" read must never become the base of a destructive rewrite. Deletes are tracked per WAV: an entry is dropped / its `WavRelativePath` cleared only when its WAV is gone-or-absent; a failed delete keeps the entry (retryable on the next pass) and counts report what was ACTUALLY deleted. `DeleteAllAudio()` sweeps `*.wav` recursively under the history root, so orphan WAVs (archiver append-failure, past failed deletes) are covered instead of surviving invisibly.
+
+- **D6 — delete-path containment** (finder F5). Every WAV-delete path is normalized full-path and rejected unless it stays under the history root (no absolute paths, no `..` escapes) — guard lives in the store's shared delete helper so Append/Delete/Prune/DeleteAllAudio all inherit it.
+
+- **D7 — supported cap bound is 10,000** (finder F6). The index is one JSON file loaded/sorted wholesale; 10k entries ≈ 10 MB worst case — acceptable for an opt-in eval corpus; the original draft's 100,000 was unvalidated. Policy and UI clamp to [1, 10000].
+
+- **D8 — commit ordering is flush → prune → refresh** (finder F1). The retention VM awaits the durable settings flush and only then prunes and refreshes the disk display, so prune-on-save can never act on pre-commit settings. Live per-dictation reads stay disk-truth (the established `() => store.Load()` pattern).
+
+- **D9 — the archiver samples its audio gate once per call** (finder F7). One `Archive` reads the gate Func a single time and uses that value for both the file write and the entry's path, so a mid-archive flip can't orphan a WAV or dangle a reference. The PipelineHost silent-drop guard uses the same session's earlier settings snapshot; a flip inside that seconds-scale window can only lose one silent-drop recovery entry or produce one text-only empty entry — never a privacy leak. Accepted and documented.
+
 ---
 
 ### Task 1: Retention settings fields + policy + store seams (pure-managed core)
@@ -50,9 +60,14 @@
 
 **Behavior:**
 - `AppSettings` gains `HistoryStoreAudioEnabled` (bool, default `true`), `HistoryMaxEntries` (int, default `100`), `HistoryMaxAgeDays` (int?, default `30`; `null` = keep forever).
-- New `HistoryRetentionPolicy` maps settings → store policy with clamping (entries ≥ 1; age ≥ 1 day when non-null).
-- `HistoryStore` prunes via an injected policy provider (defaults reproduce today's constants exactly), factors the two-tier prune into a shared helper used by both `Append` and new `public int Prune()`, and gains `DeleteAllAudio()` (WAVs deleted, entries kept with `WavRelativePath = ""`) and `ComputeAudioDiskUsageBytes()` (recursive `*.wav` byte sum; 0 when root missing).
+- New `HistoryRetentionPolicy` maps settings → store policy with clamping (entries to [1, 10000]; age to ≥ 1 day when non-null).
+- `HistoryStore` prunes via an injected policy provider (defaults reproduce today's constants exactly), factors the two-tier prune into a shared helper used by both `Append` and new `public int Prune()`, and gains `DeleteAllAudio()` and `ComputeAudioDiskUsageBytes()` (recursive `*.wav` byte sum; 0 when root missing).
 - `Append` with `MaxAgeDays == null` skips the age tier entirely (count cap still applies).
+- Destructive ops follow D5/D6:
+  - `Prune()` loads via a strict loader (`false` on corrupt/unreadable index → return 0, write nothing; missing index file = legitimately empty → proceed). It drops an entry only when its WAV (if any) is gone after its delete attempt; an entry whose WAV delete failed stays (retried on the next pass). Returns the number of dropped entries. `Append` keeps today's lenient load behavior (out-of-scope finding F2a records the pre-existing overwrite hazard).
+  - `DeleteAllAudio()` sweeps `*.wav` recursively under the root (tracked per file) — the privacy intent is file deletion, which needs no index — and then, ONLY when the strict loader reads the index cleanly, rewrites `WavRelativePath=""` on entries whose WAV is gone-or-absent and saves once. Corrupt/unreadable index → WAVs still swept, refs untouched (a clean retry on the next pass), and the returned count still reflects files actually deleted. Safe re-run: a second call mops up leftovers from a failed first call.
+  - `TryDeleteWav` rejects any relative path whose normalized full path leaves the root (absolute or `..`) — the guard is inside this shared helper so every caller inherits it.
+  - Save ordering mirrors existing `Append` (deletes first, atomic index save second); a save failure after deletes leaves the index pointing at possibly-deleted WAVs — the same exposure today's `Append` has, accepted as precedent-consistent (not a new risk).
 
 **Files:**
 - Modify: `src/Winpepper.Core/Settings/AppSettings.cs` (add 3 fields after `PrewarmMicEnabled`-era block, with comments noting pre-2026-08 settings files keep defaults)
@@ -68,8 +83,8 @@
   - `AppSettings.HistoryMaxAgeDays : int? = 30`
   - `public sealed record HistoryRetentionPolicy { int MaxEntries /*=100*/; int? MaxAgeDays /*=30*/; TimeSpan? MaxAge { get; } /*null when MaxAgeDays null*/; static HistoryRetentionPolicy Default { get; } static HistoryRetentionPolicy FromSettings(AppSettings) }` in `Winpepper.History`
   - `public HistoryStore(string root, Func<HistoryRetentionPolicy> policyProvider)`
-  - `public int HistoryStore.Prune()` (returns dropped-entry count)
-  - `public int HistoryStore.DeleteAllAudio()` (returns WAV-delete count)
+  - `public int HistoryStore.Prune()` (dropped-entry count; 0 without writing on strict-load failure)
+  - `public int HistoryStore.DeleteAllAudio()` (WAV-file count actually deleted; 0 without writing on strict-load failure)
   - `public long HistoryStore.ComputeAudioDiskUsageBytes()`
 
 **Test cases:**
@@ -79,9 +94,12 @@
 - Policy `MaxAgeDays = null`: 400-day-old entry survives appends; count cap at `MaxEntries` still enforced.
 - `Prune()`: seed 5 entries (index written, no append afterwards) then `Prune()` with MaxEntries=2 → 2 remain, 3 WAVs gone, returns 3. Also age variant.
 - Prune with `null` age keeps by age but drops by count.
-- `DeleteAllAudio()`: 3 entries with WAVs → all WAVs gone, 3 entries kept with empty `WavRelativePath`, returns 3; second call returns 0 (idempotent).
+- `Prune()` on a corrupt `index.json` → returns 0, file bytes unchanged.
+- `DeleteAllAudio()`: 3 entries with WAVs → all WAVs gone, 3 entries kept with empty `WavRelativePath`, returns 3; second call returns 0 (idempotent). Include an orphan `orphan.wav` (no entry) → also deleted and counted.
+- `DeleteAllAudio()` on corrupt index → WAVs still deleted and counted (sweep needs no index), index file untouched byte-for-byte.
+- Traversal: entry with `WavRelativePath = "../evil.wav"` and a fabricated target outside the root → the outside file survives `Append`-prune/`DeleteAllAudio` passes (guard refuses the escape).
 - `ComputeAudioDiskUsageBytes()`: two fabricated WAVs (e.g. 10 + 20 bytes) + non-WAV file → returns exact WAV byte sum; empty/missing root → 0.
-- `FromSettings`: defaults → (100, 30); custom (5, 7) round-trips; `HistoryMaxAgeDays = null` → `MaxAge == null`; clamping `HistoryMaxEntries = 0` → 1 and `HistoryMaxAgeDays = 0` → 1 day.
+- `FromSettings`: defaults → (100, 30); custom (5, 7) round-trips; `HistoryMaxAgeDays = null` → `MaxAge == null`; clamping `HistoryMaxEntries = 0` → 1 and `= 50000` → 10000, and `HistoryMaxAgeDays = 0` → 1 day.
 - Persistence chain-pin (mirrors `StreamingSettingPersistenceTests`): `QueueAndFlushAsync(s => s with { HistoryStoreAudioEnabled = false, HistoryMaxEntries = 7, HistoryMaxAgeDays = null })` through a real `DebouncedSettingsWriter` + `SettingsStore` on a temp path → reload shows all three; neighbors untouched.
 - Pre-2026-08 settings file (JSON lacking the 3 fields) → `SettingsStore.Load()` yields the defaults (true/100/30).
 
@@ -131,9 +149,9 @@
 **Requirements served:** R1 (+ D1a), R5 (archiver side), R6, R7
 
 **Behavior:**
-- `HistoryArchiver` gains `Func<bool>? storeAudio` ctor seam (default on). When off: no WAV written, entry persisted with `WavRelativePath = ""`, `DurationMs` still derived from samples.
+- `HistoryArchiver` gains `Func<bool>? storeAudio` ctor seam (default on). Each `Archive` call samples the gate **exactly once** into a local (D9) and uses that value for both the file write and the entry's `WavRelativePath`. When off: no WAV written, entry persisted with `WavRelativePath = ""`, `DurationMs` still derived from samples.
 - `HistoryServices` wires live settings: store policy provider + archiver audio gate read `Func<AppSettings>`; ctor gains that parameter.
-- The two silent-drop sites in `PipelineHost.cs` skip `Archive` entirely when `HistoryStoreAudioEnabled` is false; the two success sites are unchanged (text-only entries still archived when off).
+- The two silent-drop sites in `PipelineHost.cs` skip `Archive` entirely when `HistoryStoreAudioEnabled` is false in that session's already-read settings snapshot (`settingsAtStop` / `settingsAtStop2`); the two success sites are unchanged (text-only entries still archived when off). Residual flip-skew accepted per D9.
 - Defaults ⇒ byte-identical behavior to today (archiver tests from Task 1 baseline keep passing).
 
 **Files:**
@@ -151,11 +169,12 @@
 **Test cases:**
 - Gate off: no WAV file appears in root, entry appended with empty `WavRelativePath`, `DurationMs` correct for 16000 samples (1000 ms).
 - Gate flips between calls (Func re-read per call): first archive writes WAV, flip returns false, second archive WAV-less → proves live read.
+- Single sampling (D9): counting `storeAudio` fake invoked exactly **once** per `Archive` call.
 - Gate default: existing archiver tests pass (constructor back-compat — old two-arg call sites unchanged).
 
 - [ ] **Step 1: Write the failing behavioral tests**
 
-  New `HistoryArchiverTests`: `Archive_StoreAudioOff_WritesNoWav_PersistsTextOnlyEntry` and `Archive_StoreAudioGate_ReadLive_PerCall`.
+  New `HistoryArchiverTests`: `Archive_StoreAudioOff_WritesNoWav_PersistsTextOnlyEntry`, `Archive_StoreAudioGate_ReadLive_PerCall`, and `Archive_StoreAudioGate_SampledOncePerCall` (counting fake).
 
 - [ ] **Step 2: Run the tests and verify the intended failures**
 
@@ -167,7 +186,7 @@
 
 - [ ] **Step 3: Add the minimal production implementation**
 
-  HistoryArchiver: add optional third parameter, `_storeAudio = storeAudio ?? (() => true)`; in `Archive`, wrap the `WavWriter.WriteMono16kInt16` call and set `WavRelativePath = _storeAudio() ? relative : ""`. Fix the class doc comment's stale "Pruning to 50" line. HistoryServices: new ctor param; `Store = new HistoryStore(historyRoot, () => HistoryRetentionPolicy.FromSettings(settingsProvider())); Archiver = new HistoryArchiver(Store, storeAudio: () => settingsProvider().HistoryStoreAudioEnabled);`. PipelineHost: at the two silent-drop blocks (the `if (trimmed is null)` / `if (trimmed2 is null)` archive calls), wrap the `_archiver.Archive(...)` call in `if (settingsAtStop.HistoryStoreAudioEnabled)` / `if (settingsAtStop2.HistoryStoreAudioEnabled)` (locals already read at those points). Exact before/after snippets in the task brief.
+  HistoryArchiver: add optional third parameter, `_storeAudio = storeAudio ?? (() => true)`; in `Archive`, sample ONCE (`var keepAudio = _storeAudio();`), wrap the `WavWriter.WriteMono16kInt16` call in `if (keepAudio)`, and set `WavRelativePath = keepAudio ? relative : ""`. Fix the class doc comment's stale "Pruning to 50" line. HistoryServices: new ctor param; `Store = new HistoryStore(historyRoot, () => HistoryRetentionPolicy.FromSettings(settingsProvider())); Archiver = new HistoryArchiver(Store, storeAudio: () => settingsProvider().HistoryStoreAudioEnabled);`. PipelineHost: wrap the two silent-drop `_archiver.Archive(...)` calls in `if (settingsAtStop.HistoryStoreAudioEnabled)` / `if (settingsAtStop2.HistoryStoreAudioEnabled)` (locals already read at those points). Exact before/after snippets in the task brief.
 
 - [ ] **Step 4: Run the focused tests**
 
@@ -196,7 +215,7 @@
 **Requirements served:** R3 (prune-on-save trigger), R4 (VM half), R5 (no crash), R6
 
 **Behavior:**
-- New pure-managed `HistoryRetentionViewModel` (in `Winpepper.History/ViewModels`): binds `StoreAudioEnabled` (bool), `MaxEntries` (double for NumberBox, clamped ≥ 1), `MaxAgeDays` (double, clamped ≥ 1), `KeepForever` (bool; true ⇒ persists `HistoryMaxAgeDays = null`), exposes `DiskUsageDisplay` (e.g. `Audio on disk: 12.4 MB across 34 recording(s)`), commits each change via `ISettingsWriter.QueueAndFlushAsync` (durable-commit precedent from `RecordingSettingsViewModel`) and immediately calls `HistoryStore.Prune()` then refreshes disk usage (prune-on-save).
+- New pure-managed `HistoryRetentionViewModel` (in `Winpepper.History/ViewModels`): binds `StoreAudioEnabled` (bool), `MaxEntries` (double for NumberBox, clamped ≥ 1), `MaxAgeDays` (double, clamped ≥ 1), `KeepForever` (bool; true ⇒ persists `HistoryMaxAgeDays = null`), exposes `DiskUsageDisplay` (e.g. `Audio on disk: 12.4 MB across 34 recording(s)`), and follows D8 ordering on every change: the setter kicks off a commit chain that **awaits** `ISettingsWriter.QueueAndFlushAsync` and only then calls `HistoryStore.Prune()` and refreshes the disk display — prune-on-save can never act on pre-commit settings.
 - `DeleteAllAudioAsync()` calls `HistoryStore.DeleteAllAudio()`, refreshes usage, raises change notifications; returns the deleted count for the page to echo.
 - `HistoryDetailViewModel` transcription Runner: short-circuits on empty `WavRelativePath` with an inline message, and catches `FileNotFoundException` with an inline message (same inline-surface precedent as the existing `InvalidOperationException` catch) — WAV-less entries can no longer crash the page's async-void handler.
 
@@ -210,14 +229,14 @@
 - Produces:
   - `public sealed class HistoryRetentionViewModel : INotifyPropertyChanged`
     - ctor `(AppSettings initial, HistoryStore store, ISettingsWriter writer)`
-    - `bool StoreAudioEnabled`, `double MaxEntries`, `double MaxAgeDays`, `bool KeepForever` (setter commits+persist+prune+usage refresh)
+    - `bool StoreAudioEnabled`, `double MaxEntries`, `double MaxAgeDays`, `bool KeepForever` (setters commit via an ordered flush→prune→refresh chain per D8)
     - `string DiskUsageDisplay` (read-only, refreshed on commit/Refresh)
     - `void Refresh()` (reloads usage; cheap)
     - `Task<int> DeleteAllAudioAsync()`
   - `HistoryDetailViewModel` unchanged publicly (behavioral fix inside the Runner).
 
 **Test cases:**
-- Each setter writes exactly the right `AppSettings` mutation through a `FakeWriter`-style fake (pattern from `RecordingSettingsViewModelTests`) AND prunes immediately: seed real temp store with 5 entries + WAVs, set `MaxEntries = 2` → writer's `Current.HistoryMaxEntries == 2`, store holds 2, 3 WAVs gone.
+- Each setter writes exactly the right `AppSettings` mutation through the fake writer AND prunes only AFTER the flush completes: the fake writer's `QueueAndFlushAsync` is gated on a `TaskCompletionSource` the test completes explicitly — before completion the store is unpruned and the writer holds the mutation; after completion the prune has run (seed real temp store with 5 entries + WAVs, `MaxEntries = 2` → writer's `Current.HistoryMaxEntries == 2`, store holds 2, 3 WAVs gone).
 - `KeepForever = true` persists `HistoryMaxAgeDays = null`; toggling back persists the numeric days.
 - Clamps: `MaxEntries = 0`/NaN guarded (0 → commit as 1; NaN ignored), `MaxAgeDays = 0` → 1.
 - `DiskUsageDisplay` reflects fabricated WAV bytes (assert contains the byte count; exact string format asserted loosely via contains, to not overfit).
@@ -238,7 +257,7 @@
 
 - [ ] **Step 3: Add the minimal production implementation**
 
-  New VM file (setter pattern + `CommitDurable` mirror of `RecordingSettingsViewModel`; prune+refresh after each commit; NaN/clamp guards in setters). Detail VM: prepend the empty-path short-circuit and add `catch (FileNotFoundException)` in the transcription Runner.
+  New VM file (setter pattern mirrors `RecordingSettingsViewModel`, but the commit path is an ordered async chain per D8: setter stores the field, then `_ = CommitAndApplyAsync(mutator)` whose body awaits `_writer.QueueAndFlushAsync(mutator)` and only then runs `_store.Prune()` and refreshes the usage display — the prune can never act on pre-commit settings; NaN/clamp guards in setters). Detail VM: prepend the empty-path short-circuit and add `catch (FileNotFoundException)` in the transcription Runner.
 
 - [ ] **Step 4: Run the focused tests**
 
@@ -290,7 +309,7 @@
 
 - [ ] **Step 3: Add the minimal production implementation**
 
-  XAML: insert a `RowDefinition` (`Auto`) before the list row; add one `Border` card containing: `ToggleSwitch x:Name="StoreAudioToggle" Header="Save audio recordings of your dictations"`, a caption TextBlock stating "When off, Winpepper keeps transcripts and timings in history but saves no audio. Dictations dismissed as silent are not archived — without audio there is nothing to recover — and Lab replay/re-transcribe needs audio.", a NumberBox `x:Name="MaxEntriesBox"` (`Minimum=1`, `Maximum=100000`) with header "Keep at most this many dictations", a NumberBox `x:Name="MaxAgeBox"` (`Minimum=1`, `Maximum=36500`) with header "Delete dictations older than (days)", a CheckBox `x:Name="KeepForeverCheck" Content="Keep forever — never delete by age (for building an eval corpus)"`, a TextBlock `x:Name="DiskUsageText"`, and a Button `x:Name="DeleteAllAudioButton" Content="Delete all saved audio now"`. Code-behind: in `OnNavigatedTo` build `new HistoryRetentionViewModel(App.Shell.SettingsStore.Load(), services.Store, App.Shell.SettingsWriter)`, initialize control state from it, wire `Toggled`/`ValueChanged` (NaN-guarded)/`Checked`/`Unchecked`/`Click` to the VM, then `ViewModel.Refresh()` the list VM and re-read `DiskUsageText`. Delete button shows a `ContentDialog` ("Delete all saved audio? Recordings are deleted; transcripts are kept. This cannot be undone.", Primary="Delete", Close="Cancel") before calling `await vm.DeleteAllAudioAsync()`.
+  XAML: insert a `RowDefinition` (`Auto`) before the list row; add one `Border` card containing: `ToggleSwitch x:Name="StoreAudioToggle" Header="Save audio recordings of your dictations"`, a caption TextBlock stating "When off, Winpepper keeps transcripts and timings in history but saves no audio. Dictations dismissed as silent are not archived — without audio there is nothing to recover — and Lab replay/re-transcribe needs audio.", a NumberBox `x:Name="MaxEntriesBox"` (`Minimum=1`, `Maximum=10000`) with header "Keep at most this many dictations", a NumberBox `x:Name="MaxAgeBox"` (`Minimum=1`, `Maximum=36500`) with header "Delete dictations older than (days)", a CheckBox `x:Name="KeepForeverCheck" Content="Keep forever — never delete by age (for building an eval corpus)"`, a TextBlock `x:Name="DiskUsageText"`, and a Button `x:Name="DeleteAllAudioButton" Content="Delete all saved audio now"`. Code-behind: in `OnNavigatedTo` build `new HistoryRetentionViewModel(App.Shell.SettingsStore.Load(), services.Store, App.Shell.SettingsWriter)`, initialize control state from it, wire `Toggled`/`ValueChanged` (NaN-guarded)/`Checked`/`Unchecked`/`Click` to the VM, then `ViewModel.Refresh()` the list VM and re-read `DiskUsageText`. Delete button shows a `ContentDialog` ("Delete all saved audio? Recordings are deleted; transcripts are kept. This cannot be undone.", Primary="Delete", Close="Cancel") before calling `await vm.DeleteAllAudioAsync()`, and reports the returned count afterwards (e.g. "N recordings deleted." — with a "M could not be deleted (file in use); try again" suffix when entries remain).
 
 - [ ] **Step 4: Run the Windows-side compile+test verification**
 
@@ -317,10 +336,11 @@
 
 ## Self-review record
 
-- **Spec coverage:** R1→T2(+T4 UI), R2→T1, R3→T1(`Prune`)+T3(vm calls it), R4→T3+T4, R5→T2(archiver gate)+T3(rerun guard), R6→T1 defaults + unmodified existing tests checked every task, R7→per-task Linux runs + T4 gate. Every task names its Requirements; none serves zero.
+- **Spec coverage:** R1→T2(+T4 UI), R2→T1, R3→T1(`Prune`)+T3(vm chain), R4→T3+T4, R5→T2(archiver gate)+T3(rerun guard), R6→T1 defaults + unmodified existing tests checked every task, R7→per-task Linux runs + T4 gate. Every task names its Requirements; none serves zero.
 - **No silent deferrals:** no mocks standing in for production outcomes; the only deferred-verification surface is `Winpepper.App` compile/runtime (structurally Linux-unbuildable) — covered by the Windows gate in T4 and called out in T2's Step 6.
 - **Interface consistency:** T1 produces `HistoryRetentionPolicy`/`Prune`/`DeleteAllAudio`/`ComputeAudioDiskUsageBytes` consumed by T2/T3; T3's VM ctor is consumed by T4 exactly as written; AppSettings property names spelled identically everywhere (`HistoryStoreAudioEnabled`, `HistoryMaxEntries`, `HistoryMaxAgeDays`).
 - **Executable tests:** each Red step references members that do not exist yet (compile failure = intended failure) or, for T3's detail-VM case, the currently-crashing behavior; each Green command names the exact test assembly/class.
 - **Placeholder scan:** no TBD/TODO/"handle edge cases"; UI wording is literal in T4; commit messages literal.
 - **Operational completeness:** disk-usage refresh after delete-all; confirm dialog before destructive delete; NaN guards for NumberBox; doc-comment staleness ("Pruning to 50") fixed in T2 where the file is already touched.
 - **Task size:** T1/T3 pure-managed (Linux-verifiable), T2 small mixed, T4 pure UI; each reviewable independently.
+- **Load-bearing amendments (Stage 2):** finder round 1 surfaced 7 confirmed gaps (commit ordering F1, strict load F2, truthful deletes F3, orphan sweep F4, path containment F5, cap bound F6, single sampling F7) — encoded as decisions D5–D9 and Task 1–4 amendments; pre-existing hazards recorded as out-of-scope findings (Append's lenient corrupt-index overwrite; `SettingsStore._lastGood` staleness; hand-edited duplicate-path cross-delete). Changed tasks re-checked against all eight self-review items above: coverage unchanged, interfaces extended consistently (`Prune`/`DeleteAllAudio` return semantics now explicit), every new behavior has a named failing-first test.

@@ -217,14 +217,14 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 - One real clean run `--attempts 1` → exit 0 `BUILD OK on attempt 1` (happy path; transient
   branches are covered deterministically by the self-test, statistically by Task 3's battery).
 
-- [ ] **Step 1: Write the failing behavioral test**
+- [x] **Step 1: Write the failing behavioral test**
 
   Create `scripts/build-app-windows-from-wsl.selftest.sh` per the ten cases above (the fake
   build command is a small inline bash snippet passed via the seam env var; the wrapper captures
   its stdout/stderr to the attempt log exactly as it captures the real build, so no path handoff
   is needed).
 
-- [ ] **Step 2: Run the test and verify the intended failure**
+- [x] **Step 2: Run the test and verify the intended failure**
 
   Run: `bash scripts/build-app-windows-from-wsl.selftest.sh`
 
@@ -232,7 +232,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   (shell reports No such file or directory / case 1 cannot run) — the missing behavior is the
   wrapper itself, not a setup accident.
 
-- [ ] **Step 3: Add the minimal production implementation**
+- [x] **Step 3: Add the minimal production implementation**
 
   Create `scripts/build-app-windows-from-wsl.sh` with exactly the Behavior above. Structure:
   header comment (purpose; the three mitigations with accurate single-node wording from
@@ -253,19 +253,19 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   (full-path tag + separator boundary + `.worktrees/` exclusion) → kill only kept PIDs
   (seam-able). `chmod +x` both scripts.
 
-- [ ] **Step 4: Run the focused test**
+- [x] **Step 4: Run the focused test**
 
   Run: `bash -n scripts/build-app-windows-from-wsl.sh scripts/build-app-windows-from-wsl.selftest.sh && bash scripts/build-app-windows-from-wsl.selftest.sh`
 
   Expected: syntax clean; `SELFTEST: PASS` (all ten cases green).
 
-- [ ] **Step 5: Refactor while green**
+- [x] **Step 5: Refactor while green**
 
   Keep the script self-contained (no shared lib with the gate — deliberate: the gate is proven
   and frozen for this kata; duplication of 15 well-commented lines is cheaper than touching the
   gate). Confirm no stray arg-parsing, no unused vars; rerun the self-test after any refactor.
 
-- [ ] **Step 6: Run broader verification**
+- [x] **Step 6: Run broader verification**
 
   Order matters — never let Windows-built `obj` state leak into a Linux build (AGENTS.md
   cross-OS rule). Run the Linux suite FIRST (its own clean conditions), then the real wrapper
@@ -278,7 +278,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   `BUILD OK on attempt 1` (exit 0), run log directory printed. Note: after this step the tree's
   `src/**` state is Windows-built — any later Linux run must wipe first (AGENTS.md).
 
-- [ ] **Step 7: Commit the task**
+- [x] **Step 7: Commit the task**
 
   ```bash
   git add scripts/build-app-windows-from-wsl.sh scripts/build-app-windows-from-wsl.selftest.sh
@@ -329,18 +329,18 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   clause). Validation: the new commands' text matches the script's real interface `--attempts`;
   markdown renders (no broken fences); `AGENTS.md` diff is one line.
 
-- [ ] **Step 1: Write the failing behavioral test**
+- [x] **Step 1: Write the failing behavioral test**
 
   Red evidence: `grep -n 'build-app-windows-from-wsl' docs/testing-windows-from-wsl.md AGENTS.md`
   finds nothing (the command is undocumented). Record output.
 
-- [ ] **Step 2: Run the test and verify the intended failure**
+- [x] **Step 2: Run the test and verify the intended failure**
 
   Run: `grep -rn 'build-app-windows-from-wsl' docs/testing-windows-from-wsl.md AGENTS.md docs/DEVELOPMENT.md`
 
   Expected: FAIL — no matches (exit 1).
 
-- [ ] **Step 3: Add the minimal production implementation**
+- [x] **Step 3: Add the minimal production implementation**
 
   Write the doc section, the DEVELOPMENT.md sentence, and the AGENTS.md sentence per Behavior.
   Numbers quoted in docs must match Phase-1 evidence (probe v2: first-attempt 0/300 misses on
@@ -349,19 +349,19 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   210–318 s vs parallel 167–234 s).
   Use "single-node/serialized scheduling" wording — never "single process".
 
-- [ ] **Step 4: Run the focused test**
+- [x] **Step 4: Run the focused test**
 
   Run: `grep -n 'build-app-windows-from-wsl' docs/testing-windows-from-wsl.md AGENTS.md docs/DEVELOPMENT.md`
 
   Expected: PASS — matches in all three files.
 
-- [ ] **Step 5: Refactor while green**
+- [x] **Step 5: Refactor while green**
 
   Verify the section sits after "One command" and before "Why the clean step"; no duplicated
   guidance (the troubleshooting section already covers cross-OS CS0006 — reference it, don't
   repeat it).
 
-- [ ] **Step 6: Run broader verification**
+- [x] **Step 6: Run broader verification**
 
   Task 1's Windows run left Windows-built `src/**` state — wipe before any Linux build
   (AGENTS.md cross-OS rule; linux-tests.sh does not pre-clean).
@@ -370,7 +370,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
 
   Expected: `LINUX SUITE: GREEN` (repo pre-commit rule applies to every commit).
 
-- [ ] **Step 7: Commit the task**
+- [x] **Step 7: Commit the task**
 
   ```bash
   git add docs/testing-windows-from-wsl.md docs/DEVELOPMENT.md AGENTS.md
@@ -408,30 +408,30 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   transient signature from that attempt's log is quoted in the report.
 - Linux suite → `LINUX SUITE: GREEN` with the recorded test count.
 
-- [ ] **Step 1: Write the failing behavioral test**
+- [x] **Step 1: Write the failing behavioral test**
 
   Red statement: without Task 1 the command cannot run; already proven in Task 1 Step 2. Nothing
   new to fail.
 
-- [ ] **Step 2: Run the test and verify the intended failure**
+- [x] **Step 2: Run the test and verify the intended failure**
 
   N/A — covered by Task 1 Step 2 (recorded as such).
 
-- [ ] **Step 3: Add the minimal production implementation**
+- [x] **Step 3: Add the minimal production implementation**
 
   No implementation — this task is the verification battery.
 
-- [ ] **Step 4: Run the focused test**
+- [x] **Step 4: Run the focused test**
 
   Run: 5 × `scripts/build-app-windows-from-wsl.sh`
 
   Expected: every run `BUILD OK ...` exit 0 (retries, if any, itemized with signatures).
 
-- [ ] **Step 5: Refactor while green**
+- [x] **Step 5: Refactor while green**
 
   N/A (no code).
 
-- [ ] **Step 6: Run broader verification**
+- [x] **Step 6: Run broader verification**
 
   Cross-OS order (AGENTS.md rule): wipe → Linux suite → gate (the gate pre-cleans `src` and
   `tests` itself).
@@ -445,7 +445,7 @@ Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `
   `GATE: BLOCKED-ENVIRONMENTAL` with verbatim log lines — never claim GREEN without the summary.
   Finally confirm `git status` clean.
 
-- [ ] **Step 7: Commit the task**
+- [x] **Step 7: Commit the task**
 
   No commit (no tracked changes). Record evidence paths in the run ledger.
 

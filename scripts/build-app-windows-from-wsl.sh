@@ -36,12 +36,15 @@
 # %LOCALAPPDATA%\winpepper. After a timeout, `timeout` has killed only the
 # WSL-side interop proxy — wedged Windows-side dotnet.exe children keep
 # holding file locks — so the orphan cleanup lists dotnet.exe processes and
-# kills only those whose FULL command line contains this checkout's full UNC
-# path tag AND does not contain "<tag>\.worktrees\". Full path, never a
-# basename: the bare name "winpepper" is a substring of every nested
-# worktree path (...\winpepper\.worktrees\<other-agent>\...), so a basename
-# filter could kill other agents' builds. Listing stays on the powershell
-# side; the filter is bash-side and self-testable.
+# kills only those whose command line, normalized to '/' separators, contains
+# this checkout's full tag followed by a separator AND does not contain
+# "<tag>/.worktrees/". Full path + separator boundary, never a basename: the
+# bare name "winpepper" is a substring of every nested worktree path
+# (...\winpepper\.worktrees\<other-agent>\...), an unbounded full-path match
+# would also accept prefix-named siblings (...\gzcc vs ...\gzcc2), and
+# slash-style-only checks miss mixed separators — any of those could kill
+# other agents' builds. Listing stays on the powershell side; the filter is
+# bash-side and self-testable.
 #
 # Self-test seams (each changes nothing when unset):
 #   WINPEPPER_APP_BUILD_CMD        command string run via bash -c instead of
@@ -133,13 +136,16 @@ echo "build-app-windows-from-wsl: pre-clean: rm -rf $ROOT/src/*/bin $ROOT/src/*/
 rm -rf "$ROOT"/src/*/bin "$ROOT"/src/*/obj
 
 # Checkout-scoped orphan cleanup for the timeout path. Listing is separated
-# from filtering so the filter lives in bash and is self-testable.
+# from filtering so the filter lives in bash and is self-testable. All path
+# comparisons happen after normalizing '\' to '/', so mixed-separator command
+# lines (Windows accepts and emits both) cannot slip either check.
 kill_orphans() {
   local tag
   tag="$(wslpath -w "$ROOT" 2>/dev/null || true)"
   tag="${tag%$'\r'}"
   [[ -n "$tag" ]] || tag="$ROOT"   # Linux spelling as fallback
-  local needle="$tag\\.worktrees\\"
+  local tagN="${tag//\\//}"
+  local needleN="$tagN/.worktrees/"
   local rows
   if [[ -n "${WINPEPPER_APP_ORPHAN_LIST_CMD:-}" ]]; then
     rows="$(bash -c "$WINPEPPER_APP_ORPHAN_LIST_CMD" || true)"
@@ -147,18 +153,18 @@ kill_orphans() {
     # shellcheck disable=SC2016 # the $() and backtick-t are PowerShell-side, not bash
     rows="$("$PS" -NoProfile -Command 'Get-CimInstance Win32_Process -Filter "Name='"'"'dotnet.exe'"'"'" | ForEach-Object { "$($_.ProcessId)`t$($_.CommandLine)" }' 2>/dev/null || true)"
   fi
-  local pid cmd
+  local pid cmd cmdN
   while IFS=$'\t' read -r pid cmd; do
     pid="${pid%$'\r'}"
     cmd="${cmd%$'\r'}"
     [[ -n "$pid" && -n "$cmd" ]] || continue
+    cmdN="${cmd//\\//}"
     # Keep only rows for THIS checkout: the full effective-root tag immediately
-    # followed by a path separator (\ or /) — an unbounded substring would also
-    # match a prefix-named sibling checkout (e.g. tag ...\gzcc vs ...\gzcc2) ...
-    if [[ "$cmd" != *"$tag"\\* && "$cmd" != *"$tag"/* ]]; then continue; fi
-    # ... and never a worktree nested under it (<tag>\.worktrees\ or the
-    # forward-slash spelling — command lines may use either).
-    [[ "$cmd" != *"$needle"* && "$cmd" != *"$tag"/.worktrees/* ]] || continue
+    # followed by a path separator — an unbounded substring would also match a
+    # prefix-named sibling checkout (e.g. tag .../gzcc vs .../gzcc2) ...
+    if [[ "$cmdN" != *"$tagN"/* ]]; then continue; fi
+    # ... and never a worktree nested under it (<tag>/.worktrees/...).
+    [[ "$cmdN" != *"$needleN"* ]] || continue
     echo "build-app-windows-from-wsl: killing orphaned dotnet.exe PID $pid"
     if [[ -n "${WINPEPPER_APP_ORPHAN_KILL_CMD:-}" ]]; then
       bash -c "$WINPEPPER_APP_ORPHAN_KILL_CMD" kill "$pid" || true

@@ -127,14 +127,16 @@ Phase-1 report (absolute): `/home/dan/code/winpepper/.worktrees/.the-usual-logs/
   1. list: `dotnet.exe` processes as `PID<TAB>CommandLine` rows (default:
      powershell `Get-CimInstance Win32_Process -Filter "Name='dotnet.exe'" |%{
      "$($_.ProcessId)`t$($_.CommandLine)"}`; overridable via `WINPEPPER_APP_ORPHAN_LIST_CMD`),
-  2. filter in bash: keep a row only when its command line contains the FULL effective-root tag
-     (the `wslpath -w` UNC spelling of `<root>`, or Linux spelling as fallback) IMMEDIATELY
-     FOLLOWED by a path separator (`\` or `/`) — an unbounded containment would also match a
-     prefix-named sibling checkout (`...\gzcc` vs `...\gzcc2`, task-1 review) — AND does not
-     contain `<tag>\.worktrees\` — full path, never a basename: from the main checkout the bare
-     basename `winpepper` is a substring of every nested worktree path
-     (`...\winpepper\.worktrees\<other-agent>\...`), so a basename match can kill other agents'
-     builds under the expected concurrent-agent workload (found by round-3 fresh eyes);
+  2. filter in bash, on command lines NORMALIZED to `/` separators (mixed `\`/`/` spellings can
+     coexist in real Windows command lines — task-1 re-review): keep a row only when the
+     normalized line contains the FULL effective-root tag (the `wslpath -w` UNC spelling
+     of `<root>`, or Linux spelling as fallback) IMMEDIATELY FOLLOWED by a separator AND does
+     not contain `<tag>/.worktrees/` — full path + separator boundary, never a basename: from
+     the main checkout the bare basename `winpepper` is a substring of every nested worktree
+     path (`...\winpepper\.worktrees\<other-agent>\...`), an unbounded full-path match would
+     also accept prefix-named siblings (`...\gzcc` vs `...\gzcc2`), and either of those can
+     kill other agents' builds under the expected concurrent-agent workload (round-3 plan
+     review + task-1 review rounds);
   3. kill only the kept PIDs (default: powershell `Stop-Process -Id <pid> -Force` per PID;
      overridable via `WINPEPPER_APP_ORPHAN_KILL_CMD`), printing each PID.
 - Self-test seams (documented in the script header; each changes nothing when unset):
@@ -162,22 +164,24 @@ with a fake `src/Winpepper.App/Winpepper.App.csproj` placeholder):
    succeeds → wrapper exits 0 on attempt 3 (signature matched, not treated as permanent).
 5. *clean first try:* fake succeeds immediately → exit 0 on attempt 1, no retry lines.
 6. *timeout path + kill scoping:* fake build is `sleep`-based with
-   `WINPEPPER_APP_BUILD_TIMEOUT_S=2` (→ exit 124); `WINPEPPER_APP_ORPHAN_LIST_CMD` fakes five
+   `WINPEPPER_APP_BUILD_TIMEOUT_S=2` (→ exit 124); `WINPEPPER_APP_ORPHAN_LIST_CMD` fakes seven
    rows — (a) a CommandLine containing the disposable root's tag + separator, (b) one containing
    a DIFFERENT checkout under `<main>\.worktrees\other-agent\...`, (c) one containing a
-   `<tag>\.worktrees\` nested path for the SAME tag, (d) one containing a prefix-named sibling
-   `<tag>2\...`, (e) one containing a FORWARD-SLASH nested `<tag>/.worktrees/...`;
-   `WINPEPPER_APP_ORPHAN_KILL_CMD` records the PIDs it receives.
+   `<tag>\.worktrees\` nested path, (d) one containing a prefix-named sibling `<tag>2\...`,
+   (e) one containing a FORWARD-SLASH nested `<tag>/.worktrees/...`, (f,g) both MIXED-separator
+   nested spellings; `WINPEPPER_APP_ORPHAN_KILL_CMD` records the PIDs it receives.
    → wrapper exits 1 after exactly 1 attempt (no retry), prints a TIMEOUT line, and the kill
-   record contains ONLY PID (a) (bash-side boundary-aware full-path filter with the
-   `.worktrees` exclusion in both slash spellings provably selects own-checkout command lines
-   and rejects all four other-checkout flavors).
+   record contains ONLY PID (a) (the separator-normalized, boundary-aware full-path filter
+   provably selects own-checkout command lines and rejects all six other-checkout flavors).
 7. *pre-clean runs against the effective root:* seed `<disposable>/src/Seed/bin/` and
    `.../obj/` sentinel files; the fake build command asserts both are already gone at call
    time (failing the run if present); after the wrapper exits 0, the sentinels are absent from
    disk — the "clean build" claim of Task 3 rests on this, never on assumption.
-8. *usage validation:* `--attempts 0`, `--attempts abc`, and a trailing positional argument each
-   print usage and exit 2 without running any build.
+8. *usage validation:* `--attempts 0`, `--attempts abc`, a trailing positional argument, and a
+   SET-BUT-EMPTY `WINPEPPER_APP_ROOT_OVERRIDE` each exit 2 with usage/error and never run a
+   build (the empty-override guard keeps a failed `mktemp` upstream from pointing the pre-clean
+   at the real checkout; the selftest's own setup also aborts hard when a disposable root cannot
+   be created and validates it lives under /tmp).
 Cases 1, 2 and 5 also assert run-dir uniqueness (any two runs → two distinct `run-*` dirs).
 
 **Files:**

@@ -20,6 +20,7 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
     private string _diskUsageDisplay;
     private bool _lastCommitPersisted = true;
     private bool _lastApplyHadIndexFailure;
+    private int _lastApplyRetainedAfterFailedDelete;
 
     public HistoryRetentionViewModel(
         HistoryStore store,
@@ -139,6 +140,17 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         }
     }
 
+    public int LastApplyRetainedAfterFailedDelete
+    {
+        get => _lastApplyRetainedAfterFailedDelete;
+        private set
+        {
+            if (_lastApplyRetainedAfterFailedDelete == value) return;
+            _lastApplyRetainedAfterFailedDelete = value;
+            OnPropertyChanged();
+        }
+    }
+
     public event EventHandler? RetentionApplied;
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -186,15 +198,15 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         HistoryRetentionPolicy committedPolicy)
     {
         await _applyGate.WaitAsync();
+        LastApplyHadIndexFailure = false;
+        LastApplyRetainedAfterFailedDelete = 0;
         try
         {
             LastCommitPersisted = await flush;
             var prune = await Task.Run(() => _store.Prune(committedPolicy));
-            // A recording kept after a failed delete also maps to the existing
-            // warning channel so the page never presents an over-limit apply as complete.
             LastApplyHadIndexFailure = prune.IndexSaveFailed ||
-                                       prune.LoadFailed ||
-                                       prune.RetainedAfterFailedDelete > 0;
+                                       prune.LoadFailed;
+            LastApplyRetainedAfterFailedDelete = prune.RetainedAfterFailedDelete;
             var display = await Task.Run(
                 () => FormatDiskUsage(_store.ComputeAudioDiskUsageBytes()));
             DiskUsageDisplay = display;

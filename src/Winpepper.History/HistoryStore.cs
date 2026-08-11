@@ -141,7 +141,8 @@ public sealed class HistoryStore
 
     private static HistoryIndex DeserializeAndSort(string json)
     {
-        var loaded = JsonSerializer.Deserialize<HistoryIndex>(json, JsonOptions) ?? new HistoryIndex();
+        var loaded = JsonSerializer.Deserialize<HistoryIndex>(json, JsonOptions)
+            ?? throw new JsonException("index.json is null");
         if (loaded.Entries is null) throw new JsonException("index.json has null entries");
         if (loaded.Entries.Any(e => e is null)) throw new JsonException("index.json has a null entry");
         return loaded with

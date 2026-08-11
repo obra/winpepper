@@ -261,19 +261,29 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
     }
 
     [Fact]
-    public async Task ResistingWav_PruneWarningStaysVisibleUntilRetrySucceeds()
+    public async Task RetainedDeleteFailures_AreSeparatedFromIndexFailure_AndResetAfterRetry()
     {
         var initial = new AppSettings { HistoryMaxAgeDays = null };
         var store = new HistoryStore(_root);
-        var resistingRel = "vm-prune-resisting/blocked.wav";
-        var resistingPath = Path.Combine(_root, resistingRel);
-        Directory.CreateDirectory(Path.GetDirectoryName(resistingPath)!);
-        File.WriteAllText(resistingPath, "blocked");
+        var resistingDirectory = Path.Combine(_root, "vm-prune-resisting");
+        Directory.CreateDirectory(resistingDirectory);
+        var resistingPaths = new[]
+        {
+            Path.Combine(resistingDirectory, "blocked-oldest.wav"),
+            Path.Combine(resistingDirectory, "blocked-older.wav"),
+        };
+        foreach (var path in resistingPaths) File.WriteAllText(path, "blocked");
         store.Append(new HistoryEntry
         {
             Id = "oldest",
-            CreatedAtUtc = DateTime.UtcNow.AddMinutes(-2),
-            WavRelativePath = resistingRel,
+            CreatedAtUtc = DateTime.UtcNow.AddMinutes(-4),
+            WavRelativePath = Path.GetRelativePath(_root, resistingPaths[0]),
+        });
+        store.Append(new HistoryEntry
+        {
+            Id = "older",
+            CreatedAtUtc = DateTime.UtcNow.AddMinutes(-3),
+            WavRelativePath = Path.GetRelativePath(_root, resistingPaths[1]),
         });
         store.Append(new HistoryEntry
         {
@@ -284,16 +294,16 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         var writer = new GateableWriter(initial);
         var slot = PublishedHistoryRetentionSlot.FromSettings(initial);
         var vm = new HistoryRetentionViewModel(store, writer, slot);
-        var resistingDirectory = Path.GetDirectoryName(resistingPath)!;
         var probePath = Path.Combine(resistingDirectory, "probe.tmp");
         File.WriteAllText(probePath, "probe");
         Assert.SkipUnless(TryGetUnixMode(resistingDirectory, out var originalDirectoryMode),
             "Unix permission semantics are required for this test.");
-        var originalFileMode = File.GetUnixFileMode(resistingPath);
+        var originalFileModes = resistingPaths.Select(File.GetUnixFileMode).ToArray();
 
         try
         {
-            File.SetUnixFileMode(resistingPath, UnixFileMode.UserRead);
+            foreach (var path in resistingPaths)
+                File.SetUnixFileMode(path, UnixFileMode.UserRead);
             File.SetUnixFileMode(resistingDirectory,
                 UnixFileMode.UserRead | UnixFileMode.UserExecute);
             Assert.SkipUnless(!TryDeleteExistingFile(probePath),
@@ -304,14 +314,19 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
             writer.Complete(0, persisted: true);
             await firstApply;
 
-            vm.LastApplyHadIndexFailure.ShouldBeTrue();
-            store.Load().Entries.Count.ShouldBe(3);
-            File.Exists(resistingPath).ShouldBeTrue();
+            vm.LastApplyHadIndexFailure.ShouldBeFalse();
+            vm.LastApplyRetainedAfterFailedDelete.ShouldBe(2);
+            store.Load().Entries.Count.ShouldBe(4);
+            resistingPaths.ShouldAllBe(path => File.Exists(path));
         }
         finally
         {
             File.SetUnixFileMode(resistingDirectory, originalDirectoryMode);
-            if (File.Exists(resistingPath)) File.SetUnixFileMode(resistingPath, originalFileMode);
+            for (var i = 0; i < resistingPaths.Length; i++)
+            {
+                if (File.Exists(resistingPaths[i]))
+                    File.SetUnixFileMode(resistingPaths[i], originalFileModes[i]);
+            }
         }
 
         var retry = WaitForEventsAsync(vm, 1);
@@ -320,8 +335,80 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         await retry;
 
         vm.LastApplyHadIndexFailure.ShouldBeFalse();
+        vm.LastApplyRetainedAfterFailedDelete.ShouldBe(0);
         store.Load().Entries.Select(e => e.Id).ShouldBe(["newest", "middle"]);
-        File.Exists(resistingPath).ShouldBeFalse();
+        resistingPaths.ShouldAllBe(path => !File.Exists(path));
+    }
+
+    [Fact]
+    public async Task MixedRetainedDeleteAndIndexFailures_AreReportedSeparately()
+    {
+        var initial = new AppSettings { HistoryMaxAgeDays = null };
+        var store = new HistoryStore(_root);
+        var resistingDirectory = Path.Combine(_root, "vm-prune-mixed");
+        Directory.CreateDirectory(resistingDirectory);
+        var resistingPaths = new[]
+        {
+            Path.Combine(resistingDirectory, "blocked-oldest.wav"),
+            Path.Combine(resistingDirectory, "blocked-older.wav"),
+        };
+        foreach (var path in resistingPaths) File.WriteAllText(path, "blocked");
+        store.Append(new HistoryEntry
+        {
+            Id = "oldest",
+            CreatedAtUtc = DateTime.UtcNow.AddMinutes(-4),
+            WavRelativePath = Path.GetRelativePath(_root, resistingPaths[0]),
+        });
+        store.Append(new HistoryEntry
+        {
+            Id = "older",
+            CreatedAtUtc = DateTime.UtcNow.AddMinutes(-3),
+            WavRelativePath = Path.GetRelativePath(_root, resistingPaths[1]),
+        });
+        store.Append(new HistoryEntry
+        {
+            Id = "middle",
+            CreatedAtUtc = DateTime.UtcNow.AddMinutes(-1),
+        });
+        store.Append(new HistoryEntry { Id = "newest", CreatedAtUtc = DateTime.UtcNow });
+        var writer = new GateableWriter(initial);
+        var vm = CreateViewModel(initial, writer);
+        var probePath = Path.Combine(resistingDirectory, "probe.tmp");
+        File.WriteAllText(probePath, "probe");
+        Assert.SkipUnless(TryGetUnixMode(_root, out var originalRootMode),
+            "Unix permission semantics are required for this test.");
+        Assert.SkipUnless(TryGetUnixMode(resistingDirectory, out var originalDirectoryMode),
+            "Unix permission semantics are required for this test.");
+        var originalFileModes = resistingPaths.Select(File.GetUnixFileMode).ToArray();
+
+        try
+        {
+            foreach (var path in resistingPaths)
+                File.SetUnixFileMode(path, UnixFileMode.UserRead);
+            File.SetUnixFileMode(resistingDirectory,
+                UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(_root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            Assert.SkipUnless(!TryDeleteExistingFile(probePath) && !CanCreateFile(_root),
+                "The current user can still delete audio or write the history index.");
+            var applied = WaitForEventsAsync(vm, 1);
+
+            vm.MaxEntries = 2;
+            writer.Complete(0, persisted: true);
+            await applied;
+
+            vm.LastApplyHadIndexFailure.ShouldBeTrue();
+            vm.LastApplyRetainedAfterFailedDelete.ShouldBe(2);
+        }
+        finally
+        {
+            File.SetUnixFileMode(_root, originalRootMode);
+            File.SetUnixFileMode(resistingDirectory, originalDirectoryMode);
+            for (var i = 0; i < resistingPaths.Length; i++)
+            {
+                if (File.Exists(resistingPaths[i]))
+                    File.SetUnixFileMode(resistingPaths[i], originalFileModes[i]);
+            }
+        }
     }
 
     [Fact]
@@ -370,6 +457,7 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
             await applied;
 
             vm.LastApplyHadIndexFailure.ShouldBeTrue();
+            vm.LastApplyRetainedAfterFailedDelete.ShouldBe(0);
             appliedCount.ShouldBe(1);
         }
         finally

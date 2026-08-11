@@ -113,6 +113,13 @@ public sealed partial class HistoryPage : Page
         var status = "";
         if (!retentionViewModel.LastCommitPersisted)
             status = "Setting could not be saved right now; it will be retried.";
+        if (retentionViewModel.LastApplyRetainedAfterFailedDelete is var retained && retained > 0)
+        {
+            var failedDelete =
+                $"{retained} recording(s) could not be deleted " +
+                "(file in use) and remain over the limit; retry to finish applying the limit.";
+            status = string.IsNullOrEmpty(status) ? failedDelete : $"{status} {failedDelete}";
+        }
         if (retentionViewModel.LastApplyHadIndexFailure)
         {
             const string indexFailure =

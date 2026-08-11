@@ -8,10 +8,11 @@
 > (3) `HistoryPruneResult` carries `DroppedCount, IndexSaveFailed, LoadFailed,
 > RetainedAfterFailedDelete` so a privacy action never reports silent success;
 > (4) disk-usage text populates asynchronously after VM construction (no UI-thread
-> recursive enumeration); (5) the Windows gate's single-script `GATE: GREEN` was not
-> achievable intact in this session (WSL↔Windows interop outage mid-run) — every gate
-> component instead passed separately on the Windows host at final HEAD (receipt:
-> `.worktrees/.the-usual-logs/eqrr-audio-retention/reports/verification-receipt.md`).
+> recursive enumeration); (5) the hardened `scripts/windows-gate.sh` (single-call start
+> per build/run, 120×5s polling) completed one contiguous pass at `c388725`: exit 0,
+> `GATE: GREEN`, 2773/2773 tests passed, and every build reported 0 Errors (receipt:
+> `.worktrees/.the-usual-logs/eqrr-audio-retention/reports/verification-receipt.md`;
+> durable log: `artifacts/windows-gate/gate-final-c388725.log`).
 
 # User-Configurable Audio History Retention Implementation Plan
 

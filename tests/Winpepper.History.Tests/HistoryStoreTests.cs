@@ -347,6 +347,20 @@ public class HistoryStoreTests : IDisposable
     }
 
     [Fact]
+    public void Prune_NullIndex_ReturnsLoadFailedAndLeavesBytesUntouched()
+    {
+        var indexPath = Path.Combine(_root, "index.json");
+        var originalBytes = "null"u8.ToArray();
+        File.WriteAllBytes(indexPath, originalBytes);
+        var store = new HistoryStore(_root);
+
+        var result = store.Prune();
+
+        result.ShouldBe(new HistoryPruneResult { LoadFailed = true });
+        File.ReadAllBytes(indexPath).ShouldBe(originalBytes);
+    }
+
+    [Fact]
     public void Prune_NullEntriesIndex_BailsWithoutWriting()
     {
         var indexPath = Path.Combine(_root, "index.json");
@@ -544,6 +558,25 @@ public class HistoryStoreTests : IDisposable
         result.IndexSaveFailed.ShouldBeFalse();
         result.EnumerationFailed.ShouldBeFalse();
         File.ReadAllText(indexPath).ShouldBe(corrupt);
+    }
+
+    [Fact]
+    public void DeleteAllAudio_NullIndex_StillSweepsWavsAndLeavesBytesUntouched()
+    {
+        var wavPath = CreateWav("null-index/orphan.wav", "orphan");
+        var indexPath = Path.Combine(_root, "index.json");
+        var originalBytes = "null"u8.ToArray();
+        File.WriteAllBytes(indexPath, originalBytes);
+        var store = new HistoryStore(_root);
+
+        var result = store.DeleteAllAudio();
+
+        result.DeletedCount.ShouldBe(1);
+        result.FailedCount.ShouldBe(0);
+        result.IndexSaveFailed.ShouldBeFalse();
+        result.EnumerationFailed.ShouldBeFalse();
+        File.Exists(wavPath).ShouldBeFalse();
+        File.ReadAllBytes(indexPath).ShouldBe(originalBytes);
     }
 
     [Fact]

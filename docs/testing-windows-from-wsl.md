@@ -85,6 +85,56 @@ Notes:
   directly). `-p:UseXamlCompilerExecutable=true` only matters for App/MSI
   builds (see README "Building from source").
 
+## Building the app from WSL
+
+The test script above never builds `Winpepper.App`. For a hand app build from
+a WSL2 checkout — the same Release build the pre-push gate runs — use:
+
+```sh
+scripts/build-app-windows-from-wsl.sh [--attempts N]   # default N=5
+```
+
+The wrapper prints its run-log directory
+(`artifacts/build-app-windows/run-<UTC-timestamp>-<pid>/`, one
+`attempt<N>.log` per attempt) at start and end. Exit 0 = `BUILD OK`; exit 1 =
+build failed (non-transient error, attempts exhausted, or timed out —
+timeouts are never retried); exit 2 = usage or environment error. Like the
+gate, it never installs the MSI, never launches or kills `Winpepper.exe`,
+and never writes `%LOCALAPPDATA%\winpepper`.
+
+Why the wrapper exists: building the App over the `\\wsl.localhost` share is
+exposed to transient 9P filesystem races. Cross-process file-visibility lag
+on the share is measured systematic — 98–100% of 800 probe writes took ≥5 ms
+to become visible to a Windows-side reader (≤43 ms max) — and under
+concurrent-build contention the share also throws outright transport errors:
+reproduced live, the XAML compiler failed writing its output to the share
+("An unexpected network error occurred") with follow-on WMC-family XAML
+errors, then passed on the next identical run. The CS0006/WMC1006
+ref-assembly codes this command defends against are *inferred* members of
+the same 9P coherence/transport class — every historically recorded CS0006
+trace also had the (since-fixed) cross-OS obj-mixing mechanism in play, so a
+fresh isolated CS0006 reproduction has never been observed.
+
+The three mitigations, byte-for-byte the gate's recipe
+(`scripts/windows-gate.sh` stays the canary for this build):
+
+1. **Always-on pre-clean** (`rm -rf src/*/bin src/*/obj`) removes leftover
+   Linux-built intermediates — the deterministic cross-OS CS0006 covered in
+   "Why the clean step (troubleshooting)" below.
+2. **Single-node scheduling** (`-m:1 -p:UseSharedCompilation=false
+   -p:UseXamlCompilerExecutable=true`): the whole project graph is scheduled
+   on one MSBuild node, so targets run in strict dependency order and no two
+   tool processes (per-project `csc.exe` children, `XamlCompiler.exe`, the mt
+   shim) ever probe or write the share concurrently inside the measured lag
+   windows. Compiles still run as child processes, and `-m:1` implies no
+   timing guarantee — the residual handoff exposure is the retry layer's
+   job. Cost check: serialized clean builds take 210–318 s vs 167–234 s
+   parallel.
+3. **Bounded retry** (default `--attempts 5`, the recorded worst-case
+   transient chain) fires only on the observed transient signatures
+   (`CS0006`, `WMC1006`, `unexpected network error`); any other failure
+   stops immediately.
+
 ## Why the clean step (troubleshooting)
 
 **CS0006 "Metadata file ...\obj\Release\net9.0\ref\X.dll could not be

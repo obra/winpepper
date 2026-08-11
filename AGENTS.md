@@ -8,7 +8,7 @@
     all 9 test projects (12 project/TFM runs) on the Windows host via `powershell.exe` interop
     over the `\\wsl.localhost` UNC path. Exit 0 with `GATE: GREEN` = pass. It never installs
     the MSI, never launches or kills `Winpepper.exe`, and never writes to
-    `%LOCALAPPDATA%\winpepper`.
+    `%LOCALAPPDATA%\winpepper`. Hand app builds from WSL (outside the gate) go through `scripts/build-app-windows-from-wsl.sh`, not a hand-rolled `dotnet build`.
   - Underlying/alternative procedure: `scripts/test-windows-from-wsl.sh` (drives the Windows-host `dotnet.exe` against the checkout's UNC path; ~12 min, use a 20–30 min timeout). See `docs/testing-windows-from-wsl.md` for the verified procedure and troubleshooting.
   - How to run: build each project in `tests/` with `-c Release`, then execute via the xUnit v3 in-process runner (`dotnet exec <built test dll>`). Do not rely on `dotnet test` — the VSTest host is unreliable on some dev machines.
   - On Linux, provision the .NET 9 SDK locally if needed (`/.dotnet` is gitignored). A green Linux run is necessary but not sufficient — Windows-only code (WinUI, NAudio, DPAPI) only compiles and runs on Windows.

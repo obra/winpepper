@@ -162,7 +162,10 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         var result = await Task.Run(_store.DeleteAllAudio);
         var display = await Task.Run(
             () => FormatDiskUsage(_store.ComputeAudioDiskUsageBytes()));
-        LastApplyHadIndexFailure = result.IndexSaveFailed || result.EnumerationFailed;
+        // Index-only: an incomplete folder scan is surfaced truthfully through the
+        // structured result (the page's delete-all message), never via the
+        // "history index could not be updated" sentence.
+        LastApplyHadIndexFailure = result.IndexSaveFailed;
         DiskUsageDisplay = display;
         RetentionApplied?.Invoke(this, EventArgs.Empty);
         return result;

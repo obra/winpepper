@@ -434,6 +434,59 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task DeleteAllAudioAsync_EnumerationFailure_DoesNotSetIndexFailureFlag()
+    {
+        SeedEntries(1);
+        var inaccessibleDirectory = Path.Combine(_root, "inaccessible");
+        Directory.CreateDirectory(inaccessibleDirectory);
+        File.WriteAllText(Path.Combine(inaccessibleDirectory, "hidden.wav"), "hidden");
+        Assert.SkipUnless(TryGetUnixMode(inaccessibleDirectory, out var originalMode),
+            "Unix permission controls are unavailable on this platform.");
+
+        var initial = new AppSettings();
+        var vm = CreateViewModel(initial, new GateableWriter(initial));
+        HistoryAudioCleanupResult? result = null;
+
+        try
+        {
+            File.SetUnixFileMode(inaccessibleDirectory, UnixFileMode.None);
+            Assert.SkipUnless(!CanEnumerateDirectory(inaccessibleDirectory),
+                "The current user can still enumerate a chmod 000 directory.");
+
+            result = await vm.DeleteAllAudioAsync();
+        }
+        finally
+        {
+            File.SetUnixFileMode(inaccessibleDirectory, originalMode);
+        }
+
+        // An incomplete folder scan is not an index failure: the flag drives the
+        // page's "history index could not be updated" sentence and must stay false;
+        // the enumeration failure is surfaced truthfully through the structured result.
+        result.ShouldNotBeNull();
+        result.EnumerationFailed.ShouldBeTrue();
+        result.IndexSaveFailed.ShouldBeFalse();
+        vm.LastApplyHadIndexFailure.ShouldBeFalse();
+    }
+
+    private static bool CanEnumerateDirectory(string directory)
+    {
+        try
+        {
+            Directory.EnumerateFileSystemEntries(directory).ToList();
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    [Fact]
     public async Task PruneIndexSaveFailure_IsSurfaced_AndStillRaisesEvent()
     {
         SeedEntries(1);

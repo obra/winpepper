@@ -2,6 +2,9 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <!-- tbc0: dual-target so the real-Windows contention test (WindowContextPrefetchAsrContentionTests,
+         #if WINDOWS) runs on the gate's windows TFM; net9.0 keeps the Linux-visible tests. -->
+    <TargetFrameworks>net9.0;net9.0-windows10.0.19041.0</TargetFrameworks>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="xunit.v3" />
@@ -17,5 +20,8 @@
     <ProjectReference Include="..\..\src\Winpepper.Asr\Winpepper.Asr.csproj" />
     <ProjectReference Include="..\..\src\Winpepper.Platform\Winpepper.Platform.csproj" />
     <ProjectReference Include="..\..\src\Winpepper.Cleanup\Winpepper.Cleanup.csproj" />
+    <!-- tbc0: real contention test spawns the real worker loop (TranscribeWorkerHost)
+         as a child process — same inclusion mechanism Winpepper.Asr.Tests uses. -->
+    <ProjectReference Include="..\TranscribeWorkerHost\TranscribeWorkerHost.csproj" />
   </ItemGroup>
 </Project>

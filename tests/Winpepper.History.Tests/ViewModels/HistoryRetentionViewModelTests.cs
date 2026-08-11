@@ -307,6 +307,34 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         await Task.WhenAll(appliedA, appliedB);
     }
 
+    [Fact]
+    public async Task PolicyChangeFromSecondViewModel_DoesNotRepublishStaleAudioValue()
+    {
+        var initial = new AppSettings { HistoryStoreAudioEnabled = true };
+        var slot = PublishedHistoryRetentionSlot.FromSettings(initial);
+        var writer = new GateableWriter(initial);
+        var store = new HistoryStore(_root);
+        var vmA = new HistoryRetentionViewModel(store, writer, slot);
+        var vmB = new HistoryRetentionViewModel(store, writer, slot);
+        var appliedA = WaitForEventsAsync(vmA, 1);
+        var appliedB = WaitForEventsAsync(vmB, 1);
+
+        vmA.StoreAudioEnabled = false;
+        vmB.MaxEntries = 123;
+
+        try
+        {
+            var snapshot = slot.GetSnapshot();
+            snapshot.StoreAudio.ShouldBeFalse();
+            snapshot.Policy.MaxEntries.ShouldBe(123);
+        }
+        finally
+        {
+            writer.CompleteAll(true, true);
+            await Task.WhenAll(appliedA, appliedB);
+        }
+    }
+
     private HistoryRetentionViewModel CreateViewModel(AppSettings initial, GateableWriter writer)
     {
         var slot = PublishedHistoryRetentionSlot.FromSettings(initial);

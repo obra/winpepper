@@ -7,7 +7,7 @@ namespace Winpepper.History.Tests;
 public sealed class PublishedHistoryRetentionSlotTests
 {
     [Fact]
-    public void GetSnapshot_ReturnsThePairFromTheLatestPublish()
+    public void GetSnapshot_ReturnsThePairFromTheLatestComponentPublishes()
     {
         var slot = PublishedHistoryRetentionSlot.FromSettings(new AppSettings
         {
@@ -21,7 +21,8 @@ public sealed class PublishedHistoryRetentionSlotTests
             MaxAgeDays = 40,
         };
 
-        slot.Publish(storeAudio: false, policyB);
+        slot.PublishAudio(storeAudio: false);
+        slot.PublishPolicy(policyB);
 
         var snapshot = slot.GetSnapshot();
 

@@ -50,7 +50,9 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
             if (_storeAudioEnabled == value) return;
             _storeAudioEnabled = value;
             OnPropertyChanged();
-            PublishAndCommit(s => s with { HistoryStoreAudioEnabled = value });
+            PublishAndCommit(
+                s => s with { HistoryStoreAudioEnabled = value },
+                (slot, _) => slot.PublishAudio(value));
         }
     }
 
@@ -65,7 +67,9 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
             _maxEntries = clamped;
             OnPropertyChanged();
             var committed = (int)clamped;
-            PublishAndCommit(s => s with { HistoryMaxEntries = committed });
+            PublishAndCommit(
+                s => s with { HistoryMaxEntries = committed },
+                static (slot, policy) => slot.PublishPolicy(policy));
         }
     }
 
@@ -80,7 +84,9 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
             _maxAgeDays = clamped;
             OnPropertyChanged();
             var committed = _keepForever ? (int?)null : (int)clamped;
-            PublishAndCommit(s => s with { HistoryMaxAgeDays = committed });
+            PublishAndCommit(
+                s => s with { HistoryMaxAgeDays = committed },
+                static (slot, policy) => slot.PublishPolicy(policy));
         }
     }
 
@@ -93,7 +99,9 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
             _keepForever = value;
             OnPropertyChanged();
             var committed = value ? (int?)null : (int)_maxAgeDays;
-            PublishAndCommit(s => s with { HistoryMaxAgeDays = committed });
+            PublishAndCommit(
+                s => s with { HistoryMaxAgeDays = committed },
+                static (slot, policy) => slot.PublishPolicy(policy));
         }
     }
 
@@ -147,10 +155,12 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         return result;
     }
 
-    private void PublishAndCommit(Func<AppSettings, AppSettings> mutator)
+    private void PublishAndCommit(
+        Func<AppSettings, AppSettings> mutator,
+        Action<PublishedHistoryRetentionSlot, HistoryRetentionPolicy> publish)
     {
         var committedPolicy = CurrentPolicy();
-        _slot.Publish(_storeAudioEnabled, committedPolicy);
+        publish(_slot, committedPolicy);
 
         try
         {

@@ -14,12 +14,22 @@ public sealed class HistoryArchiveInput
     public string WindowTitleAtStart { get; init; } = "";
     public string WindowTitleAtInject { get; init; } = "";
     public HistoryTimings Timings { get; init; } = new();
+    public bool IsSilentDrop { get; init; }
 }
 
 /// <summary>
-/// Session-finalize sink. Writes the WAV under <c>history-root/YYYY-MM-DD/uuid.wav</c>
-/// (UTC date), builds a <see cref="HistoryEntry"/>, and appends it to the store.
-/// Pruning to 50 happens inside <see cref="HistoryStore.Append"/>.
+/// Session-finalize sink. When audio storage is enabled, writes the WAV under
+/// <c>history-root/YYYY-MM-DD/uuid.wav</c> (UTC date), builds a
+/// <see cref="HistoryEntry"/>, and appends it to the store. When audio storage is
+/// disabled, normal dictations are stored as text-only entries and silent drops
+/// are skipped. Retention-policy pruning happens inside <see cref="HistoryStore.Append"/>.
+///
+/// Fail-closed behavior: archiving is refused or degraded rather than writing to a
+/// place we cannot account for later — a reparse-point root, a reparse-point day
+/// directory (degrades to text-only), or a present-but-corrupt/unreadable index (the
+/// store refuses to append; the archive is skipped). Every skip is reported through
+/// the optional <c>onArchiveSkipped</c> callback; callers that ignore the return
+/// value still get an observable signal.
 /// </summary>
 public sealed class HistoryArchiver
 {
@@ -27,22 +37,38 @@ public sealed class HistoryArchiver
 
     private readonly HistoryStore _store;
     private readonly Func<DateTime> _nowUtc;
+    private readonly Func<bool> _storeAudio;
+    private readonly Action<string>? _onArchiveSkipped;
 
-    public HistoryArchiver(HistoryStore store, Func<DateTime>? nowUtc = null)
+    public HistoryArchiver(
+        HistoryStore store,
+        Func<DateTime>? nowUtc = null,
+        Func<bool>? storeAudio = null,
+        Action<string>? onArchiveSkipped = null)
     {
         _store = store;
         _nowUtc = nowUtc ?? (() => DateTime.UtcNow);
+        _storeAudio = storeAudio ?? (() => true);
+        _onArchiveSkipped = onArchiveSkipped;
     }
 
-    public HistoryEntry Archive(HistoryArchiveInput input)
+    public HistoryEntry? Archive(HistoryArchiveInput input)
     {
+        // Fail closed: never write WAV or index through a reparse-point root.
+        if (_store.RootIsUnsafe)
+        {
+            Skip("History archive skipped: the history root is a junction/symlink; " +
+                 "refusing to write through it.");
+            return null;
+        }
+
+        var keepAudio = _storeAudio();
+        if (!keepAudio && input.IsSilentDrop) return null;
+
         var now = _nowUtc();
         var id = Guid.NewGuid().ToString("N");
         var day = now.ToString("yyyy-MM-dd");
-        var relative = $"{day}/{id}.wav";
-        var absolute = Path.Combine(_store.Root, relative);
-
-        WavWriter.WriteMono16kInt16(absolute, input.Samples16k);
+        var relative = keepAudio ? $"{day}/{id}.wav" : "";
 
         var entry = new HistoryEntry
         {
@@ -60,7 +86,123 @@ public sealed class HistoryArchiver
             Timings = input.Timings,
         };
 
-        _store.Append(entry);
+        if (keepAudio)
+        {
+            var absolute = Path.Combine(_store.Root, relative);
+            HistoryEntry? result = null;
+            _store.WithExclusiveLock(() =>
+            {
+                // Fail closed against a pre-planted reparse-point day directory: write
+                // the text-only entry instead of following the link outside the root.
+                if (DirectoryIsReparsePoint(Path.GetDirectoryName(absolute)!))
+                {
+                    entry = entry with { WavRelativePath = "" };
+                    Skip("History audio degraded to text-only: the day directory is a " +
+                         "junction/symlink; refusing to write the WAV through it.");
+                    if (!TryAppend(entry)) return;
+                    result = entry;
+                    return;
+                }
+                // Validate BEFORE writing: a present-but-unreadable/corrupt index means
+                // this append will be refused — never create the WAV in the first place.
+                if (!_store.IndexIsWritableNow())
+                {
+                    Skip("History archive skipped: the history index is unreadable or corrupt; " +
+                         "the new dictation was not recorded rather than overwrite existing history.");
+                    return;
+                }
+                WavWriteResult wavWrite;
+                try
+                {
+                    WavWriter.WriteMono16kInt16(absolute, input.Samples16k);
+                    wavWrite = WavWriteResult.Ok;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    wavWrite = WavWriteResult.Failed;
+                }
+                if (wavWrite == WavWriteResult.Failed)
+                {
+                    // Never leave a partial/unindexed WAV behind; report either way.
+                    if (TryDeleteOrphanWav(absolute))
+                        Skip("History archive skipped: the recording could not be written; " +
+                             "the dictation was not recorded.");
+                    else
+                        Skip("History archive skipped: the recording could not be written and " +
+                             "the partial file could not be deleted; it remains on disk unindexed.");
+                    return;
+                }
+                if (!TryAppend(entry))
+                {
+                    // Race-only residual (index became unreadable/unwritable between the probe and
+                    // the append): delete the orphan WAV, and keep it OBSERVABLE if that fails.
+                    if (!TryDeleteOrphanWav(absolute))
+                        Skip("History archive skipped after the index refused the entry, and " +
+                             "the orphaned recording could not be deleted; the file remains on " +
+                             "disk unindexed.");
+                    return;
+                }
+                result = entry;
+            });
+            return result;
+        }
+
+        if (!TryAppend(entry)) return null;
         return entry;
+    }
+
+    /// <summary>
+    /// Append the entry; when the store refuses or cannot persist (present-but-unreadable/
+    /// corrupt index, or an IO/permission failure saving it), report and return false so
+    /// the caller can skip/clean up instead of overwriting history or stranding a WAV.
+    /// </summary>
+    private bool TryAppend(HistoryEntry entry)
+    {
+        try
+        {
+            _store.Append(entry);
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
+        {
+            Skip("History archive skipped: the history index could not be updated " +
+                 "(unreadable or corrupt); the new dictation was not recorded rather than " +
+                 "overwrite existing history.");
+            return false;
+        }
+    }
+
+    private static bool TryDeleteOrphanWav(string absolute)
+    {
+        try
+        {
+            if (File.Exists(absolute)) File.Delete(absolute);
+            return !File.Exists(absolute);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private enum WavWriteResult
+    {
+        Ok,
+        Failed,
+    }
+
+    private void Skip(string reason) => _onArchiveSkipped?.Invoke(reason);
+
+    private static bool DirectoryIsReparsePoint(string directory)
+    {
+        try
+        {
+            return Directory.Exists(directory) &&
+                   (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
     }
 }

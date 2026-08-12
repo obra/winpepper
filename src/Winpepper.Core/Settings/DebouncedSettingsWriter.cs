@@ -46,12 +46,29 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
             {
                 try { await Task.Delay(_delay, token); }
                 catch (OperationCanceledException) { return; }
-                Flush();
+                _ = Flush();
             });
         }
     }
 
     public async Task FlushAsync()
+    {
+        await FlushWithOutcomeAsync();
+    }
+
+    public async Task<bool> TryQueueAndFlushAsync(Func<AppSettings, AppSettings> mutator)
+    {
+        var applied = false;
+        Queue(settings =>
+        {
+            var result = mutator(settings);
+            applied = true;
+            return result;
+        });
+        return await FlushWithOutcomeAsync() && applied;
+    }
+
+    private async Task<bool> FlushWithOutcomeAsync()
     {
         Task? t;
         lock (_lock) { t = _scheduled; _cts?.Cancel(); }
@@ -61,7 +78,7 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
         // sync context would deadlock; documented, and no production caller
         // blocks on FlushAsync (all await or discard with `_ =`).
         if (t is not null) { try { await t; } catch { } }
-        Flush();
+        return Flush();
     }
 
     public async Task QueueAndFlushAsync(Func<AppSettings, AppSettings> mutator)
@@ -70,7 +87,7 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
         await FlushAsync();
     }
 
-    private void Flush()
+    private bool Flush()
     {
         // The whole read-modify-write runs under _lock: concurrent flushes
         // serialize (the old code called Save outside the lock, so two
@@ -92,7 +109,7 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
 
         lock (_lock)
         {
-            if (_pendingMutators.Count == 0) return;
+            if (_pendingMutators.Count == 0) return true;
 
             // Degraded-load guard: if the settings file exists but cannot be
             // READ right now, its fallback value must not become the base of
@@ -152,6 +169,7 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
                 requeuedCount);
         if (loggedBefore is not null && loggedAfter is not null)
             LogChangedFields(loggedBefore, loggedAfter);
+        return skippedKeptCount == 0 && saveError is null;
     }
 
     private void LogChangedFields(AppSettings before, AppSettings after)
@@ -187,6 +205,6 @@ public sealed class DebouncedSettingsWriter : ISettingsWriter, IDisposable
     public void Dispose()
     {
         _cts?.Cancel();
-        Flush();
+        _ = Flush();
     }
 }

@@ -97,6 +97,13 @@ public record AppSettings
     // cold-start capture (the mic-in-use indicator then only lights while
     // dictating — a privacy trade-off).
     public bool PrewarmMicEnabled { get; init; } = true;
+
+    // Saved voice-recording retention. These defaults also apply when loading
+    // pre-2026-08 settings files that do not contain these fields.
+    public bool HistoryStoreAudioEnabled { get; init; } = true;
+    public int HistoryMaxEntries { get; init; } = 100;
+    public int? HistoryMaxAgeDays { get; init; } = 30;
+
     public string LastVersionSeen { get; init; } = "";
 
     // Main-window size in physical pixels; null until the user resizes or the

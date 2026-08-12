@@ -2,52 +2,96 @@
       xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
       xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
       xmlns:vm="using:Winpepper.History.ViewModels">
-    <Grid Padding="24" MaxWidth="720" HorizontalAlignment="Left" RowSpacing="4">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
+    <ScrollViewer>
+        <Grid Padding="24" MaxWidth="720" HorizontalAlignment="Left" RowSpacing="4">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" Text="History" Style="{StaticResource TitleTextBlockStyle}" />
-        <TextBlock Grid.Row="1"
-                   Text="Recent dictations. Click an entry to inspect, replay, and rerun it in the Lab."
-                   Style="{ThemeResource BodyTextBlockStyle}"
-                   Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                   TextWrapping="Wrap"
-                   Margin="0,0,0,8" />
+            <TextBlock Grid.Row="0" Text="History" Style="{StaticResource TitleTextBlockStyle}" />
+            <TextBlock Grid.Row="1"
+                       Text="Recent dictations. Click an entry to inspect, replay, and rerun it in the Lab."
+                       Style="{ThemeResource BodyTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Margin="0,0,0,8" />
 
-        <ListView Grid.Row="2"
-                  ItemsSource="{x:Bind ViewModel.Rows, Mode=OneWay}"
-                  SelectionMode="Single"
-                  ItemClick="OnRowClick"
-                  IsItemClickEnabled="True">
-            <ListView.ItemTemplate>
-                <DataTemplate x:DataType="vm:HistoryRowViewModel">
-                    <Grid ColumnSpacing="12" Padding="0,10">
-                        <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto" />
-                            <ColumnDefinition Width="*" />
-                            <ColumnDefinition Width="Auto" />
-                        </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0" Width="140">
-                            <TextBlock Text="{x:Bind TimestampDisplay}"
-                                       Style="{ThemeResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock Text="{x:Bind DurationDisplay}"
-                                       Style="{ThemeResource CaptionTextBlockStyle}"
-                                       Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
-                        </StackPanel>
-                        <TextBlock Grid.Column="1" Text="{x:Bind TranscriptPreviewDisplay}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
-                        <Button Grid.Column="2" Click="OnCopy" Tag="{x:Bind}" Padding="8,4" VerticalAlignment="Center" ToolTipService.ToolTip="Copy cleaned text">
-                            <StackPanel Orientation="Horizontal" Spacing="6">
-                                <FontIcon Glyph="&#xE8C8;" FontSize="14" />
-                                <TextBlock Text="Copy" />
+            <Border Grid.Row="2"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1" CornerRadius="8" Padding="16"
+                    Margin="0,0,0,8">
+                <StackPanel Spacing="12">
+                    <TextBlock Text="Recordings" Style="{ThemeResource BodyStrongTextBlockStyle}" />
+                    <ToggleSwitch x:Name="StoreAudioToggle"
+                                  Header="Save audio recordings of your dictations"
+                                  Toggled="OnStoreAudioToggled" />
+                    <TextBlock Text="When off, Winpepper keeps transcripts and timings in history but saves no audio. Dictations dismissed as silent are not archived — without audio there is nothing to recover — and Lab replay/re-transcribe needs audio."
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                    <NumberBox x:Name="MaxEntriesBox"
+                               Header="Keep at most this many dictations"
+                               Minimum="1" Maximum="10000"
+                               ValueChanged="OnMaxEntriesChanged" />
+                    <NumberBox x:Name="MaxAgeBox"
+                               Header="Delete dictations older than (days)"
+                               Minimum="1" Maximum="36500"
+                               ValueChanged="OnMaxAgeChanged" />
+                    <CheckBox x:Name="KeepForeverCheck"
+                              Content="Keep forever — never delete by age (for building an eval corpus)"
+                              Checked="OnKeepForeverChanged"
+                              Unchecked="OnKeepForeverChanged" />
+                    <TextBlock x:Name="DiskUsageText"
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Button x:Name="DeleteAllAudioButton"
+                            Content="Delete all saved audio now"
+                            Click="OnDeleteAllAudio"
+                            HorizontalAlignment="Left" />
+                    <TextBlock x:Name="RetentionStatusText"
+                               Style="{ThemeResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+
+            <ListView Grid.Row="3"
+                      MaxHeight="480"
+                      ItemsSource="{x:Bind ViewModel.Rows, Mode=OneWay}"
+                      SelectionMode="Single"
+                      ItemClick="OnRowClick"
+                      IsItemClickEnabled="True">
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="vm:HistoryRowViewModel">
+                        <Grid ColumnSpacing="12" Padding="0,10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Width="140">
+                                <TextBlock Text="{x:Bind TimestampDisplay}"
+                                           Style="{ThemeResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="{x:Bind DurationDisplay}"
+                                           Style="{ThemeResource CaptionTextBlockStyle}"
+                                           Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
                             </StackPanel>
-                        </Button>
-                    </Grid>
-                </DataTemplate>
-            </ListView.ItemTemplate>
-        </ListView>
-    </Grid>
+                            <TextBlock Grid.Column="1" Text="{x:Bind TranscriptPreviewDisplay}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                            <Button Grid.Column="2" Click="OnCopy" Tag="{x:Bind}" Padding="8,4" VerticalAlignment="Center" ToolTipService.ToolTip="Copy cleaned text">
+                                <StackPanel Orientation="Horizontal" Spacing="6">
+                                    <FontIcon Glyph="&#xE8C8;" FontSize="14" />
+                                    <TextBlock Text="Copy" />
+                                </StackPanel>
+                            </Button>
+                        </Grid>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Grid>
+    </ScrollViewer>
 </Page>

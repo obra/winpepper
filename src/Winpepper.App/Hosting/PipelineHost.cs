@@ -755,6 +755,7 @@ public sealed class PipelineHost : IDisposable
                     _archiver.Archive(new Winpepper.History.HistoryArchiveInput
                     {
                         Samples16k = samples,
+                        IsSilentDrop = true,
                         RawTranscript = "",
                         CleanedText = "",
                         AsrModelName = "",
@@ -1371,6 +1372,7 @@ public sealed class PipelineHost : IDisposable
                         _archiver.Archive(new Winpepper.History.HistoryArchiveInput
                         {
                             Samples16k = samples2,
+                            IsSilentDrop = true,
                             RawTranscript = "",
                             CleanedText = "",
                             AsrModelName = "",

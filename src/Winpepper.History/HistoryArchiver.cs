@@ -76,6 +76,14 @@ public sealed class HistoryArchiver
             var absolute = Path.Combine(_store.Root, relative);
             _store.WithExclusiveLock(() =>
             {
+                // Fail closed against a pre-planted reparse-point day directory: write
+                // the text-only entry instead of following the link outside the root.
+                if (DirectoryIsReparsePoint(Path.GetDirectoryName(absolute)!))
+                {
+                    entry = entry with { WavRelativePath = "" };
+                    _store.Append(entry);
+                    return;
+                }
                 WavWriter.WriteMono16kInt16(absolute, input.Samples16k);
                 _store.Append(entry);
             });
@@ -86,5 +94,18 @@ public sealed class HistoryArchiver
         }
 
         return entry;
+    }
+
+    private static bool DirectoryIsReparsePoint(string directory)
+    {
+        try
+        {
+            return Directory.Exists(directory) &&
+                   (File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
     }
 }

@@ -159,6 +159,53 @@ public class HistoryArchiverTests : IDisposable
     }
 
     [Fact]
+    public void Archive_PreplantedLinkedDayDir_DegradesToTextOnly()
+    {
+        // D6 descendant boundary applied to the WRITE side: a reparse-point day dir must
+        // never receive the WAV, and the dictation must not be lost — fall back to the
+        // text-only archive (same shape as storeAudio=off).
+        var now = DateTime.UtcNow;
+        var day = now.ToString("yyyy-MM-dd");
+        var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-archiver-daysymlink-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideRoot);
+        var linkedDay = Path.Combine(_root, day);
+        Directory.CreateDirectory(_root);
+        var linkCreated = false;
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkedDay, outsideRoot);
+                linkCreated = true;
+            }
+            catch (Exception)
+            {
+                // Assert below reports this as an environment skip.
+            }
+            Assert.SkipUnless(linkCreated, "Directory symlink creation is unavailable.");
+
+            var store = new HistoryStore(_root);
+            var archiver = new HistoryArchiver(store, () => now);
+
+            var entry = archiver.Archive(new HistoryArchiveInput
+            {
+                Samples16k = new float[16000],
+                RawTranscript = "hello",
+            });
+
+            entry.ShouldNotBeNull();
+            entry!.WavRelativePath.ShouldBeEmpty();
+            Directory.GetFileSystemEntries(outsideRoot).ShouldBeEmpty();
+            store.Load().Entries.ShouldHaveSingleItem().WavRelativePath.ShouldBeEmpty();
+        }
+        finally
+        {
+            if (Directory.Exists(linkedDay)) Directory.Delete(linkedDay);
+            if (Directory.Exists(outsideRoot)) Directory.Delete(outsideRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Archive_StoreAudioOn_SilentDrop_ArchivesWithWav()
     {
         var store = new HistoryStore(_root);

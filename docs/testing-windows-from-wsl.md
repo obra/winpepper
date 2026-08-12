@@ -85,6 +85,60 @@ Notes:
   directly). `-p:UseXamlCompilerExecutable=true` only matters for App/MSI
   builds (see README "Building from source").
 
+## Building the app from WSL
+
+The test script above never builds `Winpepper.App`. For a hand app build from
+a WSL2 checkout — the same Release build the pre-push gate runs — use:
+
+```sh
+scripts/build-app-windows-from-wsl.sh [--attempts N]   # default N=5
+```
+
+The wrapper prints its run-log directory
+(`artifacts/build-app-windows/run-<UTC-timestamp>-<pid>/`, one
+`attempt<N>.log` per attempt) at the start of each run and again with the
+final verdict (a usage/environment exit 2 happens before any run directory
+exists; each attempt's log path is printed at that attempt's start). Exit 0 =
+`BUILD OK`; exit 1 = build failed (non-transient error, attempts exhausted,
+or timed out — timeouts are never retried). Like the gate, it never installs
+the MSI, never launches or kills `Winpepper.exe`, and never writes
+`%LOCALAPPDATA%\winpepper`.
+
+Why the wrapper exists: building the App over the `\\wsl.localhost` share is
+exposed to transient 9P filesystem faults. Reproduced live under
+concurrent-build contention: the XAML compiler failed writing its output to
+the share ("An unexpected network error occurred") with follow-on WMC-family
+XAML errors, then passed on the next identical run. A controlled probe of
+cross-process write→read pairs (600 samples, half mid concurrent App build)
+found *no* file-visibility windows — first-attempt reads saw every write —
+only stretched per-operation latency (p99 53 ms, max 64 ms contended vs ~0 ms
+locally). The CS0006/WMC1006 ref-assembly codes this command defends against
+are *inferred* members of the same transient-I/O class — every historically
+recorded CS0006 trace also had the (since-fixed) cross-OS obj-mixing
+mechanism in play, so a fresh isolated CS0006 reproduction has never been
+observed.
+
+The three mitigations — the build flags are byte-for-byte the gate's app-build
+recipe (`scripts/windows-gate.sh` stays the canary for this build), and the
+wrapper adds the bounded retry the gate does not have:
+
+1. **Always-on pre-clean** (`rm -rf src/*/bin src/*/obj`) removes leftover
+   Linux-built intermediates — the deterministic cross-OS CS0006 covered in
+   "Why the clean step (troubleshooting)" below.
+2. **Single-node scheduling** (`-m:1 -p:UseSharedCompilation=false
+   -p:UseXamlCompilerExecutable=true`): the whole project graph is scheduled
+   on one MSBuild node, so targets run in strict dependency order and no two
+   tool processes (per-project `csc.exe` children, `XamlCompiler.exe`, the mt
+   shim) ever hit the share concurrently — minimal 9P traffic contention,
+   which is the variable the reproduced transport fault tracks with. Compiles
+   still run as child processes, and `-m:1` implies no timing guarantee — it
+   is a contention reducer, and the residual tail is the retry layer's job.
+   Cost check: serialized clean builds take 210–318 s vs 167–234 s parallel.
+3. **Bounded retry** (default `--attempts 5`, the recorded worst-case
+   transient chain) fires only on the observed transient signatures
+   (`CS0006`, `WMC1006`, `unexpected network error`); any other failure
+   stops immediately.
+
 ## Why the clean step (troubleshooting)
 
 **CS0006 "Metadata file ...\obj\Release\net9.0\ref\X.dll could not be
@@ -93,9 +147,10 @@ Windows builds run on top of Linux-built `obj/` state. MSBuild's
 IncrementalClean reads the previous `*.FileListAbsolute.txt` (Linux-style
 paths), decides those outputs are orphans, and deletes them — which on a UNC
 cwd resolves to the very files the build just wrote. The fix is exactly what
-the script does: wipe `bin/`+`obj/` under `src/` and `tests/` whenever the
-previous build was made by the other OS. (`--no-clean` skips the wipe and is
-safe only for back-to-back Windows-side runs.)
+`test-windows-from-wsl.sh` does: wipe `bin/`+`obj/` under `src/` and `tests/`
+whenever the previous build was made by the other OS. (Its `--no-clean` skips
+the wipe and is safe only for back-to-back Windows-side runs; the app wrapper
+above always wipes and only under `src/`.)
 
 Consequence in the other direction: after a Windows-side run, the next
 **Linux** build should also start from clean `bin/`/`obj/` (or at least expect
@@ -106,5 +161,12 @@ Other issues encountered / to watch for:
 - **Interop dead** (`dotnet.exe: cannot execute binary file`): WSL interop is
   disabled; check `/etc/wsl.conf` `[interop] enabled=true` and restart the
   distro. The script fails loudly on this.
+- **Transient interop outage** (attempt logs contain only `UtilAcceptVsock ...
+  accept4 failed 110`, ~70-byte logs, and every build/test run fails within
+  seconds): the WSL→Windows channel flapped. It self-heals within roughly ten
+  minutes — wait and re-run the identical command. The app wrapper reports
+  this as a non-transient failure on purpose (the build never started);
+  rerunning after the heal is the documented recovery. Never claim a green
+  gate/build from a runlog full of these.
 - **Slow builds**: everything crosses the 9P `\\wsl.localhost` boundary;
   ~60–90 s per project build is normal. Don't kill it early.

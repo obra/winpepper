@@ -53,7 +53,17 @@ checkout (`\\wsl.localhost\...`) with the Windows `dotnet.exe` also works: the
 projects detect the UNC path and automatically stage the mt.exe manifest merge
 (`scripts/mt-unc-shim.ps1`) and the WiX link (`%TEMP%\winpepper-msi`, MSI
 copied back to `artifacts/`) on a local drive. Those conditionals are inert on
-normal `C:\` checkouts.
+normal `C:\` checkouts. From a WSL shell, build the App via
+`scripts/build-app-windows-from-wsl.sh` (see
+[`docs/testing-windows-from-wsl.md`](testing-windows-from-wsl.md) "Building
+the app from WSL"): it runs the same documented `dotnet build` command but
+hardened with a pre-clean, single-node scheduling, and a bounded retry. The
+hardening targets transient UNC build failures seen from WSL checkouts: a 9P
+transport write fault inside the XAML compiler under concurrent-build
+contention was reproduced on this host, while the exact CS0006/WMC1006 codes
+are inferred (plausible-but-unproven) members of that same transient-I/O
+class, never isolated-reproduced — the raw command block below remains the
+reference for native-Windows readers.
 
 ```powershell
 # Restore + build (the App project needs UseXamlCompilerExecutable=true on

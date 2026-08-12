@@ -23,6 +23,13 @@ public sealed class HistoryArchiveInput
 /// <see cref="HistoryEntry"/>, and appends it to the store. When audio storage is
 /// disabled, normal dictations are stored as text-only entries and silent drops
 /// are skipped. Retention-policy pruning happens inside <see cref="HistoryStore.Append"/>.
+///
+/// Fail-closed behavior: archiving is refused or degraded rather than writing to a
+/// place we cannot account for later — a reparse-point root, a reparse-point day
+/// directory (degrades to text-only), or a present-but-corrupt/unreadable index (the
+/// store refuses to append; the archive is skipped). Every skip is reported through
+/// the optional <c>onArchiveSkipped</c> callback; callers that ignore the return
+/// value still get an observable signal.
 /// </summary>
 public sealed class HistoryArchiver
 {
@@ -31,21 +38,29 @@ public sealed class HistoryArchiver
     private readonly HistoryStore _store;
     private readonly Func<DateTime> _nowUtc;
     private readonly Func<bool> _storeAudio;
+    private readonly Action<string>? _onArchiveSkipped;
 
     public HistoryArchiver(
         HistoryStore store,
         Func<DateTime>? nowUtc = null,
-        Func<bool>? storeAudio = null)
+        Func<bool>? storeAudio = null,
+        Action<string>? onArchiveSkipped = null)
     {
         _store = store;
         _nowUtc = nowUtc ?? (() => DateTime.UtcNow);
         _storeAudio = storeAudio ?? (() => true);
+        _onArchiveSkipped = onArchiveSkipped;
     }
 
     public HistoryEntry? Archive(HistoryArchiveInput input)
     {
         // Fail closed: never write WAV or index through a reparse-point root.
-        if (_store.RootIsUnsafe) return null;
+        if (_store.RootIsUnsafe)
+        {
+            Skip("History archive skipped: the history root is a junction/symlink; " +
+                 "refusing to write through it.");
+            return null;
+        }
 
         var keepAudio = _storeAudio();
         if (!keepAudio && input.IsSilentDrop) return null;
@@ -74,6 +89,7 @@ public sealed class HistoryArchiver
         if (keepAudio)
         {
             var absolute = Path.Combine(_store.Root, relative);
+            HistoryEntry? result = null;
             _store.WithExclusiveLock(() =>
             {
                 // Fail closed against a pre-planted reparse-point day directory: write
@@ -81,20 +97,61 @@ public sealed class HistoryArchiver
                 if (DirectoryIsReparsePoint(Path.GetDirectoryName(absolute)!))
                 {
                     entry = entry with { WavRelativePath = "" };
-                    _store.Append(entry);
+                    Skip("History audio degraded to text-only: the day directory is a " +
+                         "junction/symlink; refusing to write the WAV through it.");
+                    if (!TryAppend(entry)) return;
+                    result = entry;
                     return;
                 }
                 WavWriter.WriteMono16kInt16(absolute, input.Samples16k);
-                _store.Append(entry);
+                if (!TryAppend(entry))
+                {
+                    // The index refused (present but unreadable/corrupt) AFTER the WAV was
+                    // written — orphan it honestly rather than keep an unindexed file.
+                    TryDeleteOrphanWav(absolute);
+                    return;
+                }
+                result = entry;
             });
-        }
-        else
-        {
-            _store.Append(entry);
+            return result;
         }
 
+        if (!TryAppend(entry)) return null;
         return entry;
     }
+
+    /// <summary>
+    /// Append the entry; when the store refuses (present-but-unreadable/corrupt index),
+    /// report and return false so the caller can skip instead of overwriting history.
+    /// </summary>
+    private bool TryAppend(HistoryEntry entry)
+    {
+        try
+        {
+            _store.Append(entry);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            Skip("History archive skipped: the history index is unreadable or corrupt; " +
+                 "the new dictation was not recorded rather than overwrite existing history.");
+            return false;
+        }
+    }
+
+    private static void TryDeleteOrphanWav(string absolute)
+    {
+        try
+        {
+            if (File.Exists(absolute)) File.Delete(absolute);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort — leave the stray file; later cleanup can never have indexed it.
+        }
+    }
+
+    private void Skip(string reason) => _onArchiveSkipped?.Invoke(reason);
 
     private static bool DirectoryIsReparsePoint(string directory)
     {

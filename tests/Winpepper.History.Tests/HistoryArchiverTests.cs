@@ -119,10 +119,93 @@ public class HistoryArchiverTests : IDisposable
     }
 
     [Fact]
+    public void Archive_Skips_WhenIndexCorrupt_LeavesIndexUntouched_AudioPath()
+    {
+        // A present-but-mangled index must never become a one-entry replacement; the
+        // archive is skipped entirely (audio path must not orphan a WAV either).
+        var indexPath = Path.Combine(_root, "index.json");
+        const string corrupt = "{ nope";
+        File.WriteAllText(indexPath, corrupt);
+        var store = new HistoryStore(_root);
+        var skips = new List<string>();
+        var archiver = new HistoryArchiver(store, onArchiveSkipped: skips.Add);
+
+        var entry = archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+            RawTranscript = "hello",
+        });
+
+        entry.ShouldBeNull();
+        File.ReadAllText(indexPath).ShouldBe(corrupt);
+        Directory.EnumerateFiles(_root, "*.wav", SearchOption.AllDirectories).ShouldBeEmpty();
+        skips.ShouldHaveSingleItem().ShouldContain("index");
+    }
+
+    [Fact]
+    public void Archive_Skips_WhenIndexCorrupt_TextOnlyPath()
+    {
+        var indexPath = Path.Combine(_root, "index.json");
+        const string corrupt = "{ nope";
+        File.WriteAllText(indexPath, corrupt);
+        var store = new HistoryStore(_root);
+        var skips = new List<string>();
+        var archiver = new HistoryArchiver(store, storeAudio: () => false, onArchiveSkipped: skips.Add);
+
+        var entry = archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+            RawTranscript = "hello",
+        });
+
+        entry.ShouldBeNull();
+        File.ReadAllText(indexPath).ShouldBe(corrupt);
+        skips.ShouldHaveSingleItem().ShouldContain("index");
+    }
+
+    [Fact]
+    public void Archive_SkipReported_WhenRootIsSymlink()
+    {
+        var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-archiver-rootsymlink-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideRoot);
+        var linkRoot = Path.Combine(Path.GetTempPath(), $"winpepper-archiver-rootlink-{Guid.NewGuid():N}");
+        var linkCreated = false;
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkRoot, outsideRoot);
+                linkCreated = true;
+            }
+            catch (Exception)
+            {
+                // Assert below reports this as an environment skip.
+            }
+            Assert.SkipUnless(linkCreated, "Directory symlink creation is unavailable.");
+
+            var store = new HistoryStore(linkRoot);
+            var skips = new List<string>();
+            var archiver = new HistoryArchiver(store, onArchiveSkipped: skips.Add);
+
+            var entry = archiver.Archive(new HistoryArchiveInput
+            {
+                Samples16k = new float[16000],
+            });
+
+            entry.ShouldBeNull();
+            skips.ShouldHaveSingleItem().ShouldContain("junction");
+            Directory.GetFileSystemEntries(outsideRoot).ShouldBeEmpty();
+        }
+        finally
+        {
+            if (Directory.Exists(linkRoot)) Directory.Delete(linkRoot);
+            if (Directory.Exists(outsideRoot)) Directory.Delete(outsideRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Archive_SkipsEntirely_WhenRootIsSymlink()
     {
-        // D6 fail-closed: routine archiving must also refuse to write through a
-        // reparse-point root — no WAV creation and no external index mutation.
         var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-archiver-rootsymlink-{Guid.NewGuid():N}");
         Directory.CreateDirectory(outsideRoot);
         var linkRoot = Path.Combine(Path.GetTempPath(), $"winpepper-archiver-rootlink-{Guid.NewGuid():N}");

@@ -157,7 +157,12 @@ public sealed class HistoryStore
         lock (_gate)
         {
             ThrowIfRootUnsafe();
-            var idx = LoadUnlocked();
+            // Fail closed: an existing-but-unreadable/malformed index must never be
+            // upended by a lenient read + one-entry save.
+            if (!TryLoadStrictUnlocked(out var idx))
+                throw new InvalidOperationException(
+                    "The existing history index is unreadable or corrupt; refusing to append " +
+                    "rather than overwrite prior history.");
             var combined = idx.Entries.Concat(new[] { entry })
                 .OrderByDescending(e => e.CreatedAtUtc)
                 .ToList();

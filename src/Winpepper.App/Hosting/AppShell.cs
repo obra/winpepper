@@ -335,7 +335,9 @@ public sealed class AppShell : IDisposable
                     return Winpepper.History.Lab.RerunModelRouter.EngineServes(engine?.ModelName, name) ? engine : null;
                 },
                 name => modelsServices.Registry.Find(name)?.Kind == Winpepper.Models.ModelKind.StreamingAsr),
-            () => store.Load());
+            () => store.Load(),
+            onArchiveSkipped: reason =>
+                factory.CreateLogger("Winpepper.App.History").LogWarning("{Reason}", reason));
 
         var cancel = HotkeyChord.Parse("Esc");
         var hotkeyLog = factory.CreateLogger("Winpepper.App.Hotkeys");

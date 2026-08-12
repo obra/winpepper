@@ -13,11 +13,15 @@ public sealed class HistoryServices
     public HistoryServices(
         string historyRoot,
         ITranscriptionRerunService transcriptionRerun,
-        Func<Winpepper.Core.Settings.AppSettings> settingsProvider)
+        Func<Winpepper.Core.Settings.AppSettings> settingsProvider,
+        Action<string>? onArchiveSkipped = null)
     {
         RetentionSlot = PublishedHistoryRetentionSlot.FromSettings(settingsProvider());
         Store = new HistoryStore(historyRoot, () => RetentionSlot.Policy);
-        Archiver = new HistoryArchiver(Store, storeAudio: () => RetentionSlot.StoreAudio);
+        Archiver = new HistoryArchiver(
+            Store,
+            storeAudio: () => RetentionSlot.StoreAudio,
+            onArchiveSkipped: onArchiveSkipped);
         TranscriptionRerun = transcriptionRerun;
         CleanupRerun = new LlamaCleanupRerunService();
         HistoryRoot = historyRoot;

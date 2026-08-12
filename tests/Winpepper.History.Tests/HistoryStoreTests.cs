@@ -899,6 +899,49 @@ public class HistoryStoreTests : IDisposable
     }
 
     [Fact]
+    public void Append_PresentButCorruptIndex_ThrowsAndPreservesIndex()
+    {
+        // Fail closed: appending must NEVER turn an unreadable/malformed index into a
+        // one-entry replacement — the dictionary of prior dictations outranks the new one.
+        var indexPath = Path.Combine(_root, "index.json");
+        const string corrupt = "{ not valid json";
+        File.WriteAllText(indexPath, corrupt);
+        var store = new HistoryStore(_root);
+
+        Should.Throw<InvalidOperationException>(
+            () => store.Append(new HistoryEntry { Id = "new" }));
+
+        File.ReadAllText(indexPath).ShouldBe(corrupt);
+    }
+
+    [Fact]
+    public void Append_PresentButUnreadableIndex_ThrowsAndPreservesIndex()
+    {
+        var indexPath = Path.Combine(_root, "index.json");
+        const string valid = "{\"entries\":[{\"id\":\"keep\"}]}";
+        File.WriteAllText(indexPath, valid);
+        Assert.SkipUnless(TryGetUnixMode(indexPath, out var originalMode),
+            "Unix permission controls are unavailable on this platform.");
+        var store = new HistoryStore(_root);
+
+        try
+        {
+            File.SetUnixFileMode(indexPath, UnixFileMode.None);
+            Assert.SkipUnless(!CanReadFile(indexPath),
+                "The current user can still read a chmod 000 file.");
+
+            Should.Throw<InvalidOperationException>(
+                () => store.Append(new HistoryEntry { Id = "new" }));
+        }
+        finally
+        {
+            File.SetUnixFileMode(indexPath, originalMode);
+        }
+
+        File.ReadAllText(indexPath).ShouldBe(valid);
+    }
+
+    [Fact]
     public void Append_And_Delete_Throw_WhenRootIsSymlink()
     {
         // Fail-closed backstop for every caller: the store refuses routine mutations

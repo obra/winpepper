@@ -12,6 +12,7 @@ public sealed partial class HistoryPage : Page
 {
     private HistoryRetentionViewModel? _retentionViewModel;
     private bool _updatingRetentionControls;
+    private bool _deleteAllStatusShown;
 
     public HistoryListViewModel ViewModel { get; private set; } = null!;
 
@@ -127,6 +128,11 @@ public sealed partial class HistoryPage : Page
             status = string.IsNullOrEmpty(status) ? indexFailure : $"{status} {indexFailure}";
         }
 
+        // A delete-all result (which may carry warnings about recordings that remain)
+        // must not be wiped by a later settings-apply event with nothing to say.
+        if (string.IsNullOrEmpty(status) && _deleteAllStatusShown) return;
+
+        _deleteAllStatusShown = false;
         RetentionStatusText.Text = status;
     }
 
@@ -172,6 +178,7 @@ public sealed partial class HistoryPage : Page
         }
 
         RetentionStatusText.Text = status;
+        _deleteAllStatusShown = true;
     }
 
     private void OnRowClick(object sender, ItemClickEventArgs e)

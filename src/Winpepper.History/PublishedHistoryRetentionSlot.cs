@@ -9,11 +9,23 @@ public sealed class PublishedHistoryRetentionSlot
 
     private readonly object _gate = new();
     private Snapshot _snapshot;
+    private long _commitSequence;
 
     private PublishedHistoryRetentionSlot(bool storeAudio, HistoryRetentionPolicy policy)
     {
         _snapshot = new Snapshot(storeAudio, policy);
     }
+
+    /// <summary>
+    /// Monotonic commit ordering shared across every consumer view-model LIFETIME (pages
+    /// re-create VMs on navigation; abandoned apply chains continue in the background).
+    /// A retention chain captures its sequence at commit time and must skip destructive
+    /// work when the slot has since accepted a newer commit.
+    /// </summary>
+    public long NextCommitSequence() => Interlocked.Increment(ref _commitSequence);
+
+    /// <summary>The latest commit sequence accepted by this slot.</summary>
+    public long CurrentCommitSequence => Interlocked.Read(ref _commitSequence);
 
     public bool StoreAudio
     {

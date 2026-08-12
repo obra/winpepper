@@ -334,6 +334,19 @@ public sealed class HistoryStore
         }
     }
 
+    /// <summary>
+    /// True when an <see cref="Append"/> right now would be accepted: the existing index
+    /// is absent or loads strictly. Used by the archiver to validate BEFORE writing a WAV
+    /// so a refused append never leaves an unindexed recording behind.
+    /// </summary>
+    public bool IndexIsWritableNow()
+    {
+        lock (_gate)
+        {
+            return TryLoadStrictUnlocked(out _);
+        }
+    }
+
     /// <summary>Remove the entry with the given id (no-op if absent) and delete its WAV.</summary>
     public void Delete(string id)
     {

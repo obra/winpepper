@@ -184,11 +184,12 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
     {
         var committedPolicy = CurrentPolicy();
         publish(_slot, committedPolicy);
+        var commitSequence = _slot.NextCommitSequence();
 
         try
         {
             var flush = _writer.TryQueueAndFlushAsync(mutator);
-            _ = CommitAndApplyAsync(flush, committedPolicy);
+            _ = CommitAndApplyAsync(flush, committedPolicy, commitSequence);
         }
         catch
         {
@@ -198,7 +199,8 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
 
     private async Task CommitAndApplyAsync(
         Task<bool> flush,
-        HistoryRetentionPolicy committedPolicy)
+        HistoryRetentionPolicy committedPolicy,
+        long commitSequence)
     {
         await _applyGate.WaitAsync();
         LastApplyHadIndexFailure = false;
@@ -206,10 +208,18 @@ public sealed class HistoryRetentionViewModel : INotifyPropertyChanged
         try
         {
             LastCommitPersisted = await flush;
-            var prune = await Task.Run(() => _store.Prune(committedPolicy));
-            LastApplyHadIndexFailure = prune.IndexSaveFailed ||
-                                       prune.LoadFailed;
-            LastApplyRetainedAfterFailedDelete = prune.RetainedAfterFailedDelete;
+            // A newer commit supersedes this chain: its own apply performs the prune.
+            // Skipping here prevents an abandoned view-model (e.g. page re-created on
+            // navigation) from later applying a stale, possibly-tighter limit and
+            // permanently deleting recordings the user has already un-limited. The benign
+            // tail (usage refresh + event) still runs so subscribers observe the chain.
+            if (_slot.CurrentCommitSequence == commitSequence)
+            {
+                var prune = await Task.Run(() => _store.Prune(committedPolicy));
+                LastApplyHadIndexFailure = prune.IndexSaveFailed ||
+                                           prune.LoadFailed;
+                LastApplyRetainedAfterFailedDelete = prune.RetainedAfterFailedDelete;
+            }
             var display = await Task.Run(
                 () => FormatDiskUsage(_store.ComputeAudioDiskUsageBytes()));
             DiskUsageDisplay = display;

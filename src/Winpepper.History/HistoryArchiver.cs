@@ -103,12 +103,23 @@ public sealed class HistoryArchiver
                     result = entry;
                     return;
                 }
+                // Validate BEFORE writing: a present-but-unreadable/corrupt index means
+                // this append will be refused — never create the WAV in the first place.
+                if (!_store.IndexIsWritableNow())
+                {
+                    Skip("History archive skipped: the history index is unreadable or corrupt; " +
+                         "the new dictation was not recorded rather than overwrite existing history.");
+                    return;
+                }
                 WavWriter.WriteMono16kInt16(absolute, input.Samples16k);
                 if (!TryAppend(entry))
                 {
-                    // The index refused (present but unreadable/corrupt) AFTER the WAV was
-                    // written — orphan it honestly rather than keep an unindexed file.
-                    TryDeleteOrphanWav(absolute);
+                    // Race-only residual (index became unreadable between the probe and the
+                    // append): delete the orphan WAV, and keep it OBSERVABLE if that fails.
+                    if (!TryDeleteOrphanWav(absolute))
+                        Skip("History archive skipped after the index refused the entry, and " +
+                             "the orphaned recording could not be deleted; the file remains on " +
+                             "disk unindexed.");
                     return;
                 }
                 result = entry;
@@ -139,15 +150,16 @@ public sealed class HistoryArchiver
         }
     }
 
-    private static void TryDeleteOrphanWav(string absolute)
+    private static bool TryDeleteOrphanWav(string absolute)
     {
         try
         {
             if (File.Exists(absolute)) File.Delete(absolute);
+            return !File.Exists(absolute);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            // Best effort — leave the stray file; later cleanup can never have indexed it.
+            return false;
         }
     }
 

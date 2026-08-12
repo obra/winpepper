@@ -108,7 +108,11 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         writer.Complete(0, persisted: false);
         await applied;
 
-        observedEntryCounts.ToArray().ShouldBe(new[] { 4, 3, 2 });
+        // Chains still APPLY in setter order (events 4→3→2 style observations prove the
+        // ordering), but under generation control only the NEWEST commit runs the
+        // destructive prune — intermediate chains refresh state without deleting. The
+        // observed entry counts are therefore {5, 5, 2}, ending at the same final 2.
+        observedEntryCounts.ToArray().ShouldBe(new[] { 5, 5, 2 });
         writer.Current.HistoryMaxEntries.ShouldBe(2);
         store.Load().Entries.Count.ShouldBe(2);
         vm.LastCommitPersisted.ShouldBeFalse();
@@ -138,6 +142,40 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
 
         writer.CompleteAll(true, true, true);
         await applied;
+    }
+
+    [Fact]
+    public async Task StaleChain_FromAnAbandonedViewModel_NeverPrunesAfterANewerCommit()
+    {
+        // Page navigation re-creates the VM; abandoned chains continue. A chain whose
+        // commit is older than the slot's latest must NEVER run its destructive prune.
+        var wavs = SeedEntries(100);
+        var initial = new AppSettings();
+        var slot = PublishedHistoryRetentionSlot.FromSettings(initial);
+        var store = new HistoryStore(_root);
+        var writerA = new GateableWriter(initial);
+        var writerB = new GateableWriter(initial);
+        var vmOld = new HistoryRetentionViewModel(store, writerA, slot);
+        var vmNew = new HistoryRetentionViewModel(store, writerB, slot);
+
+        var appliedOld = WaitForEventsAsync(vmOld, 1);
+        var appliedNew = WaitForEventsAsync(vmNew, 1);
+
+        vmOld.MaxEntries = 1;    // older commit: tight limit (chains now blocked on flush A)
+        vmNew.MaxEntries = 200;  // newer commit: relaxed limit (≠ default 100 so it publishes)
+
+        // The NEWER chain completes first — nothing is pruned under limit 200.
+        writerB.Complete(0, persisted: true);
+        await appliedNew;
+        new HistoryStore(_root).Load().Entries.Count.ShouldBe(100);
+
+        // Only now does the ABANDONED older chain finish. It must not delete 99 entries.
+        writerA.Complete(0, persisted: true);
+        await appliedOld;
+
+        var store2 = new HistoryStore(_root);
+        store2.Load().Entries.Count.ShouldBe(100);
+        wavs.ShouldAllBe(path => File.Exists(path));
     }
 
     [Fact]

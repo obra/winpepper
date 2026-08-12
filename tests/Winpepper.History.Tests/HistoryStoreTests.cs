@@ -899,6 +899,49 @@ public class HistoryStoreTests : IDisposable
     }
 
     [Fact]
+    public void Append_And_Delete_Throw_WhenRootIsSymlink()
+    {
+        // Fail-closed backstop for every caller: the store refuses routine mutations
+        // too when the root is a reparse point.
+        var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-rootsymlink-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideRoot);
+        var indexPath = Path.Combine(outsideRoot, "index.json");
+        const string indexJson = "{\"entries\":[{\"id\":\"keep\",\"wavRelativePath\":\"\"}]}";
+        File.WriteAllText(indexPath, indexJson);
+        var linkRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-rootlink-{Guid.NewGuid():N}");
+        var linkCreated = false;
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkRoot, outsideRoot);
+                linkCreated = true;
+            }
+            catch (Exception)
+            {
+                // Assert below reports this as an environment skip.
+            }
+            Assert.SkipUnless(linkCreated, "Directory symlink creation is unavailable.");
+
+            var store = new HistoryStore(linkRoot);
+            store.RootIsUnsafe.ShouldBeTrue();
+
+            Should.Throw<InvalidOperationException>(
+                () => store.Append(new HistoryEntry { Id = "x" }));
+            Should.Throw<InvalidOperationException>(
+                () => store.Delete("keep"));
+
+            File.ReadAllText(indexPath).ShouldBe(indexJson);
+            Directory.GetFileSystemEntries(outsideRoot).ShouldBe([indexPath]);
+        }
+        finally
+        {
+            if (Directory.Exists(linkRoot)) Directory.Delete(linkRoot);
+            if (Directory.Exists(outsideRoot)) Directory.Delete(outsideRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Prune_DoesNotDeleteThroughSymlinkedRoot()
     {
         var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-history-rootsymlink-{Guid.NewGuid():N}");

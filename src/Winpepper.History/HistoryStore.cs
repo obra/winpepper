@@ -156,6 +156,7 @@ public sealed class HistoryStore
     {
         lock (_gate)
         {
+            ThrowIfRootUnsafe();
             var idx = LoadUnlocked();
             var combined = idx.Entries.Concat(new[] { entry })
                 .OrderByDescending(e => e.CreatedAtUtc)
@@ -333,6 +334,7 @@ public sealed class HistoryStore
     {
         lock (_gate)
         {
+            ThrowIfRootUnsafe();
             var idx = LoadUnlocked();
             var match = idx.Entries.FirstOrDefault(e => e.Id == id);
             if (match is null) return;
@@ -476,6 +478,20 @@ public sealed class HistoryStore
     /// root is NOT unsafe (first run), but any attribute-read failure means we cannot prove
     /// safety and must fail closed.
     /// </summary>
+    /// <summary>
+    /// True when the history root is a reparse point (junction/symlink). Routine callers
+    /// (e.g. the archiver) use this to skip; destructive store operations refuse directly.
+    /// </summary>
+    public bool RootIsUnsafe => RootIsReparsePoint();
+
+    private void ThrowIfRootUnsafe()
+    {
+        if (RootIsReparsePoint())
+            throw new InvalidOperationException(
+                "The history root is a junction/symlink; refusing to mutate through it. " +
+                "Replace the link with a real directory.");
+    }
+
     private bool RootIsReparsePoint()
     {
         try

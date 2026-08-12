@@ -119,6 +119,46 @@ public class HistoryArchiverTests : IDisposable
     }
 
     [Fact]
+    public void Archive_SkipsEntirely_WhenRootIsSymlink()
+    {
+        // D6 fail-closed: routine archiving must also refuse to write through a
+        // reparse-point root — no WAV creation and no external index mutation.
+        var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-archiver-rootsymlink-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(outsideRoot);
+        var linkRoot = Path.Combine(Path.GetTempPath(), $"winpepper-archiver-rootlink-{Guid.NewGuid():N}");
+        var linkCreated = false;
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkRoot, outsideRoot);
+                linkCreated = true;
+            }
+            catch (Exception)
+            {
+                // Assert below reports this as an environment skip.
+            }
+            Assert.SkipUnless(linkCreated, "Directory symlink creation is unavailable.");
+
+            var store = new HistoryStore(linkRoot);
+            var archiver = new HistoryArchiver(store);
+
+            var entry = archiver.Archive(new HistoryArchiveInput
+            {
+                Samples16k = new float[16000],
+            });
+
+            entry.ShouldBeNull();
+            Directory.GetFileSystemEntries(outsideRoot).ShouldBeEmpty();
+        }
+        finally
+        {
+            if (Directory.Exists(linkRoot)) Directory.Delete(linkRoot);
+            if (Directory.Exists(outsideRoot)) Directory.Delete(outsideRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Archive_StoreAudioOn_SilentDrop_ArchivesWithWav()
     {
         var store = new HistoryStore(_root);

@@ -44,6 +44,9 @@ public sealed class HistoryArchiver
 
     public HistoryEntry? Archive(HistoryArchiveInput input)
     {
+        // Fail closed: never write WAV or index through a reparse-point root.
+        if (_store.RootIsUnsafe) return null;
+
         var keepAudio = _storeAudio();
         if (!keepAudio && input.IsSilentDrop) return null;
 

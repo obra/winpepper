@@ -108,7 +108,7 @@ public sealed class HistoryRetentionViewModelTests : IDisposable
         writer.Complete(0, persisted: false);
         await applied;
 
-        // Chains still APPLY in setter order (events 4→3→2 style observations prove the
+        // Chains still APPLY in setter order (three events in sequence prove the
         // ordering), but under generation control only the NEWEST commit runs the
         // destructive prune — intermediate chains refresh state without deleting. The
         // observed entry counts are therefore {5, 5, 2}, ending at the same final 2.

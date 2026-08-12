@@ -164,6 +164,128 @@ public class HistoryArchiverTests : IDisposable
     }
 
     [Fact]
+    public void Archive_SaveFailureAfterWavWritten_RemovesOrphanAndReports()
+    {
+        // Root allows reads + the day dir is writable, but the root cannot create the
+        // index temp file → the probe passes, the WAV succeeds, the index save fails.
+        // The archiver must delete the orphan WAV, report, and return null.
+        var indexPath = Path.Combine(_root, "index.json");
+        const string indexJson = "{\"entries\":[]}";
+        File.WriteAllText(indexPath, indexJson);
+        var day = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var dayDir = Path.Combine(_root, day);
+        Directory.CreateDirectory(dayDir);
+
+        Assert.SkipUnless(TryGetUnixMode(_root, out var originalRootMode),
+            "Unix permission controls are unavailable on this platform.");
+        Assert.SkipUnless(TryGetUnixMode(dayDir, out var originalDayMode),
+            "Unix permission controls are unavailable on this platform.");
+
+        HistoryEntry? entry = null;
+        var skips = new List<string>();
+        try
+        {
+            // Read-only root: Save's temp-file creation fails; day dir stays writable.
+            File.SetUnixFileMode(_root, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            Assert.SkipUnless(!CanCreateIn(_root),
+                "The current user can still create files in a chmod 500 directory.");
+
+            var store = new HistoryStore(_root);
+            var archiver = new HistoryArchiver(store, onArchiveSkipped: skips.Add);
+
+            entry = archiver.Archive(new HistoryArchiveInput
+            {
+                Samples16k = new float[16000],
+                RawTranscript = "hello",
+            });
+        }
+        finally
+        {
+            File.SetUnixFileMode(_root, originalRootMode);
+            File.SetUnixFileMode(dayDir, originalDayMode);
+        }
+
+        entry.ShouldBeNull();
+        File.ReadAllText(indexPath).ShouldBe(indexJson);
+        Directory.EnumerateFiles(_root, "*.wav", SearchOption.AllDirectories).ShouldBeEmpty();
+        skips.ShouldNotBeEmpty();
+    }
+
+    [Fact]
+    public void Archive_WavWriteFailure_LeavesNoPartialFile_AndReports()
+    {
+        // Day dir pre-created read-only → WavWriter fails at creation; no partial file may
+        // remain, the index must not be touched, and the skip must be reported.
+        var day = DateTime.UtcNow.ToString("yyyy-MM-dd");
+        var dayDir = Path.Combine(_root, day);
+        Directory.CreateDirectory(dayDir);
+
+        Assert.SkipUnless(TryGetUnixMode(dayDir, out var originalDayMode),
+            "Unix permission controls are unavailable on this platform.");
+
+        HistoryEntry? entry = null;
+        var skips = new List<string>();
+        try
+        {
+            File.SetUnixFileMode(dayDir, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+            Assert.SkipUnless(!CanCreateIn(dayDir),
+                "The current user can still create files in a chmod 500 directory.");
+
+            var store = new HistoryStore(_root);
+            var archiver = new HistoryArchiver(store, onArchiveSkipped: skips.Add);
+
+            entry = archiver.Archive(new HistoryArchiveInput
+            {
+                Samples16k = new float[16000],
+                RawTranscript = "hello",
+            });
+        }
+        finally
+        {
+            File.SetUnixFileMode(dayDir, originalDayMode);
+        }
+
+        entry.ShouldBeNull();
+        Directory.EnumerateFiles(dayDir, "*.wav").ShouldBeEmpty();
+        File.Exists(Path.Combine(_root, "index.json")).ShouldBeFalse();
+        skips.ShouldNotBeEmpty();
+    }
+
+    private static bool CanCreateIn(string directory)
+    {
+        var path = Path.Combine(directory, $"probe-{Guid.NewGuid():N}");
+        try
+        {
+            File.WriteAllText(path, "probe");
+            File.Delete(path);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetUnixMode(string path, out UnixFileMode mode)
+    {
+        mode = default;
+        if (OperatingSystem.IsWindows()) return false;
+        try
+        {
+            mode = File.GetUnixFileMode(path);
+            return true;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    [Fact]
     public void Archive_SkipReported_WhenRootIsSymlink()
     {
         var outsideRoot = Path.Combine(Path.GetTempPath(), $"winpepper-archiver-rootsymlink-{Guid.NewGuid():N}");

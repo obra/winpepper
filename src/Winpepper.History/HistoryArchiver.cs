@@ -111,11 +111,31 @@ public sealed class HistoryArchiver
                          "the new dictation was not recorded rather than overwrite existing history.");
                     return;
                 }
-                WavWriter.WriteMono16kInt16(absolute, input.Samples16k);
+                WavWriteResult wavWrite;
+                try
+                {
+                    WavWriter.WriteMono16kInt16(absolute, input.Samples16k);
+                    wavWrite = WavWriteResult.Ok;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    wavWrite = WavWriteResult.Failed;
+                }
+                if (wavWrite == WavWriteResult.Failed)
+                {
+                    // Never leave a partial/unindexed WAV behind; report either way.
+                    if (TryDeleteOrphanWav(absolute))
+                        Skip("History archive skipped: the recording could not be written; " +
+                             "the dictation was not recorded.");
+                    else
+                        Skip("History archive skipped: the recording could not be written and " +
+                             "the partial file could not be deleted; it remains on disk unindexed.");
+                    return;
+                }
                 if (!TryAppend(entry))
                 {
-                    // Race-only residual (index became unreadable between the probe and the
-                    // append): delete the orphan WAV, and keep it OBSERVABLE if that fails.
+                    // Race-only residual (index became unreadable/unwritable between the probe and
+                    // the append): delete the orphan WAV, and keep it OBSERVABLE if that fails.
                     if (!TryDeleteOrphanWav(absolute))
                         Skip("History archive skipped after the index refused the entry, and " +
                              "the orphaned recording could not be deleted; the file remains on " +
@@ -132,8 +152,9 @@ public sealed class HistoryArchiver
     }
 
     /// <summary>
-    /// Append the entry; when the store refuses (present-but-unreadable/corrupt index),
-    /// report and return false so the caller can skip instead of overwriting history.
+    /// Append the entry; when the store refuses or cannot persist (present-but-unreadable/
+    /// corrupt index, or an IO/permission failure saving it), report and return false so
+    /// the caller can skip/clean up instead of overwriting history or stranding a WAV.
     /// </summary>
     private bool TryAppend(HistoryEntry entry)
     {
@@ -142,10 +163,11 @@ public sealed class HistoryArchiver
             _store.Append(entry);
             return true;
         }
-        catch (InvalidOperationException)
+        catch (Exception ex) when (ex is InvalidOperationException or IOException or UnauthorizedAccessException)
         {
-            Skip("History archive skipped: the history index is unreadable or corrupt; " +
-                 "the new dictation was not recorded rather than overwrite existing history.");
+            Skip("History archive skipped: the history index could not be updated " +
+                 "(unreadable or corrupt); the new dictation was not recorded rather than " +
+                 "overwrite existing history.");
             return false;
         }
     }
@@ -161,6 +183,12 @@ public sealed class HistoryArchiver
         {
             return false;
         }
+    }
+
+    private enum WavWriteResult
+    {
+        Ok,
+        Failed,
     }
 
     private void Skip(string reason) => _onArchiveSkipped?.Invoke(reason);

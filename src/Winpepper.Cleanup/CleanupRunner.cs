@@ -125,7 +125,7 @@ public sealed class CleanupRunner
         // 3) Compute the max-new-tokens budget per spec §5.5.
         var maxTokens = Math.Min(options.MaxNewTokensCap, (int)Math.Ceiling(rawTranscript.Length * 2.0));
         if (maxTokens < 1) maxTokens = 1;
-        _log.LogDebug("Cleanup prompt budget: system {SystemChars} chars, user {UserChars} chars, maxNewTokens {MaxTokens}",
+        _log.LogInformation("Cleanup prompt budget: system {SystemChars} chars, user {UserChars} chars, maxNewTokens {MaxTokens}",
             systemPrompt.Length, userPrompt.Length, maxTokens);
 
         // 4) Call the backend with a timeout token.

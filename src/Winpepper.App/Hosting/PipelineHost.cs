@@ -579,7 +579,7 @@ public sealed class PipelineHost : IDisposable
                 if (_engine.State != SessionState.Idle) return;
                 if (_vm.HasPendingPaste)
                     _log.LogInformation(
-                        "Pending paste retained across new dictation ({Chars} chars held; a park during this dictation will append)",
+                        "Pending paste dismissed on new dictation ({Chars} chars discarded)",
                         _vm.PendingPasteText.Length);
                 _engine.Apply(SessionEvent.StartRequested);
                 _currentSessionId = Guid.NewGuid();
@@ -1203,7 +1203,7 @@ public sealed class PipelineHost : IDisposable
                 {
                     if (_vm.HasPendingPaste)
                         _log.LogInformation(
-                            "Pending paste retained across new dictation ({Chars} chars held; a park during this dictation will append)",
+                            "Pending paste dismissed on new dictation ({Chars} chars discarded)",
                             _vm.PendingPasteText.Length);
                     _engine.Apply(SessionEvent.StartRequested);
                     _currentSessionId = Guid.NewGuid();

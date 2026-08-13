@@ -260,10 +260,13 @@ public sealed class SessionViewModel : INotifyPropertyChanged
         // flipping to Error so the user can click again. The error is still
         // recorded above (Diagnostics/tray); whether it also toasts is
         // AppShell's ErrorToastPolicy, independent of this guard. Scoped to
-        // NOT-in-flight since parks survive dictations (council 2026-07-28):
-        // an error DURING a dictation started over a held park must still
-        // present -- an unconditional return here silently dropped that
-        // dictation's failure.
+        // NOT-in-flight: a park can still coincide with an in-flight engine
+        // state when the CURRENT dictation has just parked at its end
+        // (EnterPendingPaste fires before InjectionCompleted); an error then
+        // must still present -- an unconditional return here silently
+        // dropped that dictation's failure (2026-07-24 class). Pre-dictation
+        // parks no longer reach this code mid-dictation: they are dismissed
+        // at recording start (owner directive 2026-08-12).
         if (_pending.HasPending && !SessionStages.IsDictationInFlight(_engineState)) return;
         // Idle scoping: an EVENT error has no ongoing validity, so outside a
         // live dictation it never takes the pill. Keyed on the ENGINE state:
@@ -380,8 +383,9 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     {
         if (token != _presentationGeneration) return; // newer state took the pill
         if (_stage != SessionStage.Error) return;     // stage already moved on
-        // NOTE: no HasPending early-return here. Since parks survive dictations
-        // (council 2026-07-28) an error CAN own the pill while a park is held;
+        // NOTE: no HasPending early-return here. A same-dictation park
+        // (created at its own dictation's end) CAN coexist with an error
+        // owning the pill;
         // refusing to act would strand Stage=Error forever (the 2026-07-24
         // squatting-pill class). "Click-to-paste wins" is honored by the
         // resync below, whose idle arm restores the PENDING pill.
@@ -443,11 +447,12 @@ public sealed class SessionViewModel : INotifyPropertyChanged
     /// check here is a REGRESSION, not a cleanup.
     ///
     /// INTENTIONALLY NOT pending-scoped either: the single production caller
-    /// is a real per-dictation failure, never a background report. Since
-    /// parks survive dictations (council 2026-07-28), a HasPending guard
-    /// here silently dropped the failure of any dictation started over a
-    /// held park. The park is not lost: the self-clear resync restores the
-    /// PENDING pill after the error's hold.
+    /// is a real per-dictation failure, never a background report. With a
+    /// HasPending guard here, a park held at that moment silently swallowed
+    /// that failure (no pill error; Unknown never toasts). A surviving park
+    /// (one this dictation parked itself; pre-dictation parks were dismissed
+    /// at recording start, owner directive 2026-08-12) is not lost: the
+    /// self-clear resync restores the PENDING pill after the error's hold.
     /// </summary>
     public void NotifyError(string message) => _ui.Post(() =>
     {
@@ -500,11 +505,15 @@ public sealed class SessionViewModel : INotifyPropertyChanged
             switch (to)
             {
                 case SessionState.Recording:
-                    // A held park deliberately SURVIVES a new dictation
-                    // (council 2026-07-28: preserve/append or fail loud --
-                    // never silently drop; supersedes Rule 5 of the
-                    // 2026-07-21 pending-paste plan, owner-approved). If this
-                    // dictation also parks, EnterPendingPaste appends.
+                    // A new dictation DISMISSES any held park (owner
+                    // directive 2026-08-12: "dismiss the click to paste as
+                    // soon as a new recording starts"; supersedes the
+                    // council 2026-07-28 preserve/append policy). Starting
+                    // to talk again declares the deferred text abandoned.
+                    // Discard idempotently BEFORE this dictation can
+                    // end-park into EnterPendingPaste, so a later park
+                    // holds only THIS dictation's text.
+                    _pending.Discard();
                     _stopwatch.Restart();
                     _cpuBaseline = SystemTimesSampler?.Invoke();
                     _cpuTicksSinceStart = 0;
@@ -530,10 +539,11 @@ public sealed class SessionViewModel : INotifyPropertyChanged
                     break;
                 case SessionState.Idle:
                     _stopwatch.Stop();
-                    // A held park survives dictations: returning to engine
-                    // Idle with a held slot must RESTORE the PENDING pill
-                    // (stage + reason-correct copy) -- not leave the last
-                    // in-flight copy ("Inserting...") on screen and not
+                    // A slot held at engine Idle belongs to the dictation
+                    // that just ended (a PRE-dictation park was dismissed at
+                    // recording start): RESTORE the PENDING pill (stage +
+                    // reason-correct copy) -- do not leave the last
+                    // in-flight copy ("Inserting...") on screen and do not
                     // auto-hide the pill.
                     if (_pending.HasPending)
                     {

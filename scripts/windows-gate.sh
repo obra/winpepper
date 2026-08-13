@@ -49,6 +49,17 @@
 # evidence doc. Note the gate is CPU/RAM heavy — run it when the user isn't
 # depending on a responsive host.
 #
+# WSL interop flake recovery (verified on this machine 2026-08-12/13;
+# microsoft/WSL#41242, upstream fix not in any installable release yet):
+# individual powershell.exe invocations can die at the vsock back-connect
+# ("UtilAcceptVsock ... accept4 failed 110", "abnormally long accept") even
+# when the Windows-side work actually ran — pure transport failure, and during
+# a wedge ~50% of invocations flake. Every gate leg is idempotent (plain
+# builds, `dotnet exec` of test DLLs), so run_ps_reliable retries a leg ONLY
+# when its log carries the vsock signature — never on real build/test failure
+# text, never on TIMEOUT — GC'ing orphaned Relay helpers between attempts
+# (orphans pin vmbus rings; the GC is the documented machine fix).
+#
 # Usage: ./scripts/windows-gate.sh
 # Exit:  0 and "GATE: GREEN" iff the app builds and all 13 runs are green.
 set -euo pipefail
@@ -69,11 +80,41 @@ rm -rf "$HERE"/src/*/bin "$HERE"/src/*/obj "$HERE"/tests/*/bin "$HERE"/tests/*/o
 
 BUILD_TIMEOUT=2400   # 40 min (first run restores NuGet over UNC)
 TEST_TIMEOUT=1200    # 20 min per test run (hang guard)
+VSOCK_RETRIES=4      # per-leg cap, only for vsock transport flakes (see header)
 
 run_ps() { # run_ps <timeout_s> <logfile> <ps-command>
   local t="$1" log="$2" cmd="$3"
   timeout --foreground "$t" "$PS" -NoProfile -ExecutionPolicy Bypass \
     -Command "$cmd; exit \$LASTEXITCODE" > "$log" 2>&1
+}
+
+# Garbage-collect orphaned Relay helpers (PPID 1) — the documented fix for the
+# vsock wedge from ~/code/this-machine-projects/AGENTS.md. Best-effort: fine
+# when sudo is unavailable or there is nothing to collect.
+gc_relays() {
+  sudo -n kill -9 $(ps -e -o pid= -o comm= -o ppid= \
+    | awk '$2=="Relay" && $3==1 {print $1}') 2>/dev/null || true
+}
+
+# run_ps with bounded retry, fired ONLY when the failed leg's log carries the
+# vsock transport signature. Real build/test failures and TIMEOUTs (124) are
+# returned immediately — retries must never delay or mask red code, and a
+# wedged build needs human eyes. The returned rc / log are the last attempt's.
+run_ps_reliable() {
+  local t="$1" log="$2" cmd="$3" attempt rc=0
+  for (( attempt=1; attempt<=VSOCK_RETRIES; attempt++ )); do
+    rc=0
+    run_ps "$t" "$log" "$cmd" || rc=$?
+    if [[ $rc -eq 0 || $rc -eq 124 ]] \
+      || ! grep -qE 'UtilAcceptVsock|accept4 failed|abnormally long accept' "$log"; then
+      return "$rc"
+    fi
+    (( attempt < VSOCK_RETRIES )) || break
+    echo "windows-gate: vsock transport flake on attempt $attempt (rc=$rc); GC'ing orphaned Relay helpers and retrying"
+    gc_relays
+    sleep 3
+  done
+  return "$rc"
 }
 
 # `timeout` kills only the WSL-side interop proxy; Windows-side children
@@ -130,7 +171,7 @@ echo "windows-gate: UNC root $UNC_ROOT"
 
 echo "=== [1/3] Build Winpepper.App (Release, XAML exe compiler) ==="
 app="$UNC_ROOT"'\src\Winpepper.App\Winpepper.App.csproj'
-if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/app-build.log" \
+if run_ps_reliable "$BUILD_TIMEOUT" "$LOG_DIR/app-build.log" \
      "dotnet build '$app' -c Release -m:1 -p:UseSharedCompilation=false -p:UseXamlCompilerExecutable=true"; then
   summary+=("Winpepper.App build: OK")
 else
@@ -143,7 +184,7 @@ fi
 echo "=== [2/3] Build the 9 test projects (Release, all TFMs) ==="
 for proj in "${PROJECTS[@]}"; do
   csproj="$UNC_ROOT"'\tests\'"$proj"'\'"$proj"'.csproj'
-  if run_ps "$BUILD_TIMEOUT" "$LOG_DIR/build-$proj.log" "dotnet build '$csproj' -c Release -m:1 -p:UseSharedCompilation=false"; then
+  if run_ps_reliable "$BUILD_TIMEOUT" "$LOG_DIR/build-$proj.log" "dotnet build '$csproj' -c Release -m:1 -p:UseSharedCompilation=false"; then
     echo "  built $proj"
   else
     rc=$?
@@ -161,7 +202,7 @@ for entry in "${RUNS[@]}"; do
   log="$LOG_DIR/run-$proj-$tfm.log"
   echo "  running $proj ($tfm) ..."
   rc=0
-  run_ps "$TEST_TIMEOUT" "$log" \
+  run_ps_reliable "$TEST_TIMEOUT" "$log" \
     "Set-Location '$dll_dir'; dotnet exec '$dll_dir\\$proj.dll'" || rc=$?
   line="$(grep -E 'Total:.*Errors:.*Failed:' "$log" | tail -1 | tr -d '\r' || true)"
   total="$(grep -oE 'Total: *[0-9]+' <<<"$line" | grep -oE '[0-9]+' || echo 0)"

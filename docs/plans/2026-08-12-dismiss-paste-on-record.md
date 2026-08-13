@@ -49,6 +49,12 @@ regression. Historical plan docs under `docs/plans/` are NOT edited.
   Prefix focused `dotnet` commands with:
   `export DOTNET_ROOT=/home/dan/code/winpepper/.dotnet; export PATH="$DOTNET_ROOT:$PATH"`
   (`./scripts/linux-tests.sh` sets these itself).
+- **xUnit v3 zero-match trap (measured, validator LB-3):** a `-namespace`
+  (or any) filter matching ZERO tests exits 0 and prints only `Total: 0` —
+  the summary OMITS the `Errors/Failed/...` tokens entirely. Any focused
+  pass/fail check below therefore requires BOTH exit 0 AND a summary line
+  containing `Total:` with a non-zero count AND `Failed: 0`. An exit-code-
+  only or `grep "Failed: 0"`-only check silently "passes" on zero matches.
 - Work only in the worktree `/home/dan/code/winpepper/.worktrees/dismiss-paste-on-record`
   on branch `the-usual/dismiss-paste-on-record`.
 
@@ -234,7 +240,7 @@ dotnet build tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj -c Release -
 dotnet exec tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll -namespace Winpepper.Core.Tests.ViewModels
 ```
 
-Expected: exactly five FAILs, each for the missing behavior (not setup errors):
+Expected: the namespace run reports a non-zero `Total:` (the ViewModels namespace holds 183 tests before this task's test edits, 184 after — a `Total: 0` run means a filter typo, NOT a result; see the xUnit zero-match trap in Global Constraints) and exactly five FAILs, each for the missing behavior (not setup errors):
 - `NewDictation_DismissesPending` fails at `vm.HasPendingPaste.ShouldBeFalse()` (park still held).
 - `DismissedPark_DoesNotReturn_WhenDictationEnds` fails at `vm.HasPendingPaste.ShouldBeFalse()` (park restored at Idle).
 - `SecondPark_AfterDismissal_HoldsOnlyNewText_OneClickPastesIt` fails at `vm.PendingPasteText.ShouldBe("second thought.")` (actual `"first thought. second thought."`).
@@ -383,7 +389,7 @@ dotnet build tests/Winpepper.Core.Tests/Winpepper.Core.Tests.csproj -c Release -
 dotnet exec tests/Winpepper.Core.Tests/bin/Release/net9.0/Winpepper.Core.Tests.dll -namespace Winpepper.Core.Tests.ViewModels
 ```
 
-Expected: PASS — `Failed: 0` for the namespace run (all five previously failing pins now green, the boundary pin still green, and no other ViewModels test regressed).
+Expected: PASS — exit 0 AND a summary line with `Total: 184` (non-zero, per the xUnit zero-match trap in Global Constraints) AND `Errors: 0` AND `Failed: 0` for the namespace run (all five previously failing pins now green, the boundary pin still green, and no other ViewModels test regressed).
 
 - [ ] **Step 5: Refactor while green**
 

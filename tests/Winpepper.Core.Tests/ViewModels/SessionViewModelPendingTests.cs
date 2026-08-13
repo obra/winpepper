@@ -48,55 +48,59 @@ public class SessionViewModelPendingTests
     }
 
     [Fact]
-    public void NewDictation_RetainsPending()
+    public void NewDictation_DismissesPending()
     {
-        // DELIBERATE PIN REVISION (council 2026-07-28, all 6 lenses:
-        // "preserve/append or fail loud -- never silently drop"; supersedes
-        // Rule 5 of the 2026-07-21 pending-paste plan, owner-approved). The
-        // old trapdoor: pressing the pedal again -- the most natural recovery
-        // gesture -- destroyed the very text the park saved.
+        // DELIBERATE PIN REVISION (owner directive 2026-08-12: "Dismiss the
+        // click to paste as soon as a new recording starts"; supersedes the
+        // council 2026-07-28 preserve/append pin). Pressing the pedal again
+        // now DECLARES the held text abandoned: the park is discarded at
+        // recording start.
         var (vm, engine) = NewVm();
         vm.EnterPendingPaste("saved text", T(1, "a"));
 
         engine.Apply(SessionEvent.StartRequested); // Recording
 
-        vm.HasPendingPaste.ShouldBeTrue();
-        vm.PendingPasteText.ShouldBe("saved text");
+        vm.HasPendingPaste.ShouldBeFalse();
+        vm.PendingPasteText.ShouldBe(string.Empty);
         vm.Stage.ShouldBe(SessionStage.Recording); // dictation UX unchanged
+        vm.StatusText.ShouldBe("Recording...");
     }
 
     [Fact]
-    public void ParkSurvivesDictation_EngineIdle_RestoresPendingPillAndCopy()
+    public void DismissedPark_DoesNotReturn_WhenDictationEnds()
     {
-        // After the retained park's dictation finishes (here: cancelled --
-        // CancelRequested drives the engine straight back to Idle), the pill
-        // must return to the PENDING presentation with the reason-correct
-        // copy, not linger on the last in-flight stage and not auto-hide.
+        // The dismissal is final: when the interrupting dictation ends
+        // (here: cancelled -- CancelRequested drives the engine straight
+        // back to Idle), the pill must NOT resurrect the old park; it
+        // settles to the ordinary Idle/"Ready" presentation.
         var (vm, engine) = NewVm();
         vm.EnterPendingPaste("saved text", T(1, "a"), PendingPasteReason.ElevatedTarget);
         engine.Apply(SessionEvent.StartRequested);
 
         engine.Apply(SessionEvent.CancelRequested); // engine -> Idle
 
-        vm.HasPendingPaste.ShouldBeTrue();
-        vm.PendingPasteText.ShouldBe("saved text");
-        vm.Stage.ShouldBe(SessionStage.PendingPaste);
-        vm.StatusText.ShouldBe("Admin window - switch & click");
+        vm.HasPendingPaste.ShouldBeFalse();
+        vm.PendingPasteText.ShouldBe(string.Empty);
+        vm.Stage.ShouldBe(SessionStage.Idle);
+        vm.StatusText.ShouldBe("Ready");
     }
 
     [Fact]
-    public void SecondPark_Appends_AndOneClickPastesEverything()
+    public void SecondPark_AfterDismissal_HoldsOnlyNewText_OneClickPastesIt()
     {
+        // With dismissal at recording start, a dictation that parks always
+        // parks into an EMPTY slot: no append of abandoned text. One click
+        // pastes exactly this dictation's text.
         var (vm, engine) = NewVm();
         vm.EnterPendingPaste("first thought.", T(1, "a"));
-        engine.Apply(SessionEvent.StartRequested);   // new dictation; park retained
+        engine.Apply(SessionEvent.StartRequested);   // new dictation; park DISMISSED
         engine.Apply(SessionEvent.CancelRequested);  // back to Idle for clarity
 
-        vm.EnterPendingPaste("second thought.", T(2, "b")); // this dictation parked too
+        vm.EnterPendingPaste("second thought.", T(2, "b")); // this dictation parked
 
-        vm.PendingPasteText.ShouldBe("first thought. second thought.");
+        vm.PendingPasteText.ShouldBe("second thought.");
         vm.Stage.ShouldBe(SessionStage.PendingPaste);
-        vm.NotifyPasteAttempted(injected: true).ShouldBeTrue(); // ONE click, everything
+        vm.NotifyPasteAttempted(injected: true).ShouldBeTrue(); // ONE click
         vm.HasPendingPaste.ShouldBeFalse();
         vm.Stage.ShouldBe(SessionStage.Idle);
     }
@@ -150,26 +154,23 @@ public class SessionViewModelPendingTests
     }
 
     [Fact]
-    public void ErrorReport_MidDictation_WhilePending_StillTakesThePill()
+    public void ErrorReport_MidDictation_AfterDismissedPark_StillTakesThePill()
     {
-        // Since parks survive dictations (council 2026-07-28), the HasPending
-        // guard in OnBusReport became reachable MID-DICTATION -- and, written
-        // unconditionally, it silently dropped the failure of any dictation
-        // started over a held park (no pill error; Unknown never toasts).
-        // The guard is now scoped to idle: in flight, the error must present.
-        // Contrast ErrorReport_WhilePending_KeepsPendingClickable (engine
-        // Idle), which pins the guard's surviving click-to-paste rationale.
+        // Dismissal must not defang error presentation: a dictation started
+        // over a held park discards the park at start, and a mid-dictation
+        // EVENT error must still present (OnBusReport's idle guard scopes by
+        // engine state; the slot is already empty by now).
         var (vm, engine) = NewVm();
         var bus = new ErrorBus();
         vm.AttachErrorBus(bus);
         vm.EnterPendingPaste("saved text", T(1, "a"));
-        engine.Apply(SessionEvent.StartRequested); // Recording: in flight
+        engine.Apply(SessionEvent.StartRequested); // Recording: park dismissed
 
         bus.Report(ErrorStage.Unknown, new InvalidOperationException("pipeline blew up"), Guid.NewGuid());
 
         vm.Stage.ShouldBe(SessionStage.Error);      // presented, not swallowed
-        vm.HasPendingPaste.ShouldBeTrue();          // the park itself is untouched
-        vm.PendingPasteText.ShouldBe("saved text");
+        vm.HasPendingPaste.ShouldBeFalse();         // dismissed at start
+        vm.PendingPasteText.ShouldBe(string.Empty);
     }
 
     [Fact]

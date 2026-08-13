@@ -5,14 +5,18 @@ namespace Winpepper.Core.Pending;
 /// paste could not be delivered (focus moved, halt gesture, elevated target,
 /// no observable foreground). NEVER persisted to disk -- history archiving
 /// is a separate, unchanged feature. Lifecycle:
-/// None -> Pending(text,target,reason) [-> Pending(text + ' ' + more, ...)]*
-/// -> consumed (successful pill-click paste) | app exit (memory-only).
-/// A new dictation NEVER discards the slot and cancel preserves it (council
-/// constraint, 2026-07-28: preserve/append or fail loud -- never silently
-/// drop; supersedes Rule 5 of the 2026-07-21 pending-paste plan,
-/// owner-approved). A dictation that parks while the slot is occupied
-/// APPENDS, so one pill click pastes everything, oldest first, always the
-/// COMPLETE text -- never a remainder.
+/// None -> Pending(text,target,reason)
+/// -> consumed (successful pill-click paste)
+/// | DISMISSED when the user starts a NEW dictation (owner directive
+///   2026-08-12: "dismiss the click to paste as soon as a new recording
+///   starts" -- starting to talk again declares the deferred text abandoned;
+///   supersedes the council 2026-07-28 preserve/append policy)
+/// | app exit (memory-only).
+/// HoldOrAppend KEEPS its never-replace append semantics for an occupied
+/// slot as a defensive component guarantee, although production paths now
+/// always park into an empty slot (the Recording-arm discard runs first).
+/// Cancel preserves the slot: a cancel happens mid-dictation, and any park
+/// then alive belongs to that same dictation.
 /// </summary>
 public sealed class PendingPasteState
 {
@@ -50,7 +54,7 @@ public sealed class PendingPasteState
         HasPending = true;
     }
 
-    /// <summary>Clear the slot (successful paste, or app exit). Idempotent.</summary>
+    /// <summary>Clear the slot (successful paste, new-dictation dismissal, or app exit). Idempotent.</summary>
     public void Discard()
     {
         HasPending = false;

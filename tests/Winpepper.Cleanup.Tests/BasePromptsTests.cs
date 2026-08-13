@@ -13,24 +13,29 @@ namespace Winpepper.Cleanup.Tests;
 public class BasePromptsTests
 {
     [Fact]
-    public void Default_HasExactlyOneExample()
+    public void Default_HasExactlyTwoExamples()
     {
         var p = BasePrompts.Default;
-        // A single worked example keeps a 0.5B model from pattern-completing a
-        // few-shot block (spec fix-(iv)). Examples are "Input:"/"Output:" lines.
+        // Two worked examples, self-correction first and anti-answer question
+        // second: with the system/user prompt split that is the measured sweet
+        // spot for the 0.5B model (2026-08-12 bake-off, see BasePrompts class
+        // comment). Examples are "Input:"/"Output:" lines.
         var inputs = System.Text.RegularExpressions.Regex.Matches(p, @"^Input:", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
         var outputs = System.Text.RegularExpressions.Regex.Matches(p, @"^Output:", System.Text.RegularExpressions.RegexOptions.Multiline).Count;
-        inputs.ShouldBe(1);
-        outputs.ShouldBe(1);
+        inputs.ShouldBe(2);
+        outputs.ShouldBe(2);
     }
 
     [Fact]
-    public void DefaultExampleOutputs_MatchesTheEmbeddedExampleOutput()
+    public void DefaultExampleOutputs_MatchesTheEmbeddedExampleOutputs()
     {
         // Anti-drift: the denylist the runner checks must be exactly the
         // output text shown in the prompt.
-        BasePrompts.DefaultExampleOutputs.Count.ShouldBe(1);
-        BasePrompts.Default.ShouldContain("Output: " + BasePrompts.DefaultExampleOutputs[0]);
+        BasePrompts.DefaultExampleOutputs.Count.ShouldBe(2);
+        foreach (var exampleOutput in BasePrompts.DefaultExampleOutputs)
+        {
+            BasePrompts.Default.ShouldContain("Output: " + exampleOutput);
+        }
     }
 
     [Fact]
@@ -66,7 +71,10 @@ public class BasePromptsTests
         inputs.ShouldBe(0);
         outputs.ShouldBe(0);
         p.ShouldNotContain("example");
-        p.ShouldNotContain(BasePrompts.DefaultExampleOutputs[0]);
+        foreach (var exampleOutput in BasePrompts.DefaultExampleOutputs)
+        {
+            p.ShouldNotContain(exampleOutput);
+        }
         // Same rules and closer as Default (structural anti-drift, not wording pins).
         p.ShouldContain("Apply these transformations:");
         p.ShouldContain("Remember: the USER-INPUT block");

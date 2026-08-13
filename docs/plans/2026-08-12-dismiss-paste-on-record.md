@@ -356,7 +356,7 @@ with:
                     // auto-hide the pill.
 ```
 
-In `src/Winpepper.Core/Pending/PendingPasteState.cs`, replace the class doc header (currently lines 3-16) with (comment-only; `HoldOrAppend`/`Discard`/`OnPasteAttempted` code and the append separator are all unchanged):
+In `src/Winpepper.Core/Pending/PendingPasteState.cs`, replace the class doc header (currently lines 3-16) with (comment-only; `HoldOrAppend`/`Discard`/`OnPasteAttempted` code and the append separator are all unchanged), and also update the `Discard()` method summary so the closest API doc names the new production caller:
 
 ```csharp
 /// <summary>
@@ -379,6 +379,18 @@ In `src/Winpepper.Core/Pending/PendingPasteState.cs`, replace the class doc head
 /// </summary>
 ```
 
+`Discard()`'s method summary (currently line 53) — replace:
+
+```csharp
+    /// <summary>Clear the slot (successful paste, or app exit). Idempotent.</summary>
+```
+
+with:
+
+```csharp
+    /// <summary>Clear the slot (successful paste, new-dictation dismissal, or app exit). Idempotent.</summary>
+```
+
 - [ ] **Step 4: Run the focused tests**
 
 Run:
@@ -393,11 +405,15 @@ Expected: PASS — exit 0 AND a summary line with `Total: 184` (non-zero, per th
 
 - [ ] **Step 5: Refactor while green**
 
-No code refactor needed: the implementation is one idempotent `_pending.Discard()` call plus comment updates. Verify by hand that no lingering `council 2026-07-28` / "parks survive" / "retained across" phrasing remains in `src/Winpepper.Core/`:
+No code refactor needed: the implementation is one idempotent `_pending.Discard()` call plus comment updates. Verify by hand that no lingering "parks survive"/"retained across" phrasing remains in `src/Winpepper.Core/`. NOTE: the string `council 2026-07-28` legitimately REMAINS in exactly two places after Step 3 — the new Recording-arm comment and the new `PendingPasteState` header, both as the historical citation "supersedes the council 2026-07-28 preserve/append policy". Do not delete those; the forbidden thing is the old survival CLAIM, not the history:
 
-Run: `grep -rn "council 2026-07-28\|survives dictations\|survives a new dictation\|retained across" src/Winpepper.Core/`
+Run: `grep -rn "survives dictations\|survives a new dictation\|retained across" src/Winpepper.Core/`
 
 Expected: no matches.
+
+Run: `grep -rn "council 2026-07-28" src/Winpepper.Core/`
+
+Expected: exactly two matches — the `SessionViewModel.cs` Recording-arm comment and the `PendingPasteState.cs` class header, and both in the wording "supersedes the council 2026-07-28 preserve/append policy" (the superseded policy cited as history, not asserted as current).
 
 - [ ] **Step 6: Run impacted-test verification**
 
@@ -427,7 +443,7 @@ git commit -m "feat(core): dismiss the pending click-to-paste park when a new re
 
 - [ ] **Step 1: Establish the stale evidence (why no failing unit test exists)**
 
-No xUnit test can pin these strings: `PipelineHost.HandleHotkey` is App-layer Windows-only code with no test coverage of its start arms (survey: `docs` explorer report `plan-recording-start-flow.md` §5). The failing artifact is the log text itself, which after Task 1 asserts the opposite of the code's behavior. Confirm the two stale lines exist:
+No xUnit test can pin these strings: `PipelineHost` is App-layer Windows-only (`#if WINDOWS`, TFM `net9.0-windows` — excluded from the Linux suite and uncovered by any test project; `grep -rn "HandleHotkey" tests/` yields no coverage of the start arms). The failing artifact is the log text itself, which after Task 1 asserts the opposite of the code's behavior. Confirm the two stale lines exist:
 
 Run: `grep -n "retained across new dictation" src/Winpepper.App/Hosting/PipelineHost.cs`
 

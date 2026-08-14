@@ -119,6 +119,80 @@ public class HistoryArchiverTests : IDisposable
     }
 
     [Fact]
+    public void Archive_RaisesArchived_AfterEntryIsLoadableFromStore()
+    {
+        var store = new HistoryStore(_root);
+        var archiver = new HistoryArchiver(store);
+        var raised = new List<HistoryEntry>();
+        var loadableAtRaise = false;
+        archiver.Archived += e =>
+        {
+            raised.Add(e);
+            // The event must fire only after a subscriber can see the entry (e.g. a
+            // history page refreshing its list on the UI thread).
+            loadableAtRaise = store.Load().Entries.Any(x => x.Id == e.Id);
+        };
+
+        var entry = archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+            RawTranscript = "hello",
+        });
+
+        raised.ShouldHaveSingleItem().Id.ShouldBe(entry!.Id);
+        loadableAtRaise.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void Archive_TextOnly_RaisesArchived()
+    {
+        var store = new HistoryStore(_root);
+        var archiver = new HistoryArchiver(store, storeAudio: () => false);
+        var raised = new List<HistoryEntry>();
+        archiver.Archived += raised.Add;
+
+        var entry = archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+            RawTranscript = "hello",
+        });
+
+        raised.ShouldHaveSingleItem().Id.ShouldBe(entry!.Id);
+    }
+
+    [Fact]
+    public void Archive_Skipped_NeverRaisesArchived()
+    {
+        // Silent drop with audio storage off: nothing is persisted, nothing is raised.
+        var indexPath = Path.Combine(_root, "index.json");
+        const string corrupt = "{ nope";
+        var store = new HistoryStore(_root);
+        var archiver = new HistoryArchiver(store, storeAudio: () => false);
+        var raised = 0;
+        archiver.Archived += _ => raised++;
+
+        archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+            IsSilentDrop = true,
+        }).ShouldBeNull();
+        raised.ShouldBe(0);
+
+        // Corrupt index: the append is refused, nothing is raised (audio path).
+        File.WriteAllText(indexPath, corrupt);
+        archiver = new HistoryArchiver(store);
+        archiver.Archived += _ => raised++;
+
+        archiver.Archive(new HistoryArchiveInput
+        {
+            Samples16k = new float[16000],
+            RawTranscript = "hello",
+        }).ShouldBeNull();
+        raised.ShouldBe(0);
+        File.ReadAllText(indexPath).ShouldBe(corrupt);
+    }
+
+    [Fact]
     public void Archive_Skips_WhenIndexCorrupt_LeavesIndexUntouched_AudioPath()
     {
         // A present-but-mangled index must never become a one-entry replacement; the

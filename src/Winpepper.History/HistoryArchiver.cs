@@ -40,6 +40,15 @@ public sealed class HistoryArchiver
     private readonly Func<bool> _storeAudio;
     private readonly Action<string>? _onArchiveSkipped;
 
+    /// <summary>
+    /// Raised after a new entry has been durably appended to the store — i.e. a
+    /// subscriber can immediately reload and see it, including entries degraded to
+    /// text-only. Raised on the caller's thread; UI subscribers must marshal to
+    /// their dispatcher before touching views. Skipped/refused archives never
+    /// raise this event.
+    /// </summary>
+    public event Action<HistoryEntry>? Archived;
+
     public HistoryArchiver(
         HistoryStore store,
         Func<DateTime>? nowUtc = null,
@@ -144,10 +153,12 @@ public sealed class HistoryArchiver
                 }
                 result = entry;
             });
+            if (result is not null) Archived?.Invoke(result);
             return result;
         }
 
         if (!TryAppend(entry)) return null;
+        Archived?.Invoke(entry);
         return entry;
     }
 

@@ -11,6 +11,7 @@ namespace Winpepper.App.Views;
 public sealed partial class HistoryPage : Page
 {
     private HistoryRetentionViewModel? _retentionViewModel;
+    private Winpepper.History.HistoryArchiver? _archiver;
     private bool _updatingRetentionControls;
     private bool _deleteAllStatusShown;
 
@@ -29,6 +30,11 @@ public sealed partial class HistoryPage : Page
         var services = shell.HistoryServices;
         ViewModel = new HistoryListViewModel(services.Store);
         ViewModel.Refresh();
+
+        // Live-update: refresh the list as each dictation is archived, without
+        // requiring the user to navigate away and back.
+        _archiver = services.Archiver;
+        _archiver.Archived += OnEntryArchived;
 
         if (_retentionViewModel is not null)
         {
@@ -70,7 +76,20 @@ public sealed partial class HistoryPage : Page
             _retentionViewModel.PropertyChanged -= OnRetentionPropertyChanged;
         }
 
+        if (_archiver is not null)
+        {
+            _archiver.Archived -= OnEntryArchived;
+            _archiver = null;
+        }
+
         base.OnNavigatedFrom(e);
+    }
+
+    private void OnEntryArchived(Winpepper.History.HistoryEntry entry)
+    {
+        // Archive completes on a pipeline background thread; the Rows binding may
+        // only be touched on the UI thread.
+        DispatcherQueue.TryEnqueue(() => ViewModel.Refresh());
     }
 
     private void OnStoreAudioToggled(object sender, RoutedEventArgs e)

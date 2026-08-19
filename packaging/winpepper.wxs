@@ -15,7 +15,7 @@
            Compressed="yes"
            InstallerVersion="500">
 
-    <SummaryInformation Description="Winpepper local dictation for Windows 11"
+    <SummaryInformation Description="Winpepper local dictation for Windows"
                         Manufacturer="$(Manufacturer)" />
 
     <MediaTemplate EmbedCab="yes" />
@@ -73,19 +73,11 @@
     <Property Id="ARPNOREPAIR" Value="1" />
     <Icon Id="WinpepperIcon" SourceFile="$(AppPublishDir)\Assets\AppIcon.ico" />
 
-    <!-- Spec §11: Windows 11 22H2+ via LaunchCondition. Build 22621 = 22H2.
-         VersionNT64 >= 1000 enforces Windows 10/11 x64; the build-number gate (MSI_WIN_BUILD,
-         populated by the AppSearch registry search below from HKLM\…\CurrentBuildNumber)
-         is the real 22H2+ check. MSI string comparison on >= is lexicographic, so this works correctly
-         only as long as CurrentBuildNumber is always a same-width number string — which it
-         is on Windows 10/11 (5 digits). WindowsBuild is NOT a stock MSI/WiX property and
-         must not be used here. -->
-    <!-- Drop VersionNT/VersionNT64 — Windows reports them as 603 (Win 8.1 compat
-         shim) on Win 10/11+ regardless of actual version. MSI_WIN_BUILD from our
-         capability probe reads CurrentBuildNumber from the registry and is the
-         only reliable signal. -->
-    <Launch Condition="Installed OR MSI_WIN_BUILD &gt;= 22621"
-            Message="[ProductName] requires Windows 11 22H2 (build 22621) or newer." />
+    <!-- Deliberately no OS-version LaunchCondition: the installer imposes
+         no Windows version floor. The app stack (WinAppSDK, .NET 9, ONNX
+         Runtime, Win32 capture/injection APIs) runs on every supported
+         Windows release, so gating on a build number would only exclude
+         machines the software would run on fine. -->
 
     <Feature Id="MainFeature" Title="$(ProductName)" Level="1" ConfigurableDirectory="INSTALLFOLDER">
       <ComponentGroupRef Id="HarvestedFiles" />
@@ -119,7 +111,7 @@
                Guid="6c0b2a36-9d4f-44cf-9a3e-a3a4f0c1ed03">
       <Shortcut Id="WinpepperShortcut"
                 Name="Winpepper"
-                Description="Local dictation for Windows 11"
+                Description="Local dictation for Windows"
                 Target="[#WinpepperExe]"
                 WorkingDirectory="INSTALLFOLDER"
                 Icon="WinpepperIcon" />
@@ -208,26 +200,6 @@
     <Binary Id="D3D12ProbeBinary" SourceFile="$(var.D3D12ProbeExe)" />
     <Binary Id="WinAppSdkBootstrapperBinary" SourceFile="$(var.WinAppSdkBootstrapper)" />
 
-    <!-- MSI_WIN_BUILD feeds the launch condition above. It is populated by the
-         standard AppSearch action (sequenced before LaunchConditions in both the
-         UI and execute sequences), which needs no script engine. It used to be
-         copied out of the capability probe's output file by a VBScript custom
-         action; that failed with MSI error 2738 on Windows images that ship
-         without vbscript.dll (e.g. Windows Sandbox, hardened images), which made
-         the launch condition fire and the install abort with 1603 (issue #29).
-         CurrentBuildNumber is REG_SZ, so Type="raw" yields the bare digit string
-         and the lexicographic >= comparison caveat documented above still applies.
-         Secure="yes" makes the property transferable from the immediate to the
-         deferred context if a future CA ever needs it there. -->
-    <Property Id="MSI_WIN_BUILD" Secure="yes">
-      <RegistrySearch Id="MsiWinBuildRegSearch"
-                      Root="HKLM"
-                      Key="Software\Microsoft\Windows NT\CurrentVersion"
-                      Name="CurrentBuildNumber"
-                      Type="raw"
-                      Bitness="always64" />
-    </Property>
-
     <!-- Best-effort capability probe. It writes %TEMP%\winpepper-probe.txt
          (DX12 presence, WinAppSDK presence, Windows build) purely as a
          support/diagnostics artifact; nothing in the install consumes it.
@@ -248,9 +220,8 @@
                   Return="check" />
 
     <!-- The probe runs in BOTH sequences so the diagnostics file exists under
-         interactive (UI) AND silent (/qn) installs. It is anchored before
-         LaunchConditions only so it still runs (and leaves its artifact) when
-         the OS gate aborts the install; nothing downstream depends on it. -->
+         interactive (UI) AND silent (/qn) installs. Anchoring before
+         LaunchConditions keeps it early; nothing downstream depends on it. -->
     <InstallUISequence>
       <Custom Action="RunCapabilityProbe" Before="LaunchConditions" />
     </InstallUISequence>

@@ -1,6 +1,6 @@
 # Install Winpepper in Windows Sandbox
 
-This directory provides scripts to quickly install and smoke-test Winpepper inside an ephemeral [Windows Sandbox](https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview) — a clean, throwaway Windows 11 environment that leaves no trace on your host after you close it.
+This directory provides scripts to quickly install and smoke-test Winpepper inside an ephemeral [Windows Sandbox](https://learn.microsoft.com/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-overview) — a clean, throwaway Windows environment that leaves no trace on your host after you close it.
 
 ## Why Sandbox?
 
@@ -8,7 +8,7 @@ Winpepper is currently **agent-built, human-untested**. Running it in Windows Sa
 
 ## Prerequisites
 
-- Windows 11 22H2 (build 22621+) or Windows 10/11 Pro/Enterprise with Windows Sandbox enabled
+- Windows 10/11 Pro or Enterprise with the Windows Sandbox feature enabled
 - ~2.5 GB free disk space inside the sandbox (700 MB install + ~1.2 GB models + overhead)
 - The Winpepper MSI already built, **or** the .NET 9 SDK + WiX v5 on the host so the launcher can build it for you
 

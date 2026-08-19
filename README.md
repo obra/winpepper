@@ -109,8 +109,7 @@ tab — step on the pedal, speak, step off.
 
 ### What you need
 
-- Windows 11, version 22H2 or newer
-- A 64-bit PC (nearly all PCs)
+- A 64-bit PC running Windows (nearly all PCs)
 - About 1.5 GB of free disk space for a default install (roughly 700 MB for
   the app, 760 MB for the speech model); up to ~3 GB with the optional backup
   speech and text-cleanup models
@@ -154,9 +153,9 @@ unless you deliberately turn it on.
 
 ## Try it risk-free
 
-Windows Sandbox is a feature built into Windows 11 that gives you a clean,
-throwaway copy of Windows in a window — anything you install inside it disappears
-when you close it, leaving your real PC untouched.
+Windows Sandbox is a feature built into Windows Pro and Enterprise editions that
+gives you a clean, throwaway copy of Windows in a window — anything you install
+inside it disappears when you close it, leaving your real PC untouched.
 
 The scripts in [`scripts/windows-sandbox/`](scripts/windows-sandbox/) launch a
 sandbox, install Winpepper inside it, run the self-test, and show you the result.

@@ -1,4 +1,4 @@
-# Winpepper Design — Native Windows 11 Local Dictation
+# Winpepper Design — Native Windows Local Dictation
 
 **Status:** Approved for implementation
 **Date:** 2026-05-15
@@ -26,7 +26,7 @@ Non-goals: cross-platform abstractions, Linux compatibility shims, cloud transcr
 | OCR                    | `Windows.Media.Ocr` (OS built-in, no Tesseract dep)                  |
 | Logging                | `Microsoft.Extensions.Logging` + Serilog file sink                   |
 | Packaging              | WiX v5 MSI                                                            |
-| Minimum OS             | Windows 11 22H2, x64                                                 |
+| Target OS              | Windows, x64 (no version floor)                                      |
 
 ARM64 is out of scope for v1.
 
@@ -429,7 +429,8 @@ Upgrade rules: `MajorUpgrade.AllowDowngrades=no`, `Schedule=afterInstallInitiali
 
 Prereqs:
 
-- Windows 11 22H2+ enforced via `LaunchCondition`.
+- No Windows-version `LaunchCondition` in the MSI — the installer gates on
+  nothing but the stack's own prerequisites below.
 - DirectX 12 capability: warn at install time if missing; app still runs CPU.
 - WinAppSDK runtime: detected; if missing, the MSI invokes the WinAppSDK bootstrapper.
 

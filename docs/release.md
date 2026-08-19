@@ -74,7 +74,7 @@ wingetcreate new https://github.com/obra/winpepper/releases/download/<tag>/winpe
    Fill the prompts with: `PackageIdentifier` `obra.Winpepper`,
    `PackageVersion` = the tag without the leading `v` (e.g. `0.6.2-alpha`),
    `Publisher` `Winpepper`, `PackageName` `Winpepper`, `License` `Apache-2.0`,
-   `ShortDescription` `Local dictation for Windows 11`. Before submitting, edit
+   `ShortDescription` `Local dictation for Windows`. Before submitting, edit
    the generated installer manifest to add:
 
 ```yaml

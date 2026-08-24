@@ -321,6 +321,15 @@ public sealed class AppShell : IDisposable
                 "WindowContextPrefetch unavailable; cleanup will run without window context.");
         }
 
+        // One-time OCR stack pre-warm off a background thread (see
+        // OcrFallback.BeginPrewarm): the first real WinRT RecognizeAsync pays
+        // ~6.6 s of model init in a fresh process; a dictation into a
+        // low-UIA-text window would otherwise eat that inside the 500 ms
+        // context window and silently lose the context. Skips itself when the
+        // user profile has no OCR languages installed.
+        Winpepper.Platform.WindowContext.OcrFallback.BeginPrewarm(
+            factory.CreateLogger<Winpepper.Platform.WindowContext.OcrFallback>());
+
         // NOTE: no boot-time CleanupOptions snapshot here. PipelineHost builds
         // CleanupOptions per dictation from the settings provider
         // (Winpepper.Cleanup.CleanupOptionsFactory.FromSettings), so Cleanup-tab

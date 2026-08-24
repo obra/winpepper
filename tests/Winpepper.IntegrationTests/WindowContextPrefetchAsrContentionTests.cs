@@ -5,6 +5,7 @@ using Shouldly;
 using Winpepper.Asr.TranscribeCpp;
 using Winpepper.Asr.TranscribeCpp.Worker;
 using Winpepper.Asr.Transcription;
+using Winpepper.Platform.Tests.TestInfra;
 using Winpepper.Platform.WindowContext;
 using Xunit;
 
@@ -16,9 +17,11 @@ namespace Winpepper.IntegrationTests;
 /// prefetch burst raced live streaming ASR; the July fix moved the burst to stop.
 /// Post-fb1f538 the streaming ASR runs in the transcribe.cpp WORKER SUBPROCESS, and this
 /// test measures — on the real Windows gate machine, with the real Nemotron worker, a
-/// real streamed utterance, and REAL UIA/OCR bursts on the real foreground window — that
-/// a listen-start burst no longer produces the JULY-SCALE pathological starvation regime
-/// on the app-side seams the pipeline actually guards on:
+/// real streamed utterance, and REAL UIA/OCR bursts on a TEST-OWNED window
+/// (TestOwnedWindow: hidden off-screen, never activated, deterministic 3-node
+/// sentinel tree) — that a listen-start burst no longer produces the JULY-SCALE
+/// pathological starvation regime on the app-side seams the pipeline actually
+/// guards on:
 ///   * per-call duration of the app's own timed calls into the streaming path stays under
 ///     500 ms in both arms (the NativeCallStats aggregates: the same numbers the timing
 ///     line's native_max / native_over250 render; July's failing regime was 1000–4000 ms),
@@ -27,7 +30,15 @@ namespace Winpepper.IntegrationTests;
 /// counts are logged as reporting evidence (a single ~250–300 ms call can be ordinary
 /// jitter on a shared VM), while the 250 ms native_over250 budget remains the production
 /// guard via the owner's live-dictation readout. Skips itself plainly when the gate host
-/// has no foreground window or no Nemotron layout installed.
+/// cannot create the owned window or has no Nemotron layout installed.
+///
+/// Why test-owned, not ambient foreground (2026-08-13 + 2026-08-24 gate reds; probe
+/// evidence in artifacts/read-probe/probe*.tsv): bursts that read whatever window
+/// the user happens to have focused flake on that window's UIA tree size and its
+/// provider's responsiveness (3-node window ~= 10-30 ms under load; a starved
+/// Electron host stalled a 17-node read for 21 s and outlived the 10 s witness).
+/// The contention comparison (native call stats, post-stop latency) does not
+/// depend on the bursts' window identity, so determinism costs no signal.
 /// </summary>
 [Trait("Platform", "Windows")]
 public class WindowContextPrefetchAsrContentionTests
@@ -140,25 +151,26 @@ public class WindowContextPrefetchAsrContentionTests
     public async Task ListenStartBurstOverlappingRealStreaming_NoVisibleStarvation_AndBoundedPostStop()
     {
         if (!OperatingSystem.IsWindows()) return;
-        Assert.SkipUnless(ForegroundWindow.Handle() != IntPtr.Zero,
-            "no foreground window on this host — the real-burst contention evidence is not observable");
+        using var window = TestOwnedWindow.Create();
+        Assert.SkipUnless(window is not null,
+            "could not create the test-owned window in this session — the real-burst contention evidence is not observable");
         var layout = StreamingModelLayout.English;
         Assert.SkipUnless(layout.IsInstalled(ModelsRoot),
             $"Nemotron layout not installed under {ModelsRoot} — cannot drive the real worker");
 
-        // 2026-08-13 gate evidence on this host: the real-UIA/OCR bursts are
-        // load-sensitive — four of five gate runs at 1-min load >= 15 failed this
-        // fact's PrefetchCompleted guard (the third burst simply outlived its 10 s
-        // witness window) while the single run at load ~12 passed on identical code.
-        // One retry bounds that environment noise without touching any product
-        // budget; a real contention regression (July-scale native stalls) fails
-        // EVERY arm's guard deterministically, so the retry cannot launder it.
+        // 2026-08-13 gate evidence on this host: the bursts were load-sensitive WHEN
+        // they read the ambient foreground (the third burst outlived its 10 s witness
+        // 4 of 5 runs at load >= 15). The test-owned window makes burst cost
+        // deterministic; the retry below remains as a one-shot bound against
+        // unrelated environment noise — a real contention regression (July-scale
+        // native stalls) fails EVERY arm's guard deterministically, so the retry
+        // cannot launder it.
         const int maxAttempts = 2;
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
-                await RunScenarioAndAssertAsync();
+                await RunScenarioAndAssertAsync(window.Hwnd);
                 if (attempt > 1)
                     _log.WriteLine($"scenario passed on attempt {attempt}/{maxAttempts} — the earlier failure was environment noise, not a product regression.");
                 return;
@@ -170,10 +182,9 @@ public class WindowContextPrefetchAsrContentionTests
         }
     }
 
-    private async Task RunScenarioAndAssertAsync()
+    private async Task RunScenarioAndAssertAsync(IntPtr hwnd)
     {
         var layout = StreamingModelLayout.English;
-        var hwnd = ForegroundWindow.Handle();
         var audio = AmTone();
         using var engine = new WorkerProcessEngine(
             new ExeWorkerProcessFactory(HostPsi),

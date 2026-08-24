@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using Winpepper.Cleanup;
 using Winpepper.Corrections;
+using Winpepper.Platform.Tests.TestInfra;
 using Winpepper.Platform.WindowContext;
 using Xunit;
 
@@ -11,16 +12,26 @@ namespace Winpepper.Platform.Tests.WindowContext;
 
 // tbc0 Task 4 — Windows-real prefetch invariant. Drives a REAL WindowContextPrefetch
 // (real UiaTreeReader + real OcrFallback, composed exactly like
-// WindowContextPrefetch.CreateWindows does) against ForegroundWindow.Handle(), through the
-// real coordinator, sequencer, and CleanupRunner (EchoBackend). Excluded on Linux by both
-// the #if WINDOWS guard and the [Trait("Platform", "Windows")] (linux-tests.sh runs with
-// -notrait "Platform=Windows"); the windows-gate runs it for real on the gate machine.
+// WindowContextPrefetch.CreateWindows does) through the real coordinator, sequencer,
+// and CleanupRunner (EchoBackend). Excluded on Linux by both the #if WINDOWS guard
+// and the [Trait("Platform", "Windows")] (linux-tests.sh runs with -notrait
+// "Platform=Windows"); the windows-gate runs it for real on the gate machine.
 //
-// On a degenerate VM screen (empty UIA text, blank OCR) the prefetch still completes
-// quickly and ConsumedWindowContext == true holds; this is the brief's stated invariant
-// — "empty context is a valid real burst for timing purposes." Live end-to-end behaviour
-// and ASR contentions (native_max / native_over250) remain the owner's dictation-harness
-// readout — none exists here; stated plainly.
+// The read targets a TEST-OWNED window (TestInfra.TestOwnedWindow), not the host's
+// ambient foreground: 2026-08-13 + 2026-08-24 gate reds showed the ambient-foreground
+// version flakes on whichever window happens to be focused (read cost scales with
+// the focused window's UIA tree and its provider responsiveness: 3-node control
+// ~= 10-30 ms at 100% cpu; Chrome pages ~= 0.5-3 s; a starved Electron provider
+// once stalled a read for 21 s — see artifacts/read-probe/probe*.tsv). The owned
+// window is hidden off-screen, never activated, and holds a deterministic
+// sentinel-bearing EDIT child, so the read exercises the SAME real machinery in
+// tens of ms under any ambient load (guard: TestInfra.TestOwnedWindowTests).
+//
+// On a degenerate screen state the owned-window read still completes quickly and
+// ConsumedWindowContext == true holds; "empty context is a valid real burst for
+// timing purposes." Live end-to-end behaviour and ASR contentions (native_max /
+// native_over250) remain the owner's dictation-harness readout + the integration
+// contention fact — stated plainly.
 [Trait("Platform", "Windows")]
 public class WindowContextListenStartRealPrefetchTests
 {
@@ -83,6 +94,10 @@ public class WindowContextListenStartRealPrefetchTests
     // budget; a genuinely broken prefetch fails EVERY attempt, so the guard stays.
     private const int MaxMeasurementAttempts = 3;
 
+    // The deterministic real-read target, shared by both facts for the process
+    // lifetime (windows are destroyed with the test process).
+    private static readonly Lazy<TestOwnedWindow?> s_window = new(TestOwnedWindow.Create);
+
     private static readonly Lazy<Task<StopLaunchOutcome>> s_stopLaunch =
         new(InitializeStopLaunchAsync, LazyThreadSafetyMode.ExecutionAndPublication);
 
@@ -111,7 +126,7 @@ public class WindowContextListenStartRealPrefetchTests
             (hwnd, ct) => prefetch.StartAsync(hwnd, ct));
 
         coordinator.OnRecordingStart();
-        var hwnd = ForegroundWindow.Handle();
+        var hwnd = s_window.Value!.Hwnd;
 
         // Stopwatch around the prefetch's OWN completion — independent of the runner's
         // wait. After `await Task.Delay` and the runner call, the prefetch has very
@@ -153,7 +168,7 @@ public class WindowContextListenStartRealPrefetchTests
         var sequencer = new WindowContextListenStartSequencer(coordinator);
 
         coordinator.OnRecordingStart();
-        var hwnd = ForegroundWindow.Handle();
+        var hwnd = s_window.Value!.Hwnd;
         var handle = sequencer.RecordingStarted(startPrefetch: true, hwnd);
         handle.ShouldNotBeNull();
 
@@ -184,11 +199,10 @@ public class WindowContextListenStartRealPrefetchTests
     public async Task StopLaunchRegime_RealPrefetch_RealUiaOcr_ConsumedTrue()
     {
         if (!OperatingSystem.IsWindows()) return;
-        // Whole-branch review F1: with no observable foreground the real prefetch
-        // collapses to an instant Empty and the invariants pass vacuously — skip
-        // honestly so the gate log shows the evidence was NOT observable on this host.
-        Assert.SkipUnless(ForegroundWindow.Handle() != IntPtr.Zero,
-            "no foreground window on this host — the real-prefetch regime evidence is not observable");
+        // With no creatable test-owned window the real-prefetch evidence is not
+        // observable in this session — skip honestly so the gate log records it.
+        Assert.SkipUnless(s_window.Value is not null,
+            "could not create the test-owned window in this session — the real-prefetch regime evidence is not observable");
 
         var outcome = await s_stopLaunch.Value;
         _log.WriteLine(
@@ -202,8 +216,8 @@ public class WindowContextListenStartRealPrefetchTests
     public async Task ListenStartRegime_RealPrefetch_RealUiaOcr_ConsumedTrueAndNoLongerWait()
     {
         if (!OperatingSystem.IsWindows()) return;
-        Assert.SkipUnless(ForegroundWindow.Handle() != IntPtr.Zero,
-            "no foreground window on this host — the real-prefetch regime evidence is not observable");
+        Assert.SkipUnless(s_window.Value is not null,
+            "could not create the test-owned window in this session — the real-prefetch regime evidence is not observable");
 
         // Reuse the cached stop-launch outcome to schedule the head-start delay (350ms +
         // the real prefetch duration) and to compare the two measured waits.
@@ -211,10 +225,6 @@ public class WindowContextListenStartRealPrefetchTests
         // No defensive skip here: the invariants below hold even if stop-launch's
         // prefetch exceeded its 2s budget — the listen-start regime launches strictly
         // earlier so the prefetch has had strictly more time to complete before cleanup.
-        // Stated plainly: on every real foreground that doesn't move the floor further
-        // out, consumed=true and wait<=stopLaunch.Wait both hold. If the gate foreground
-        // turns out pathological (prefetch > 10s), this test surfaces the failure
-        // honestly instead of swallowing it.
         var prefetchDurationMs = Math.Max(0, stopLaunch.PrefetchDurationMs);
         var stopLaunchWaitMs = stopLaunch.WaitMs;
 

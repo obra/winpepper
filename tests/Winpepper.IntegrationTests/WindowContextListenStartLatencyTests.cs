@@ -57,22 +57,27 @@ public class WindowContextListenStartLatencyTests
 
     // 1) stop-launch regime (TODAY's behaviour): no launch at "listen-start",
     //    launch the context task AT stop, ASR finishes 350 ms later, runner waits
-    //    the ~350 ms remainder. measured WindowContextWaitMs in [250, 1500].
+    //    the ~1150 ms remainder. measured WindowContextWaitMs in [250, 1500].
+    //    (2026-08-24: prefetch task widened 700->1500 ms — with 700 ms the
+    //    [250, 1500] window broke whenever the middle Task.Delay(350) overshot
+    //    by >=450 ms at the gate host's sustained 100% cpu; 1500 ms tolerates
+    //    ~900 ms of slippage while keeping every asserted bound identical.
+    //    See test #3's comment for the observed flip.)
     [Fact]
     public async Task StopLaunchRegime_PrefetchOutlivesAsrFinish_CleanupWaitsTheRemainder()
     {
         var coordinator = new WindowContextPrefetchCoordinator((hwnd, ct) =>
             Task.Run(async () =>
             {
-                await Task.Delay(700, ct);
+                await Task.Delay(1500, ct);
                 return WindowContextResult.FromUia(new string('x', 400));
             }, ct));
 
         // "listen-start": no launch in this regime.
         coordinator.OnRecordingStart();
 
-        // "stop": launch the 700 ms context task via the coordinator, then let
-        // streaming finish (350 ms). At cleanup start the prefetch has ~350 ms
+        // "stop": launch the 1500 ms context task via the coordinator, then let
+        // streaming finish (350 ms). At cleanup start the prefetch has ~1150 ms
         // of work remaining.
         var handle = coordinator.Start(new IntPtr(42));
         await Task.Delay(350);
@@ -147,27 +152,37 @@ public class WindowContextListenStartLatencyTests
         result.WindowContextWaitMs!.Value.ShouldBeLessThan(250);
     }
 
-    // 3) stop-launch + fast finish + tight budget: 700 ms context task launched
-    //    at "stop", 350 ms streaming finish (≈350 ms of prefetch work remains),
+    // 3) stop-launch + fast finish + tight budget: 4000 ms context task launched
+    //    at "stop", 350 ms streaming finish (≈3650 ms of prefetch work remains),
     //    WindowContextWait budget = 200 ms — the budget EXPIRES before the
-    //    remainder (200 < 350), so the runner drops the context. consumed == false;
+    //    remainder (200 < 3650), so the runner drops the context. consumed == false;
     //    measured WindowContextWaitMs in [150, 1200] (the budget bound, plus
-    //    scheduler tolerance). (A 400 ms budget would CONSUME here — 400 > 350 —
+    //    scheduler tolerance). (A 400 ms budget would CONSUME here — 400 > 350-ish —
     //    verified arithmetic; 200 ms is what actually exercises the drop branch.)
+    //
+    //    2026-08-24: the margin was widened from 700->4000 ms. With a 700 ms task
+    //    the intended "~350 ms remains at cleanup start" depended on the middle
+    //    Task.Delay(350) waking on schedule; under the gate host's sustained
+    //    100% cpu that sleep overshot by >=150 ms, the remainder shrank below the
+    //    200 ms budget, and the fact flopped to consumed==true (observed gate
+    //    red). A 4000 ms task tolerates ~3.6 s of scheduler slippage — far beyond
+    //    anything a multi-second test leg can produce — and costs no wall time:
+    //    the runner's 200 ms budget still bounds this fact, the abandoned tail
+    //    task simply completes in the process background afterwards.
     [Fact]
     public async Task StopLaunchRegime_FastFinish_DropsContextAfterBudget()
     {
         var coordinator = new WindowContextPrefetchCoordinator((hwnd, ct) =>
             Task.Run(async () =>
             {
-                await Task.Delay(700, ct);
+                await Task.Delay(4000, ct);
                 return WindowContextResult.FromUia(new string('x', 400));
             }, ct));
 
         coordinator.OnRecordingStart();
 
-        // "stop": launch the 700 ms context task, let streaming finish 350 ms
-        // later; ~350 ms of prefetch work remains at cleanup start.
+        // "stop": launch the 4000 ms context task, let streaming finish 350 ms
+        // later; ≈3650 ms of prefetch work remains at cleanup start.
         var handle = coordinator.Start(new IntPtr(42));
         await Task.Delay(350);
 

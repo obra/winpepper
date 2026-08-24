@@ -28,4 +28,9 @@
          as a child process — same inclusion mechanism Winpepper.Asr.Tests uses. -->
     <ProjectReference Include="..\TranscribeWorkerHost\TranscribeWorkerHost.csproj" />
   </ItemGroup>
+  <ItemGroup Condition="'$(TargetFramework)' == 'net9.0-windows10.0.19041.0'">
+    <!-- Shared test-owned window for the real-UIA burst test (deterministic
+         read cost, no ambient-foreground dependence; windows TFM only). -->
+    <Compile Include="..\Winpepper.Platform.Tests\TestInfra\TestOwnedWindow.cs" Link="TestInfra\TestOwnedWindow.cs" />
+  </ItemGroup>
 </Project>

@@ -244,6 +244,30 @@
          per-user package; the install location is fixed by convention. -->
     <ui:WixUI Id="WixUI_Minimal" />
 
+    <!-- Launch-on-finish. A fresh MSI install must land the user in first-run
+         onboarding (AppShell shows it whenever Settings.OnboardingCompleted is
+         false), so the exit dialog offers a "Launch Winpepper" checkbox,
+         checked by default. WixShellExec (WixToolset.Util.wixext, binary id
+         Wix4UtilCA_X64 for the NetFx-era prefix the v5 wixlib still uses)
+         ShellExecutes the just-installed exe impersonated — as the installing
+         user, never elevated. No launch args: the Run key's tray switch is
+         for logon; the install-finish path must show the window so onboarding
+         appears. Return="ignore": a failed ShellExecute must not turn the
+         success exit dialog into an error. Never fires on silent (/qn)
+         installs or maintenance — there is no ExitDialog without full UI,
+         and NOT Installed gates repair/modify. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Winpepper" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <Property Id="WixShellExecTarget" Value="[#WinpepperExe]" />
+    <CustomAction Id="LaunchWinpepper"
+                  BinaryRef="Wix4UtilCA_X64"
+                  DllEntry="WixShellExec"
+                  Impersonate="yes"
+                  Return="ignore" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchWinpepper" Order="1" Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+    </UI>
+
     <!-- Real Apache-2.0 license text for WixUI_Minimal's combined welcome/EULA dialog;
          without this override WiX shows its lorem-ipsum placeholder.
          Path is relative to the project directory (packaging/), same as the

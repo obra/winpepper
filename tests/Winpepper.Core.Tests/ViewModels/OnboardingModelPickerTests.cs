@@ -93,6 +93,36 @@ public sealed class OnboardingModelPickerTests
     }
 
     [Fact]
+    public async Task Advance_CleanupModelOptedIn_TurnsCleanupEnabledOn()
+    {
+        // 2026-08-24: cleanup is opt-in by default. Choosing the cleanup MODEL
+        // in onboarding is the opt-in gesture — it must also switch the feature
+        // on, otherwise on-first-use users would download a model that never runs.
+        var (vm, prov, writer, _) = CreateAtDownloadStep();
+        vm.CleanupModelSelected = true;
+
+        await vm.AdvanceAsync();
+
+        prov.Starts[0].Names.ShouldContain("qwen2.5-0.5b-instruct-q4_k_m");
+        var s = writer.Applied(new AppSettings());
+        s.OnboardingCleanupModelChosen.ShouldBeTrue();
+        s.CleanupEnabled.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task Advance_CleanupModelNotChosen_LeavesCleanupEnabledAsPersisted()
+    {
+        var (vm, _, writer, _) = CreateAtDownloadStep();
+
+        await vm.AdvanceAsync();
+
+        // Fresh default stays opt-in-off...
+        writer.Applied(new AppSettings()).CleanupEnabled.ShouldBeFalse();
+        // ...and an earlier explicit opt-in is never stripped by onboarding.
+        writer.Applied(new AppSettings { CleanupEnabled = true }).CleanupEnabled.ShouldBeTrue();
+    }
+
+    [Fact]
     public async Task TestDictation_GatesOnSpeechVerifiedAndPipelineStart()
     {
         var (vm, prov, _, pipelineStarts) = CreateAtDownloadStep();

@@ -19,12 +19,20 @@ public static class SelectedModelsPolicy
     /// choice only counts while cleanup is enabled (change 4's gate): a
     /// disabled feature's model is not "selected" for download purposes.
     /// Null slots (no selection in that combo) are skipped.
+    ///
+    /// The backup-ASR choice counts only when <paramref name="backupAsrOptedIn"/>
+    /// or the backup is already installed: on a fresh install the page SEEDS
+    /// the combo to the default backup name without any user action
+    /// (2026-08-24 minimal footprint), and a combo seed is not consent — one
+    /// click on "Download selected models" must not pull the ~670 MB backup.
+    /// Installed backups stay selected so the button keeps its re-verify/repair
+    /// role for them.
     /// </summary>
     public static IReadOnlyList<SelectedModel> BuildSelection(
-        SelectedModel? asr, SelectedModel? streaming, SelectedModel? cleanup, bool cleanupEnabled)
+        SelectedModel? asr, bool backupAsrOptedIn, SelectedModel? streaming, SelectedModel? cleanup, bool cleanupEnabled)
     {
         var selection = new List<SelectedModel>(3);
-        if (asr is { } a) selection.Add(a);
+        if (asr is { } a && (backupAsrOptedIn || a.IsInstalled)) selection.Add(a);
         if (streaming is { } s) selection.Add(s);
         if (cleanupEnabled && cleanup is { } c) selection.Add(c);
         return selection;

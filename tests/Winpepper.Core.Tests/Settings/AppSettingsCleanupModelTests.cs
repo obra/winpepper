@@ -26,7 +26,7 @@ public class AppSettingsCleanupModelTests
     public void Defaults_Include_Cleanup_Llm_Settings()
     {
         var s = new AppSettings();
-        s.CleanupEnabled.ShouldBeTrue();
+        s.CleanupEnabled.ShouldBeFalse(); // 2026-08-24: opt-in (minimal-footprint default)
         s.CleanupWindowContextEnabled.ShouldBeFalse();
         s.CleanupProfile.ShouldBe("Ordinary");
         s.CleanupCustomPrompt.ShouldBe("");

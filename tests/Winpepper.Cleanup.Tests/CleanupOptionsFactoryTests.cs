@@ -41,7 +41,7 @@ public class CleanupOptionsFactoryTests
     {
         var opts = CleanupOptionsFactory.FromSettings(new AppSettings());
 
-        opts.Enabled.ShouldBeTrue();
+        opts.Enabled.ShouldBeFalse(); // 2026-08-24: cleanup LLM is opt-in (minimal-footprint default)
         opts.WindowContextEnabled.ShouldBeFalse();
         opts.Profile.ShouldBe(CleanupProfile.Ordinary);
         opts.MaxNewTokensCap.ShouldBe(512);

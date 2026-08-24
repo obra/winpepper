@@ -21,6 +21,12 @@ public sealed partial class ModelsPage : Page
     // in flight, so the streaming state line can honestly say "Installing…".
     private bool _downloadRunIncludesStreaming;
     private bool _asrSelectedVerified;
+    // 2026-08-24 minimal footprint: the not-installed backup ASR joins the
+    // one-click download scope only after the user touches its combo. The async
+    // seeding assignment fires OnAsrChanged synchronously, so consent is keyed
+    // off events that arrive after the seed landed.
+    private bool _asrSeedApplied;
+    private bool _asrBackupOptedIn;
     private CancellationTokenSource? _lifetimeCts;
     private EventHandler<StreamingAutoInstallStatus>? _autoInstallStatusChanged;
     private System.ComponentModel.PropertyChangedEventHandler? _cleanupVmChanged;
@@ -76,6 +82,12 @@ public sealed partial class ModelsPage : Page
         AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
         StreamingCombo.SelectedItem = ViewModel.StreamingCard.SelectedDescriptor;
+        // The seeding above synchronously fires OnAsrChanged — that is NOT a
+        // user opt-in. Only SelectionChanged events raised after this flag
+        // flips (i.e. the user actually touched the combo) opt the not-installed
+        // backup ASR into the one-click download scope (2026-08-24 minimal
+        // footprint; see SelectedModelsPolicy.BuildSelection).
+        _asrSeedApplied = true;
 
         // Cleanup gate: seed from the shell's live cleanup view-model (the
         // page is rebuilt per navigation, so this re-seed alone covers the
@@ -128,6 +140,7 @@ public sealed partial class ModelsPage : Page
     {
         if (AsrCombo.SelectedItem is ModelDescriptor d)
         {
+            if (_asrSeedApplied) _asrBackupOptedIn = true;
             ViewModel.AsrCard.SelectedName = d.Name;
             ViewModel.AsrCard.CommitSelection();
             UpdateInstalledLabels();
@@ -404,7 +417,7 @@ public sealed partial class ModelsPage : Page
         SelectedModelsPolicy.SelectedModel? cleanup = ViewModel.CleanupCard.SelectedDescriptor is { } c
             ? new(c.Name, ViewModel.CleanupCard.IsSelectedInstalled, c.ManualInstallOnly) : null;
 
-        return SelectedModelsPolicy.BuildSelection(asr, streaming, cleanup, _cleanupEnabled);
+        return SelectedModelsPolicy.BuildSelection(asr, _asrBackupOptedIn, streaming, cleanup, _cleanupEnabled);
     }
 
     /// <summary>

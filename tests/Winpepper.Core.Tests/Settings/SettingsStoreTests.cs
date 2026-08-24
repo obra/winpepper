@@ -134,6 +134,11 @@ public class SettingsStoreTests : IDisposable
         // settings existed (real old-shape serialized output — camelCase, no
         // cleanup* keys). Loading it must fill all six cleanup fields with
         // their defaults, not throw and not zero them out.
+        // 2026-08-24: the defaults changed to the minimal-footprint set
+        // (cleanup LLM opt-in). An unpersisted cleanup key follows the CURRENT
+        // default, so these pre-upgrade files now resolve CleanupEnabled=false
+        // — continuous with a fresh install. Files that ever persisted an
+        // explicit choice still carry it.
         File.WriteAllText(_path, """
             {
               "schema": 1,
@@ -161,7 +166,7 @@ public class SettingsStoreTests : IDisposable
 
         var s = new SettingsStore(_path).Load();
 
-        s.CleanupEnabled.ShouldBeTrue();
+        s.CleanupEnabled.ShouldBeFalse(); // current default: opt-in
         s.CleanupWindowContextEnabled.ShouldBeFalse();
         s.CleanupProfile.ShouldBe("Ordinary");
         s.CleanupCustomPrompt.ShouldBe("");

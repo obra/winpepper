@@ -47,4 +47,17 @@ public sealed class AppSettingsDefaultsTests
         new AppSettings().InjectionChannels.ShouldBe(
             new[] { "emReplaceSel", "wmCharSmto", "vkPacket" });
     }
+
+    [Fact]
+    public void Defaults_Cleanup_IsOptIn()
+    {
+        // 2026-08-24 minimal-footprint default: a fresh install downloads and
+        // loads ONLY the streaming speech model (~756 MB). The backup ASR and
+        // the cleanup LLM are opt-in (onboarding checkboxes, Cleanup tab
+        // toggle), so cleanup boots OFF when no choice was ever persisted.
+        // Existing settings files carry cleanupEnabled=true and are unaffected.
+        var s = new AppSettings();
+        s.CleanupEnabled.ShouldBeFalse();
+        Winpepper.Core.ViewModels.CleanupSettingsContract.Defaults().Enabled.ShouldBeFalse();
+    }
 }

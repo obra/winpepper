@@ -328,7 +328,7 @@ public class DebouncedSettingsWriterTests : IDisposable
         var log = new ListLogger();
         using var writer = new DebouncedSettingsWriter(store, TimeSpan.FromSeconds(30), log);
 
-        await writer.QueueAndFlushAsync(s => s with { MicDeviceId = "dev-a", CleanupEnabled = false });
+        await writer.QueueAndFlushAsync(s => s with { MicDeviceId = "dev-a", CleanupEnabled = true });
 
         var line = log.Lines.ShouldHaveSingleItem();
         line.ShouldStartWith("Information:");

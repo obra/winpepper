@@ -1,4 +1,5 @@
 #if WINDOWS
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.Runtime.InteropServices.WindowsRuntime;
@@ -19,6 +20,59 @@ public sealed class OcrFallback
     private readonly ILogger<OcrFallback> _log;
 
     public OcrFallback(ILogger<OcrFallback> log) { _log = log; }
+
+    private static int s_prewarmStarted;
+
+    /// <summary>
+    /// Fire-and-forget one-time pre-warm of the WinRT OCR stack. In a fresh
+    /// process the first real <c>RecognizeAsync</c> pays ~6.6 s of OCR model
+    /// init (2026-08-24 probe of the gate host: cold 6646 ms, warm 15-25 ms);
+    /// a dictation into a low-UIA-text window would otherwise eat that inside
+    /// the 500 ms production context window and silently lose the context.
+    /// Runs the whole pipeline (engine create + a dummy recognize on a blank
+    /// bitmap) off a background thread at app start, so real dictations later
+    /// in the session only ever see warm cost.
+    ///
+    /// Gated on availability: when the user's profile has no OCR-enabled
+    /// language installed (OCR languages drive both this engine and the screen
+    /// reader's), <c>TryCreateFromUserProfileLanguages</c> returns null and the
+    /// warm-up skips. Failures are silent (Debug only), matching the class's
+    /// spec §9.1 posture. Single-flight: repeated calls are no-ops.
+    /// </summary>
+    public static void BeginPrewarm(ILogger<OcrFallback> log)
+    {
+        if (Interlocked.Exchange(ref s_prewarmStarted, 1) != 0) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var sw = Stopwatch.StartNew();
+                var engine = OcrEngine.TryCreateFromUserProfileLanguages();
+                if (engine is null)
+                {
+                    log.LogDebug("OCR pre-warm skipped: no OCR languages installed for this user profile");
+                    return;
+                }
+
+                var blank = new SoftwareBitmap(BitmapPixelFormat.Bgra8, 640, 480);
+                try
+                {
+                    // Token-less AsTask for the same CsWinRT reason as the real
+                    // capture path below; nothing to cancel here.
+                    _ = await engine.RecognizeAsync(blank).AsTask();
+                }
+                finally
+                {
+                    blank.Dispose();
+                }
+                log.LogDebug("OCR engine pre-warmed in {Ms}ms", sw.ElapsedMilliseconds);
+            }
+            catch (Exception ex)
+            {
+                log.LogDebug(ex, "OCR pre-warm failed (non-fatal)");
+            }
+        });
+    }
 
     public async Task<WindowContextResult> CaptureAsync(IntPtr foregroundHwnd, CancellationToken ct)
     {

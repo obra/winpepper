@@ -18,7 +18,7 @@ public sealed record CleanupSettingsContract(
     int TimeoutMs)
 {
     public static CleanupSettingsContract Defaults() =>
-        new(Enabled: true, WindowContextEnabled: false,
+        new(Enabled: false, WindowContextEnabled: false,
             Profile: "Ordinary", CustomPrompt: "",
             MaxNewTokens: 512, TimeoutMs: 15000);
 

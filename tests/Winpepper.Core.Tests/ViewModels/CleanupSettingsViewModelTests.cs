@@ -11,7 +11,7 @@ public class CleanupSettingsViewModelTests
     public void Defaults_Map_From_Contract()
     {
         var vm = new CleanupSettingsViewModel(CleanupSettingsContract.Defaults(), _ => { });
-        vm.Enabled.ShouldBeTrue();
+        vm.Enabled.ShouldBeFalse(); // 2026-08-24: cleanup LLM is opt-in
         vm.WindowContextEnabled.ShouldBeFalse();
         vm.Profile.ShouldBe("Ordinary");
         vm.MaxNewTokens.ShouldBe(512);
@@ -55,7 +55,7 @@ public class CleanupSettingsViewModelTests
     {
         var calls = 0;
         var vm = new CleanupSettingsViewModel(CleanupSettingsContract.Defaults(), _ => calls++);
-        vm.Enabled = false;
+        vm.Enabled = true; // a real change: the default is now False (opt-in, 2026-08-24)
         calls.ShouldBe(1);
     }
 

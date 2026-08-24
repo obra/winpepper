@@ -251,6 +251,11 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged, IDisposable
                     StreamingModelName = SelectedSpeechModelName,
                     OnboardingBackupModelChosen = _backupModelSelected,
                     OnboardingCleanupModelChosen = _cleanupModelSelected,
+                    // Opting into the cleanup MODEL here is the user's opt-in
+                    // gesture for the feature itself (cleanup is off by default
+                    // since 2026-08-24). Only ever turns it ON — an earlier
+                    // explicit choice is never stripped.
+                    CleanupEnabled = _cleanupModelSelected ? true : s.CleanupEnabled,
                 });
                 _modelProvisioner.StartDownloads(BuildDownloadNames(), SelectedSpeechModelName);
                 Step = OnboardingStep.TestDictation; // advance immediately; downloads continue in the background

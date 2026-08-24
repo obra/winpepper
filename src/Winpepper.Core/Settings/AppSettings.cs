@@ -69,7 +69,11 @@ public record AppSettings
     // Cleanup LLM settings (Cleanup tab). Persisted here and read LIVE per
     // dictation by PipelineHost, so a toggle flip takes effect on the very next
     // dictation. Defaults mirror CleanupSettingsContract.Defaults().
-    public bool CleanupEnabled { get; init; } = true;
+    // 2026-08-24: CleanupEnabled default flipped to OFF — the minimal-footprint
+    // setup path downloads and loads only the streaming speech model; the
+    // cleanup LLM (and the backup ASR) are opt-in via the onboarding checkboxes
+    // and the Cleanup tab. Files that ever persisted an explicit choice keep it.
+    public bool CleanupEnabled { get; init; } = false;
     public bool CleanupWindowContextEnabled { get; init; } = false;
     public string CleanupProfile { get; init; } = "Ordinary"; // "Ordinary" | "Literal" | "Custom"
     public string CleanupCustomPrompt { get; init; } = "";

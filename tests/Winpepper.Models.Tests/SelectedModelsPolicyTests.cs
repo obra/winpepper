@@ -14,6 +14,7 @@ public class SelectedModelsPolicyTests
     {
         var selection = SelectedModelsPolicy.BuildSelection(
             asr: Model("asr-a", installed: true),
+            backupAsrOptedIn: true,
             streaming: Model("stream-a", installed: false),
             cleanup: Model("clean-a", installed: false),
             cleanupEnabled: true);
@@ -29,6 +30,7 @@ public class SelectedModelsPolicyTests
     {
         var selection = SelectedModelsPolicy.BuildSelection(
             asr: Model("asr-a", installed: true),
+            backupAsrOptedIn: true,
             streaming: Model("stream-a", installed: false),
             cleanup: Model("clean-a", installed: false),
             cleanupEnabled: false);
@@ -41,9 +43,55 @@ public class SelectedModelsPolicyTests
     public void BuildSelection_Skips_Null_Slots()
     {
         var selection = SelectedModelsPolicy.BuildSelection(
-            asr: null, streaming: null, cleanup: null, cleanupEnabled: true);
+            asr: null, backupAsrOptedIn: true, streaming: null, cleanup: null, cleanupEnabled: true);
 
         selection.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void BuildSelection_BackupAsr_NotInstalled_And_NotOptedIn_IsExcluded()
+    {
+        // 2026-08-24 minimal-footprint default: a fresh install's ASR combo is
+        // seeded to the backup default without the user ever choosing it, and
+        // its files are absent. A combo seed is not consent — one click on
+        // "Download selected models" must not pull the ~670 MB backup.
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed: false),
+            backupAsrOptedIn: false,
+            streaming: Model("stream-a", installed: true),
+            cleanup: null,
+            cleanupEnabled: true);
+
+        selection.ShouldAllBe(m => m.Name != "asr-a"); // backup excluded
+        selection.Select(m => m.Name).ShouldBe(new[] { "stream-a" }); // installed choice stays visible
+        SelectedModelsPolicy.DownloadableMissingNames(selection).ShouldBeEmpty();
+        SelectedModelsPolicy.DownloadButtonEnabled(selection).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void BuildSelection_BackupAsr_NotInstalled_ButOptedIn_IsIncluded()
+    {
+        // The user deliberately changed the ASR combo — that is the opt-in
+        // gesture for the backup model's download scope.
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed: false),
+            backupAsrOptedIn: true,
+            streaming: null, cleanup: null, cleanupEnabled: true);
+
+        SelectedModelsPolicy.DownloadableMissingNames(selection).ShouldBe(new[] { "asr-a" });
+    }
+
+    [Fact]
+    public void BuildSelection_BackupAsr_Installed_IsIncluded_RegardlessOfOptIn()
+    {
+        // Installed selections keep their re-verify/repair download semantics.
+        var selection = SelectedModelsPolicy.BuildSelection(
+            asr: Model("asr-a", installed: true),
+            backupAsrOptedIn: false,
+            streaming: null, cleanup: null, cleanupEnabled: true);
+
+        selection.Count.ShouldBe(1);
+        selection[0].Name.ShouldBe("asr-a");
     }
 
     [Fact]
@@ -51,6 +99,7 @@ public class SelectedModelsPolicyTests
     {
         var selection = SelectedModelsPolicy.BuildSelection(
             asr: Model("asr-a", installed: true),
+            backupAsrOptedIn: true,
             streaming: Model("stream-a", installed: false),
             cleanup: Model("clean-a", installed: false),
             cleanupEnabled: true);
@@ -64,6 +113,7 @@ public class SelectedModelsPolicyTests
     {
         var selection = SelectedModelsPolicy.BuildSelection(
             asr: Model("asr-a", installed: false),
+            backupAsrOptedIn: true,
             streaming: null,
             cleanup: Model("sotto", installed: false, manual: true),
             cleanupEnabled: true);
@@ -78,6 +128,7 @@ public class SelectedModelsPolicyTests
         // Two dropdowns pointing at the same registry entry must not download it twice.
         var selection = SelectedModelsPolicy.BuildSelection(
             asr: Model("same", installed: false),
+            backupAsrOptedIn: true,
             streaming: Model("same", installed: false),
             cleanup: null,
             cleanupEnabled: true);
@@ -91,6 +142,7 @@ public class SelectedModelsPolicyTests
     {
         var selection = SelectedModelsPolicy.BuildSelection(
             asr: Model("asr-a", installed: true),
+            backupAsrOptedIn: true,
             streaming: null,
             cleanup: Model("sotto", installed: false, manual: true),
             cleanupEnabled: true);
@@ -105,6 +157,7 @@ public class SelectedModelsPolicyTests
         // An installed manual model needs no note and no download.
         var selection = SelectedModelsPolicy.BuildSelection(
             asr: Model("asr-a", installed: true),
+            backupAsrOptedIn: true,
             streaming: null,
             cleanup: Model("sotto", installed: true, manual: true),
             cleanupEnabled: true);
@@ -121,6 +174,7 @@ public class SelectedModelsPolicyTests
     {
         var selection = SelectedModelsPolicy.BuildSelection(
             asr: Model("asr-a", installed, manual),
+            backupAsrOptedIn: true,
             streaming: null, cleanup: null, cleanupEnabled: true);
 
         SelectedModelsPolicy.DownloadButtonEnabled(selection).ShouldBe(expected);

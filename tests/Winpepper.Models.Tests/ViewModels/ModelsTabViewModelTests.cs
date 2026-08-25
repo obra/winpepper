@@ -15,6 +15,23 @@ public class ModelsTabViewModelTests : IDisposable
     public void Dispose() { if (Directory.Exists(_root)) Directory.Delete(_root, recursive: true); }
 
     [Fact]
+    public void Initialize_EmptyAsrName_MeansNone_SelectedDescriptorNull()
+    {
+        // 2026-08-25: "" (the fresh-install default) selects no backup model —
+        // the page renders its "None" entry and the selection policy sees a
+        // null slot (so one-click download pulls nothing for the backup card).
+        var registry = new ModelRegistry();
+        var vm = new ModelsTabViewModel(registry, _root, new FakeDownloader(),
+            currentAsrName: "",
+            currentCleanupName: "qwen2.5-0.5b-instruct-q4_k_m",
+            currentStreamingName: ModelRegistry.StreamingAsrName,
+            promoteAsr: _ => { }, promoteCleanup: _ => { }, promoteStreaming: _ => { });
+
+        vm.AsrCard.SelectedDescriptor.ShouldBeNull();
+        vm.AsrCard.IsSelectedInstalled.ShouldBeFalse();
+    }
+
+    [Fact]
     public void Initialize_BuildsOneCardPerKind()
     {
         var registry = new ModelRegistry();

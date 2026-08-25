@@ -26,7 +26,7 @@ public class SettingsStoreTests : IDisposable
         var s = store.Load();
         s.Schema.ShouldBe(1);
         s.MicDeviceId.ShouldBe("");
-        s.AsrModelName.ShouldBe("parakeet-tdt-0.6b-v3");
+        s.AsrModelName.ShouldBe(""); // 2026-08-25: None by default (minimal footprint)
         s.PlaySounds.ShouldBeTrue();
     }
 

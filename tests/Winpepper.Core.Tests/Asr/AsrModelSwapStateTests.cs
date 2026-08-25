@@ -49,6 +49,36 @@ public class AsrModelSwapStateTests
     }
 
     [Fact]
+    public void MarkUnloaded_ClearsLoadedName_KeepsGeneration()
+    {
+        // 2026-08-25 "None" backup selection: when the user deselects the
+        // backup model mid-session (or boots with None), PipelineHost disposes
+        // the loaded session itself; the swap state must then report
+        // "nothing loaded" so a LATER re-selection plans Load (not KeepCurrent
+        // against a session that no longer exists).
+        var state = new AsrModelSwapState();
+        state.CommitLoad("parakeet-tdt-0.6b-v3");
+
+        state.MarkUnloaded();
+
+        state.LoadedModelName.ShouldBeNull();
+        state.Generation.ShouldBe(1);
+    }
+
+    [Fact]
+    public void Plan_AfterMarkUnloaded_DesiredPresent_ReturnsLoad_NotKeepCurrent()
+    {
+        var state = new AsrModelSwapState();
+        state.CommitLoad("parakeet-tdt-0.6b-v3");
+        state.MarkUnloaded();
+
+        state.Plan("parakeet-tdt-0.6b-v2", desiredFilesPresent: true)
+             .ShouldBe(AsrSwapAction.Load);
+        state.Plan("parakeet-tdt-0.6b-v3", desiredFilesPresent: true)
+             .ShouldBe(AsrSwapAction.Load); // same name, but the session is gone
+    }
+
+    [Fact]
     public void Plan_SameModelLoaded_ReturnsKeepCurrent()
     {
         var state = new AsrModelSwapState();

@@ -307,6 +307,25 @@ public sealed class PipelineHost : IDisposable
         lock (_startGate)
         {
             var desired = _resolveAsrModelName(_desiredAsrModel());
+            if (string.IsNullOrEmpty(desired))
+            {
+                // "None" backup (2026-08-25 minimal footprint): run primary-only.
+                // If a backup session is currently loaded (the user switched to
+                // None mid-session), release it now — and teach the swap state
+                // that nothing is held, or a later re-selection of the SAME name
+                // would Plan KeepCurrent against a disposed session.
+                if (_asr is not null)
+                {
+                    _log.LogInformation("backup ASR deselected (None) — unloading session {Model}",
+                        _asrSwap.LoadedModelName);
+                    var old = _asr;
+                    _asr = null;
+                    _asrSwap.MarkUnloaded();
+                    _orphanGuard.RunOrDefer(old.Dispose);
+                }
+            }
+            else
+            {
             var desiredDir = _resolveModelDir(desired);
             var ready = _isAsrModelReady(desired);
             var action = _asrSwap.Plan(desired, ready);
@@ -350,6 +369,7 @@ public sealed class PipelineHost : IDisposable
                         // keep-old-on-failure; fall through to primary check
                     }
                     break;
+            }
             }
 
             // A LOCAL dictation needs at least one of: primary streaming model

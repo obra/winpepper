@@ -256,6 +256,12 @@ public sealed class OnboardingViewModel : INotifyPropertyChanged, IDisposable
                     // since 2026-08-24). Only ever turns it ON — an earlier
                     // explicit choice is never stripped.
                     CleanupEnabled = _cleanupModelSelected ? true : s.CleanupEnabled,
+                    // Same for the backup ASR (2026-08-25): its active-name
+                    // default is None, so choosing the backup MODEL must point
+                    // AsrModelName at it or the user downloads files that never
+                    // run. Only ever sets it; a declined backup leaves prior
+                    // choices intact.
+                    AsrModelName = _backupModelSelected ? _catalog.BackupName : s.AsrModelName,
                 });
                 _modelProvisioner.StartDownloads(BuildDownloadNames(), SelectedSpeechModelName);
                 Step = OnboardingStep.TestDictation; // advance immediately; downloads continue in the background

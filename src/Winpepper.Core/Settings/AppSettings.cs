@@ -11,8 +11,14 @@ public record AppSettings
     // Audio
     public string MicDeviceId { get; init; } = "";
 
-    // ASR
-    public string AsrModelName { get; init; } = "parakeet-tdt-0.6b-v3";
+    // ASR (the backup/batch fallback family). "" = None (2026-08-25
+    // minimal-footprint default): no backup is selected, downloaded, or
+    // loaded — the streaming model runs primary-only and the Models tab's
+    // backup combo shows "None". Recognized names resolve through
+    // ModelRegistry.ResolveOrDefault, which still names parakeet as the repair
+    // default for unknown NON-EMPTY persisted values; settings files written
+    // before this change carry the prior parakeet default and keep their backup.
+    public string AsrModelName { get; init; } = "";
 
     // Primary local speech model (StreamingAsr kind). Streams while you speak
     // when StreamingEnabled; serves batch otherwise. Missing/unknown values

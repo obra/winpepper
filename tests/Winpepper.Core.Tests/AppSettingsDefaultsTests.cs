@@ -60,4 +60,16 @@ public sealed class AppSettingsDefaultsTests
         s.CleanupEnabled.ShouldBeFalse();
         Winpepper.Core.ViewModels.CleanupSettingsContract.Defaults().Enabled.ShouldBeFalse();
     }
+
+    [Fact]
+    public void Defaults_BackupAsr_IsNone()
+    {
+        // 2026-08-25: "" means None — no backup model is selected, downloaded,
+        // or loaded; the streaming model runs primary-only (the Models tab's
+        // backup combo shows its "None" entry). ModelRegistry.ResolveOrDefault
+        // still names parakeet as the REPAIR default for unknown non-empty
+        // persisted values; and settings files from before this change carry
+        // the old parakeet default explicitly, so they keep their backup.
+        new AppSettings().AsrModelName.ShouldBe("");
+    }
 }

@@ -203,7 +203,7 @@ for entry in "${RUNS[@]}"; do
   echo "  running $proj ($tfm) ..."
   rc=0
   run_ps_reliable "$TEST_TIMEOUT" "$log" \
-    "Set-Location '$dll_dir'; dotnet exec '$dll_dir\\$proj.dll'" || rc=$?
+    "Set-Location '$dll_dir'; \$env:WINPEPPER_PIN_TIMING_HOST='1'; dotnet exec '$dll_dir\\$proj.dll'" || rc=$?
   line="$(grep -E 'Total:.*Errors:.*Failed:' "$log" | tail -1 | tr -d '\r' || true)"
   total="$(grep -oE 'Total: *[0-9]+' <<<"$line" | grep -oE '[0-9]+' || echo 0)"
   grand_total=$((grand_total + total))

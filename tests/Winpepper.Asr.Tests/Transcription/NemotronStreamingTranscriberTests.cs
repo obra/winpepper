@@ -394,19 +394,35 @@ public class NemotronStreamingTranscriberTests
         // The fake's BeginStream blocks 600 ms and reports that the ENTIRE
         // 600 ms was compute-gate wait. With B4, native stats must see ~0 ms
         // for stream begin: no over-250 entry, native_max well under 250.
-        var engine = new FakeTranscribeCppEngine
+        //
+        // Machine-noise immunity (2026-08-24): VM/CI noise can DELAY a thread
+        // (stretching measured elapsed past the 600 ms the fake reports) but
+        // can never shrink it — the least-noisy of several fresh attempts is
+        // the truthful sample. A real gate-wait leak blows EVERY attempt to
+        // ~600 ms, so min-of-3 keeps the regression signal while a preempted
+        // test thread (observed CountOver250Ms=1 on a healthy main run) stops
+        // tripping it.
+        var bestMaxMs = double.MaxValue;
+        var bestOver250 = int.MaxValue;
+        var attempts = new List<string>();
+        for (var attempt = 1; attempt <= 3 && bestMaxMs >= 250; attempt++)
         {
-            BeginStreamDelay = TimeSpan.FromMilliseconds(600),
-            GateWaitMsToReport = 600, // returned per-call via BeginStream's out parameter
-        };
-        var t = new NemotronStreamingTranscriber(
-            () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
-        await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
-        await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // forces EnsureStream
-        var stats = ((INativeCallStatsSource)s).NativeCallStats;
-        Assert.Equal(0, stats.CountOver250Ms);
-        Assert.True(stats.MaxMs < 250,
-            $"gate wait leaked into native stats: MaxMs={stats.MaxMs}");
+            var engine = new FakeTranscribeCppEngine
+            {
+                BeginStreamDelay = TimeSpan.FromMilliseconds(600),
+                GateWaitMsToReport = 600, // returned per-call via BeginStream's out parameter
+            };
+            var t = new NemotronStreamingTranscriber(
+                () => engine, FakeTranscriber.Returning("batch", "batch text"), "nemotron-streaming-en");
+            await using var s = await t.StartSessionAsync(TestContext.Current.CancellationToken);
+            await s.PushAsync(Samples(2560), TestContext.Current.CancellationToken); // forces EnsureStream
+            var stats = ((INativeCallStatsSource)s).NativeCallStats;
+            attempts.Add($"attempt {attempt}: MaxMs={stats.MaxMs:0.0} over250={stats.CountOver250Ms}");
+            if (stats.MaxMs < bestMaxMs) { bestMaxMs = stats.MaxMs; bestOver250 = stats.CountOver250Ms; }
+        }
+
+        Assert.True(bestOver250 == 0 && bestMaxMs < 250,
+            $"gate wait leaked into native stats (best-of-3 MaxMs={bestMaxMs:0.0}). {string.Join("; ", attempts)}");
     }
 
     [Fact]

@@ -216,8 +216,16 @@ public class WindowContextPrefetchAsrContentionTests
         // (a cold-start call of 1741 ms was observed on THIS host in an unrelated
         // arm), so the 250 ms budget is not a hard gate here — it is asserted per
         // dictation in production via the timing line (owner readout).
-        control.NativeMaxMs.ShouldBeLessThan(500,
-            "\nControl arm showed a >=500 ms call — pathological contention absent the burst; environment unfit for this comparison");
+        // 2026-08-24 (VM/asset-noise robustness doctrine): an UNFIT ENVIRONMENT
+        // is a skip, not a failure — the same machine-noise-vs-code-signal
+        // distinction as the rest of today's test fixes. The control arm is the
+        // quiet baseline; if IT already shows a >=500 ms call, this host
+        // currently cannot host the comparison (e.g. gate machine pegged at
+        // 100% CPU by unrelated work) and failing would blame the code for the
+        // environment. The burst-arm guard below — the actual regression
+        // sentinel against the July pathological scale — stays a hard fail.
+        Assert.SkipUnless(control.NativeMaxMs < 500,
+            $"environment unfit for this comparison: control arm showed a {control.NativeMaxMs:0}ms call absent the burst");
         burst.NativeMaxMs.ShouldBeLessThan(500,
             "\nThe burst arm showed a >=500 ms call — the listen-start burst regime approached the July pathological scale");
         _log.WriteLine($"over250 counts (reporting): control={control.NativeOver250}, burst={burst.NativeOver250}");

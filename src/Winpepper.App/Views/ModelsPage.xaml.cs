@@ -33,6 +33,42 @@ public sealed partial class ModelsPage : Page
 
     public ModelsTabViewModel ViewModel { get; private set; } = null!;
 
+    /// <summary>
+    /// The page-level choice list rendered by the backup-ASR combo: the
+    /// synthetic "None" row followed by the card's real descriptors. A null
+    /// <see cref="ModelCardViewModel.SelectedDescriptor"/> (empty or unknown
+    /// persisted name) means None; it is a slot the one-click download policy
+    /// skips, so staying on (or selecting) None can never download Parakeet.
+    /// </summary>
+    public IReadOnlyList<object> AsrComboChoices { get; private set; } = Array.Empty<object>();
+
+    /// <summary>The synthetic "None" row. Not a <see cref="ModelDescriptor"/> by
+    /// design: it must never appear in catalogs, downloads, or registry math.</summary>
+    private sealed class NoneChoice
+    {
+        public static readonly NoneChoice Instance = new();
+        public string Name => "";
+        public string DisplayName => "None \u2014 streaming model only (no backup)";
+    }
+
+    /// <summary>
+    /// What the combo shows at seed time: the persisted selection when it maps
+    /// to a real descriptor; ResolveOrDefault repair shape for unknown persisted
+    /// names; otherwise the None row (fresh installs: <c>AsrModelName</c> is "").
+    /// </summary>
+    private object ResolveAsrSeedItem()
+    {
+        if (ViewModel.AsrCard.SelectedDescriptor is { } known) return known;
+        if (!string.IsNullOrEmpty(ViewModel.AsrCard.SelectedName))
+        {
+            var canonical = App.Shell!.ModelsServices.Registry.ResolveOrDefault(
+                ViewModel.AsrCard.SelectedName, ModelKind.Asr).Name;
+            var repaired = ViewModel.AsrCard.Available.FirstOrDefault(d => d.Name == canonical);
+            if (repaired is not null) return repaired;
+        }
+        return NoneChoice.Instance;
+    }
+
     public ModelsPage()
     {
         this.InitializeComponent();
@@ -79,7 +115,15 @@ public sealed partial class ModelsPage : Page
                     throw new InvalidOperationException("The UI dispatcher rejected model progress work.");
             });
 
-        AsrCombo.SelectedItem = ViewModel.AsrCard.SelectedDescriptor;
+        // The backup-ASR combo renders a synthetic "None" first entry
+        // (2026-08-25 minimal footprint): the card's Available stays strictly
+        // registry descriptors, so the None row is a page-level composition —
+        // no fake descriptor can ever leak into download catalogs.
+        var asrChoices = new List<object> { NoneChoice.Instance };
+        asrChoices.AddRange(ViewModel.AsrCard.Available);
+        AsrComboChoices = asrChoices;
+
+        AsrCombo.SelectedItem = ResolveAsrSeedItem();
         CleanupCombo.SelectedItem = ViewModel.CleanupCard.SelectedDescriptor;
         StreamingCombo.SelectedItem = ViewModel.StreamingCard.SelectedDescriptor;
         // The seeding above synchronously fires OnAsrChanged — that is NOT a
@@ -115,10 +159,12 @@ public sealed partial class ModelsPage : Page
         App.Shell!.StreamingAutoInstaller.StatusChanged += _autoInstallStatusChanged;
         UpdateInstalledLabels();
         WireSpeechProvider(s);
+        var persistedAsrName = s.AsrModelName;
+        if (!string.IsNullOrEmpty(persistedAsrName)) // None: nothing to verify
         try
         {
             var selectedAsr = App.Shell!.ModelsServices.Registry.ResolveOrDefault(
-                App.Shell!.SettingsStore.Load().AsrModelName, ModelKind.Asr).Name;
+                persistedAsrName, ModelKind.Asr).Name;
             _asrSelectedVerified = await Task.Run(
                 () => App.Shell!.ModelsServices.VerifyAsrModelReady(selectedAsr));
             UpdateInstalledLabels();
@@ -138,6 +184,19 @@ public sealed partial class ModelsPage : Page
 
     private async void OnAsrChanged(object sender, SelectionChangedEventArgs e)
     {
+        if (AsrCombo.SelectedItem is NoneChoice)
+        {
+            // Selecting None publishes "" — effective immediately (the pipeline
+            // unloads any held backup session on its next evaluation) and
+            // persisted. A None slot is invisible to the download policy, so
+            // one-click download cannot fetch Parakeet while None is selected.
+            _asrSelectedVerified = false;
+            ViewModel.AsrCard.SelectedName = "";
+            ViewModel.AsrCard.CommitSelection();
+            UpdateInstalledLabels();
+            UpdateDownloadButtonState();
+            return;
+        }
         if (AsrCombo.SelectedItem is ModelDescriptor d)
         {
             if (_asrSeedApplied) _asrBackupOptedIn = true;
@@ -460,7 +519,9 @@ public sealed partial class ModelsPage : Page
     private void UpdateInstalledLabels()
     {
         var asrInstalled = _asrSelectedVerified;
-        AsrInstalledText.Text = asrInstalled ? "Installed" : "Not downloaded";
+        var asrNoneSelected = ViewModel.AsrCard.SelectedDescriptor is null;
+        AsrInstalledText.Text = asrNoneSelected ? "None \u2014 no backup model"
+            : asrInstalled ? "Installed" : "Not downloaded";
         AsrInstalledIcon.Visibility = asrInstalled ? Visibility.Visible : Visibility.Collapsed;
         AsrNotInstalledIcon.Visibility = asrInstalled ? Visibility.Collapsed : Visibility.Visible;
 

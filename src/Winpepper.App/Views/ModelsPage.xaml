@@ -85,8 +85,8 @@
                                    Style="{ThemeResource CaptionTextBlockStyle}" />
                     </StackPanel>
 
-                    <!-- Local model (always available as fallback; downloadable via the button below) -->
-                    <TextBlock Text="Local model (fallback)" Style="{ThemeResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <!-- Local model (optional backup; downloadable via the button below) -->
+                    <TextBlock Text="Backup model (optional)" Style="{ThemeResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <FontIcon x:Name="AsrInstalledIcon" Glyph="&#xE73E;" FontSize="14" Foreground="{ThemeResource SystemFillColorSuccessBrush}" VerticalAlignment="Center" />
                         <FontIcon x:Name="AsrNotInstalledIcon" Glyph="&#xE896;" FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" VerticalAlignment="Center" Visibility="Collapsed" />
@@ -94,9 +94,9 @@
                     </StackPanel>
                     <ComboBox x:Name="AsrCombo"
                               AutomationProperties.AutomationId="ModelsAsrCombo"
-                              Header="Active local model"
+                              Header="Backup model (optional)"
                               HorizontalAlignment="Stretch"
-                              ItemsSource="{x:Bind ViewModel.AsrCard.Available, Mode=OneWay}"
+                              ItemsSource="{x:Bind AsrComboChoices, Mode=OneWay}"
                               DisplayMemberPath="DisplayName"
                               SelectionChanged="OnAsrChanged" />
                     <ListView ItemsSource="{x:Bind ViewModel.AsrCard.ProgressByFile, Mode=OneWay}" SelectionMode="None">

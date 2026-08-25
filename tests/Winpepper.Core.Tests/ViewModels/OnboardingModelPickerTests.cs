@@ -123,6 +123,35 @@ public sealed class OnboardingModelPickerTests
     }
 
     [Fact]
+    public async Task Advance_BackupModelOptedIn_PersistsBackupAsTheActiveAsrName()
+    {
+        // 2026-08-25: the Models tab's backup default is None. Checking the
+        // backup MODEL here is the opt-in gesture — it must also point the
+        // active ASR name at it, else the user downloads ~670 MB that never
+        // runs. As with cleanup: only ever TURNS IT ON, never strips an
+        // earlier explicit choice.
+        var (vm, prov, writer, _) = CreateAtDownloadStep();
+        vm.BackupModelSelected = true;
+
+        await vm.AdvanceAsync();
+
+        prov.Starts[0].Names.ShouldContain("parakeet-tdt-0.6b-v3");
+        writer.Applied(new AppSettings()).AsrModelName.ShouldBe("parakeet-tdt-0.6b-v3");
+    }
+
+    [Fact]
+    public async Task Advance_BackupModelNotChosen_LeavesAsrModelNameAsPersisted()
+    {
+        var (vm, _, writer, _) = CreateAtDownloadStep();
+
+        await vm.AdvanceAsync();
+
+        writer.Applied(new AppSettings()).AsrModelName.ShouldBe(""); // fresh default stays None
+        writer.Applied(new AppSettings { AsrModelName = "parakeet-tdt-0.6b-v2" })
+              .AsrModelName.ShouldBe("parakeet-tdt-0.6b-v2"); // explicit prior pick untouched
+    }
+
+    [Fact]
     public async Task TestDictation_GatesOnSpeechVerifiedAndPipelineStart()
     {
         var (vm, prov, _, pipelineStarts) = CreateAtDownloadStep();

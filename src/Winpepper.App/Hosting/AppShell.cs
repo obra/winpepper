@@ -92,7 +92,10 @@ public sealed class AppShell : IDisposable
         var settings = store.Load();
         var modelsServices = new Winpepper.App.Services.ModelsServices(
             Path.Combine(AppPaths.Root, "models"), settings.AsrModelName);
-        if (!string.Equals(settings.AsrModelName, modelsServices.AsrDescriptor.Name, StringComparison.Ordinal))
+        // "" = no backup selected (None) — a VALID setting, not an error to
+        // repair back to the default (2026-08-25 minimal footprint).
+        if (!string.IsNullOrEmpty(settings.AsrModelName) &&
+            !string.Equals(settings.AsrModelName, modelsServices.AsrDescriptor.Name, StringComparison.Ordinal))
         {
             factory.CreateLogger("Winpepper.App").LogWarning(
                 "Unknown ASR model {ConfiguredModel}; restored default {DefaultModel}",
@@ -417,8 +420,10 @@ public sealed class AppShell : IDisposable
                                          name => modelsServices.Registry.InstallDirFor(
                                              modelsServices.ModelsRoot, name, Winpepper.Models.ModelKind.Asr),
                                          () => asrSelection.Read(),
-                                         raw => modelsServices.Registry.ResolveOrDefault(
-                                             raw, Winpepper.Models.ModelKind.Asr).Name,
+                                         raw => string.IsNullOrWhiteSpace(raw)
+                                             ? "" // "None" reaches the pipeline as-is
+                                             : modelsServices.Registry.ResolveOrDefault(
+                                                   raw, Winpepper.Models.ModelKind.Asr).Name,
                                          name => modelsServices.VerifyAsrModelReady(name),
                                          (dir, name) => new Winpepper.Asr.Transcription.ParakeetTranscriber(
                                              new Winpepper.Asr.ParakeetSession(dir), name, ownsSession: true),

@@ -53,4 +53,13 @@ public sealed class AsrModelSwapState
         LoadedModelName = modelName;
         Generation++;
     }
+
+    /// <summary>
+    /// Record that no backup session is held (PipelineHost disposes the session
+    /// itself when the desired selection becomes "None"). Without this, a later
+    /// re-selection of the SAME name would Plan <c>KeepCurrent</c> against a
+    /// session that no longer exists (2026-08-25). Generation is left intact —
+    /// it counts loads, not occupancy.
+    /// </summary>
+    public void MarkUnloaded() => LoadedModelName = null;
 }

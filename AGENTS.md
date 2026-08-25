@@ -13,6 +13,16 @@
   - How to run: build each project in `tests/` with `-c Release`, then execute via the xUnit v3 in-process runner (`dotnet exec <built test dll>`). Do not rely on `dotnet test` — the VSTest host is unreliable on some dev machines.
   - On Linux, provision the .NET 9 SDK locally if needed (`/.dotnet` is gitignored). A green Linux run is necessary but not sufficient — Windows-only code (WinUI, NAudio, DPAPI) only compiles and runs on Windows.
   - Do not mix Linux- and Windows-side builds in the same `bin/`/`obj/`: clean them when switching sides (the helper scripts do this automatically), otherwise MSBuild incremental state corrupts and builds fail with CS0006.
+- **Timing-sensitive tests must be machine-robust** (2026-08-24): budgets pinned to one host's
+  measurements fail on VMs/CI without proving any code regression, so new timing pins must
+  (a) compare against baselines measured *on the running machine* (e.g. plain-Sleep quantum,
+  cold UIA bootstrap), not constants from the dev box; (b) use min/median over N samples for
+  "took suspiciously long" checks (VM noise delays but never accelerates); and (c) where the
+  host cannot express the discriminated property at all, `Assert.Skip` loudly with the
+  measurements — with `WINPEPPER_PIN_TIMING_HOST=1` (exported by `scripts/windows-gate.sh`)
+  converting such skips into hard failures, since on the pinned timing host "cannot measure"
+  IS "broken". Existing examples: `InterChunkPacingWindowsTests`, `TestOwnedWindowTests`,
+  `NemotronStreamingTranscriberTests.StreamBegin_GateWait_*`.
 - **ASR model-level audio evidence:** `./scripts/run-bench-windows.sh` builds the latency bench
   with the Windows dotnet, generates reference TTS WAVs on the host, and runs real Parakeet
   model batch transcription over them (transcripts, post-stop latency). Streaming evidence

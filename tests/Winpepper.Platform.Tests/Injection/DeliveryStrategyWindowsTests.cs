@@ -82,8 +82,13 @@ public class DeliveryStrategyWindowsTests
         sw.Stop();
 
         ok.ShouldBeFalse();
-        // Pipeline-never-hangs pin: <= 2x the 150 ms SMTO timeout.
-        sw.ElapsedMilliseconds.ShouldBeLessThanOrEqualTo(300);
+        // Pipeline-never-hangs pin: the property being protected is BOUNDED
+        // termination (no wedged dictation), and VM noise delays but never
+        // accelerates wall-clock — 10x the 150 ms SMTO timeout keeps the fail
+        // signal for a real hang while making GitHub runner jitter irrelevant
+        // (widened from 2x on 2026-08-24: 300 ms was just tighter than the
+        // property and tripped on slow-VM scheduling, not on hangs).
+        sw.ElapsedMilliseconds.ShouldBeLessThanOrEqualTo(1500);
     }
 
     [Fact]
@@ -98,7 +103,8 @@ public class DeliveryStrategyWindowsTests
         sw.Stop();
 
         ok.ShouldBeFalse();
-        sw.ElapsedMilliseconds.ShouldBeLessThanOrEqualTo(300);
+        // Same bounded-termination reasoning as the WmCharSmto pin above.
+        sw.ElapsedMilliseconds.ShouldBeLessThanOrEqualTo(1500);
     }
 
     [Fact]

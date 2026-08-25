@@ -38,7 +38,20 @@ public class TestOwnedWindowTests
         // head-start + bounded retries). This fact guards the STEADY-STATE
         // determinism the regime facts rely on, so the cold read is paid here
         // first and only later reads are timed.
+        //
+        // Machine-relative budget (2026-08-24): the cold bootstrap is the
+        // natural per-host scale for UIA cost — on hosts where EVERYTHING UIA
+        // is uniformly slower (GitHub runner VMs measured a 4183ms steady read
+        // of this same 3-node window; session-0 VM UIA delivery variance, not
+        // a machinery regression) an absolute host-calibrated number cannot
+        // distinguish "slow VM" from "wedged extractor". Steady-state reads
+        // must stay within max(1500ms, 3x the cold bootstrap): room for a
+        // uniformly-slow host, fail signal when machinery wedges (a real wedge
+        // runs 10x+ past the cold cost).
+        var coldSw = Stopwatch.StartNew();
         _ = await ReadOnceAsync(window.Hwnd);
+        coldSw.Stop();
+        var budget = TimeSpan.FromMilliseconds(Math.Max(1500, 3.0 * coldSw.ElapsedMilliseconds));
 
         // Steady-state guard. Observed flake modes during development: a read
         // returning 0 elements in ~2ms (1-in-8 single runs) and, once, three such
@@ -65,8 +78,8 @@ public class TestOwnedWindowTests
                     $"owned-window read attempt {attempt}: elapsed={sw.ElapsedMilliseconds}ms elements={elements.Count} composed={(text is null ? "null" : $"{text.Length} chars")}");
                 if (elements.Count == 0)
                     _log.WriteLine("  zero-element manual probe: " + ManualProbe(attemptWindow.Hwnd));
-                sw.Elapsed.ShouldBeLessThan(TimeSpan.FromMilliseconds(1500),
-                    $"\nreading the test-owned 3-node window took {sw.ElapsedMilliseconds}ms — the determinism window the gate facts rely on is broken on this host");
+                sw.Elapsed.ShouldBeLessThan(budget,
+                    $"\nreading the test-owned 3-node window took {sw.ElapsedMilliseconds}ms — beyond the budget {budget.TotalMilliseconds:0}ms (max(1500ms, 3x the {coldSw.ElapsedMilliseconds}ms cold UIA bootstrap on this host)) — the determinism window the gate facts rely on is broken here");
                 if (text is null) { attemptWindow.Dispose(); attemptWindow = null; }
             }
         }

@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
+using Winpepper.Platform.Injection;
 using static Winpepper.Platform.Hotkeys.KeyboardHookNative;
 
 namespace Winpepper.Platform.Hotkeys;
@@ -103,15 +104,18 @@ public sealed class HotkeyHook : IDisposable
         var bindings = Volatile.Read(ref _bindings);
 
         // Injected fast-path (standard WH_KEYBOARD_LL practice, 2026-07-28):
-        // synthetic events (LLKHF_INJECTED / LLKHF_LOWER_IL_INJECTED --
-        // SendInput from ANY process, including our own TextInjector and
-        // NeutralizeHeldModifiers) never participate in chord matching or
-        // key-state tracking; they pass straight through. This (a) removes
-        // the hook's per-event tax (~0.2 ms/event measured on the production
-        // host) from every injected keystroke system-wide, and (b) fixes a
-        // latent wedge: our own neutralization KEYUP for a physically-held
-        // Win key used to clear _modifiers and end a Win-containing hold
-        // chord spuriously. The chord recorder still receives injected
+        // our OWN synthetic events (TextInjector text and
+        // NeutralizeHeldModifiers KEYUPs, tagged with
+        // SendInputNative.OwnInjectionTag -- see IsOwnInjection) never
+        // participate in chord matching or key-state tracking; they pass
+        // straight through. This (a) removes the hook's per-event tax
+        // (~0.2 ms/event measured on the production host) from our own
+        // injection stream, and (b) fixes a latent wedge: our own
+        // neutralization KEYUP for a physically-held Win key used to clear
+        // _modifiers and end a Win-containing hold chord spuriously. Other
+        // processes' injected keys are matched like physical ones, so
+        // remapping software (e.g. Logi Options+ delivering a keyboard's
+        // dictation key as Win+H) can trigger hotkeys. The chord recorder still receives injected
         // transitions (it filters them itself via RawKeyTransition.IsInjected),
         // so recording-mode behavior is contract-identical. _captureKeysDown
         // intentionally no longer tracks injected downs -- such entries were
@@ -528,7 +532,7 @@ public sealed class HotkeyHook : IDisposable
 
         if (down || up)
         {
-            var injected = (data.Flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) != 0;
+            var injected = IsOwnInjection(data.Flags, data.DwExtraInfo);
             var swallow = TryProcessKey((int)data.VkCode, down, out var evt,
                 (int)data.ScanCode, injected);
             if (evt is not null) _events.Writer.TryWrite(evt);
@@ -539,6 +543,16 @@ public sealed class HotkeyHook : IDisposable
 
         return CallNextHookEx(_hookHandle, nCode, wParam, lParam);
     }
+
+    /// <summary>
+    /// Only our own SendInput (tagged with <see cref="SendInputNative.OwnInjectionTag"/>)
+    /// takes the injected fast-path. Other apps' injected keys are treated as
+    /// physical so they can trigger hotkeys -- e.g. Logi Options+ re-injects a
+    /// dictation key as Win+H.
+    /// </summary>
+    internal static bool IsOwnInjection(uint flags, IntPtr extraInfo)
+        => (flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) != 0
+           && extraInfo == SendInputNative.OwnInjectionTag;
 
     /// <summary>
     /// Ask the hook thread to reinstall WH_KEYBOARD_LL. Safe to call from any

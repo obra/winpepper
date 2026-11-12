@@ -75,7 +75,7 @@ public static class ModifierGuard
                     Scan = 0,
                     Flags = SendInputNative.KEYEVENTF_KEYUP,
                     Time = 0,
-                    ExtraInfo = IntPtr.Zero,
+                    ExtraInfo = SendInputNative.OwnInjectionTag,
                 },
             };
         }

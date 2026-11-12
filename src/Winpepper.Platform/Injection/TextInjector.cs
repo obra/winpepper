@@ -403,7 +403,7 @@ public sealed class TextInjector
                     Scan = codeUnits[i],
                     Flags = SendInputNative.KEYEVENTF_UNICODE,
                     Time = 0,
-                    ExtraInfo = IntPtr.Zero,
+                    ExtraInfo = SendInputNative.OwnInjectionTag,
                 },
             };
             inputs[i * 2 + 1] = new SendInputNative.INPUT
@@ -415,7 +415,7 @@ public sealed class TextInjector
                     Scan = codeUnits[i],
                     Flags = SendInputNative.KEYEVENTF_UNICODE | SendInputNative.KEYEVENTF_KEYUP,
                     Time = 0,
-                    ExtraInfo = IntPtr.Zero,
+                    ExtraInfo = SendInputNative.OwnInjectionTag,
                 },
             };
         }

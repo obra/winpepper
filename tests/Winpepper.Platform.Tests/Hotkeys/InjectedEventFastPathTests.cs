@@ -1,19 +1,22 @@
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using Winpepper.Platform.Hotkeys;
+using Winpepper.Platform.Injection;
 using Xunit;
 
 namespace Winpepper.Platform.Tests.Hotkeys;
 
 /// <summary>
 /// Pins the injected-event fast-path (standard WH_KEYBOARD_LL practice,
-/// 2026-07-28): synthetic events (LLKHF_INJECTED) pass straight through --
-/// they never match chords, never mutate key-state tracking, and are never
-/// swallowed. Winpepper's own injection stream (KEYEVENTF_UNICODE text plus
+/// 2026-07-28): our own synthetic events (tagged with
+/// SendInputNative.OwnInjectionTag) pass straight through -- they never match
+/// chords, never mutate key-state tracking, and are never swallowed.
+/// Winpepper's own injection stream (KEYEVENTF_UNICODE text plus
 /// NeutralizeHeldModifiers KEYUPs) is the dominant producer; the fast-path
 /// removes the hook's per-event tax (~0.2 ms/event measured on the
-/// production host) from every injected keystroke system-wide. The chord
-/// recorder still receives injected transitions and filters them itself.
+/// production host) from it. Other processes' injected keys are not
+/// fast-pathed (see HotkeyHook.IsOwnInjection). The chord recorder still
+/// receives fast-pathed transitions and filters them itself.
 /// </summary>
 public class InjectedEventFastPathTests
 {
@@ -132,5 +135,26 @@ public class InjectedEventFastPathTests
         seen[0].VirtualKey.ShouldBe(0x41);
         seen[0].IsDown.ShouldBeTrue();
         seen[0].IsInjected.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void OnlyOurOwnTaggedInjection_TakesTheFastPath()
+    {
+        // Other apps' injected keys (Logi Options+ re-injecting a dictation
+        // key as Win+H) must reach chord matching; only our tagged SendInput
+        // is skipped.
+        HotkeyHook.IsOwnInjection(0x10, SendInputNative.OwnInjectionTag).ShouldBeTrue();
+        HotkeyHook.IsOwnInjection(0x02, SendInputNative.OwnInjectionTag).ShouldBeTrue();
+        HotkeyHook.IsOwnInjection(0x10, IntPtr.Zero).ShouldBeFalse();
+        HotkeyHook.IsOwnInjection(0, SendInputNative.OwnInjectionTag).ShouldBeFalse(); // physical
+    }
+
+    [Fact]
+    public void EverythingWeSend_CarriesTheOwnInjectionTag()
+    {
+        foreach (var input in TextInjector.BuildKeyDownUpInputs("hi".Select(c => (ushort)c).ToArray()))
+            input.Keyboard.ExtraInfo.ShouldBe(SendInputNative.OwnInjectionTag);
+        foreach (var input in ModifierGuard.BuildKeyUpInputs([0x5B, 0x10]))
+            input.Keyboard.ExtraInfo.ShouldBe(SendInputNative.OwnInjectionTag);
     }
 }

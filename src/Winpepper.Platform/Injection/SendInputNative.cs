@@ -8,6 +8,14 @@ internal static partial class SendInputNative
     public const uint KEYEVENTF_KEYUP   = 0x0002;
     public const uint KEYEVENTF_UNICODE = 0x0004;
 
+    /// <summary>
+    /// dwExtraInfo stamped on every keyboard event Winpepper sends ("WPEP").
+    /// The hotkey hook uses it to tell our own synthetic input (skipped) from
+    /// other apps' injected input, e.g. Logi Options+ sending Win+H for a
+    /// dictation key (matched like a physical key).
+    /// </summary>
+    public static readonly IntPtr OwnInjectionTag = 0x57504550;
+
     [StructLayout(LayoutKind.Sequential)]
     public struct KEYBDINPUT
     {

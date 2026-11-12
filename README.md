@@ -151,20 +151,6 @@ Optional: if you'd rather use a cloud speech service, there's built-in support f
 AssemblyAI with your own API key. It's off by default — nothing goes to the cloud
 unless you deliberately turn it on.
 
-## Try it risk-free
-
-Windows Sandbox is a feature built into Windows Pro and Enterprise editions that
-gives you a clean, throwaway copy of Windows in a window — anything you install
-inside it disappears when you close it, leaving your real PC untouched.
-
-The scripts in [`scripts/windows-sandbox/`](scripts/windows-sandbox/) launch a
-sandbox, install Winpepper inside it, run the self-test, and show you the result.
-See [`scripts/windows-sandbox/README.md`](scripts/windows-sandbox/README.md) for
-the one command to run.
-
-One catch: Windows Sandbox has no microphone, so you can confirm the app installs
-and starts, but not that dictation itself works.
-
 ## If something goes wrong
 
 **Nothing happens when I hold the hotkey.** Check that Winpepper is running (look

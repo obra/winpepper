@@ -105,6 +105,17 @@ public sealed partial class RecordingPage : Page
         try { _levelRecorder.Start(); } catch { /* device unavailable; meter stays at zero */ }
     }
 
+    /// <summary>
+    /// Closing the window only hides it to the tray, so OnNavigatedFrom never
+    /// runs and the meter would keep the mic open (OS mic-in-use indicator
+    /// stuck on). MainWindow calls this on every visibility change.
+    /// </summary>
+    internal void SetLevelMeterActive(bool active)
+    {
+        if (!active) { _levelRecorder?.Dispose(); _levelRecorder = null; }
+        else if (_levelRecorder is null && _shell is not null) RestartLevelMeter(_shell.RecordingVm.MicDeviceId);
+    }
+
     private void OnFocusTestBox(object sender, RoutedEventArgs e) => TestBox.Focus(FocusState.Programmatic);
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)

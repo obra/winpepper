@@ -70,6 +70,13 @@ public sealed partial class MainWindow : Window
                 st => st with { WindowWidth = size.Width, WindowHeight = size.Height });
         };
 
+        // Hidden to the tray: release the Recording page's level-meter mic.
+        appWindow.Changed += (sender, args) =>
+        {
+            if (args.DidVisibilityChange && ContentFrame.Content is RecordingPage page)
+                page.SetLevelMeterActive(sender.IsVisible);
+        };
+
         AppWindow.Closing += OnAppWindowClosing;
     }
 

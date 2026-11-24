@@ -1,5 +1,7 @@
 #if WINDOWS
 using System.Runtime.InteropServices;
+using System.Collections.Concurrent;
+using Serilog;
 
 namespace Winpepper.App.Views.Native;
 
@@ -25,6 +27,8 @@ internal static class ExtendedWindowStyle
     public const int LWA_ALPHA         = 0x00000002;
 
     private static readonly IntPtr HWND_TOPMOST = new(-1);
+    private static readonly IntPtr HWND_NOTOPMOST = new(-2);
+    private static readonly ConcurrentDictionary<IntPtr, byte> TopmostFailures = new();
     private const uint SWP_NOSIZE       = 0x0001;
     private const uint SWP_NOMOVE       = 0x0002;
     private const uint SWP_NOZORDER     = 0x0004;
@@ -96,7 +100,30 @@ internal static class ExtendedWindowStyle
     public static void AssertTopmost(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero) return;
-        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        var result = TopmostWindowRecovery.Assert(hwnd, ReadExtendedStyle, SetTopmost);
+        if (result.IsTopmost)
+        {
+            var previouslyFailed = TopmostFailures.TryRemove(hwnd, out _);
+            if (result.RecoveryAttempted || previouslyFailed)
+                Log.ForContext("SourceContext", typeof(ExtendedWindowStyle).FullName)
+                    .Information("Pill topmost state recovered for {Hwnd}: {@Recovery}", hwnd.ToInt64(), result);
+        }
+        else if (TopmostFailures.TryAdd(hwnd, 0))
+        {
+            // The keep-alive retries every 100 ms. Log the first failure until
+            // recovery, rather than filling the log on every timer tick.
+            Log.ForContext("SourceContext", typeof(ExtendedWindowStyle).FullName)
+                .Warning("Pill topmost state still missing for {Hwnd}: {@Recovery}", hwnd.ToInt64(), result);
+        }
+    }
+
+    private static long ReadExtendedStyle(IntPtr hwnd) => (long)GetWindowLongPtr64(hwnd, GWL_EXSTYLE);
+
+    private static WindowPositionResult SetTopmost(IntPtr hwnd, bool topmost)
+    {
+        var succeeded = SetWindowPos(hwnd, topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+            0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        return new(succeeded, succeeded ? 0 : Marshal.GetLastPInvokeError());
     }
 
     /// <summary>

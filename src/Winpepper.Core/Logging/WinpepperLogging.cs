@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Serilog;
 using Serilog.Events;
+using Serilog.Formatting.Json;
 
 namespace Winpepper.Core.Logging;
 
@@ -48,6 +49,12 @@ public static class WinpepperLogging
                 rollingInterval: RollingInterval.Day,
                 retainedFileCountLimit: 14,
                 outputTemplate: template,
+                shared: false)
+            .WriteTo.File(
+                formatter: new JsonFormatter(renderMessage: true),
+                path: Path.Combine(logDirectory, "winpepper-.jsonl"),
+                rollingInterval: RollingInterval.Day,
+                retainedFileCountLimit: 14,
                 shared: false);
 
         if (debugConsole)

@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Shouldly;
 using Winpepper.Core.Logging;
 using Xunit;
+using System.Text.Json;
 
 namespace Winpepper.Core.Tests.Logging;
 
@@ -28,5 +29,11 @@ public class WinpepperLoggingTests : IDisposable
         files.Length.ShouldBe(1);
         var contents = File.ReadAllText(files[0]);
         contents.ShouldContain("hello world");
+
+        var jsonLines = File.ReadAllLines(Directory.GetFiles(_dir, "winpepper-*.jsonl").Single());
+        jsonLines.ShouldHaveSingleItem();
+        using var entry = JsonDocument.Parse(jsonLines[0]);
+        entry.RootElement.GetProperty("Level").GetString().ShouldBe("Information");
+        entry.RootElement.GetProperty("Properties").GetProperty("Token").GetString().ShouldBe("world");
     }
 }
